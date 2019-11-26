@@ -46,6 +46,7 @@ TABLE_SIZE_ACTIVITY=${TABLE_SIZE_ACTIVITY:-10}
 declare -A author_aliases
 author_aliases=(
   ["AgalyaR <agalya.job@gmail.com>"]="Agalya Ramachandran <agalya.job@gmail.com>"
+  ["Alessio Garzi <agarzi@clouditalia.com>"]="Alessio Garzi <gun101@email.it>"
   ["Anca Vamanu"]="Anca Vamanu <anca@opensips.org>"
   ["Andreas Granig <andreas.granig@inode.info>"]="Andreas Granig <agranig@linguin.org>"
   ["Andreas Heise"]="Andreas Heise <aheise@gmx.de>"
@@ -112,6 +113,7 @@ author_aliases=(
 declare -A github_handles
 github_handles=(
   ["Agalya Ramachandran"]="AgalyaR"
+  ["Alessio Garzi"]="Ozzyboshi"
   ["Alexandr Dubovikov <voip@start4.info>"]="adubovikov"
   ["Alexey Vasilyev <alexei.vasilyev@gmail.com>"]="vasilevalex"
   ["Andrei Datcu <datcuandrei@gmail.com>"]="andrei-datcu"
@@ -591,6 +593,7 @@ mod_renames=(
   [cachedb_local]=localcache
   [uac_registrant]=registrant
   [tracer]=siptrace
+  [stir_shaken]=stir
   [mi_http]=mi_json:1540473075:  # old_module:new_module_since:old_module_until
   [mi_html]=mi_http::1540473075
 )

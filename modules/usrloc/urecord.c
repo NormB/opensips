@@ -35,6 +35,7 @@
 #include "urecord.h"
 #include <string.h>
 #include "../../mem/shm_mem.h"
+#include "../../parser/parse_uri.h"
 #include "../../dprint.h"
 #include "../../ut.h"
 #include "../../hash_func.h"
@@ -53,7 +54,7 @@ extern db_key_t *cid_keys;
 extern db_val_t *cid_vals;
 extern int cid_len;
 
-int matching_mode = CONTACT_ONLY;
+int matching_mode = CT_MATCH_CONTACT_ONLY;
 
 int cseq_delay = 20;
 
@@ -492,60 +493,18 @@ int db_delete_urecord(urecord_t* _r)
 
 int cdb_add_ct_update(cdb_dict_t *updates, const ucontact_t *ct, char remove)
 {
-	static str ctkey_pkg_buf, ctkeyb64_pkg_buf;
 	cdb_pair_t *pair;
 	cdb_dict_t *ct_fields;
-	str subkey;
 	cdb_key_t contacts_key;
 	str printed_flags;
-	int len, base64len;
 
 	cdb_key_init(&contacts_key, "contacts");
-	
-	switch (matching_mode) {
-	case CONTACT_ONLY:
-		len = ct->c.len  ;
-		base64len = calc_base64_encode_len(len);
-		if (pkg_str_extend(&ctkey_pkg_buf, len) < 0) {
-			LM_ERR("oom\n");
-			return -1;
-		}
 
-		if (pkg_str_extend(&ctkeyb64_pkg_buf, base64len) < 0) {
-			LM_ERR("oom\n");
-			return -1;
-		}
-		memcpy(ctkey_pkg_buf.s, ct->c.s, ct->c.len);
-		break;
-	case CONTACT_CALLID:
-		len = ct->c.len + 1 + ct->callid.len;
-		base64len = calc_base64_encode_len(len);
-		if (pkg_str_extend(&ctkey_pkg_buf, len) < 0) {
-			LM_ERR("oom\n");
-			return -1;
-		}
+	LM_DBG("using key=<%.*s>, subkey=<%.*s>\n",
+		contacts_key.name.len,contacts_key.name.s,
+		ct->cdb_key.len, ct->cdb_key.s);
 
-		if (pkg_str_extend(&ctkeyb64_pkg_buf, base64len) < 0) {
-			LM_ERR("oom\n");
-			return -1;
-		}
-		memcpy(ctkey_pkg_buf.s, ct->c.s, ct->c.len);
-		ctkey_pkg_buf.s[ct->c.len] = ':';
-		memcpy(ctkey_pkg_buf.s + ct->c.len + 1, ct->callid.s,
-			ct->callid.len);
-		break;
-	default:
-		LM_CRIT("unknown matching_mode %d\n", matching_mode);
-		return -1;
-	}
-	
-	base64encode((unsigned char *)ctkeyb64_pkg_buf.s,
-	             (unsigned char *)ctkey_pkg_buf.s, len);
-
-	subkey.s = ctkeyb64_pkg_buf.s;
-	subkey.len = base64len;
-
-	pair = cdb_mk_pair(&contacts_key, &subkey);
+	pair = cdb_mk_pair(&contacts_key, &ct->cdb_key);
 	if (!pair) {
 		LM_ERR("oom\n");
 		return -1;
@@ -738,6 +697,117 @@ err_free:
 	return -1;
 }
 
+
+static inline int get_param_from_uri(str* _uri, str *_param, str *_val)
+{
+	struct sip_uri puri;
+	unsigned int i;
+
+	//LM_DBG("checking <%.*s> for param <%.*s>\n",
+	//	_uri->len, _uri->s, _param->len, _param->s);
+
+	if( parse_uri( _uri->s, _uri->len, &puri)==0 ) {
+		/* search the param by name */
+		for( i=0 ; i<puri.u_params_no ; i++ ) {
+			if (_param->len==puri.u_name[i].len
+			&& memcmp( _param->s, puri.u_name[i].s, _param->len)==0 ) {
+				*_val = puri.u_val[i];
+				//LM_DBG("extracted value <%.*s> for param <%.*s>\n",
+				//	_val->len, _val->s, _param->len, _param->s);
+				return 0;
+			}
+		}
+	}
+
+	return -1;
+}
+
+
+static int cdb_build_ucontact_key(str* _ct, ucontact_info_t* _ci)
+{
+	static str ctkey_pkg_buf, ctkeyb64_pkg_buf;
+	int len, base64len;
+	str ct_val;
+
+	if (_ci->cmatch->mode==CT_MATCH_NONE)
+		_ci->cmatch->mode = matching_mode;
+
+	switch (_ci->cmatch->mode) {
+
+		case CT_MATCH_CONTACT_ONLY:
+			len = _ct->len  ;
+			base64len = calc_base64_encode_len(len);
+			if (pkg_str_extend(&ctkey_pkg_buf, len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			if (pkg_str_extend(&ctkeyb64_pkg_buf, base64len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			memcpy(ctkey_pkg_buf.s, _ct->s, _ct->len);
+			break;
+
+		case CT_MATCH_CONTACT_CALLID:
+			len = _ct->len + 1 + _ci->callid->len;
+			base64len = calc_base64_encode_len(len);
+			if (pkg_str_extend(&ctkey_pkg_buf, len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			if (pkg_str_extend(&ctkeyb64_pkg_buf, base64len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			memcpy(ctkey_pkg_buf.s, _ct->s, _ct->len);
+			ctkey_pkg_buf.s[_ct->len] = ':';
+			memcpy(ctkey_pkg_buf.s + _ct->len + 1, _ci->callid->s,
+				_ci->callid->len);
+			break;
+
+		case CT_MATCH_PARAM:
+			if (get_param_from_uri( _ct, &_ci->cmatch->param, &ct_val)<0 ) {
+				LM_ERR("parse error on contact.....weird\n");
+				return -1;
+			}
+			len = _ci->cmatch->param.len + 1 + ct_val.len;
+			base64len = calc_base64_encode_len(len);
+			if (pkg_str_extend(&ctkey_pkg_buf, len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			if (pkg_str_extend(&ctkeyb64_pkg_buf, base64len) < 0) {
+				LM_ERR("oom\n");
+				return -1;
+			}
+			memcpy(ctkey_pkg_buf.s, _ci->cmatch->param.s,
+				_ci->cmatch->param.len);
+			ctkey_pkg_buf.s[_ci->cmatch->param.len] = ':';
+			memcpy(ctkey_pkg_buf.s + _ci->cmatch->param.len + 1, ct_val.s,
+				ct_val.len);
+			break;
+
+		default:
+			LM_CRIT("unknown matching mode %d\n", _ci->cmatch->mode);
+			return -1;
+
+	}
+
+	base64encode((unsigned char *)ctkeyb64_pkg_buf.s,
+		(unsigned char *)ctkey_pkg_buf.s, len);
+
+	_ci->cdb_key.s = ctkeyb64_pkg_buf.s;
+	_ci->cdb_key.len = base64len;
+
+	LM_DBG("subkey=<%.*s> for CT=<%.*s>+CALLID=<%.*s> mode %d\n",
+		_ci->cdb_key.len, _ci->cdb_key.s,
+		_ct->len,_ct->s,_ci->callid->len,_ci->callid->s,
+		_ci->cmatch->mode );
+
+	return 0;
+}
+
+
 /*! \brief
  * Release urecord previously obtained
  * through get_urecord
@@ -794,6 +864,15 @@ int insert_ucontact(urecord_t* _r, str* _contact, ucontact_info_t* _ci,
 		                                     _r->label,
 		                    ((unsigned short)_r->next_clabel));
 		_r->next_clabel = CLABEL_INC_AND_TEST(_r->next_clabel);
+	}
+
+	if (cluster_mode==CM_FULL_SHARING_CACHEDB
+	&& _ci->cdb_key.s==NULL) {
+		/* we need to build the cdb key for this new ucontact */
+		if (cdb_build_ucontact_key( _contact, _ci) < 0) {
+			LM_ERR("failed to generate CDB key\n");
+			return -1;
+		}
 	}
 
 	if (!(*_c = mem_insert_ucontact(_r, _contact, _ci))) {
@@ -864,7 +943,9 @@ int delete_ucontact(urecord_t* _r, struct ucontact* _c, char is_replicated)
 static inline struct ucontact* contact_match( ucontact_t* ptr, str* _c)
 {
 	while(ptr) {
-		if ((_c->len == ptr->c.len) && !memcmp(_c->s, ptr->c.s, _c->len) && ptr->expires != UL_EXPIRED_TIME ) {
+		if ( ptr->expires != UL_EXPIRED_TIME
+		&& (_c->len == ptr->c.len) && !memcmp(_c->s, ptr->c.s, _c->len)
+		) {
 			return ptr;
 		}
 
@@ -878,10 +959,10 @@ static inline struct ucontact* contact_callid_match( ucontact_t* ptr,
 														str* _c, str *_callid)
 {
 	while(ptr) {
-		if ( (_c->len==ptr->c.len) && (_callid->len==ptr->callid.len)
+		if ( ptr->expires != UL_EXPIRED_TIME
+		&& (_c->len==ptr->c.len) && (_callid->len==ptr->callid.len)
 		&& !memcmp(_c->s, ptr->c.s, _c->len)
 		&& !memcmp(_callid->s, ptr->callid.s, _callid->len)
-		&& ptr->expires != UL_EXPIRED_TIME
 		) {
 			return ptr;
 		}
@@ -889,6 +970,31 @@ static inline struct ucontact* contact_callid_match( ucontact_t* ptr,
 		ptr = ptr->next;
 	}
 	return 0;
+}
+
+
+static inline struct ucontact* contact_param_match( ucontact_t* ptr,
+														str* _c, str *_param)
+{
+	str ct_val;
+	str uct_val;
+
+	if ( ptr==NULL || get_param_from_uri(_c, _param, &ct_val)<0 )
+		return NULL;
+
+	while(ptr) {
+		/* parse the contact URI and extract the param + value */
+		if ( ptr->expires != UL_EXPIRED_TIME
+		&& get_param_from_uri( &ptr->c, _param, &uct_val)==0
+		&& ct_val.len == uct_val.len
+		&& memcmp(ct_val.s, uct_val.s, uct_val.len)==0
+		) {
+			return ptr;
+		}
+
+		ptr = ptr->next;
+	}
+	return NULL;
 }
 
 
@@ -901,7 +1007,7 @@ static inline struct ucontact* contact_callid_match( ucontact_t* ptr,
  *     -2 - found, but to be skipped (same cseq)
  */
 int get_ucontact(urecord_t* _r, str* _c, str* _callid, int _cseq,
-														struct ucontact** _co)
+								struct ct_match *match, struct ucontact** _co)
 {
 	ucontact_t* ptr;
 	int no_callid;
@@ -910,16 +1016,23 @@ int get_ucontact(urecord_t* _r, str* _c, str* _callid, int _cseq,
 	no_callid = 0;
 	*_co = 0;
 
-	switch (matching_mode) {
-		case CONTACT_ONLY:
+	if (match->mode==CT_MATCH_NONE)
+		match->mode = matching_mode;
+
+	LM_DBG("using ct mathing mode %d\n", match->mode);
+	switch (match->mode) {
+		case CT_MATCH_CONTACT_ONLY:
 			ptr = contact_match( _r->contacts, _c);
 			break;
-		case CONTACT_CALLID:
+		case CT_MATCH_CONTACT_CALLID:
 			ptr = contact_callid_match( _r->contacts, _c, _callid);
 			no_callid = 1;
 			break;
+		case CT_MATCH_PARAM:
+			ptr = contact_param_match( _r->contacts, _c, &match->param);
+			break;
 		default:
-			LM_CRIT("unknown matching_mode %d\n", matching_mode);
+			LM_CRIT("unknown contact matching mode %d\n", match->mode);
 			return -1;
 	}
 

@@ -150,6 +150,10 @@ new_ucontact(str* _dom, str* _aor, str* _contact, ucontact_info_t* _ci)
 		if (shm_str_dup( &c->attr, _ci->attr) < 0) goto mem_error;
 	}
 
+	if (_ci->cdb_key.s && _ci->cdb_key.len) {
+		if (shm_str_dup( &c->cdb_key, &_ci->cdb_key) < 0) goto mem_error;
+	}
+
 	if (_ci->shtag.s) {
 		if (shm_str_dup(&c->shtag, &_ci->shtag) < 0)
 			goto mem_error;
@@ -200,6 +204,7 @@ out_free:
 	if (c->c.s) shm_free(c->c.s);
 	if (c->instance.s) shm_free(c->instance.s);
 	if (c->attr.s) shm_free(c->attr.s);
+	if (c->cdb_key.s) shm_free(c->cdb_key.s);
 	if (c->shtag.s) shm_free(c->shtag.s);
 	if (c->kv_storage) store_destroy(c->kv_storage);
 	shm_free(c);
@@ -225,6 +230,7 @@ void free_ucontact(ucontact_t* _c)
 	if (_c->callid.s) shm_free(_c->callid.s);
 	if (_c->c.s) shm_free(_c->c.s);
 	if (_c->attr.s) shm_free(_c->attr.s);
+	if (_c->cdb_key.s) shm_free(_c->cdb_key.s);
 	if (_c->shtag.s) shm_free(_c->shtag.s);
 	if (_c->kv_storage) store_destroy(_c->kv_storage);
 
@@ -694,12 +700,10 @@ out_err:
 int db_update_ucontact(ucontact_t* _c)
 {
 	static db_ps_t my_ps = NULL;
-	db_key_t keys1[2];
-	db_val_t vals1[2];
+	db_key_t keys1[1];
+	db_val_t vals1[1];
 	db_key_t keys2[15];
 	db_val_t vals2[15];
-	int keys1_no = 1;
-	int keys2_no;
 
 	if (_c->flags & FL_MEM) {
 		return 0;
@@ -796,23 +800,12 @@ int db_update_ucontact(ucontact_t* _c)
 	} else {
 		vals2[13].val.str_val = _c->attr;
 	}
-	keys2_no = 14;
-
-	if (matching_mode == CONTACT_CALLID) {
-		/* callid is part of the matching key */
-		keys1[keys1_no] = &callid_col;
-		vals1[keys1_no].type = DB_STR;
-		vals1[keys1_no].nul = 0;
-		vals1[keys1_no].val.str_val = _c->callid;
-		keys1_no++;
-	}
 
 	/* callid is part of the update */
-	keys2[keys2_no] = &callid_col;
-	vals2[keys2_no].type = DB_STR;
-	vals2[keys2_no].nul = 0;
-	vals2[keys2_no].val.str_val = _c->callid;
-	keys2_no++;
+	keys2[14] = &callid_col;
+	vals2[14].type = DB_STR;
+	vals2[14].nul = 0;
+	vals2[14].val.str_val = _c->callid;
 
 	if (ul_dbf.use_table(ul_dbh, _c->domain) < 0) {
 		LM_ERR("sql use_table failed\n");
@@ -821,8 +814,7 @@ int db_update_ucontact(ucontact_t* _c)
 
 	CON_PS_REFERENCE(ul_dbh) = &my_ps;
 
-	if (ul_dbf.update(ul_dbh, keys1, 0, vals1, keys2, vals2,
-				keys1_no, keys2_no) < 0) {
+	if (ul_dbf.update(ul_dbh, keys1, 0, vals1, keys2, vals2, 1, 15)<0) {
 		LM_ERR("updating database failed\n");
 		goto out_err;
 	}
@@ -843,9 +835,8 @@ out_err:
 int db_delete_ucontact(ucontact_t* _c)
 {
 	static db_ps_t my_ps = NULL;
-	db_key_t keys[2];
-	db_val_t vals[2];
-	int n;
+	db_key_t keys[1];
+	db_val_t vals[1];
 
 	if (_c->flags & FL_MEM)
 		return 0;
@@ -856,17 +847,6 @@ int db_delete_ucontact(ucontact_t* _c)
 	VAL_NULL(vals) = 0;
 	VAL_BIGINT(vals) = (long long)_c->contact_id;
 
-	n=1;
-
-	if (matching_mode == CONTACT_CALLID) {
-		/* callid is part of the matching key */
-		keys[n] = &callid_col;
-		vals[n].type = DB_STR;
-		vals[n].nul = 0;
-		vals[n].val.str_val = _c->callid;
-		n++;
-	}
-
 	if (ul_dbf.use_table(ul_dbh, _c->domain) < 0) {
 		LM_ERR("sql use_table failed\n");
 		return -1;
@@ -874,7 +854,7 @@ int db_delete_ucontact(ucontact_t* _c)
 
 	CON_PS_REFERENCE(ul_dbh) = &my_ps;
 
-	if (ul_dbf.delete(ul_dbh, keys, 0, vals, n) < 0) {
+	if (ul_dbf.delete(ul_dbh, keys, 0, vals, 1) < 0) {
 		LM_ERR("deleting from database failed\n");
 		return -1;
 	}

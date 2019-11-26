@@ -24,10 +24,12 @@
 #include "../../timer.h"
 
 /**
- * Generic struct debugging support. Especially useful for troubleshooting
- * bugs related to reference counted structures, including:
- *   - mem corruption due to free() operations on lingering references
- *   - too many / too little ref operations
+ * Generic struct debugging support.  Some major use cases:
+ *   - troubleshooting bugs related to reference counted structures, including:
+ *     * mem corruption due to free() operations on lingering references
+ *     * too many / too little ref operations
+ *   - logging and keeping the last N events in memory and only dumping them
+ *     on a certain condition (e.g. occurrence of a bug)
  *
  * How To use:
  *  - before the forking phase, use shl_init() to initialize a global history
@@ -103,6 +105,15 @@ struct struct_hist_list;
 struct struct_hist_list *_shl_init(char *obj_name, int window_size,
 			int auto_logging, int init_actions_sz);
 #define shl_init(nm, wsz, autolog) _shl_init(nm, wsz, autolog, 5)
+
+/**
+ * Flush all contents of a struct hist list to the log.  Useful when collecting
+ * data over time in a rotating log list under high traffic volume conditions
+ * and only flushing the logs once a certain condition hits (e.g. bug occurs).
+ *
+ * @shl: a struct history list
+ */
+void sh_list_flush(struct struct_hist_list *shl);
 
 /**
  * Frees up the global history holder, along with all of its content

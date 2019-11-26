@@ -72,4 +72,3 @@ struct tls_domain {
 };
 
 #endif /* TLS_HELPER_H */
-

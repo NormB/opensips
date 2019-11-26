@@ -95,11 +95,11 @@ static int notification_handler(str *command)
 			LM_INFO("Timeout notification for %.*s\n", param.len, param.s);
 			if (parse_dlg_did(&param, &h_entry, &h_id) < 0)
 				return -1;
-			if(dlg_api.terminate_dlg(h_entry, h_id, &terminate_reason)< 0)
+			if(dlg_api.terminate_dlg(NULL, h_entry, h_id, &terminate_reason)< 0)
 				LM_ERR("Failed to terminate dialog h_entry=[%u], h_id=[%u]\n", h_entry, h_id);
 			return 0;
 		default:
-			LM_ERR("Unhandled command %c param=%.*s\n", cmd, param.len, param.s);
+			LM_WARN("Unhandled command %c param=%.*s\n", cmd, param.len, param.s);
 			return 0;
 	}
 }
@@ -396,7 +396,7 @@ void notification_listener_process(int rank)
 
 			} while (p < end);
 
-			offset = end - start;
+			offset = end - p;
 			memmove(buffer, start, end - start);
 			continue;
 error:

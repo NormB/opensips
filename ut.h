@@ -574,6 +574,22 @@ static inline void unescape_crlf(str *in_out)
 	}
 }
 
+static inline int is_e164(str* _user)
+{
+	int i;
+	char c;
+
+	if ((_user->len > 2) && (_user->len < 17) && ((_user->s)[0] == '+')) {
+		for (i = 1; i < _user->len; i++) {
+			c = (_user->s)[i];
+			if ((c < '0') || (c > '9')) return -1;
+		}
+		return 1;
+	} else {
+	    return -1;
+	}
+}
+
 
 /*
  * Convert a string to lower case
@@ -1294,6 +1310,9 @@ int parse_reply_codes( str *options_reply_codes_str,
 
 void base64encode(unsigned char *out, unsigned char *in, int inlen);
 int base64decode(unsigned char *out,unsigned char *in,int len);
+
+void base64urlencode(unsigned char *out, unsigned char *in, int inlen);
+int base64urldecode(unsigned char *out,unsigned char *in,int len);
 
 /*
  * "word64" is a combination between:

@@ -985,28 +985,6 @@ static void destroy(void)
             free_int_list(ds_probing_list, NULL);
 }
 
-#define CHECK_AND_EXPAND_LIST(_list_) \
-	do{\
-		if (_list_->type == GPARAM_TYPE_PVS) { \
-			_list_ ## _exp_end = _list_->next; \
-			_list_ ## _exp_start = set_list_from_pvs(msg, _list_->v.pvs,\
-					_list_->next);\
-			if (_list_ ## _exp_start == NULL) {\
-				LM_ERR("error when expanding " #_list_ " variable\n");\
-				return -1;\
-			}\
-			_list_ = _list_ ## _exp_start;\
-		}\
-	} while (0)
-
-#define TRY_FREE_EXPANDED_LIST(_list_) \
-	do {\
-		if (_list_ ## _exp_start && _list_ == _list_ ## _exp_end) {\
-			free_int_list(_list_ ## _exp_start, _list_ ## _exp_end);\
-			_list_ ## _exp_start = NULL; \
-		}\
-	} while (0)
-
 /**
  *
 static int w_ds_select(struct sip_msg* msg, char* part_set, char* alg,
@@ -1024,7 +1002,7 @@ static int w_ds_select(struct sip_msg *msg, int set, int alg, int flags,
 		return -1;
 
 	ds_select_ctl.mode = mode;
-	ds_select_ctl.set_destination = 0;
+	ds_select_ctl.set_destination = 1;
 	ds_select_ctl.ds_flags = 0;
 	ds_select_ctl.partition = part;
 	ds_select_ctl.set = set;
@@ -1034,12 +1012,7 @@ static int w_ds_select(struct sip_msg *msg, int set, int alg, int flags,
 
 	memset(&selected_dst, 0, sizeof(ds_selected_dst));
 
-	_ret = ds_select_dst(msg, &ds_select_ctl, &selected_dst,
-		ds_select_ctl.ds_flags);
-	if (_ret>=0) ret = _ret;
-
 	/* last ds_select_dst run: setting destination. */
-	ds_select_ctl.set_destination = 1;
 	LM_DBG("ds_select: %d %d %d %d\n",
 		ds_select_ctl.set, ds_select_ctl.alg, ds_select_ctl.max_results,
 		ds_select_ctl.set_destination);
