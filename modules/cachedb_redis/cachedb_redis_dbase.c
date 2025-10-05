@@ -259,10 +259,10 @@ int redis_connect(redis_con *con)
 	rpl = redisCommand(ctx, "JSON.DEBUG help");
 	if (rpl == NULL || rpl->type == REDIS_REPLY_ERROR) {
 		LM_INFO("no JSON support detected on Redis server %s:%d\n",
-		        con->host, con->port);
+			con->host, con->port);
 	} else {
 		LM_INFO("detected JSON support in Redis server %s:%d\n",
-		        con->host, con->port);
+			con->host, con->port);
 		con->flags |= REDIS_JSON_SUPPORT;
 	}
 	freeReplyObject(rpl);
@@ -559,7 +559,7 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 					node->context->errstr);
 
 				if (match_prefix(reply->str, reply->len, MOVED_PREFIX, MOVED_PREFIX_LEN)) {
-    					// It's a MOVED response
+						// It's a MOVED response
 					redis_moved *moved_info = pkg_malloc(sizeof(redis_moved));
 						if (!moved_info) {
 						LM_ERR("cachedb_redis: Unable to allocate redis_moved struct, no more pkg memory\n");
@@ -591,7 +591,7 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 
 						if (node->context == NULL) {
 							if (redis_reconnect_node(con,node) < 0) {
-							  LM_ERR("Unable to reconnect to node %p endpoint: %s:%d\n", node, node->ip, node->port);
+								LM_ERR("Unable to reconnect to node %p endpoint: %s:%d\n", node, node->ip, node->port);
 								last_err = -1;
 								goto try_next_con;
 							}
@@ -622,7 +622,7 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 
 		if (i != QUERY_ATTEMPTS)
 			LM_INFO("successfully ran query after %d failed attempt(s)\n",
-			        QUERY_ATTEMPTS - i);
+				QUERY_ATTEMPTS - i);
 
 		last_err = 0;
 		break;
@@ -631,7 +631,7 @@ try_next_con:
 		((redis_con *)connection->data)->current = con->next_con;
 		if (con->next_con != first)
 			LM_INFO("failing over to next Redis host (%s:%d)\n",
-			        con->next_con->host, con->next_con->port);
+				con->next_con->host, con->next_con->port);
 	}
 
 	*rpl = reply;
@@ -731,7 +731,7 @@ int redis_set(cachedb_con *connection,str *attr,str *val,int expires)
 
 	if (expires) {
 		rc = redis_run_command(connection, &reply, attr, "EXPIRE %b %d",
-		             attr->s, (size_t)attr->len, expires);
+				attr->s, (size_t)attr->len, expires);
 		if (rc != 0)
 			goto out_err;
 
@@ -979,13 +979,13 @@ char *redis_mk_fts_filter(const cdb_filter_t *f)
 	for (it = f; it; it = it->next) {
 		if (it->val.is_str) {
 			i += sprintf(ret+i, "%s@%.*s:", it==f ? "":" ",
-			        it->key.name.len, it->key.name.s);
+				it->key.name.len, it->key.name.s);
 			i += redis_escape_string_fts_filter(ret+i, &it->val.s);
 		} else {
 			switch (it->op) {
 			case CDB_OP_EQ:
 				i += sprintf(ret+i, "%s@%.*s:%d", it==f ? "":" ",
-				    it->key.name.len, it->key.name.s, it->val.i);
+					it->key.name.len, it->key.name.s, it->val.i);
 				continue;
 
 			case CDB_OP_LT:
@@ -1014,7 +1014,7 @@ char *redis_mk_fts_filter(const cdb_filter_t *f)
 			}
 
 			i += sprintf(ret+i, "%s@%.*s:[%s %s]", it==f ? "":" ",
-			        it->key.name.len, it->key.name.s, min_val, max_val);
+				it->key.name.len, it->key.name.s, min_val, max_val);
 		}
 	}
 
@@ -1042,7 +1042,7 @@ int redis_query(cachedb_con *_con, const cdb_filter_t *filter, cdb_res_t *res)
 
 	if (!(con->flags & REDIS_JSON_SUPPORT)) {
 		LM_ERR("connection to %s:%d has no JSON capability\n",
-		        con->host, con->port);
+			con->host, con->port);
 		return -1;
 	}
 
@@ -1081,19 +1081,19 @@ int redis_query(cachedb_con *_con, const cdb_filter_t *filter, cdb_res_t *res)
 
 	if (!rpl || rpl->type == REDIS_REPLY_ERROR) {
 		LM_ERR("error reply on FT.SEARCH query (rc: %d, rpl: %p), filters: %s\n",
-		        rc, rpl, argv[2]);
+			rc, rpl, argv[2]);
 		goto error;
 	}
 
 	if (rpl->type != REDIS_REPLY_ARRAY) {
 		LM_ERR("expected array in FT.SEARCH reply, got type %d, filters: %s\n",
-		        rpl->type, argv[2]);
+			rpl->type, argv[2]);
 		goto error;
 	}
 
 	if (rpl->element[0]->type != REDIS_REPLY_INTEGER) {
 		LM_ERR("unexpected type in FT.SEARCH reply array[0], got %d, filters: %s\n",
-		        rpl->element[0]->type, argv[2]);
+			rpl->element[0]->type, argv[2]);
 		goto error;
 	}
 
@@ -1105,14 +1105,14 @@ int redis_query(cachedb_con *_con, const cdb_filter_t *filter, cdb_res_t *res)
 		val = rpl->element[1+ i*2+1];
 
 		if (key->type != REDIS_REPLY_STRING || val->type != REDIS_REPLY_ARRAY
-		        || val->elements != 2) {
+			|| val->elements != 2) {
 			LM_ERR("unexpected reply format at idx %d: %d/%d/%lu, filters: %s\n",
-			        i, key->type, val->type, (long)val->elements, argv[2]);
+				i, key->type, val->type, (long)val->elements, argv[2]);
 			goto error;
 		}
 
 		if (key->len < fts_json_prefix.len ||
-		       memcmp(key->str, fts_json_prefix.s, fts_json_prefix.len) != 0) {
+				memcmp(key->str, fts_json_prefix.s, fts_json_prefix.len) != 0) {
 			LM_ERR("unexpected JSON key prefix at idx %d: '%s', skipping\n", i, key->str);
 			continue;
 		}
@@ -1122,13 +1122,13 @@ int redis_query(cachedb_con *_con, const cdb_filter_t *filter, cdb_res_t *res)
 
 		if (v1->type != REDIS_REPLY_STRING || strcmp(v1->str, "$")) {
 			LM_ERR("unexpected reply val#1 format at idx %d: %d/%s, filters: %s\n",
-			        i, v1->type, v1->str, argv[2]);
+				i, v1->type, v1->str, argv[2]);
 			goto error;
 		}
 
 		if (v2->type != REDIS_REPLY_STRING || v2->str[0] != '{') {
 			LM_ERR("unexpected reply val#2 format at idx %d: %d/%s, filters: %s\n",
-			        i, v2->type, v2->str, argv[2]);
+				i, v2->type, v2->str, argv[2]);
 			goto error;
 		}
 
@@ -1136,7 +1136,7 @@ int redis_query(cachedb_con *_con, const cdb_filter_t *filter, cdb_res_t *res)
 		row = redis_mk_cdb_row(v2);
 		if (!row) {
 			LM_ERR("error while processing val: %s, in key: %s\n",
-			        key->str, v2->str);
+				key->str, v2->str);
 			goto error;
 		}
 
@@ -1262,7 +1262,7 @@ next_item:
 			} else {
 				if (o == obj_cnt && o > 0) {
 					LM_BUG("bufer overflow (%d) in JSON key %.*s\n",
-					        o, pair->key.name.len, pair->key.name.s);
+						o, pair->key.name.len, pair->key.name.s);
 					goto error;
 				}
 
@@ -1273,7 +1273,7 @@ next_item:
 		case CDB_STR:
 			if (!escape) {
 				i += sprintf(obj+i, "\"%.*s\"",
-				        pair->val.val.st.len, pair->val.val.st.s);
+					pair->val.val.st.len, pair->val.val.st.s);
 			} else {
 				obj[i++] = '\"';
 				i += escape(obj+i, &pair->val.val.st);
@@ -1295,7 +1295,7 @@ next_item:
 
 		default:
 			LM_ERR("unsupported value type (%d), key: %.*s\n", pair->val.type,
-			        pair->key.name.len, pair->key.name.s);
+				pair->key.name.len, pair->key.name.s);
 			break;
 		}
 	}
@@ -1341,7 +1341,7 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 	}
 
 	argvlen[1] = sprintf(argv[1], "%s%.*s", fts_json_prefix.s,
-	        row_filter->val.s.len, row_filter->val.s.s);
+		row_filter->val.s.len, row_filter->val.s.s);
 
 	argv[2] = ".";
 	argvlen[2] = 1;
@@ -1355,7 +1355,7 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 	 * JSON.SET + NX flag, otherwise the JSON.MSET operation will return:
 	 *		"ERR new objects must be created at the root" */
 	argv[3] = redis_dict_to_json_root(pairs, redis_escape_string_json,
-	        redis_calc_escaped_len_json, 1, &subkeys_updated, &subkeys_deleted);
+		redis_calc_escaped_len_json, 1, &subkeys_updated, &subkeys_deleted);
 	if (!argv[3]) {
 		LM_ERR("failed to build JSON (key: '%.*s')\n", (int)argvlen[1], argv[1]);
 		goto error1;
@@ -1387,12 +1387,12 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 		LM_DBG("null reply on JSON.SET query (rc: %d), key: %s\n", rc, argv[1]);
 	} else if (rpl->type != REDIS_REPLY_STATUS) {
 		LM_ERR("error reply on JSON.SET query (rc: %d, rpl-type: %d, "
-		    "rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
-		    rpl->integer, rpl->str, argv[1]);
+			"rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
+			rpl->integer, rpl->str, argv[1]);
 		goto error1;
 	} else if (rpl->integer != REDIS_OK) {
 		LM_ERR("error status on JSON.SET query (rc: %d, rpl-val: %lld), key: %s\n",
-		    rc, rpl->integer, argv[1]);
+			rc, rpl->integer, argv[1]);
 		goto error1;
 	}
 
@@ -1430,7 +1430,7 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 			pair->subkey.len--;
 
 		argvlen[i+1] = sprintf(argv[i+1], "$.%.*s.%.*s", pair->key.name.len,
-		        pair->key.name.s, pair->subkey.len, pair->subkey.s);
+			pair->key.name.s, pair->subkey.len, pair->subkey.s);
 
 		argv[i+2] = cdb_dict_to_json(&pair->val.val.dict,
 				redis_escape_string_json, redis_calc_escaped_len_json);
@@ -1464,12 +1464,12 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 		goto error2;
 	} else if (rpl->type != REDIS_REPLY_STATUS) {
 		LM_ERR("error reply on JSON.MSET query (rc: %d, rpl-type: %d, "
-		    "rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
-		    rpl->integer, rpl->str, argv[1]);
+			"rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
+			rpl->integer, rpl->str, argv[1]);
 		goto error2;
 	} else if (rpl->integer != REDIS_OK) {
 		LM_ERR("error status on JSON.MSET query (rc: %d, rpl-val: %lld), key: %s\n",
-		    rc, rpl->integer, argv[1]);
+			rc, rpl->integer, argv[1]);
 		goto error2;
 	}
 
@@ -1504,7 +1504,7 @@ delete_query:
 		}
 
 		argvlen[2] = sprintf(argv[2], "$.%.*s.%.*s", pair->key.name.len,
-		        pair->key.name.s, pair->subkey.len, pair->subkey.s);
+			pair->key.name.s, pair->subkey.len, pair->subkey.s);
 
 		LM_DBG("deleting contact from AoR key: '%s', path: %s\n", argv[1], argv[2]);
 
@@ -1522,8 +1522,8 @@ delete_query:
 			goto error1;
 		} else if (rpl->type != REDIS_REPLY_INTEGER) {
 			LM_ERR("unexpected reply on JSON.DEL query (rc: %d, rpl-type: %d, "
-			    "rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
-			    rpl->integer, rpl->str, argv[1]);
+				"rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
+				rpl->integer, rpl->str, argv[1]);
 			goto error1;
 		}
 
@@ -1558,8 +1558,8 @@ set_expire:
 		goto error1;
 	} else if (rpl->type != REDIS_REPLY_INTEGER) {
 		LM_ERR("unexpected reply on EXPIRE query (rc: %d, rpl-type: %d, "
-		    "rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
-		    rpl->integer, rpl->str, argv[1]);
+			"rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
+			rpl->integer, rpl->str, argv[1]);
 		goto error1;
 	}
 
@@ -1605,13 +1605,13 @@ int redis_update(cachedb_con *_con, const cdb_filter_t *row_filter,
 
 	if (!(con->flags & REDIS_JSON_SUPPORT)) {
 		LM_ERR("connection to %s:%d has no JSON capability\n",
-		        con->host, con->port);
+			con->host, con->port);
 		return -1;
 	}
 
 	if (row_filter->next || !row_filter->key.is_pk) {
 		LM_ERR("unsupported filter (%.*s, %d)\n", row_filter->key.name.len,
-		        row_filter->key.name.s, row_filter->key.is_pk);
+			row_filter->key.name.s, row_filter->key.is_pk);
 		return -1;
 	}
 
@@ -1637,7 +1637,7 @@ int redis_update(cachedb_con *_con, const cdb_filter_t *row_filter,
 	}
 
 	argvlen[1] = sprintf(argv[1], "%s%.*s", fts_json_prefix.s,
-	        row_filter->val.s.len, row_filter->val.s.s);
+		row_filter->val.s.len, row_filter->val.s.s);
 
 	argv[2] = ".";
 	argvlen[2] = 1;
@@ -1665,12 +1665,12 @@ int redis_update(cachedb_con *_con, const cdb_filter_t *row_filter,
 		goto error;
 	} else if (rpl->type != REDIS_REPLY_STATUS) {
 		LM_ERR("error reply on JSON.SET query (rc: %d, rpl-type: %d, "
-		    "rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
-		    rpl->integer, rpl->str, argv[1]);
+			"rpl-val: %lld, rpl-str: %s), key: %s\n", rc, rpl->type,
+			rpl->integer, rpl->str, argv[1]);
 		goto error;
 	} else if (rpl->integer != REDIS_OK) {
 		LM_ERR("error status on JSON.SET query (rc: %d, rpl-val: %lld), key: %s\n",
-		    rc, rpl->integer, argv[1]);
+			rc, rpl->integer, argv[1]);
 		goto error;
 	}
 
@@ -1927,14 +1927,14 @@ int redis_raw_query_send(cachedb_con *connection, redisReply **reply,
 	LM_DBG("raw query key: %.*s\n", key.len, key.s);
 	for (i = 0; i < argc; i++)
 		LM_DBG("raw query arg %d: '%.*s' (%d)\n", i, (int)argvlen[i], argv[i],
-		       (int)argvlen[i]);
+				(int)argvlen[i]);
 #endif
 
 	return redis_run_command_argv(connection, reply, &key, argc, argv, argvlen);
 
 bad_query:
 	LM_ERR("malformed Redis RAW query: '%.*s' (%d)\n",
-	       attr->len, attr->s, attr->len);
+			attr->len, attr->s, attr->len);
 	return -1;
 }
 
