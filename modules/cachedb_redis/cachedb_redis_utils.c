@@ -349,17 +349,26 @@ error:
 
 /*
  When Redis is operating as a cluster, it is possible (very likely)
- that a MOVED redirection will be returned by the Redis nodes that
+ that a MOVED or ASK redirection will be returned by the Redis nodes that
  received the request. The general format of the reply from Redis is:
  MOVED slot [IP|FQDN]:port
+ ASK slot [IP|FQDN]:port
 
- This routine will parse the Redis MOVED reply into its components.
+ MOVED indicates the hash slot is permanently owned by a different node;
+ the client should update its slot map.
+
+ ASK indicates a temporary mid-migration redirect; the client must send
+ an ASKING command to the target node before retrying the query, and must
+ NOT update its slot map (see Redis Cluster Specification, "ASK
+ redirection" section).
+
+ This routine will parse a MOVED or ASK reply into its components.
  Note that the redisReply struct MUST be released outside of this routine
  to avoid a memory leak. The out->endpoint pointer must not be used after
  the redisReply has been released.
 
  The parsed data is stored into the following redis_moved struct:
- 
+
  typedef struct {
 	int slot;
 	const_str endpoint;
@@ -367,7 +376,8 @@ error:
  } redis_moved;
 
 */
-int parse_moved_reply(redisReply *reply, redis_moved *out) {
+static int parse_redirect_reply(redisReply *reply, redis_moved *out,
+	const char *prefix, size_t prefix_len) {
 	int i;
 	int slot = 0;
 	const char *p;
@@ -377,25 +387,25 @@ int parse_moved_reply(redisReply *reply, redis_moved *out) {
 	const char *port_start;
 	int port = REDIS_DF_PORT; // Default to Redis standard port
 
-	if (!reply || !reply->str || reply->len < MOVED_PREFIX_LEN || !out)
+	if (!reply || !reply->str || reply->len < prefix_len || !out)
 		return ERR_INVALID_REPLY;
 
 	p = reply->str;
 	end = reply->str + reply->len;
 
-	for (i = 0; i < MOVED_PREFIX_LEN; ++i) {
-		if (p[i] != MOVED_PREFIX[i]) {
+	for (i = 0; i < prefix_len; ++i) {
+		if (p[i] != prefix[i]) {
 		return ERR_INVALID_REPLY;
 		}
 	}
-	p += MOVED_PREFIX_LEN;
+	p += prefix_len;
 
 	// Parse slot number
 	while (p < end && *p >= '0' && *p <= '9') {
 		slot = slot * 10 + (*p - '0');
 		p++;
 	}
-	if (slot == 0 && (p == reply->str + MOVED_PREFIX_LEN || *(p - 1) < '0' || *(p - 1) > '9'))
+	if (slot == 0 && (p == reply->str + prefix_len || *(p - 1) < '0' || *(p - 1) > '9'))
 		return ERR_INVALID_SLOT;
 
 	// Skip spaces
@@ -440,4 +450,12 @@ int parse_moved_reply(redisReply *reply, redis_moved *out) {
 	out->port = port;
 
 	return 0;
+}
+
+int parse_moved_reply(redisReply *reply, redis_moved *out) {
+	return parse_redirect_reply(reply, out, MOVED_PREFIX, MOVED_PREFIX_LEN);
+}
+
+int parse_ask_reply(redisReply *reply, redis_moved *out) {
+	return parse_redirect_reply(reply, out, ASK_PREFIX, ASK_PREFIX_LEN);
 }

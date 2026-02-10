@@ -602,6 +602,67 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 					}
 				}
 
+				if (match_prefix(reply->str, reply->len, ASK_PREFIX, ASK_PREFIX_LEN)) {
+					/* ASK response: temporary mid-migration redirect.
+					 * Per Redis cluster spec, we must:
+					 * 1. Send ASKING to the target node
+					 * 2. Retry the query on that node
+					 * 3. NOT update our slot map */
+					redis_moved *ask_info = pkg_malloc(sizeof(redis_moved));
+					if (!ask_info) {
+						LM_ERR("cachedb_redis: Unable to allocate redis_moved struct for ASK, no more pkg memory\n");
+						freeReplyObject(reply);
+						reply = NULL;
+						goto try_next_con;
+					} else {
+						if (parse_ask_reply(reply, ask_info) < 0) {
+							LM_ERR("cachedb_redis: Unable to parse ASK reply\n");
+							pkg_free(ask_info);
+							freeReplyObject(reply);
+							goto try_next_con;
+						}
+
+						LM_DBG("cachedb_redis: ASK slot: [%d] endpoint: [%.*s] port: [%d]\n",
+							ask_info->slot, ask_info->endpoint.len,
+							ask_info->endpoint.s, ask_info->port);
+						node = get_redis_connection_by_endpoint(con, ask_info);
+
+						pkg_free(ask_info);
+						ask_info = NULL;
+						freeReplyObject(reply);
+						reply = NULL;
+
+						if (node == NULL) {
+							LM_ERR("Unable to locate connection by endpoint for ASK\n");
+							last_err = -10;
+							goto try_next_con;
+						}
+
+						if (node->context == NULL) {
+							if (redis_reconnect_node(con,node) < 0) {
+								LM_ERR("Unable to reconnect to node %p endpoint: %s:%d for ASK\n", node, node->ip, node->port);
+								last_err = -1;
+								goto try_next_con;
+							}
+						}
+
+						/* Per Redis spec: send ASKING before the redirected query */
+						redisReply *asking_reply = redisCommand(node->context, "ASKING");
+						if (asking_reply == NULL || asking_reply->type == REDIS_REPLY_ERROR) {
+							LM_ERR("cachedb_redis: ASKING command failed on %s:%d\n", node->ip, node->port);
+							if (asking_reply)
+								freeReplyObject(asking_reply);
+							last_err = -1;
+							goto try_next_con;
+						}
+						freeReplyObject(asking_reply);
+
+						/* Do NOT update slot map - ASK is a temporary redirect */
+						i = QUERY_ATTEMPTS;
+						continue;
+					}
+				}
+
 				freeReplyObject(reply);
 				reply = NULL;
 
