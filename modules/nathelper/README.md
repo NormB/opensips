@@ -476,6 +476,63 @@ modparam("nathelper", "cluster_sharing_tag", "vip")
 ```
 
 
+#### nated_contact_override (integer)
+
+
+Controls the behavior of
+[fix_nated_contact()](#fix_nated_contacturi_params--flags) when the Contact header
+has already been rewritten by a prior function in the same route,
+such as *topology_hiding()*.
+
+
+When both *topology_hiding()* and *fix_nated_contact()* are used in the
+same routing script, both attempt to rewrite the Contact header. If
+*topology_hiding()* runs first, the Contact is already scheduled for
+replacement by the time *fix_nated_contact()* executes. Without this
+parameter, calling them in this order can produce a malformed Contact
+header containing two concatenated SIP URIs (see
+[GH #2172](https://github.com/OpenSIPS/opensips/issues/2172)).
+
+
+This parameter lets you choose which rewrite wins:
+
+
+- *0* (default) - keep the existing Contact rewrite as-is. For example,
+if *topology_hiding()* already rewrote the Contact, its topology-hidden
+Contact will be preserved and *fix_nated_contact()* will be silently
+skipped for that Contact.
+- *1* - override the existing rewrite with the NAT-fixed Contact from
+*fix_nated_contact()*. The Contact will contain the source IP and port
+of the request instead of the topology-hidden address.
+
+
+> [!NOTE]
+> This parameter only takes effect when a Contact conflict is detected
+> (i.e., another function has already scheduled the Contact for
+> rewriting). When *fix_nated_contact()* is called on its own or before
+> other Contact-rewriting functions, this parameter has no effect and
+> *fix_nated_contact()* behaves normally.
+
+
+If the message contains multiple Contact URIs, the check is done
+per-Contact: only Contacts that conflict with a prior rewrite are
+affected by this setting. Other Contacts are processed by
+*fix_nated_contact()* normally.
+
+
+*Default value is "0 (keep existing rewrite)".*
+
+
+```opensips title="Set nated_contact_override parameter"
+...
+# Keep topology_hiding()'s Contact (default behavior)
+modparam("nathelper", "nated_contact_override", 0)
+...
+# Override with fix_nated_contact()'s NAT-fixed Contact
+modparam("nathelper", "nated_contact_override", 1)
+...
+```
+
 ### Exported Functions
 
 
