@@ -4743,8 +4743,51 @@ static int rtpengine_unsubscribe_f(struct sip_msg* msg, str *flags, pv_spec_t *s
 static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
 		pv_spec_t *spvar, pv_spec_t *bpvar, pv_spec_t *tpvar)
 {
-	LM_ERR("rtpengine_subscribe_request: not yet implemented\n");
-	return -1;
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	str sdp_body, to_tag;
+	pv_value_t val;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_SUBSCRIBE_REQUEST,
+			flags, NULL, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("subscribe request failed\n");
+		return -1;
+	}
+
+	/* extract offer SDP from reply and store in body pvar */
+	if (bpvar) {
+		if (!bencode_dictionary_get_str(dict, "sdp", &sdp_body)) {
+			LM_ERR("subscribe request reply missing sdp\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_VAL_STR;
+		val.rs = sdp_body;
+		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0)
+			LM_ERR("failed to set body pvar\n");
+	}
+
+	/* extract to-tag (subscription identifier) from reply */
+	if (tpvar) {
+		if (!bencode_dictionary_get_str(dict, "to-tag", &to_tag)) {
+			LM_ERR("subscribe request reply missing to-tag\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_VAL_STR;
+		val.rs = to_tag;
+		if (pv_set_value(msg, tpvar, (int)EQ_T, &val) < 0)
+			LM_ERR("failed to set tag pvar\n");
+	}
+
+	bencode_buffer_free(&bencbuf);
+	return 1;
 }
 
 static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
