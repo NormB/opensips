@@ -90,13 +90,21 @@ fn check_prefix(prefixes: &[String], value: &str) -> bool {
     prefixes.iter().any(|p| value.starts_with(p.as_str()))
 }
 
+/// Rebuild BlacklistData from raw entries and mode string.
+fn build_blacklist_data(entries: &[String], mode: &str) -> BlacklistData {
+    match mode {
+        "exact" => BlacklistData::Exact(entries.iter().cloned().collect()),
+        _ => BlacklistData::Prefix(entries.to_vec()),
+    }
+}
+
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
     data: BlacklistData,
-    #[allow(dead_code)]
     loader: FileLoader<Vec<String>>,
     stats: Stats,
+    mode: String,
 }
 
 thread_local! {
@@ -145,6 +153,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
         None => return -1,
     };
     let mode = MATCH_MODE.get_value().unwrap_or("prefix").to_string();
+    let mode_log = mode.clone();
 
     let loader = match FileLoader::new(&file, default_line_parser, build_vec) {
         Ok(l) => l,
@@ -159,22 +168,19 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
 
     let data = {
         let entries = loader.get();
-        match mode.as_str() {
-            "exact" => BlacklistData::Exact(entries.iter().cloned().collect()),
-            _ => BlacklistData::Prefix(entries.clone()),
-        }
+        build_blacklist_data(&entries, &mode)
     };
 
     let stats = Stats::new("rust_dynamic_blacklist",
-        &["checked", "blocked", "allowed", "entries"]);
+        &["checked", "blocked", "allowed", "entries", "reloads"]);
     stats.set("entries", entry_count as u64);
 
     WORKER.with(|w| {
-        *w.borrow_mut() = Some(WorkerState { data, loader, stats });
+        *w.borrow_mut() = Some(WorkerState { data, loader, stats, mode });
     });
 
     opensips_log!(DBG, "rust_dynamic_blacklist",
-        "worker {} loaded {} entries (mode={})", rank, entry_count, mode);
+        "worker {} loaded {} entries (mode={})", rank, entry_count, mode_log);
     0
 }
 
@@ -228,6 +234,45 @@ unsafe extern "C" fn w_rust_check_blacklist(
     })
 }
 
+// ── Script function: rust_blacklist_reload() ─────────────────────
+
+unsafe extern "C" fn w_rust_blacklist_reload(
+    _msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        WORKER.with(|w| {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
+                Some(state) => {
+                    match state.loader.reload() {
+                        Ok(count) => {
+                            let entries = state.loader.get();
+                            state.data = build_blacklist_data(&entries, &state.mode);
+                            drop(entries);
+                            state.stats.set("entries", count as u64);
+                            state.stats.inc("reloads");
+                            opensips_log!(INFO, "rust_dynamic_blacklist",
+                                "reloaded {} entries", count);
+                            1
+                        }
+                        Err(e) => {
+                            opensips_log!(ERR, "rust_dynamic_blacklist",
+                                "reload failed: {}", e);
+                            -2
+                        }
+                    }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_dynamic_blacklist",
+                        "blacklist not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
 
 // ── Script function: rust_blacklist_stats() ──────────────────────
 
@@ -264,11 +309,17 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_check_blacklist"),
         function: Some(w_rust_check_blacklist),
         params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_blacklist_reload"),
+        function: Some(w_rust_blacklist_reload),
+        params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
@@ -387,7 +438,6 @@ mod tests {
     #[test]
     fn test_exact_case_sensitive() {
         let set = make_exact_set(&["friendly-scanner", "SIPVicious"]);
-        // SIP User-Agents are case-sensitive
         assert!(check_exact(&set, "friendly-scanner"));
         assert!(!check_exact(&set, "Friendly-Scanner"));
         assert!(check_exact(&set, "SIPVicious"));
@@ -396,7 +446,6 @@ mod tests {
 
     #[test]
     fn test_exact_partial_not_matched() {
-        // Exact mode should NOT match partial strings
         let set = make_exact_set(&["192.168.1."]);
         assert!(!check_exact(&set, "192.168.1.100"));
         assert!(check_exact(&set, "192.168.1."));
@@ -430,7 +479,6 @@ mod tests {
 
     #[test]
     fn test_prefix_partial() {
-        // Prefix "192.168." should match "192.168.1.100"
         let prefixes = make_prefix_vec(&["192.168."]);
         assert!(check_prefix(&prefixes, "192.168.1.100"));
         assert!(check_prefix(&prefixes, "192.168.255.255"));
@@ -476,7 +524,6 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_entry_matches_everything() {
-        // An empty string prefix matches all values via starts_with
         let prefixes = make_prefix_vec(&[""]);
         assert!(check_prefix(&prefixes, "anything"));
         assert!(check_prefix(&prefixes, ""));
@@ -484,8 +531,6 @@ mod tests {
 
     #[test]
     fn test_exact_with_whitespace_preserved() {
-        // Entries should already be trimmed by FileLoader, but check
-        // that exact match is literal
         let set = make_exact_set(&["192.168.1.1"]);
         assert!(!check_exact(&set, " 192.168.1.1"));
         assert!(!check_exact(&set, "192.168.1.1 "));
@@ -536,4 +581,101 @@ mod tests {
         assert!(json.contains(r#""allowed":1"#));
     }
 
+    // ── build_blacklist_data tests ───────────────────────────────
+
+    #[test]
+    fn test_build_blacklist_data_exact() {
+        let entries = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let data = build_blacklist_data(&entries, "exact");
+        match data {
+            BlacklistData::Exact(set) => {
+                assert_eq!(set.len(), 3);
+                assert!(set.contains("a"));
+                assert!(set.contains("b"));
+                assert!(set.contains("c"));
+            }
+            BlacklistData::Prefix(_) => panic!("expected Exact"),
+        }
+    }
+
+    #[test]
+    fn test_build_blacklist_data_prefix() {
+        let entries = vec!["192.168.".to_string(), "10.0.".to_string()];
+        let data = build_blacklist_data(&entries, "prefix");
+        match data {
+            BlacklistData::Prefix(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], "192.168.");
+                assert_eq!(v[1], "10.0.");
+            }
+            BlacklistData::Exact(_) => panic!("expected Prefix"),
+        }
+    }
+
+    // ── Reload integration test (file-backed) ────────────────────
+
+    #[test]
+    fn test_reload_updates_data() {
+        use rust_common::reload::{default_line_parser, FileLoader};
+        use std::io::Write;
+
+        let path = format!("{}/rust_bl_reload_test", std::env::temp_dir().display());
+
+        // Create initial file
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "192.168.1.100").unwrap();
+            writeln!(f, "10.0.0.1").unwrap();
+        }
+
+        let loader = FileLoader::new(&path, default_line_parser, build_vec).unwrap();
+        let entries = loader.get();
+        assert_eq!(entries.len(), 2);
+        let data = build_blacklist_data(&entries, "prefix");
+        drop(entries);
+
+        // Verify initial data blocks 192.168.1.100
+        match &data {
+            BlacklistData::Prefix(v) => assert!(check_prefix(v, "192.168.1.100")),
+            _ => panic!("expected prefix"),
+        }
+
+        // Update file: remove 192.168.1.100, add 172.16.0.
+        std::fs::write(&path, "10.0.0.1\n172.16.0.\n").unwrap();
+
+        let count = loader.reload().unwrap();
+        assert_eq!(count, 2);
+
+        let entries = loader.get();
+        let data = build_blacklist_data(&entries, "prefix");
+        drop(entries);
+
+        // After reload: 192.168.1.100 no longer blocked, 172.16.0.1 is
+        match &data {
+            BlacklistData::Prefix(v) => {
+                assert!(!check_prefix(v, "192.168.1.100"));
+                assert!(check_prefix(v, "172.16.0.1"));
+                assert!(check_prefix(v, "10.0.0.1"));
+            }
+            _ => panic!("expected prefix"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reload_file_error_returns_err() {
+        use rust_common::reload::{default_line_parser, FileLoader};
+
+        let path = format!("{}/rust_bl_reload_err_test", std::env::temp_dir().display());
+        std::fs::write(&path, "entry1\n").unwrap();
+
+        let loader = FileLoader::new(&path, default_line_parser, build_vec).unwrap();
+        assert_eq!(loader.get().len(), 1);
+
+        // Delete the file, then attempt reload
+        std::fs::remove_file(&path).unwrap();
+        let result = loader.reload();
+        assert!(result.is_err());
+    }
 }
