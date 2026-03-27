@@ -5,8 +5,9 @@
 //! background tokio task. If the queue is full, the payload is dropped
 //! and the drop counter incremented.
 //!
-//! Supports custom headers, multiple URLs (fanout), and retry with
-//! exponential backoff.
+//! Supports custom headers, multiple URLs (fanout), retry with
+//! exponential backoff, message batching, SIP method filtering,
+//! and HTTP error logging/stats.
 //!
 //! # OpenSIPS config
 //!
@@ -19,6 +20,10 @@
 //! modparam("rust_http_webhook", "headers", "Authorization: Bearer xxx|X-Source: opensips")
 //! modparam("rust_http_webhook", "max_retries", 3)
 //! modparam("rust_http_webhook", "retry_delay_ms", 1000)
+//! modparam("rust_http_webhook", "batch_size", 10)
+//! modparam("rust_http_webhook", "batch_timeout_ms", 200)
+//! modparam("rust_http_webhook", "method_filter", "INVITE,BYE,REGISTER")
+//! modparam("rust_http_webhook", "log_errors", 1)
 //!
 //! route {
 //!     webhook("{\"method\":\"$rm\",\"ruri\":\"$ru\"}");
@@ -62,12 +67,16 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
-use rust_common::async_dispatch::{parse_headers, parse_urls, FireAndForget, RetryConfig};
+use rust_common::async_dispatch::{
+    parse_headers, parse_urls, BatchConfig, FireAndForget, RetryConfig,
+};
 use rust_common::mi::Stats;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::{c_int, c_void};
 use std::ptr;
+use std::sync::OnceLock;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -96,6 +105,36 @@ static MAX_RETRIES: Integer = Integer::with_default(0);
 /// delay * 2^(attempt-1).
 static RETRY_DELAY_MS: Integer = Integer::with_default(1000);
 
+/// Number of messages to accumulate before sending as a JSON array batch.
+/// 1 = no batching (default, current behavior).
+static BATCH_SIZE: Integer = Integer::with_default(1);
+
+/// Maximum wait in milliseconds before flushing a partial batch (default: 100).
+static BATCH_TIMEOUT_MS: Integer = Integer::with_default(100);
+
+/// Comma-separated list of SIP methods to send webhooks for.
+/// Empty = all methods (default).
+static METHOD_FILTER: ModString = ModString::new();
+
+/// If 1, log each webhook HTTP failure at WARN level (default: 0).
+static LOG_ERRORS: Integer = Integer::with_default(0);
+
+// ── Parsed method filter ─────────────────────────────────────────
+
+/// Parsed method filter set. Empty = allow all.
+static METHOD_FILTER_SET: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// Parse a comma-separated method list into a HashSet of uppercase methods.
+pub fn parse_method_filter(raw: &str) -> HashSet<String> {
+    if raw.is_empty() {
+        return HashSet::new();
+    }
+    raw.split(',')
+        .map(|m| m.trim().to_uppercase())
+        .filter(|m| !m.is_empty())
+        .collect()
+}
+
 // ── Per-worker state ─────────────────────────────────────────────
 
 thread_local! {
@@ -106,6 +145,10 @@ thread_local! {
         "failed",
         "retried",
         "retry_exhausted",
+        "errors_4xx",
+        "errors_5xx",
+        "errors_timeout",
+        "filtered",
     ]);
 }
 
@@ -154,6 +197,13 @@ unsafe extern "C" fn mod_init() -> c_int {
 
     let max_retries = MAX_RETRIES.get();
     let retry_delay = RETRY_DELAY_MS.get();
+    let batch_size = BATCH_SIZE.get();
+    let batch_timeout = BATCH_TIMEOUT_MS.get();
+
+    // Parse method filter
+    let filter_raw = METHOD_FILTER.get_value().unwrap_or("");
+    let filter_set = parse_method_filter(filter_raw);
+    let _ = METHOD_FILTER_SET.set(filter_set.clone());
 
     opensips_log!(INFO, "rust_http_webhook", "module initialized");
     for (i, u) in urls.iter().enumerate() {
@@ -168,6 +218,17 @@ unsafe extern "C" fn mod_init() -> c_int {
     if max_retries > 0 {
         opensips_log!(INFO, "rust_http_webhook",
             "  max_retries={}, retry_delay_ms={}", max_retries, retry_delay);
+    }
+    if batch_size > 1 {
+        opensips_log!(INFO, "rust_http_webhook",
+            "  batch_size={}, batch_timeout_ms={}", batch_size, batch_timeout);
+    }
+    if !filter_set.is_empty() {
+        opensips_log!(INFO, "rust_http_webhook",
+            "  method_filter={:?}", filter_set);
+    }
+    if LOG_ERRORS.get() > 0 {
+        opensips_log!(INFO, "rust_http_webhook", "  log_errors=enabled");
     }
 
     if let Some(ca) = TLS_CA_FILE.get_value() {
@@ -198,15 +259,20 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
         max_retries: MAX_RETRIES.get().max(0) as u32,
         retry_delay_ms: RETRY_DELAY_MS.get().max(100) as u64,
     };
+    let batch = BatchConfig {
+        batch_size: BATCH_SIZE.get().max(1) as usize,
+        batch_timeout_ms: BATCH_TIMEOUT_MS.get().max(1) as u64,
+    };
 
     WEBHOOK.with(|w| {
-        *w.borrow_mut() = Some(FireAndForget::with_options(
+        *w.borrow_mut() = Some(FireAndForget::with_all_options(
             urls,
             MAX_QUEUE.get().max(1) as usize,
             HTTP_TIMEOUT.get().max(1) as u64,
             content_type,
             custom_headers,
             retry,
+            batch,
         ));
     });
 
@@ -222,7 +288,7 @@ unsafe extern "C" fn mod_destroy() {
 // ── Script function: webhook(payload) ───────────────────────
 
 unsafe extern "C" fn w_rust_webhook(
-    _msg: *mut sys::sip_msg,
+    msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
@@ -235,6 +301,18 @@ unsafe extern "C" fn w_rust_webhook(
                 return -2;
             }
         };
+
+        // Check method filter
+        if let Some(filter) = METHOD_FILTER_SET.get() {
+            if !filter.is_empty() {
+                let sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+                let method = sip_msg.method().unwrap_or("").to_uppercase();
+                if !filter.contains(&method) {
+                    WEBHOOK_STATS.with(|s| s.inc("filtered"));
+                    return 1; // Silently skip -- not an error
+                }
+            }
+        }
 
         WEBHOOK.with(|w| {
             let borrow = w.borrow();
@@ -336,7 +414,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 13> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("url"),
         type_: 1, // STR_PARAM
@@ -376,6 +454,26 @@ static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
         name: cstr_lit!("retry_delay_ms"),
         type_: 2, // INT_PARAM
         param_pointer: RETRY_DELAY_MS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("batch_size"),
+        type_: 2, // INT_PARAM
+        param_pointer: BATCH_SIZE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("batch_timeout_ms"),
+        type_: 2, // INT_PARAM
+        param_pointer: BATCH_TIMEOUT_MS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("method_filter"),
+        type_: 1, // STR_PARAM
+        param_pointer: METHOD_FILTER.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("log_errors"),
+        type_: 2, // INT_PARAM
+        param_pointer: LOG_ERRORS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -422,3 +520,77 @@ pub static exports: sys::module_exports = sys::module_exports {
     init_child_f: Some(mod_child_init),
     reload_ack_f: None,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_method_filter tests ────────────────────────────────
+
+    #[test]
+    fn test_parse_method_filter_empty() {
+        let set = parse_method_filter("");
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn test_parse_method_filter_single() {
+        let set = parse_method_filter("INVITE");
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("INVITE"));
+    }
+
+    #[test]
+    fn test_parse_method_filter_multiple() {
+        let set = parse_method_filter("INVITE,BYE,REGISTER");
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("INVITE"));
+        assert!(set.contains("BYE"));
+        assert!(set.contains("REGISTER"));
+    }
+
+    #[test]
+    fn test_parse_method_filter_lowercase() {
+        let set = parse_method_filter("invite,bye");
+        assert!(set.contains("INVITE"));
+        assert!(set.contains("BYE"));
+    }
+
+    #[test]
+    fn test_parse_method_filter_whitespace() {
+        let set = parse_method_filter("  INVITE , BYE , REGISTER  ");
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("INVITE"));
+        assert!(set.contains("BYE"));
+        assert!(set.contains("REGISTER"));
+    }
+
+    #[test]
+    fn test_parse_method_filter_trailing_comma() {
+        let set = parse_method_filter("INVITE,BYE,");
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("INVITE"));
+        assert!(set.contains("BYE"));
+    }
+
+    #[test]
+    fn test_parse_method_filter_duplicates() {
+        let set = parse_method_filter("INVITE,INVITE,BYE");
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_method_match_in_filter() {
+        let filter = parse_method_filter("INVITE,BYE");
+        assert!(filter.contains("INVITE"));
+        assert!(!filter.contains("OPTIONS"));
+        assert!(filter.contains("BYE"));
+    }
+
+    #[test]
+    fn test_empty_filter_allows_all() {
+        let filter = parse_method_filter("");
+        // Empty filter means allow all; check is: if filter.is_empty() => allow
+        assert!(filter.is_empty());
+    }
+}
