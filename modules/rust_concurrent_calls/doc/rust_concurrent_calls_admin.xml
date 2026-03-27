@@ -621,6 +621,96 @@ route {
 		</example>
 	</section>
 
+	<section id="func_concurrent_status" xreflabel="concurrent_status()">
+		<title>
+		<function moreinfo="none">concurrent_status(account)</function>
+		</title>
+		<para>
+		Retrieve detailed status for a specific account as a JSON
+		string. Sets <literal>$var(concurrent_status)</literal> with
+		a JSON object containing the account name, current count,
+		effective limit, and per-direction breakdown.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to query. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_status</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    concurrent_status("$fU");
+    xlog("L_INFO", "Status: $var(concurrent_status)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_set_limit" xreflabel="concurrent_set_limit()">
+		<title>
+		<function moreinfo="none">concurrent_set_limit(account, limit)</function>
+		</title>
+		<para>
+		Live override of an account's concurrent call limit. The
+		override persists until the next
+		<function>concurrent_reload()</function> or process restart.
+		This allows dynamic limit adjustment without editing the
+		limits file.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>limit</emphasis> (string)  - The new limit
+			value as a string (will be parsed as unsigned integer).
+			This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - override applied successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - invalid parameters or
+			uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_set_limit</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[set_limit] {
+    concurrent_set_limit("alice", "20");
+    xlog("L_INFO", "alice limit overridden to 20\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_check_concurrent_inbound" xreflabel="check_concurrent_inbound()">
 		<title>
 		<function moreinfo="none">check_concurrent_inbound(account)</function>
@@ -742,6 +832,15 @@ route {
 		<function>check_concurrent()</function>. This is either
 		the per-account limit from the limits file or the
 		<varname>default_limit</varname> if the account is not listed.
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_status)</title>
+		<para>
+		JSON string containing detailed status for a specific account.
+		Set by <function>concurrent_status()</function>. Includes
+		account name, current count, effective limit, and per-direction
+		breakdown (inbound/outbound).
 		</para>
 	</section>
 	<section>

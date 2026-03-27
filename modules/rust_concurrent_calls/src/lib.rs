@@ -232,6 +232,32 @@ fn check_limit(
     (count < limit, count, limit)
 }
 
+/// Resolve the effective limit for an account, considering live overrides.
+fn effective_limit(
+    limits: &HashMap<String, u32>,
+    overrides: &HashMap<String, u32>,
+    account: &str,
+    default_limit: u32,
+) -> u32 {
+    overrides.get(account).copied()
+        .or_else(|| limits.get(account).copied())
+        .unwrap_or(default_limit)
+}
+
+/// Build a JSON status string for an account.
+fn build_status_json(
+    account: &str,
+    count: u32,
+    limit: u32,
+    inbound: u32,
+    outbound: u32,
+) -> String {
+    format!(
+        r#"{{"account":"{}","count":{},"limit":{},"direction":{{"inbound":{},"outbound":{}}}}}"#,
+        account, count, limit, inbound, outbound
+    )
+}
+
 /// Check limit using an external (profile-based) count instead of the local HashMap.
 ///
 /// When dialog profiles are enabled, the profile count comes from
@@ -281,6 +307,8 @@ struct WorkerState {
     inbound_counts: HashMap<String, u32>,
     outbound_counts: HashMap<String, u32>,
     direction_loader: Option<FileLoader<HashMap<String, DirectionLimits>>>,
+    // Live limit overrides (Task 42) — persist until reload or restart
+    limit_overrides: HashMap<String, u32>,
 }
 
 thread_local! {
@@ -520,6 +548,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             inbound_counts: HashMap::with_capacity(256),
             outbound_counts: HashMap::with_capacity(256),
             direction_loader,
+            limit_overrides: HashMap::new(),
         });
     });
 
@@ -567,6 +596,11 @@ unsafe extern "C" fn w_check_concurrent(
 
                     // When dialog profiles are enabled, use get_profile_size
                     // for cross-worker accurate counts
+                    // Check overrides first
+                    let eff_limit = effective_limit(
+                        &limits, &state.limit_overrides, account, default,
+                    );
+
                     let (allowed, count, limit) = if use_profiles {
                         let mut sip_msg = unsafe {
                             opensips_rs::SipMessage::from_raw(msg)
@@ -585,9 +619,8 @@ unsafe extern "C" fn w_check_concurrent(
                             profile_count, &limits, account, default,
                         )
                     } else {
-                        check_limit(
-                            &state.counts, &limits, account, default,
-                        )
+                        let count = state.counts.get(account).copied().unwrap_or(0);
+                        (count < eff_limit, count, eff_limit)
                     };
 
                     // Set $var(concurrent_count) and $var(concurrent_limit)
@@ -811,6 +844,105 @@ unsafe extern "C" fn w_check_concurrent_outbound(
     })
 }
 
+// ── Script function: concurrent_status(account) ─────────────
+
+unsafe extern "C" fn w_concurrent_status(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "concurrent_status: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        let json = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    let count = state.counts.get(account).copied().unwrap_or(0);
+                    let limits = state.loader.get();
+                    let default = DEFAULT_LIMIT.get() as u32;
+                    let limit = effective_limit(&limits, &state.limit_overrides, account, default);
+                    let inbound = state.inbound_counts.get(account).copied().unwrap_or(0);
+                    let outbound = state.outbound_counts.get(account).copied().unwrap_or(0);
+                    build_status_json(account, count, limit, inbound, outbound)
+                }
+                None => r#"{"error":"not_initialized"}"#.to_string(),
+            }
+        });
+
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(concurrent_status)", &json);
+        1
+    })
+}
+
+// ── Script function: concurrent_set_limit(account, limit) ───
+
+const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
+    let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
+    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[1].flags = 2; // CMD_PARAM_STR
+    arr
+};
+
+unsafe extern "C" fn w_concurrent_set_limit(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "concurrent_set_limit: missing account parameter");
+                return -2;
+            }
+        };
+        let limit_str = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "concurrent_set_limit: missing limit parameter");
+                return -2;
+            }
+        };
+
+        let new_limit = match limit_str.parse::<u32>() {
+            Ok(v) => v,
+            Err(_) => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "concurrent_set_limit: invalid limit value: {}", limit_str);
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
+                Some(state) => {
+                    state.limit_overrides.insert(account.to_string(), new_limit);
+                    opensips_log!(INFO, "rust_concurrent_calls",
+                        "live override: {} limit set to {}", account, new_limit);
+                    1
+                }
+                None => {
+                    opensips_log!(ERR, "rust_concurrent_calls",
+                        "worker state not initialized");
+                    -2
+                }
+            }
+        })
+    })
+}
+
 // ── Script function: concurrent_reload() ────────────────────
 
 unsafe extern "C" fn w_concurrent_reload(
@@ -827,6 +959,8 @@ unsafe extern "C" fn w_concurrent_reload(
                         Ok(count) => {
                             state.stats.set("accounts", count as u64);
                             state.stats.inc("reloads");
+                            // Clear live overrides on reload
+                            state.limit_overrides.clear();
                             opensips_log!(INFO, "rust_concurrent_calls",
                                 "reloaded {} account limits", count);
                             1
@@ -883,7 +1017,7 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 8> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 10> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_concurrent"),
         function: Some(w_check_concurrent),
@@ -912,6 +1046,18 @@ static CMDS: SyncArray<sys::cmd_export_, 8> = SyncArray([
         name: cstr_lit!("concurrent_stats"),
         function: Some(w_concurrent_stats),
         params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("concurrent_status"),
+        function: Some(w_concurrent_status),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("concurrent_set_limit"),
+        function: Some(w_concurrent_set_limit),
+        params: TWO_STR_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
@@ -1586,6 +1732,93 @@ mod tests {
         // Profile check says blocked (5 >= 5)
         let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
         assert!(!profile_allowed);
+    }
+
+    // ── MI status and limit override tests (Task 42) ────────────
+
+    #[test]
+    fn test_build_status_json() {
+        let json = build_status_json("alice", 3, 5, 2, 1);
+        assert_eq!(json, r#"{"account":"alice","count":3,"limit":5,"direction":{"inbound":2,"outbound":1}}"#);
+    }
+
+    #[test]
+    fn test_build_status_json_zeros() {
+        let json = build_status_json("bob", 0, 10, 0, 0);
+        assert_eq!(json, r#"{"account":"bob","count":0,"limit":10,"direction":{"inbound":0,"outbound":0}}"#);
+    }
+
+    #[test]
+    fn test_effective_limit_override() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let mut overrides = HashMap::new();
+        overrides.insert("alice".to_string(), 20);
+
+        // Override takes precedence
+        let limit = effective_limit(&limits, &overrides, "alice", 10);
+        assert_eq!(limit, 20);
+    }
+
+    #[test]
+    fn test_effective_limit_no_override() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let overrides = HashMap::new();
+
+        // No override, use file limit
+        let limit = effective_limit(&limits, &overrides, "alice", 10);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn test_effective_limit_default() {
+        let limits = HashMap::new();
+        let overrides = HashMap::new();
+
+        // No file limit, no override, use default
+        let limit = effective_limit(&limits, &overrides, "unknown", 10);
+        assert_eq!(limit, 10);
+    }
+
+    #[test]
+    fn test_effective_limit_override_zero_blocks() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let mut overrides = HashMap::new();
+        overrides.insert("alice".to_string(), 0);
+
+        let limit = effective_limit(&limits, &overrides, "alice", 10);
+        assert_eq!(limit, 0);
+    }
+
+    #[test]
+    fn test_override_cleared_on_reload() {
+        // Simulate: set override, then clear (as reload would do)
+        let mut overrides = HashMap::new();
+        overrides.insert("alice".to_string(), 99);
+        assert_eq!(overrides.get("alice"), Some(&99));
+
+        overrides.clear();
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn test_override_with_check_limit() {
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 3);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let mut overrides = HashMap::new();
+
+        // Without override: 3 < 5, allowed
+        let eff = effective_limit(&limits, &overrides, "alice", 10);
+        assert!(counts.get("alice").copied().unwrap_or(0) < eff);
+
+        // With override to 2: 3 >= 2, blocked
+        overrides.insert("alice".to_string(), 2);
+        let eff = effective_limit(&limits, &overrides, "alice", 10);
+        assert!(counts.get("alice").copied().unwrap_or(0) >= eff);
     }
 
     // ── Direction-aware limit tests (Task 41) ────────────────────
