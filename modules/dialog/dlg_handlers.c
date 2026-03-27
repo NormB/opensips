@@ -2487,6 +2487,15 @@ void dlg_ontimeout(struct dlg_tl *tl)
 		}
 	}
 
+	/* Re-read state under lock before running on_timeout route.
+	 * The cached dlg_state from the top of this function may be stale
+	 * if a BYE arrived between our initial read and now - a concurrent
+	 * worker may have transitioned the dialog to DELETED.
+	 * (GH-3835, third race path) */
+	dlg_lock(d_table, d_entry);
+	dlg_state = dlg->state;
+	dlg_unlock(d_table, d_entry);
+
 	if (do_expire_actions
 	&& ref_script_route_check_and_update(dlg->rt_on_timeout)
 	&& dlg_state<DLG_STATE_DELETED) {
@@ -2514,6 +2523,17 @@ void dlg_ontimeout(struct dlg_tl *tl)
 		/* there is no need to explicitly replicate the dialog termination
 		 * here, as the following code will do this for us later */
 	}
+
+	/* Re-check state under lock immediately before acting on it.
+	 * The cached dlg_state may be stale if a BYE worker transitioned
+	 * the dialog to DELETED between our initial read and now.  Without
+	 * this re-read, the timer handler enters the bye_on_timeout path,
+	 * calls dlg_end_dlg() + unref, while the BYE worker also completes
+	 * its unref chain - resulting in "bogus ref -1 with cnt 1".
+	 * (GH-3835, third race path) */
+	dlg_lock(d_table, d_entry);
+	dlg_state = dlg->state;
+	dlg_unlock(d_table, d_entry);
 
 	if ((dlg->flags&DLG_FLAG_BYEONTIMEOUT) &&
 	(dlg_state==DLG_STATE_CONFIRMED_NA || dlg_state==DLG_STATE_CONFIRMED)) {
