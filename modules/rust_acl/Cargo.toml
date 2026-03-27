@@ -8,6 +8,7 @@ description = "Live-reload ACL (blocklist + allowlist) for OpenSIPS"
 crate-type = ["cdylib"]
 
 [dependencies]
+regex = "1"
 opensips-rs = { path = "../rust/sdk" }
 rust-common = { path = "../rust/common" }
 
