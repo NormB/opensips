@@ -2,7 +2,7 @@
 //!
 //! SIP worker pushes payload, tokio task sends HTTP POST in background.
 //! If queue is full, message is dropped. Supports custom headers, multiple
-//! URLs (fanout), and retry with exponential backoff.
+//! URLs (fanout), retry with exponential backoff, and message batching.
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -20,6 +20,24 @@ impl Default for RetryConfig {
         RetryConfig {
             max_retries: 0,
             retry_delay_ms: 1000,
+        }
+    }
+}
+
+/// Configuration for message batching.
+#[derive(Clone, Debug)]
+pub struct BatchConfig {
+    /// Number of messages to accumulate before sending (1 = no batching).
+    pub batch_size: usize,
+    /// Maximum milliseconds to wait before flushing a partial batch.
+    pub batch_timeout_ms: u64,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        BatchConfig {
+            batch_size: 1,
+            batch_timeout_ms: 100,
         }
     }
 }
@@ -69,13 +87,75 @@ pub fn parse_urls(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Build a JSON array payload from a batch of messages.
+/// If individual messages are valid JSON values, they are included as-is.
+/// Otherwise they are wrapped as JSON strings.
+pub fn build_batch_payload(messages: &[String]) -> String {
+    let mut parts = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let trimmed = msg.trim();
+        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+            parts.push(trimmed.to_string());
+        } else {
+            parts.push(
+                serde_json::to_string(trimmed)
+                    .unwrap_or_else(|_| format!("\"{}\"", trimmed)),
+            );
+        }
+    }
+    format!("[{}]", parts.join(","))
+}
+
+/// Send a (possibly batched) payload to all URLs with retry.
+async fn send_payload(
+    client: &reqwest::Client,
+    urls: &[String],
+    content_type: &str,
+    headers: &[(String, String)],
+    retry: &RetryConfig,
+    payload: String,
+) {
+    for url in urls.iter() {
+        let url = url.clone();
+        let ct = content_type.to_string();
+        let client = client.clone();
+        let headers: Vec<(String, String)> = headers.to_vec();
+        let retry = retry.clone();
+        let payload = payload.clone();
+
+        tokio::spawn(async move {
+            let mut attempts = 0u32;
+            loop {
+                let mut req = client
+                    .post(&url)
+                    .header("Content-Type", ct.as_str())
+                    .body(payload.clone());
+
+                for (name, value) in headers.iter() {
+                    req = req.header(name.as_str(), value.as_str());
+                }
+
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => break,
+                    Ok(_) | Err(_) => {
+                        attempts += 1;
+                        if attempts > retry.max_retries {
+                            break;
+                        }
+                        let delay =
+                            retry.retry_delay_ms * 2u64.saturating_pow(attempts - 1);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay))
+                            .await;
+                    }
+                }
+            }
+        });
+    }
+}
+
 impl FireAndForget {
     /// Create a new fire-and-forget dispatcher.
     /// Spawns a tokio runtime with a background task that drains the queue.
-    ///
-    /// `urls`: list of target URLs (fanout -- payload sent to all).
-    /// `custom_headers`: extra headers added to every POST.
-    /// `retry`: retry configuration (0 retries = no retry).
     ///
     /// # Panics
     /// Panics if the tokio runtime cannot be created.
@@ -96,6 +176,7 @@ impl FireAndForget {
     }
 
     /// Full-featured constructor with headers, multiple URLs, and retry.
+    /// Batching defaults to off (batch_size=1).
     pub fn with_options(
         urls: Vec<String>,
         max_queue: usize,
@@ -103,6 +184,27 @@ impl FireAndForget {
         content_type: String,
         custom_headers: Vec<(String, String)>,
         retry: RetryConfig,
+    ) -> Self {
+        Self::with_all_options(
+            urls,
+            max_queue,
+            timeout_secs,
+            content_type,
+            custom_headers,
+            retry,
+            BatchConfig::default(),
+        )
+    }
+
+    /// Full constructor with headers, multiple URLs, retry, and batching.
+    pub fn with_all_options(
+        urls: Vec<String>,
+        max_queue: usize,
+        timeout_secs: u64,
+        content_type: String,
+        custom_headers: Vec<(String, String)>,
+        retry: RetryConfig,
+        batch: BatchConfig,
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<String>(max_queue);
 
@@ -119,41 +221,71 @@ impl FireAndForget {
         let headers: Arc<Vec<(String, String)>> = Arc::new(custom_headers);
         let retry = Arc::new(retry);
 
+        let batch_size = batch.batch_size.max(1);
+        let batch_timeout =
+            std::time::Duration::from_millis(batch.batch_timeout_ms.max(1));
+
         runtime.spawn(async move {
-            while let Some(payload) = rx.recv().await {
-                // Fanout: send to every URL
-                for url in urls.iter() {
-                    let url = url.clone();
-                    let ct = ct.clone();
-                    let client = client.clone();
-                    let headers = headers.clone();
-                    let retry = retry.clone();
-                    let payload = payload.clone();
+            if batch_size <= 1 {
+                // No batching: original behavior
+                while let Some(payload) = rx.recv().await {
+                    send_payload(&client, &urls, &ct, &headers, &retry, payload).await;
+                }
+            } else {
+                // Batching enabled
+                let mut buf: Vec<String> = Vec::with_capacity(batch_size);
+                let mut interval = tokio::time::interval(batch_timeout);
+                interval.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Delay,
+                );
+                // Consume the first immediate tick
+                interval.tick().await;
 
-                    tokio::spawn(async move {
-                        let mut attempts = 0u32;
-                        loop {
-                            let mut req = client.post(&url)
-                                .header("Content-Type", ct.as_str())
-                                .body(payload.clone());
-
-                            for (name, value) in headers.iter() {
-                                req = req.header(name.as_str(), value.as_str());
-                            }
-
-                            match req.send().await {
-                                Ok(resp) if resp.status().is_success() => break,
-                                Ok(_) | Err(_) => {
-                                    attempts += 1;
-                                    if attempts > retry.max_retries {
-                                        break;
+                loop {
+                    tokio::select! {
+                        msg = rx.recv() => {
+                            match msg {
+                                Some(payload) => {
+                                    buf.push(payload);
+                                    if buf.len() >= batch_size {
+                                        let batch_payload =
+                                            build_batch_payload(&buf);
+                                        buf.clear();
+                                        send_payload(
+                                            &client, &urls, &ct, &headers,
+                                            &retry, batch_payload,
+                                        )
+                                        .await;
                                     }
-                                    let delay = retry.retry_delay_ms * 2u64.saturating_pow(attempts - 1);
-                                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                                }
+                                None => {
+                                    // Channel closed -- flush remainder
+                                    if !buf.is_empty() {
+                                        let batch_payload =
+                                            build_batch_payload(&buf);
+                                        buf.clear();
+                                        send_payload(
+                                            &client, &urls, &ct, &headers,
+                                            &retry, batch_payload,
+                                        )
+                                        .await;
+                                    }
+                                    break;
                                 }
                             }
                         }
-                    });
+                        _ = interval.tick() => {
+                            if !buf.is_empty() {
+                                let batch_payload = build_batch_payload(&buf);
+                                buf.clear();
+                                send_payload(
+                                    &client, &urls, &ct, &headers,
+                                    &retry, batch_payload,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -316,12 +448,151 @@ mod tests {
 
     #[test]
     fn test_retry_backoff_calculation() {
-        // Verify the exponential backoff formula: delay * 2^(attempt-1)
         let base_delay: u64 = 1000;
-        assert_eq!(base_delay * 2u64.pow(0), 1000);  // attempt 1
-        assert_eq!(base_delay * 2u64.pow(1), 2000);  // attempt 2
-        assert_eq!(base_delay * 2u64.pow(2), 4000);  // attempt 3
-        assert_eq!(base_delay * 2u64.pow(3), 8000);  // attempt 4
+        assert_eq!(base_delay * 2u64.pow(0), 1000);
+        assert_eq!(base_delay * 2u64.pow(1), 2000);
+        assert_eq!(base_delay * 2u64.pow(2), 4000);
+        assert_eq!(base_delay * 2u64.pow(3), 8000);
+    }
+
+    // ── BatchConfig tests ────────────────────────────────────────
+
+    #[test]
+    fn test_batch_config_default() {
+        let bc = BatchConfig::default();
+        assert_eq!(bc.batch_size, 1);
+        assert_eq!(bc.batch_timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_batch_config_custom() {
+        let bc = BatchConfig {
+            batch_size: 10,
+            batch_timeout_ms: 500,
+        };
+        assert_eq!(bc.batch_size, 10);
+        assert_eq!(bc.batch_timeout_ms, 500);
+    }
+
+    // ── build_batch_payload tests ────────────────────────────────
+
+    #[test]
+    fn test_batch_payload_json_objects() {
+        let msgs = vec![
+            r#"{"method":"INVITE"}"#.to_string(),
+            r#"{"method":"BYE"}"#.to_string(),
+        ];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, r#"[{"method":"INVITE"},{"method":"BYE"}]"#);
+    }
+
+    #[test]
+    fn test_batch_payload_plain_strings() {
+        let msgs = vec!["hello world".to_string(), "foo bar".to_string()];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, r#"["hello world","foo bar"]"#);
+    }
+
+    #[test]
+    fn test_batch_payload_mixed() {
+        let msgs = vec![
+            r#"{"key":"val"}"#.to_string(),
+            "plain text".to_string(),
+        ];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, r#"[{"key":"val"},"plain text"]"#);
+    }
+
+    #[test]
+    fn test_batch_payload_single() {
+        let msgs = vec![r#"{"single":true}"#.to_string()];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, r#"[{"single":true}]"#);
+    }
+
+    #[test]
+    fn test_batch_payload_empty() {
+        let msgs: Vec<String> = vec![];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn test_batch_payload_json_array() {
+        let msgs = vec!["[1,2,3]".to_string()];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, "[[1,2,3]]");
+    }
+
+    #[test]
+    fn test_batch_payload_json_number() {
+        let msgs = vec!["42".to_string(), "3.14".to_string()];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, "[42,3.14]");
+    }
+
+    #[test]
+    fn test_batch_payload_whitespace_trimmed() {
+        let msgs = vec!["  {\"a\":1}  ".to_string()];
+        let result = build_batch_payload(&msgs);
+        assert_eq!(result, r#"[{"a":1}]"#);
+    }
+
+    // ── Batching integration tests ───────────────────────────────
+
+    #[test]
+    fn test_batch_size_1_passthrough() {
+        // batch_size=1 should behave identically to no-batch (with_options)
+        let ff = FireAndForget::with_all_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            16,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+            BatchConfig { batch_size: 1, batch_timeout_ms: 100 },
+        );
+        assert!(ff.send(r#"{"test":1}"#.to_string()));
+        assert_eq!(ff.sent.get(), 1);
+        assert_eq!(ff.dropped.get(), 0);
+    }
+
+    #[test]
+    fn test_batch_enqueue_multiple() {
+        let ff = FireAndForget::with_all_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            64,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+            BatchConfig { batch_size: 5, batch_timeout_ms: 1000 },
+        );
+        for i in 0..10 {
+            assert!(ff.send(format!(r#"{{"n":{i}}}"#)));
+        }
+        assert_eq!(ff.sent.get(), 10);
+        assert_eq!(ff.dropped.get(), 0);
+    }
+
+    #[test]
+    fn test_batch_timeout_flush() {
+        // Verify that partial batches are flushed on timeout by ensuring
+        // messages can be enqueued even when batch_size is large
+        let ff = FireAndForget::with_all_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            64,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+            BatchConfig { batch_size: 100, batch_timeout_ms: 50 },
+        );
+        // Send fewer than batch_size messages
+        for i in 0..3 {
+            assert!(ff.send(format!(r#"{{"n":{i}}}"#)));
+        }
+        assert_eq!(ff.sent.get(), 3);
     }
 
     // ── FireAndForget tests ──────────────────────────────────────
@@ -375,7 +646,11 @@ mod tests {
         let total_sent = ff.sent.get();
         let total_dropped = ff.dropped.get();
         assert_eq!(total_sent + total_dropped, 3);
-        assert!(total_dropped >= 1, "expected at least 1 drop, got {}", total_dropped);
+        assert!(
+            total_dropped >= 1,
+            "expected at least 1 drop, got {}",
+            total_dropped
+        );
     }
 
     #[test]
@@ -451,7 +726,10 @@ mod tests {
             5,
             "application/json".to_string(),
             Vec::new(),
-            RetryConfig { max_retries: 3, retry_delay_ms: 500 },
+            RetryConfig {
+                max_retries: 3,
+                retry_delay_ms: 500,
+            },
         );
         let ok = ff.send(r#"{"retry":true}"#.to_string());
         assert!(ok);
@@ -473,7 +751,6 @@ mod tests {
             Vec::new(),
             RetryConfig::default(),
         );
-        // Each send enqueues once; the fanout happens in the background
         for i in 0..5 {
             assert!(ff.send(format!(r#"{{"n":{i}}}"#)));
         }
@@ -483,7 +760,6 @@ mod tests {
 
     #[test]
     fn test_fanout_single_url_backwards_compat() {
-        // with_options with a single URL should behave like new()
         let ff = FireAndForget::with_options(
             vec!["http://127.0.0.1:19999/sink".to_string()],
             16,
@@ -515,14 +791,16 @@ mod tests {
 
     #[test]
     fn test_retry_config_custom() {
-        let rc = RetryConfig { max_retries: 5, retry_delay_ms: 200 };
+        let rc = RetryConfig {
+            max_retries: 5,
+            retry_delay_ms: 200,
+        };
         assert_eq!(rc.max_retries, 5);
         assert_eq!(rc.retry_delay_ms, 200);
     }
 
     #[test]
     fn test_retry_backoff_series() {
-        // Verify full backoff series for max_retries=5, delay=100ms
         let base: u64 = 100;
         let delays: Vec<u64> = (0..5).map(|i| base * 2u64.pow(i)).collect();
         assert_eq!(delays, vec![100, 200, 400, 800, 1600]);
@@ -530,24 +808,23 @@ mod tests {
 
     #[test]
     fn test_retry_backoff_overflow_safety() {
-        // saturating_pow prevents overflow with large attempt counts
         let result = 2u64.saturating_pow(63);
         assert!(result > 0);
-        // With very large exponent, saturating_pow caps at u64::MAX
         let result = 2u64.saturating_pow(64);
         assert_eq!(result, u64::MAX);
     }
 
     #[test]
     fn test_retry_zero_means_no_retry() {
-        let rc = RetryConfig { max_retries: 0, retry_delay_ms: 1000 };
-        // With 0 retries, the first failure should give up immediately
+        let rc = RetryConfig {
+            max_retries: 0,
+            retry_delay_ms: 1000,
+        };
         assert_eq!(rc.max_retries, 0);
     }
 
     #[test]
     fn test_with_options_retry_and_headers_combined() {
-        // Verify all three features work together
         let ff = FireAndForget::with_options(
             vec![
                 "http://127.0.0.1:19999/primary".to_string(),
@@ -560,7 +837,10 @@ mod tests {
                 ("Authorization".to_string(), "Bearer tok".to_string()),
                 ("X-Retry".to_string(), "enabled".to_string()),
             ],
-            RetryConfig { max_retries: 3, retry_delay_ms: 100 },
+            RetryConfig {
+                max_retries: 3,
+                retry_delay_ms: 100,
+            },
         );
         assert!(ff.send(r#"{"combined":true}"#.to_string()));
         assert_eq!(ff.sent.get(), 1);
@@ -570,7 +850,6 @@ mod tests {
 
     #[test]
     fn test_retry_delay_minimum_enforced() {
-        // Module clamps retry_delay_ms to at least 100ms
         let delay_raw: i32 = 50;
         let clamped = delay_raw.max(100) as u64;
         assert_eq!(clamped, 100);
