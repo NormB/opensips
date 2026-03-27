@@ -4793,8 +4793,39 @@ static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
 static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
 		pv_spec_t *spvar, pv_spec_t *bpvar)
 {
-	LM_ERR("rtpengine_subscribe_answer: not yet implemented\n");
-	return -1;
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	str oldbody;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	/* get the answer SDP — from the pvar if provided, otherwise from message body */
+	if (bpvar) {
+		pv_value_t pval;
+		memset(&pval, 0, sizeof(pv_value_t));
+		if (pv_get_spec_value(msg, bpvar, &pval) < 0 ||
+				!(pval.flags & PV_VAL_STR) || !pval.rs.len) {
+			LM_ERR("subscribe answer: body pvar is empty or not a string\n");
+			return -1;
+		}
+		oldbody = pval.rs;
+	} else {
+		if (extract_body(msg, &oldbody) == -1) {
+			LM_ERR("subscribe answer: can't extract body from message\n");
+			return -1;
+		}
+	}
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_SUBSCRIBE_ANSWER,
+			flags, &oldbody, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("subscribe answer failed\n");
+		return -1;
+	}
+
+	bencode_buffer_free(&bencbuf);
+	return 1;
 }
 
 static int rtpengine_publish_f(struct sip_msg *msg, str *flags,
