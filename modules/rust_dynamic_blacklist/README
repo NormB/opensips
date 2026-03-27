@@ -1,0 +1,213 @@
+rust_dynamic_blacklist Module
+     __________________________________________________________
+
+   Table of Contents
+
+   1. Admin Guide
+
+        1.1. Overview
+        1.2. How it works
+        1.3. Dependencies
+
+              1.3.1. OpenSIPS Modules
+              1.3.2. External Libraries or Applications
+
+        1.4. Exported Parameters
+
+              1.4.1. blacklist_file (string)
+              1.4.2. match_mode (string)
+
+        1.5. Exported Functions
+
+              1.5.1. rust_check_blacklist(value)
+
+        1.6. Exported Statistics
+
+              1.6.1. checked
+              1.6.2. blocked
+              1.6.3. allowed
+              1.6.4. entries
+
+   List of Examples
+
+   1.1. Set blacklist_file parameter
+   1.2. Set match_mode parameter
+   1.3. Blacklist file format
+   1.4. rust_check_blacklist usage
+   1.5. Complete opensips.cfg example — IP blacklist
+   1.6. Complete opensips.cfg example — User-Agent blacklist
+
+Chapter 1. Admin Guide
+
+1.1. Overview
+
+   The rust_dynamic_blacklist module provides a live-reload
+   file-based blacklist for blocking SIP traffic by source IP,
+   User-Agent, domain, or any arbitrary string value. The blacklist
+   file is loaded at startup into each worker process. Matching can
+   be exact (HashSet lookup) or prefix-based (linear scan of
+   prefixes).
+
+   This module is useful for blocking known scanner IPs, malicious
+   User-Agent strings, or spam domains without restarting OpenSIPS.
+
+1.2. How it works
+
+   At worker initialization, each process loads the blacklist file
+   and parses it line-by-line. Blank lines and lines starting with
+   # are skipped.
+
+   In "exact" mode, entries are stored in a HashSet for O(1)
+   lookup. The value passed to rust_check_blacklist() must match
+   an entry exactly (case-sensitive).
+
+   In "prefix" mode, entries are stored as a list of prefixes. The
+   value is checked against each prefix using starts_with(). This
+   allows blocking entire IP subnets (e.g., "192.168.1.") or
+   User-Agent families (e.g., "friendly-scanner").
+
+   Matching is case-sensitive in both modes.
+
+1.3. Dependencies
+
+1.3.1. OpenSIPS Modules
+
+   The following modules must be loaded before this module:
+     * None.
+
+1.3.2. External Libraries or Applications
+
+   The following libraries or applications must be installed
+   before running OpenSIPS with this module loaded:
+     * None.
+
+1.4. Exported Parameters
+
+1.4.1. blacklist_file (string)
+
+   Path to the blacklist file. One entry per line. Lines starting
+   with # are treated as comments. Blank lines are ignored. This
+   parameter is required.
+
+   Default value is "None" (must be set).
+
+   Example 1.1. Set blacklist_file parameter
+...
+modparam("rust_dynamic_blacklist", "blacklist_file", "/etc/opensips/blacklist.txt")
+...
+
+   Example 1.3. Blacklist file format
+# /etc/opensips/blacklist.txt
+# IP addresses
+192.168.1.100
+10.0.0.
+# User-Agent strings
+friendly-scanner
+SIPVicious
+# Domains
+sip.spam.example.com
+
+1.4.2. match_mode (string)
+
+   The matching algorithm to use:
+
+     * "exact" - value must match a blacklist entry exactly
+       (case-sensitive). Uses a HashSet for O(1) lookups.
+     * "prefix" - value must start with a blacklist entry
+       (case-sensitive). Uses linear prefix matching.
+
+   Default value is "prefix".
+
+   Example 1.2. Set match_mode parameter
+...
+modparam("rust_dynamic_blacklist", "match_mode", "exact")
+...
+
+1.5. Exported Functions
+
+1.5.1. rust_check_blacklist(value)
+
+   Check whether the given value matches any entry in the
+   blacklist. The matching behavior depends on the match_mode
+   parameter.
+
+   Parameters:
+     * value (string) - The value to check against the blacklist.
+       Typically a pseudo-variable such as $si (source IP), $ua
+       (User-Agent), or $rd (domain). This parameter is mandatory.
+
+   Return values:
+     * 1 - value is NOT in the blacklist (allowed)
+     * -1 - value IS in the blacklist (blocked), or error
+
+   Note: The return value convention is "positive = allowed" so
+   that typical usage reads naturally as an if-condition.
+
+   This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+   and ONREPLY_ROUTE.
+
+   Example 1.4. rust_check_blacklist usage
+...
+route {
+    if (!rust_check_blacklist("$si")) {
+        xlog("L_WARN", "blocked source IP $si\n");
+        sl_send_reply(403, "Forbidden");
+        exit;
+    }
+}
+...
+
+1.6. Exported Statistics
+
+1.6.1. checked
+
+   Total number of blacklist lookups performed.
+
+1.6.2. blocked
+
+   Number of lookups that matched the blacklist (traffic blocked).
+
+1.6.3. allowed
+
+   Number of lookups that did not match the blacklist (traffic
+   allowed).
+
+1.6.4. entries
+
+   Number of entries loaded from the blacklist file at startup.
+
+   Example 1.5. Complete opensips.cfg example -- IP blacklist
+...
+loadmodule "rust_dynamic_blacklist.so"
+
+modparam("rust_dynamic_blacklist", "blacklist_file", "/etc/opensips/ip_blacklist.txt")
+modparam("rust_dynamic_blacklist", "match_mode", "prefix")
+
+route {
+    # Block blacklisted source IPs (prefix mode catches subnets)
+    if (!rust_check_blacklist("$si")) {
+        xlog("L_WARN", "BLOCKED: source IP $si matched blacklist\n");
+        sl_send_reply(403, "Forbidden");
+        exit;
+    }
+}
+...
+
+   Example 1.6. Complete opensips.cfg example -- User-Agent blacklist
+...
+loadmodule "rust_dynamic_blacklist.so"
+
+modparam("rust_dynamic_blacklist", "blacklist_file", "/etc/opensips/ua_blacklist.txt")
+modparam("rust_dynamic_blacklist", "match_mode", "prefix")
+
+route {
+    # Block known scanner User-Agent strings
+    if (is_present_hf("User-Agent")) {
+        if (!rust_check_blacklist("$ua")) {
+            xlog("L_WARN", "BLOCKED: User-Agent $ua matched blacklist\n");
+            sl_send_reply(403, "Forbidden");
+            exit;
+        }
+    }
+}
+...

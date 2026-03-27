@@ -1,0 +1,1284 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<!-- ============ SECTION 1: OVERVIEW ============ -->
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+	The <emphasis>rust</emphasis> module is an &osips; module written entirely
+	in Rust. It provides compiled-in &sip; processing functions (rate limiting,
+	routing cache, &http; queries, atomic counters) alongside a runtime scripting
+	engine (<emphasis>rust_exec()</emphasis>) that loads user-supplied handlers
+	from shared libraries at startup.
+	</para>
+	<para>
+	The module supports both <emphasis role='bold'>synchronous</emphasis> and
+	<emphasis role='bold'>asynchronous</emphasis> execution. When
+	<emphasis>rust_exec()</emphasis> is called inside an
+	<emphasis>async()</emphasis> block, handlers can perform blocking I/O
+	without tying up &sip; worker processes &mdash; the same pattern used by
+	the <emphasis>rest_client</emphasis> module.
+	</para>
+	<para>Key features:</para>
+	<itemizedlist>
+	<listitem><para>
+		<emphasis>Per-caller rate limiting</emphasis> &mdash; Thread-local
+		counters that survive across &sip; transactions without locking or
+		shared state corruption.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>In-memory routing cache</emphasis> &mdash; TTL-based
+		destination cache using thread-local storage, providing lock-free
+		O(1) lookups.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>Persistent &http; connection pool</emphasis> &mdash;
+		Maintains TCP connections to external &http; services across requests.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>Cross-worker atomic counter</emphasis> &mdash; Shared-memory
+		atomic counter visible to all worker processes.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>Runtime scripting</emphasis> &mdash; Load user-written Rust
+		handlers at startup via <emphasis>dlopen</emphasis>, callable from
+		routes via <emphasis>rust_exec()</emphasis>.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>Async I/O</emphasis> &mdash; Handlers can perform blocking I/O
+		inside async() blocks without tying up &sip; worker processes.
+	</para></listitem>
+	</itemizedlist>
+
+	<para><emphasis role='bold'>Additional chapters in this guide:</emphasis></para>
+	<itemizedlist>
+	<listitem><para>
+		<xref linkend="architecture"/> &mdash; Two-crate workspace, C shim
+		strategy, <emphasis>sip_msg</emphasis> opacity, panic safety, version
+		probing.
+	</para></listitem>
+	<listitem><para>
+		<xref linkend="building"/> &mdash; Docker, bare metal, &osips; Make
+		system integration, deployment and verification.
+	</para></listitem>
+	<listitem><para>
+		<xref linkend="scripting"/> &mdash; Writing
+		<emphasis>rust_exec()</emphasis> handlers with
+		<emphasis>opensips_handler!</emphasis>, PV/AVP access, async patterns,
+		and a reference for all 20 included handlers.
+	</para></listitem>
+	</itemizedlist>
+
+	<para>
+	The source tree also includes example &osips; configurations in
+	<emphasis>examples/</emphasis>: a basic config using compiled-in functions,
+	an async &http; query config with resume routes, a scripting config
+	demonstrating <emphasis>rust_exec()</emphasis>, and a reference user script
+	with 19 handlers.
+	</para>
+
+	</section>
+
+	<!-- ============ SECTION 2: DEPENDENCIES ============ -->
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>signaling</emphasis> &mdash; Required by
+			<emphasis>rust_check_rate()</emphasis> for sending 429 replies.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>sl</emphasis> &mdash; Stateless reply support.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed before
+		building the module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>Rust toolchain</emphasis> (1.70 or higher, install via
+			<emphasis>rustup</emphasis>)
+		</para></listitem>
+		<listitem><para>
+			<emphasis>clang, llvm-dev, libclang-dev</emphasis> (for bindgen
+			FFI generation)
+		</para></listitem>
+		<listitem><para>
+			<emphasis>pkg-config, libssl-dev</emphasis> (for reqwest &http;
+			client)
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		All Rust dependencies are statically linked into the
+		<emphasis>.so</emphasis> &mdash; no runtime library dependencies beyond
+		what &osips; itself requires.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 3: EXPORTED PARAMETERS ============ -->
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_max_rate" xreflabel="max_rate">
+		<title><varname>max_rate</varname> (integer)</title>
+		<para>
+		Maximum number of requests allowed per source &ip; within the rate
+		limiting window. When exceeded,
+		<xref linkend="func_rust_check_rate"/> returns
+		<emphasis role='bold'>-1</emphasis> and sends a
+		<emphasis>429 Too Many Requests</emphasis> reply automatically.
+		</para>
+		<para>
+		Each worker maintains its own counter (thread-local). The effective
+		global rate limit is approximately
+		<emphasis>max_rate * udp_workers</emphasis>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>100</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>max_rate</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "max_rate", 50)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_window_seconds" xreflabel="window_seconds">
+		<title><varname>window_seconds</varname> (integer)</title>
+		<para>
+		Duration of the rate limiting window in seconds. Counters reset at the
+		start of each new window. Uses monotonic time &mdash; immune to NTP
+		adjustments.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>60</quote> seconds.
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>window_seconds</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "window_seconds", 10)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cache_ttl" xreflabel="cache_ttl">
+		<title><varname>cache_ttl</varname> (integer)</title>
+		<para>
+		Time-to-live for routing cache entries in seconds. Expired entries are
+		lazily evicted on the next lookup. Each worker has an independent cache
+		(thread-local, no sharing between workers).
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>300</quote> seconds.
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>cache_ttl</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "cache_ttl", 600)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_http_timeout" xreflabel="http_timeout">
+		<title><varname>http_timeout</varname> (integer)</title>
+		<para>
+		Timeout for &http; requests in seconds. Applies to connection
+		establishment, TLS handshake, and response transfer. Used by both
+		<xref linkend="func_rust_http_query"/> and user-script &http; handlers.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>2</quote> seconds.
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>http_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "http_timeout", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_pool_size" xreflabel="pool_size">
+		<title><varname>pool_size</varname> (integer)</title>
+		<para>
+		Maximum number of idle &http; connections to keep per host in the
+		connection pool. Initialized during child_init for each worker process.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>4</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>pool_size</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "pool_size", 8)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_script_name" xreflabel="script_name">
+		<title><varname>script_name</varname> (string)</title>
+		<para>
+		Absolute path to a user-supplied shared library
+		(<emphasis>.so</emphasis>) containing handler functions for
+		<xref linkend="func_rust_exec"/>. The library is loaded via
+		<emphasis>dlopen(RTLD_NOW | RTLD_LOCAL)</emphasis> during mod_init.
+		</para>
+		<para>
+		When not set, <xref linkend="func_rust_exec"/> returns
+		<emphasis role='bold'>-1</emphasis> with an error log. All other
+		compiled-in functions operate normally regardless of this parameter.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>not set</quote> (no user script).
+		</emphasis>
+		</para>
+		<example>
+		<title>Setting the <varname>script_name</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust", "script_name",
+    "/usr/local/lib64/opensips/scripts/libmy_handler.so")
+...
+</programlisting>
+		</example>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 4: EXPORTED FUNCTIONS ============ -->
+	<section id="exported_functions" xreflabel="Exported Functions">
+	<title>Exported Functions</title>
+
+	<section id="func_rust_check_rate" xreflabel="rust_check_rate()">
+		<title>
+		<function moreinfo="none">rust_check_rate()</function>
+		</title>
+		<para>
+		Check whether the source &ip; of the current message has exceeded the
+		configured rate limit (<xref linkend="param_max_rate"/> requests per
+		<xref linkend="param_window_seconds"/>).
+		</para>
+		<para>
+		On failure (rate exceeded), a <emphasis>429 Too Many Requests</emphasis>
+		reply is sent automatically via <emphasis>sl_send_reply</emphasis>.
+		The caller should <emphasis>exit</emphasis> after a
+		<emphasis role='bold'>-1</emphasis> return.
+		</para>
+		<para><emphasis role='bold'>Parameters:</emphasis> none</para>
+		<para><emphasis role='bold'>Return Codes</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis role='bold'>1</emphasis> - Request is within the rate
+			limit (allow).
+		</para></listitem>
+		<listitem><para>
+			<emphasis role='bold'>-1</emphasis> - Rate limit exceeded. A 429
+			reply has been sent. Also returned if source &ip; extraction fails
+			(logged at ERR level).
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE and FAILURE_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_check_rate</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (!rust_check_rate()) {
+    # 429 already sent
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_cache_lookup" xreflabel="rust_cache_lookup()">
+		<title>
+		<function moreinfo="none">rust_cache_lookup()</function>
+		</title>
+		<para>
+		Look up the R-URI user (<emphasis>$rU</emphasis>) in the per-worker
+		routing cache. On a cache hit, sets <emphasis>$du</emphasis>
+		(destination &uri;) to the cached value and returns
+		<emphasis role='bold'>1</emphasis>.
+		</para>
+		<para><emphasis role='bold'>Parameters:</emphasis> none</para>
+		<para><emphasis role='bold'>Return Codes</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis role='bold'>1</emphasis> - Cache hit.
+			<emphasis>$du</emphasis> has been set to the cached destination.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role='bold'>-1</emphasis> - Cache miss, expired entry,
+			or empty <emphasis>$rU</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Error Conditions</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$rU</emphasis> is empty or not set &mdash; returns -1,
+			logged at DBG level.
+		</para></listitem>
+		<listitem><para>
+			Cache entry expired (older than
+			<xref linkend="param_cache_ttl"/>) &mdash; entry evicted,
+			returns -1.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>set_dst_uri</emphasis> fails &mdash; returns -1,
+			logged at ERR level.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_cache_lookup</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (rust_cache_lookup()) {
+    xlog("L_DBG", "Cache hit: $rU -> $du\n");
+    t_relay();
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_cache_store" xreflabel="rust_cache_store()">
+		<title>
+		<function moreinfo="none">rust_cache_store()</function>
+		</title>
+		<para>
+		Store the current R-URI user (<emphasis>$rU</emphasis>) and destination
+		&uri; (<emphasis>$du</emphasis>) in the per-worker routing cache. The
+		entry expires after <xref linkend="param_cache_ttl"/> seconds.
+		</para>
+		<para><emphasis role='bold'>Parameters:</emphasis> none</para>
+		&rust_return_codes;
+		<para><emphasis role='bold'>Error Conditions</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$rU</emphasis> is empty or not set &mdash; returns -1,
+			logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$du</emphasis> is empty or not set &mdash; returns -1,
+			logged at ERR level.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_cache_store</function> usage</title>
+		<programlisting format="linespecific">
+...
+$du = "sip:backend.example.com";
+rust_cache_store();
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_http_query" xreflabel="rust_http_query()">
+		<title>
+		<function moreinfo="none">rust_http_query(url)</function>
+		</title>
+		<para>
+		Perform a blocking &http; GET request using the persistent connection
+		pool. The response body is stored in
+		<emphasis>$var(http_result)</emphasis> and the &http; status code in
+		<emphasis>$var(http_status)</emphasis>.
+		</para>
+		<para>
+		<emphasis role='bold'>Warning:</emphasis> This function blocks the
+		&sip; worker for the duration of the &http; call (up to
+		<xref linkend="param_http_timeout"/> seconds). For non-blocking &http;,
+		use <xref linkend="afunc_rust_exec"/> with an async handler.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>url</emphasis> (string) - Target &url;. Supports
+			variable expansion.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Output Pseudo-Variables</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$var(http_result)</emphasis> (string) - &http; response
+			body. Empty on failure.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$var(http_status)</emphasis> (integer) - &http; status
+			code (200, 404, etc.). <emphasis role='bold'>0</emphasis> on
+			failure.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Return Codes</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis role='bold'>1</emphasis> - &http; request completed.
+			Check <emphasis>$var(http_status)</emphasis> for the &http;
+			status code.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role='bold'>-1</emphasis> - Request failed (connection
+			error, timeout, DNS failure, empty &url;, pool not initialized).
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Error Conditions</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			Empty or null &url; &mdash; returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			DNS resolution failure &mdash; returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			Connection refused &mdash; returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			Connection timeout (exceeds
+			<xref linkend="param_http_timeout"/>) &mdash; returns -1,
+			logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			Response read timeout (exceeds
+			<xref linkend="param_http_timeout"/>) &mdash; returns -1,
+			logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			TLS handshake failure &mdash; returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			&http; pool not initialized (child_init failed) &mdash;
+			returns -1, logged at ERR level.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_http_query</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (rust_http_query("http://api.example.com/auth?user=$fU")) {
+    xlog("L_INFO", "HTTP $var(http_status): $var(http_result)\n");
+} else {
+    xlog("L_ERR", "HTTP query failed\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_counter_inc" xreflabel="rust_counter_inc()">
+		<title>
+		<function moreinfo="none">rust_counter_inc()</function>
+		</title>
+		<para>
+		Increment the cross-worker atomic counter and store the new value in
+		<emphasis>$var(shared_count)</emphasis>. The counter is allocated in
+		shared memory during mod_init (before fork) and uses hardware atomic
+		instructions across all workers.
+		</para>
+		<para><emphasis role='bold'>Parameters:</emphasis> none</para>
+		<para><emphasis role='bold'>Output Pseudo-Variables</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$var(shared_count)</emphasis> (integer) - Counter value
+			after increment.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Return Codes</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis role='bold'>1</emphasis> - Always succeeds. Atomic
+			operations cannot fail.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_counter_inc</function> usage</title>
+		<programlisting format="linespecific">
+...
+rust_counter_inc();
+xlog("L_DBG", "Total requests: $var(shared_count)\n");
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_exec" xreflabel="rust_exec()">
+		<title>
+		<function moreinfo="none">rust_exec(function [, param])</function>
+		</title>
+		<para>
+		Call a function exported by the user script loaded via
+		<xref linkend="param_script_name"/>. The function must be declared
+		with <emphasis>opensips_handler!</emphasis> in the user crate.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>function</emphasis> (string) - Name of the exported
+			function in the user script.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>param</emphasis> (string, optional) - Argument passed
+			to the handler. Supports variable expansion.
+		</para></listitem>
+		</itemizedlist>
+		&rust_return_codes;
+		<para><emphasis role='bold'>Error Conditions</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<xref linkend="param_script_name"/> not configured &mdash;
+			returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			Function not found in script (dlsym fails) &mdash; returns -1,
+			logged at ERR level with the symbol name.
+		</para></listitem>
+		<listitem><para>
+			Empty function name &mdash; returns -1, logged at ERR level.
+		</para></listitem>
+		<listitem><para>
+			Handler panic (Rust unwind caught at FFI boundary) &mdash;
+			returns -1, logged at ERR level with the panic message.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE, and
+		ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">rust_exec</function> usage</title>
+		<programlisting format="linespecific">
+...
+# Call with no parameter
+rust_exec("hello_world");
+
+# Call with a parameter
+rust_exec("greet", "howdy");
+
+# Routing decision based on return value
+if (!rust_exec("check_caller")) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+
+# Variable expansion in parameter
+rust_exec("lookup", "$rU");
+
+# Variable exchange: set input, call handler, read output
+$var(input) = "uppercase:hello world";
+rust_exec("variable_exchange");
+xlog("L_INFO", "Result: $var(output)\n");
+...
+</programlisting>
+		</example>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 5: EXPORTED ASYNC FUNCTIONS ============ -->
+	<section id="exported_async_functions" xreflabel="Exported Asynchronous Functions">
+	<title>Exported Asynchronous Functions</title>
+
+	<section id="afunc_rust_exec" xreflabel="rust_exec()">
+		<title>
+		<function moreinfo="none">rust_exec(function [, param])</function>
+		</title>
+		<para>
+		Perform an asynchronous call to a user script handler. This function
+		behaves the same as <xref linkend="func_rust_exec"/> in terms of input
+		and processing, but in a non-blocking manner. Script execution is
+		suspended until the handler's I/O operation completes.
+		</para>
+		<para>
+		When called inside <emphasis>async()</emphasis>, the module resolves an
+		async-capable handler by looking for a symbol prefixed with
+		<emphasis>async_</emphasis> in the user script. For example,
+		<emphasis>rust_exec("http_query")</emphasis> inside
+		<emphasis>async()</emphasis> resolves
+		<emphasis>async_http_query</emphasis>.
+		</para>
+		<para><emphasis role='bold'>Async Handler Resolution</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			If <emphasis>async_{function}</emphasis> is found in the script
+			&mdash; the async handler runs. It sets up non-blocking I/O and
+			returns immediately. The reactor monitors the fd and invokes the
+			resume callback when data arrives.
+		</para></listitem>
+		<listitem><para>
+			If <emphasis>async_{function}</emphasis> is not found &mdash; the
+			sync handler runs as a fallback. The resume route executes
+			immediately after completion. All existing handlers work inside
+			<emphasis>async()</emphasis> without modification.
+		</para></listitem>
+		<listitem><para>
+			If neither variant is found &mdash; returns
+			<emphasis role='bold'>-1</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>Resume Route</emphasis></para>
+		<para>
+		The resume route receives:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$rc</emphasis> &mdash; the handler's return code.
+		</para></listitem>
+		<listitem><para>
+			All pseudo-variables written by the handler (e.g.,
+			<emphasis>$var(http_status)</emphasis>).
+		</para></listitem>
+		<listitem><para>
+			All AVPs written by the handler (e.g.,
+			<emphasis>$avp(http_hdr)</emphasis>).
+		</para></listitem>
+		</itemizedlist>
+		&rust_return_codes;
+		<para><emphasis role='bold'>Additional Error Conditions (Async)</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			No async variant found &mdash; falls back to synchronous
+			execution, logged at DBG level.
+		</para></listitem>
+		<listitem><para>
+			Async handler panic &mdash; returns -1, resume route may not
+			execute. Logged at ERR level with the panic message.
+		</para></listitem>
+		<listitem><para>
+			Async fd monitoring timeout &mdash; the operation is cancelled.
+			Timeout is set by the handler (default: no timeout unless the
+			handler calls <emphasis>ctx.set_timeout()</emphasis>).
+		</para></listitem>
+		<listitem><para>
+			Resume callback panic &mdash; returns ASYNC_DONE, pseudo-variables
+			may be incomplete. Logged at ERR level.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE.
+		</para>
+		<example>
+		<title><function moreinfo="none">async rust_exec</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    # Non-blocking HTTP query
+    async(rust_exec("http_query",
+        "http://api.internal:8080/route/$rU"), api_done);
+}
+
+route[api_done] {
+    if ($var(http_status) == 0) {
+        xlog("L_ERR", "HTTP error: $var(http_error)\n");
+        sl_send_reply(503, "Service Unavailable");
+        exit;
+    }
+
+    xlog("L_INFO", "HTTP $var(http_status) in $var(http_time_ms)ms\n");
+
+    # Access JSON response
+    xlog("L_DBG", "JSON: $var(http_json)\n");
+
+    # Iterate response headers (stacked AVPs)
+    while ($avp(http_hdr)) {
+        xlog("L_DBG", "  $avp(http_hdr)\n");
+        $avp(http_hdr) = NULL;
+    }
+
+    if ($var(http_status) == 200) {
+        $du = $var(http_body);
+        t_relay();
+        exit;
+    }
+
+    sl_send_reply(404, "Not Found");
+}
+...
+</programlisting>
+		</example>
+
+		<para>
+		<emphasis role='bold'>async_http_query Output Variables</emphasis>
+		</para>
+		<para>
+		The reference async handler (<emphasis>async_http_query</emphasis>,
+		handler 20) sets the following variables in the resume route:
+		</para>
+		<para><emphasis role='bold'>Pseudo-Variables</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$var(http_status)</emphasis> (integer) - &http; status
+			code (200, 404, etc.).
+			<emphasis role='bold'>0</emphasis> on error.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$var(http_body)</emphasis> (string) - Response body,
+			truncated to 3800 bytes.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$var(http_json)</emphasis> (string) - Full response as
+			JSON:
+			<emphasis>{"status":200,"url":"...","elapsed_ms":42,"headers":{...},"body":"..."}</emphasis>
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$var(http_error)</emphasis> (string) - Error message.
+			Empty on success.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>$var(http_time_ms)</emphasis> (integer) - Total elapsed
+			time in milliseconds.
+		</para></listitem>
+		</itemizedlist>
+		<para><emphasis role='bold'>AVPs</emphasis></para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>$avp(http_hdr)</emphasis> (string, stacked) - Response
+			headers, one per AVP entry. Iterate with
+			<emphasis>while($avp(http_hdr))</emphasis> and pop with
+			<emphasis>$avp(http_hdr) = NULL</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+
+		<para>
+		<emphasis role='bold'>async_http_query Error Conditions</emphasis>
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			No &url; provided &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> =
+			<quote>no URL: set param or $var(http_url)</quote>.
+			Completes synchronously (ASYNC_SYNC); resume route still runs.
+		</para></listitem>
+		<listitem><para>
+			Non-http &url; scheme &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> =
+			<quote>only http:// URLs supported</quote>.
+			Completes synchronously.
+		</para></listitem>
+		<listitem><para>
+			Invalid port in &url; &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> =
+			<quote>bad port in URL</quote>.
+			Completes synchronously.
+		</para></listitem>
+		<listitem><para>
+			DNS resolution or connection failure &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> contains the system error.
+			Completes synchronously.
+		</para></listitem>
+		<listitem><para>
+			Write failure (request could not be sent) &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> =
+			<quote>write failed: ...</quote>.
+			Completes synchronously.
+		</para></listitem>
+		<listitem><para>
+			Response read failure (in resume callback) &mdash;
+			<emphasis>$var(http_status)</emphasis> = 0,
+			<emphasis>$var(http_error)</emphasis> =
+			<quote>failed to read response</quote>.
+			Resume route runs with empty data.
+		</para></listitem>
+		<listitem><para>
+			Response timeout (fd not readable within timeout period) &mdash;
+			reactor cancels fd monitoring. Resume route may not run.
+		</para></listitem>
+		</itemizedlist>
+
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 6: IMPLEMENTATION NOTES ============ -->
+	<section id="implementation_notes" xreflabel="Implementation Notes">
+	<title>Implementation Notes</title>
+
+	<section>
+		<title>Thread-Local State</title>
+		<para>
+		The rate limiter and routing cache use
+		<emphasis>thread_local!</emphasis> storage. In &osips;'s pre-fork
+		worker model, each child process gets its own copy after
+		<emphasis>fork()</emphasis>:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			No locking, no mutexes, no data races.
+		</para></listitem>
+		<listitem><para>
+			Each worker's rate counter is independent (effective global rate =
+			<emphasis>max_rate * udp_workers</emphasis>).
+		</para></listitem>
+		<listitem><para>
+			Each worker has its own cache (no sharing between workers).
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section>
+		<title>Shared Memory</title>
+		<para>
+		The cross-worker atomic counter allocates an
+		<emphasis>AtomicI64</emphasis> in &osips; shared memory during mod_init
+		(before fork). The <emphasis>fetch_add</emphasis> instruction is truly
+		atomic &mdash; no read-modify-write race.
+		</para>
+	</section>
+
+	<section>
+		<title>Panic Safety</title>
+		<para>
+		Every Rust function at the FFI boundary is wrapped with
+		<emphasis>catch_unwind</emphasis>. If a panic occurs, it is caught and
+		converted to a <emphasis role='bold'>-1</emphasis> return code.
+		&osips; continues running. The panic message is logged at ERR level
+		with the function name.
+		</para>
+		<para>
+		Async resume callbacks are also panic-safe &mdash; a panic returns
+		<emphasis>ASYNC_DONE</emphasis> to prevent the reactor from re-calling
+		a broken handler.
+		</para>
+	</section>
+
+	<section>
+		<title>Symbol Isolation</title>
+		<para>
+		User scripts are loaded with <emphasis>RTLD_LOCAL</emphasis> &mdash;
+		their symbols do not leak into the global namespace.
+		<emphasis>RTLD_NOW</emphasis> ensures all symbols are resolved at load
+		time, failing fast at startup rather than at runtime.
+		</para>
+	</section>
+
+	<section>
+		<title>Async Memory Model</title>
+		<para>
+		For <emphasis>async()</emphasis> operations, the resume callback state
+		is allocated on the Rust heap via <emphasis>Box::into_raw()</emphasis>.
+		Since <emphasis>async()</emphasis> resumes in the same worker process,
+		regular heap memory survives the reactor loop. The resume callback
+		recovers ownership via <emphasis>Box::from_raw()</emphasis>.
+		</para>
+		<para>
+		For <emphasis>async_launch()</emphasis> (fire-and-forget, different
+		process may resume), shared memory (<emphasis>shm_malloc</emphasis>)
+		would be required. The current implementation targets
+		<emphasis>async()</emphasis> only.
+		</para>
+	</section>
+
+	<section>
+		<title>Version Matching</title>
+		<para>
+		The module extracts version strings from the &osips; source tree at
+		compile time. Loading the module into a different &osips; version
+		produces a <quote>module version mismatch</quote> error at startup.
+		Always rebuild when upgrading &osips;.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 7: EXAMPLE CONFIGURATIONS ============ -->
+	<section id="example_configurations" xreflabel="Example Configurations">
+	<title>Example Configurations</title>
+	<para>
+	The source tree includes three example configurations in
+	<emphasis>modules/rust/examples/</emphasis>. Each demonstrates a different
+	set of module capabilities.
+	</para>
+
+	<section id="example_basic_cfg" xreflabel="basic.cfg">
+		<title>basic.cfg &mdash; Compiled-in Functions</title>
+		<para>
+		Minimal config demonstrating the compiled-in functions: rate limiting,
+		routing cache, and HTTP query.
+		</para>
+		<programlisting format="linespecific">
+#
+# Basic Rust Module Configuration
+#
+# Minimal config demonstrating the compiled-in functions:
+# rate limiting, routing cache, and HTTP query.
+#
+# Usage:
+#   opensips -c -f modules/rust/examples/basic.cfg   (syntax check)
+#   opensips -f modules/rust/examples/basic.cfg       (run)
+#
+
+####### Global Parameters #########
+
+log_level=3
+log_stderror=no
+log_facility=LOG_LOCAL0
+
+udp_workers=4
+auto_aliases=no
+
+socket=udp:0.0.0.0:5060
+
+####### Modules Section ###########
+
+mpath="/usr/local/lib64/opensips/modules/"
+
+loadmodule "proto_udp.so"
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "rust.so"
+
+# Rate limiter: 50 requests per 10-second window per source IP per worker
+modparam("rust", "max_rate", 50)
+modparam("rust", "window_seconds", 10)
+
+# Routing cache: entries expire after 300 seconds
+modparam("rust", "cache_ttl", 300)
+
+# HTTP connection pool: 2-second timeout, 4 idle connections per host
+modparam("rust", "http_timeout", 2)
+modparam("rust", "pool_size", 4)
+
+####### Routing Logic ###########
+
+route {
+    # ---- Rate Limiting ----
+    # Returns 1 if allowed, -1 if exceeded.
+    # On -1, a 429 reply is sent automatically.
+    if (!rust_check_rate()) {
+        xlog("L_WARN", "Rate limit exceeded for $si\n");
+        exit;
+    }
+
+    # ---- Routing Cache ----
+    # On hit: sets $du and returns 1.
+    # On miss: returns -1.
+    if (rust_cache_lookup()) {
+        xlog("L_DBG", "Cache hit: $rU -&gt; $du\n");
+        t_relay();
+        exit;
+    }
+
+    # ---- HTTP Lookup ----
+    # Query an external routing service.
+    # On success: $var(http_status)=HTTP code, $var(http_result)=body
+    # On failure: returns -1
+    if (rust_http_query("http://routing.internal/lookup?user=$rU")) {
+        if ($var(http_status) == 200) {
+            $du = $var(http_result);
+            rust_cache_store();
+            t_relay();
+            exit;
+        }
+        xlog("L_WARN", "Routing API returned $var(http_status)\n");
+    }
+
+    sl_send_reply(404, "Not Found");
+}
+</programlisting>
+	</section>
+
+	<section id="example_async_cfg" xreflabel="async.cfg">
+		<title>async.cfg &mdash; Non-blocking HTTP</title>
+		<para>
+		Non-blocking HTTP queries using async() with rust_exec(). The worker
+		is released during the HTTP call and resumes when the response arrives.
+		</para>
+		<programlisting format="linespecific">
+#
+# Async Rust Module Configuration
+#
+# Demonstrates non-blocking HTTP queries using OpenSIPS async() with
+# rust_exec(). The SIP worker is released during the HTTP call and
+# resumes processing when the response arrives.
+#
+# Requires:
+#   - rust.so module deployed
+#   - User script with async_http_query handler deployed
+#   - HTTP service running at the target URL
+#
+# Usage:
+#   opensips -c -f modules/rust/examples/async.cfg   (syntax check)
+#   opensips -f modules/rust/examples/async.cfg       (run)
+#
+
+####### Global Parameters #########
+
+log_level=3
+log_stderror=no
+log_facility=LOG_LOCAL0
+
+udp_workers=4
+auto_aliases=no
+
+socket=udp:0.0.0.0:5060
+
+####### Modules Section ###########
+
+mpath="/usr/local/lib64/opensips/modules/"
+
+loadmodule "proto_udp.so"
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "sipmsgops.so"
+loadmodule "rust.so"
+
+modparam("rust", "max_rate", 100)
+modparam("rust", "window_seconds", 60)
+modparam("rust", "http_timeout", 2)
+modparam("rust", "pool_size", 4)
+
+# User script with async_http_query handler
+modparam("rust", "script_name",
+    "/usr/local/lib64/opensips/scripts/libmy_opensips_handler.so")
+
+####### Routing Logic ###########
+
+route {
+    if (!rust_check_rate()) {
+        exit;
+    }
+
+    # ---- Async HTTP Query ----
+    # Non-blocking: the worker is released during the HTTP call.
+    # When the response arrives, route[http_done] executes.
+    #
+    # If the handler has no async variant (no async_http_query symbol),
+    # the sync handler runs and route[http_done] executes immediately.
+    async(rust_exec("http_query", "http://api.internal:8080/route/$rU"), http_done);
+}
+
+# Resume route — runs when the async HTTP response arrives.
+# Available PVs set by the handler:
+#   $var(http_status)  — HTTP status code (integer)
+#   $var(http_body)    — response body (string, max 3800 bytes)
+#   $var(http_json)    — full response as JSON object
+#   $var(http_error)   — error message (empty on success)
+#   $var(http_time_ms) — elapsed time in milliseconds
+#   $avp(http_hdr)     — response headers (stacked AVP, one per header)
+route[http_done] {
+    if ($var(http_status) == 0) {
+        xlog("L_ERR", "Async HTTP failed: $var(http_error)\n");
+        sl_send_reply(503, "Service Unavailable");
+        exit;
+    }
+
+    xlog("L_INFO", "HTTP $var(http_status) in $var(http_time_ms)ms\n");
+
+    # Access the JSON response object
+    if ($var(http_json)) {
+        xlog("L_DBG", "Response JSON: $var(http_json)\n");
+    }
+
+    # Iterate response headers via stacked AVPs
+    # Each $avp(http_hdr) contains one "Name: Value" header line.
+    # Assign NULL to pop from the stack.
+    while ($avp(http_hdr)) {
+        xlog("L_DBG", "  Header: $avp(http_hdr)\n");
+        $avp(http_hdr) = NULL;
+    }
+
+    # Route based on HTTP status
+    if ($var(http_status) == 200) {
+        # Use response body as destination
+        $du = $var(http_body);
+        t_relay();
+        exit;
+    }
+
+    if ($var(http_status) == 404) {
+        sl_send_reply(404, "Not Found");
+        exit;
+    }
+
+    sl_send_reply(500, "Routing Error");
+}
+
+# ---- Sync Fallback Example ----
+# When no URL is provided, the handler completes synchronously.
+# The resume route still runs (async_status=ASYNC_SYNC), but
+# $var(http_status) is 0 and $var(http_error) explains why.
+route[async_no_url] {
+    async(rust_exec("http_query"), http_done_noop);
+}
+
+route[http_done_noop] {
+    # $var(http_status) == 0, $var(http_error) == "no URL: ..."
+    xlog("L_DBG", "No-URL async completed: $var(http_error)\n");
+    sl_send_reply(200, "OK");
+}
+</programlisting>
+	</section>
+
+	<section id="example_scripting_cfg" xreflabel="scripting.cfg">
+		<title>scripting.cfg &mdash; User Script Handlers</title>
+		<para>
+		Demonstrates rust_exec() with user-supplied handler scripts, exercising
+		both sync handlers and async handlers in a single config.
+		</para>
+		<programlisting format="linespecific">
+#
+# Rust Module Scripting Configuration
+#
+# Demonstrates rust_exec() with user-supplied handler scripts.
+# Exercises both sync handlers and async handlers in a single config.
+#
+# Requires:
+#   - rust.so module deployed
+#   - User script .so deployed (libmy_opensips_handler.so)
+#
+# Usage:
+#   opensips -c -f modules/rust/examples/scripting.cfg   (syntax check)
+#   opensips -f modules/rust/examples/scripting.cfg       (run)
+#
+
+####### Global Parameters #########
+
+log_level=3
+log_stderror=no
+log_facility=LOG_LOCAL0
+
+udp_workers=4
+auto_aliases=no
+
+socket=udp:0.0.0.0:5060
+
+####### Modules Section ###########
+
+mpath="/usr/local/lib64/opensips/modules/"
+
+loadmodule "proto_udp.so"
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "sipmsgops.so"
+loadmodule "textops.so"
+loadmodule "rust.so"
+
+# Module parameters
+modparam("rust", "max_rate", 100)
+modparam("rust", "window_seconds", 60)
+modparam("rust", "cache_ttl", 300)
+modparam("rust", "http_timeout", 2)
+modparam("rust", "pool_size", 4)
+
+# User script
+modparam("rust", "script_name",
+    "/usr/local/lib64/opensips/scripts/libmy_opensips_handler.so")
+
+####### Routing Logic ###########
+
+route {
+    # ---- Rate Limiting (compiled-in) ----
+    if (!rust_check_rate()) {
+        exit;
+    }
+
+    # ---- Sync Script Handlers ----
+    # These run in the current worker, blocking until complete.
+
+    # Log request metadata (Call-ID, From, To, all headers)
+    rust_exec("request_logger");
+
+    # Set routing flags based on SIP method
+    rust_exec("set_routing_flags");
+
+    # Add custom header (requires textops.so)
+    rust_exec("append_custom_header", "production");
+
+    # ---- Variable Exchange: Config &lt;-&gt; Rust ----
+    # Set $var(input), call Rust, read $var(output)
+    $var(input) = "uppercase:hello from opensips";
+    rust_exec("variable_exchange");
+    xlog("L_DBG", "Transform result: $var(output)\n");
+
+    # ---- Per-Worker Counter ----
+    rust_exec("call_counter", "requests");
+    xlog("L_DBG", "Worker request count: $var(count)\n");
+
+    # ---- Cross-Worker Atomic Counter (compiled-in) ----
+    rust_counter_inc();
+    xlog("L_DBG", "Global request count: $var(shared_count)\n");
+
+    # ---- PV Manipulation ----
+    $var(pv_input) = "test-value";
+    rust_exec("pv_manipulation");
+
+    # ---- AVP Operations (transaction-scoped) ----
+    rust_exec("avp_operations");
+
+    # ---- JSON Parsing ----
+    $var(json_input) = "{\"method\":\"INVITE\",\"src_ip\":\"10.0.0.1\"}";
+    rust_exec("json_parse");
+    xlog("L_DBG", "Parsed method: $var(json_method)\n");
+
+    # ---- Sync HTTP Query (blocks worker) ----
+    # For non-blocking HTTP, use async() instead — see async.cfg
+    rust_exec("http_query", "http://127.0.0.1:8080/health");
+    xlog("L_DBG", "HTTP status: $var(http_status)\n");
+
+    sl_send_reply(200, "OK");
+}
+</programlisting>
+	</section>
+
+	</section>
+
+</chapter>

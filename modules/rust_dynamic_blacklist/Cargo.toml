@@ -1,0 +1,16 @@
+[package]
+name = "rust-dynamic-blacklist"
+version = "0.1.0"
+edition = "2021"
+description = "Live-reload IP/UA/domain blacklist for OpenSIPS"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opensips-rs = { path = "../rust/sdk" }
+rust-common = { path = "../rust/common" }
+
+[build-dependencies]
+opensips-build = { path = "../rust/build-utils" }
+cc = "1"

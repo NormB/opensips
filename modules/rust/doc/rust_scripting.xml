@@ -1,0 +1,2122 @@
+<!-- Scripting Guide -->
+
+<chapter id="scripting" xreflabel="Scripting Guide">
+
+	<title>Scripting Guide</title>
+
+	<!-- ============ SECTION 1: OVERVIEW ============ -->
+	<section id="scripting_overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+	The <emphasis>rust_exec()</emphasis> function lets you write &sip; processing
+	logic in Rust and load it at runtime, without rebuilding the Rust module. It
+	works exactly like <emphasis>python_exec()</emphasis> and
+	<emphasis>lua_exec()</emphasis> &mdash; you point the module at a shared
+	library, and call exported functions from your &osips; routes.
+	</para>
+	<para>
+	Both approaches coexist in the same module:
+	</para>
+	<informaltable>
+	<tgroup cols="3">
+	<thead>
+	<row>
+		<entry>Approach</entry>
+		<entry>How it works</entry>
+		<entry>When to use</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry><emphasis role='bold'>Compiled-in</emphasis></entry>
+		<entry>Functions like <emphasis>rust_check_rate()</emphasis> built into
+		the module</entry>
+		<entry>Performance-critical, stateful patterns</entry>
+	</row>
+	<row>
+		<entry><emphasis role='bold'>Runtime scripts</emphasis></entry>
+		<entry><emphasis>rust_exec("function_name")</emphasis> dispatches to
+		your <emphasis>.so</emphasis></entry>
+		<entry>Custom logic, rapid iteration</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</informaltable>
+	</section>
+
+	<!-- ============ SECTION 2: QUICK START ============ -->
+	<section id="scripting_quickstart" xreflabel="Quick Start">
+	<title>Quick Start</title>
+
+	<section id="scripting_quickstart_crate" xreflabel="Create a new crate">
+		<title>1. Create a new crate</title>
+		<programlisting format="linespecific">
+cargo new --lib my-opensips-handler
+cd my-opensips-handler
+</programlisting>
+	</section>
+
+	<section id="scripting_quickstart_cargo" xreflabel="Configure Cargo.toml">
+		<title>2. Configure Cargo.toml</title>
+		<programlisting format="linespecific">
+[package]
+name = "my-opensips-handler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opensips-rs = { path = "/path/to/opensips-rust/modules/rust/opensips-rs" }
+</programlisting>
+		<para>
+		The <emphasis>cdylib</emphasis> crate type produces a
+		<emphasis>.so</emphasis> file suitable for
+		<emphasis>dlopen</emphasis>. Add external crates as needed &mdash; for
+		example, the included example handlers add
+		<emphasis>serde_json = "1"</emphasis> for JSON parsing.
+		</para>
+	</section>
+
+	<section id="scripting_quickstart_handlers" xreflabel="Write handlers">
+		<title>3. Write handlers</title>
+		<programlisting format="linespecific">
+use opensips_rs::prelude::*;
+
+opensips_handler!(hello_world, |msg| {
+    opensips_log!(INFO, "my-handler", "hello from {}", msg.source_ip());
+    1  // success
+});
+
+opensips_handler!(greet, |msg, param| {
+    let greeting = param.unwrap_or("hello");
+    opensips_log!(INFO, "my-handler", "{} from {}", greeting, msg.source_ip());
+    1
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_quickstart_build" xreflabel="Build">
+		<title>4. Build</title>
+		<programlisting format="linespecific">
+cargo build --release
+# Output: target/release/libmy_opensips_handler.so
+</programlisting>
+	</section>
+
+	<section id="scripting_quickstart_config" xreflabel="Configure OpenSIPS">
+		<title>5. Configure &osips;</title>
+		<programlisting format="linespecific">
+loadmodule "rust.so"
+modparam("rust", "script_name",
+    "/usr/local/lib64/opensips/scripts/libmy_opensips_handler.so")
+
+route {
+    rust_exec("hello_world");
+    rust_exec("greet", "howdy");
+}
+</programlisting>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 3: ABI CONTRACT ============ -->
+	<section id="scripting_abi" xreflabel="ABI Contract">
+	<title>ABI Contract</title>
+	<para>
+	User scripts export <emphasis>extern "C"</emphasis> functions with this
+	signature:
+	</para>
+	<programlisting format="linespecific">
+extern "C" fn(msg: *mut c_void, param: *const c_char, param_len: c_int) -> c_int
+</programlisting>
+	<informaltable>
+	<tgroup cols="3">
+	<thead>
+	<row>
+		<entry>Argument</entry>
+		<entry>Type</entry>
+		<entry>Description</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry><emphasis>msg</emphasis></entry>
+		<entry><emphasis>*mut c_void</emphasis></entry>
+		<entry>Opaque pointer to &osips; <emphasis>sip_msg</emphasis></entry>
+	</row>
+	<row>
+		<entry><emphasis>param</emphasis></entry>
+		<entry><emphasis>*const c_char</emphasis></entry>
+		<entry>Optional parameter string (null if omitted)</entry>
+	</row>
+	<row>
+		<entry><emphasis>param_len</emphasis></entry>
+		<entry><emphasis>c_int</emphasis></entry>
+		<entry>Length of param (0 if omitted)</entry>
+	</row>
+	<row>
+		<entry><emphasis role='bold'>return</emphasis></entry>
+		<entry><emphasis>c_int</emphasis></entry>
+		<entry><emphasis role='bold'>1</emphasis> = success,
+		<emphasis role='bold'>-1</emphasis> = failure</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</informaltable>
+	<para>
+	The <emphasis>opensips_handler!</emphasis> macro hides this ABI and gives
+	you:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		<emphasis>msg</emphasis>: a <emphasis>SipMessage</emphasis> with safe
+		accessors
+	</para></listitem>
+	<listitem><para>
+		<emphasis>param</emphasis>: an <emphasis>Option&lt;&amp;str&gt;</emphasis>
+	</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<!-- ============ SECTION 4: SIPMESSAGE METHODS ============ -->
+	<section id="scripting_sipmessage" xreflabel="SipMessage Methods">
+	<title>Available SipMessage Methods</title>
+	<informaltable>
+	<tgroup cols="3">
+	<thead>
+	<row>
+		<entry>Method</entry>
+		<entry>Returns</entry>
+		<entry>Description</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry><emphasis>msg.method()</emphasis></entry>
+		<entry>Option&lt;&amp;str&gt;</entry>
+		<entry>&sip; method (INVITE, REGISTER, etc.)</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.ruri()</emphasis></entry>
+		<entry>Option&lt;&amp;str&gt;</entry>
+		<entry>Request-URI</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.status()</emphasis></entry>
+		<entry>Option&lt;&amp;str&gt;</entry>
+		<entry>Reply status string</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.status_code()</emphasis></entry>
+		<entry>Option&lt;u32&gt;</entry>
+		<entry>Reply status code</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.source_ip()</emphasis></entry>
+		<entry>String</entry>
+		<entry>Source IP address</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.source_port()</emphasis></entry>
+		<entry>u16</entry>
+		<entry>Source port</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.is_request()</emphasis></entry>
+		<entry>bool</entry>
+		<entry>True for &sip; requests</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.is_reply()</emphasis></entry>
+		<entry>bool</entry>
+		<entry>True for &sip; replies</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.flags()</emphasis></entry>
+		<entry>u32</entry>
+		<entry>Message flags</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.set_flag(n)</emphasis></entry>
+		<entry>()</entry>
+		<entry>Set a message flag</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.header("Name")</emphasis></entry>
+		<entry>Option&lt;&amp;str&gt;</entry>
+		<entry>Find header by name (case-insensitive)</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.header_iter()</emphasis></entry>
+		<entry>Iterator</entry>
+		<entry>Iterate all headers as (name, body)</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.pv("$var")</emphasis></entry>
+		<entry>Option&lt;String&gt;</entry>
+		<entry>Read a pseudo-variable format string</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.pv_get("$var")</emphasis></entry>
+		<entry>Option&lt;PvValue&gt;</entry>
+		<entry>Read a raw PV value (Int/Str/Null)</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.set_pv("$var", val)</emphasis></entry>
+		<entry>Result&lt;(), Error&gt;</entry>
+		<entry>Write a string pseudo-variable</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.set_pv_int("$var", n)</emphasis></entry>
+		<entry>Result&lt;(), Error&gt;</entry>
+		<entry>Write an integer pseudo-variable</entry>
+	</row>
+	<row>
+		<entry><emphasis>msg.call("func", &amp;[..])</emphasis></entry>
+		<entry>Result&lt;i32, Error&gt;</entry>
+		<entry>Call another module's function</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</informaltable>
+	</section>
+
+	<!-- ============ SECTION 5: HANDLER REFERENCE ============ -->
+	<section id="scripting_handler_reference" xreflabel="Handler Reference">
+	<title>Example Handlers Reference</title>
+	<para>
+	The <emphasis>modules/rust/examples/user-script/src/lib.rs</emphasis> file
+	contains 19 self-contained handlers, each one a teaching lesson that maps
+	Rust concepts to &sip; processing patterns.
+	</para>
+
+	<section id="scripting_handler_quickref" xreflabel="Quick Reference">
+		<title>Quick Reference</title>
+		<informaltable>
+		<tgroup cols="4">
+		<thead>
+		<row>
+			<entry>#</entry>
+			<entry>Handler</entry>
+			<entry>Usage</entry>
+			<entry>Rust Concepts</entry>
+		</row>
+		</thead>
+		<tbody>
+		<row>
+			<entry>1</entry>
+			<entry><emphasis>hello_world</emphasis></entry>
+			<entry>rust_exec("hello_world")</entry>
+			<entry>opensips_handler! macro, Option::unwrap_or, closures</entry>
+		</row>
+		<row>
+			<entry>2</entry>
+			<entry><emphasis>greet</emphasis></entry>
+			<entry>rust_exec("greet", "howdy")</entry>
+			<entry>Option&lt;&amp;str&gt;, default values, format!</entry>
+		</row>
+		<row>
+			<entry>3</entry>
+			<entry><emphasis>log_user_agent</emphasis></entry>
+			<entry>rust_exec("log_user_agent")</entry>
+			<entry>msg.header(), case-insensitive lookup</entry>
+		</row>
+		<row>
+			<entry>4</entry>
+			<entry><emphasis>append_custom_header</emphasis></entry>
+			<entry>rust_exec("append_custom_header", "tag")</entry>
+			<entry>msg.call(), Result&lt;T,E&gt; vs Option&lt;T&gt;, match</entry>
+		</row>
+		<row>
+			<entry>5</entry>
+			<entry><emphasis>route_by_header</emphasis></entry>
+			<entry>rust_exec("route_by_header")</entry>
+			<entry>if let Some(...), msg.set_pv(), early returns</entry>
+		</row>
+		<row>
+			<entry>6</entry>
+			<entry><emphasis>caller_screening</emphasis></entry>
+			<entry>rust_exec("caller_screening")</entry>
+			<entry>thread_local!, RefCell, HashSet, closures</entry>
+		</row>
+		<row>
+			<entry>7</entry>
+			<entry><emphasis>number_portability</emphasis></entry>
+			<entry>rust_exec("number_portability")</entry>
+			<entry>struct, Instant+Duration TTL, HashMap::entry()</entry>
+		</row>
+		<row>
+			<entry>8</entry>
+			<entry><emphasis>request_logger</emphasis></entry>
+			<entry>rust_exec("request_logger")</entry>
+			<entry>msg.header_iter(), tuple destructuring, msg.pv()</entry>
+		</row>
+		<row>
+			<entry>9</entry>
+			<entry><emphasis>rate_limit_by_ua</emphasis></entry>
+			<entry>rust_exec("rate_limit_by_ua", "50")</entry>
+			<entry>thread_local!+RefCell+HashMap, .parse::&lt;u32&gt;()</entry>
+		</row>
+		<row>
+			<entry>10</entry>
+			<entry><emphasis>set_routing_flags</emphasis></entry>
+			<entry>rust_exec("set_routing_flags")</entry>
+			<entry>msg.flags(), msg.set_flag(), starts_with(), set_pv()</entry>
+		</row>
+		<row>
+			<entry>11</entry>
+			<entry><emphasis>reply_handler</emphasis></entry>
+			<entry>rust_exec("reply_handler")</entry>
+			<entry>msg.is_reply(), msg.status_code(), match range patterns</entry>
+		</row>
+		<row>
+			<entry>12</entry>
+			<entry><emphasis>variable_exchange</emphasis></entry>
+			<entry>rust_exec("variable_exchange")</entry>
+			<entry>bidirectional PV exchange, splitn(), string transforms</entry>
+		</row>
+		<row>
+			<entry>13</entry>
+			<entry><emphasis>call_counter</emphasis></entry>
+			<entry>rust_exec("call_counter", "name")</entry>
+			<entry>persistent per-worker state, u64 counter, PV output</entry>
+		</row>
+		<row>
+			<entry>14</entry>
+			<entry><emphasis>shared_counter</emphasis></entry>
+			<entry>rust_exec("shared_counter")</entry>
+			<entry>cross-worker atomic counter via SharedAtomicCounter in shm</entry>
+		</row>
+		<row>
+			<entry>15</entry>
+			<entry><emphasis>pv_manipulation</emphasis></entry>
+			<entry>rust_exec("pv_manipulation")</entry>
+			<entry>pv() vs pv_get(), set_pv() vs set_pv_int(), PvValue enum</entry>
+		</row>
+		<row>
+			<entry>16</entry>
+			<entry><emphasis>avp_operations</emphasis></entry>
+			<entry>rust_exec("avp_operations")</entry>
+			<entry>$avp() read/write, AVP stacking, transaction-scoped state</entry>
+		</row>
+		<row>
+			<entry>17</entry>
+			<entry><emphasis>pv_edge_cases</emphasis></entry>
+			<entry>rust_exec("pv_edge_cases")</entry>
+			<entry>null/deleted AVPs, empty strings, read-only PVs, boundary ints</entry>
+		</row>
+		<row>
+			<entry>18</entry>
+			<entry><emphasis>http_query</emphasis></entry>
+			<entry>rust_exec("http_query", "http://...")</entry>
+			<entry>raw TCP HTTP/1.0, TcpStream, Duration timeout, Result chaining</entry>
+		</row>
+		<row>
+			<entry>19</entry>
+			<entry><emphasis>json_parse</emphasis></entry>
+			<entry>rust_exec("json_parse")</entry>
+			<entry>serde_json::Value, as_str()/as_u64(), as_object() iteration</entry>
+		</row>
+		<row>
+			<entry>20</entry>
+			<entry><emphasis>async_http_query</emphasis></entry>
+			<entry>async(rust_exec("http_query", "http://..."), resume)</entry>
+			<entry>opensips_async_handler!, AsyncContext, non-blocking I/O, resume callbacks</entry>
+		</row>
+		</tbody>
+		</tgroup>
+		</informaltable>
+	</section>
+
+	<!-- Handler Details -->
+
+	<section id="scripting_handler_1" xreflabel="hello_world">
+		<title>1. hello_world</title>
+		<para>
+		Minimal handler &mdash; log the &sip; method and return success.
+		Introduces the <emphasis>opensips_handler!</emphasis> macro,
+		one-argument closures, and
+		<emphasis>Option::unwrap_or()</emphasis> for default values.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(hello_world, |msg| {
+    // msg.method() returns Option&lt;&amp;str&gt;:
+    //   Some("INVITE") for requests, None for replies.
+    // unwrap_or("?") provides a fallback — no null pointer risk like in C.
+    opensips_log!(INFO, "rust-script", "hello_world called for {}",
+        msg.method().unwrap_or("?"));
+    1 // success — route processing continues
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_2" xreflabel="greet">
+		<title>2. greet</title>
+		<para>
+		Demonstrates the optional parameter passed from opensips.cfg.
+		The two-argument closure <emphasis>|msg, param|</emphasis> receives
+		<emphasis>param</emphasis> as
+		<emphasis>Option&lt;&amp;str&gt;</emphasis> &mdash; Rust's null
+		alternative that the compiler forces you to handle. Uses
+		<emphasis>unwrap_or()</emphasis> for a default greeting and
+		<emphasis>msg.source_ip()</emphasis> for caller identification.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(greet, |msg, param| {
+    // `param` is Option&lt;&amp;str&gt;:
+    //   - rust_exec("greet")        → param = None
+    //   - rust_exec("greet", "yo")  → param = Some("yo")
+    let greeting = param.unwrap_or("hello");
+
+    // msg.source_ip() returns a String (owned), not &amp;str (borrowed).
+    opensips_log!(INFO, "rust-script", "{} from {}", greeting, msg.source_ip());
+    1
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_3" xreflabel="log_user_agent">
+		<title>3. log_user_agent</title>
+		<para>
+		Reads and logs the User-Agent &sip; header using
+		<emphasis>msg.header()</emphasis>, which returns
+		<emphasis>Option&lt;&amp;str&gt;</emphasis> with case-insensitive
+		lookup. The <emphasis>_param</emphasis> underscore prefix tells the
+		Rust compiler the parameter is intentionally unused.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(log_user_agent, |msg, _param| {
+    // header() parses all headers on first call, then searches by name.
+    // Returns Option&lt;&amp;str&gt; — the &amp;str borrows directly from the parsed
+    // message buffer (zero-copy).
+    let ua = msg.header("User-Agent").unwrap_or("unknown");
+    opensips_log!(INFO, "rust-script", "User-Agent: {}", ua);
+    1
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_4" xreflabel="append_custom_header">
+		<title>4. append_custom_header</title>
+		<para>
+		Adds an <emphasis>X-Rust-Processed</emphasis> header to the &sip;
+		message using <emphasis>msg.call("append_hf", ...)</emphasis>. Teaches
+		cross-module dispatch via <emphasis>msg.call()</emphasis>, the difference
+		between <emphasis>Result&lt;T,E&gt;</emphasis> and
+		<emphasis>Option&lt;T&gt;</emphasis>, and &sip; header
+		<emphasis>\r\n</emphasis> line ending requirements.
+		</para>
+		<para>
+		<emphasis role='bold'>Requires:</emphasis>
+		<emphasis>loadmodule "textops.so"</emphasis> in your config.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(append_custom_header, |msg, param| {
+    // Build the header value. SIP headers MUST end with \r\n.
+    let tag = param.unwrap_or("rust");
+    let header = format!("X-Rust-Processed: {}\r\n", tag);
+
+    // msg.call() dispatches to another module's exported function.
+    // "append_hf" is from the textops module.
+    match msg.call("append_hf", &amp;[&amp;header]) {
+        Ok(_rc) =&gt; {
+            opensips_log!(DBG, "rust-script",
+                "appended header: X-Rust-Processed: {}", tag);
+            1
+        }
+        Err(e) =&gt; {
+            opensips_log!(ERR, "rust-script", "append_hf failed: {}", e);
+            -1
+        }
+    }
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_5" xreflabel="route_by_header">
+		<title>5. route_by_header</title>
+		<para>
+		Reads an <emphasis>X-Route-To</emphasis> custom header and sets
+		<emphasis>$du</emphasis> (destination URI) accordingly. Demonstrates
+		<emphasis>if let Some(...)</emphasis> pattern matching, PV writes with
+		<emphasis>msg.set_pv()</emphasis>, and the early-return style preferred
+		in Rust.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(route_by_header, |msg, _param| {
+    // Own the header value before mutating msg.
+    let dest = match msg.header("X-Route-To") {
+        Some(d) =&gt; d.trim().to_string(),
+        None =&gt; {
+            opensips_log!(DBG, "rust-script",
+                "route_by_header: no X-Route-To header");
+            return -1;
+        }
+    };
+
+    if dest.is_empty() {
+        opensips_log!(WARN, "rust-script",
+            "route_by_header: empty X-Route-To");
+        return -1;
+    }
+
+    // set_pv writes to OpenSIPS pseudo-variables.
+    // $du = destination URI — where OpenSIPS sends the request.
+    match msg.set_pv("$du", &amp;dest) {
+        Ok(()) =&gt; {
+            opensips_log!(INFO, "rust-script",
+                "route_by_header: $du = {}", dest);
+            1
+        }
+        Err(e) =&gt; {
+            opensips_log!(ERR, "rust-script",
+                "route_by_header: set_pv failed: {}", e);
+            -1
+        }
+    }
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_6" xreflabel="caller_screening">
+		<title>6. caller_screening</title>
+		<para>
+		Blocks calls from a hardcoded IP blacklist using
+		<emphasis>thread_local! { HashSet }</emphasis>. This is the canonical
+		pattern for per-worker state in &osips; Rust modules. Explains why
+		<emphasis>thread_local!</emphasis> is safe (fork model), what
+		<emphasis>RefCell</emphasis> does (interior mutability), and why
+		<emphasis>HashSet</emphasis> provides O(1) lookups.
+		</para>
+		<programlisting format="linespecific">
+thread_local! {
+    static BLOCKED_IPS: RefCell&lt;HashSet&lt;&amp;'static str&gt;&gt; = RefCell::new({
+        let mut set = HashSet::new();
+        set.insert("10.99.99.1");
+        set.insert("10.99.99.2");
+        set.insert("10.99.99.3");
+        set.insert("192.168.99.1");
+        set
+    });
+}
+
+opensips_handler!(caller_screening, |msg, _param| {
+    let src_ip = msg.source_ip();
+
+    let is_blocked = BLOCKED_IPS.with(|bl| {
+        let blacklist = bl.borrow();
+        blacklist.contains(src_ip.as_str())
+    });
+
+    if is_blocked {
+        opensips_log!(WARN, "rust-script", "BLOCKED caller from {}", src_ip);
+        if let Err(e) = msg.call("sl_send_reply", &amp;["403", "Forbidden"]) {
+            opensips_log!(ERR, "rust-script",
+                "sl_send_reply(403) failed: {}", e);
+        }
+        -1
+    } else {
+        1
+    }
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_7" xreflabel="number_portability">
+		<title>7. number_portability</title>
+		<para>
+		LNP (Local Number Portability) cache with TTL expiration. Maps dialed
+		numbers to carrier routing destinations using
+		<emphasis>thread_local! { HashMap }</emphasis>. Teaches Rust struct
+		definitions, <emphasis>Instant</emphasis> +
+		<emphasis>Duration</emphasis> for monotonic time, and the
+		<emphasis>HashMap::entry()</emphasis> API that avoids double lookups.
+		</para>
+		<programlisting format="linespecific">
+struct LnpEntry {
+    destination: String,
+    cached_at: Instant,
+}
+
+thread_local! {
+    static LNP_CACHE: RefCell&lt;HashMap&lt;String, LnpEntry&gt;&gt; =
+        RefCell::new(HashMap::with_capacity(64));
+}
+
+const LNP_TTL: Duration = Duration::from_secs(3600);
+
+opensips_handler!(number_portability, |msg, _param| {
+    let dialed = match msg.pv("$rU") {
+        Some(n) if !n.is_empty() =&gt; n,
+        _ =&gt; {
+            opensips_log!(DBG, "rust-script", "number_portability: no $rU");
+            return -1;
+        }
+    };
+
+    let cached_dest = LNP_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let now = Instant::now();
+        if let Some(entry) = cache.get(&amp;dialed) {
+            if now.duration_since(entry.cached_at) &lt; LNP_TTL {
+                return Some(entry.destination.clone());
+            }
+            cache.remove(&amp;dialed);
+        }
+        None
+    });
+
+    match cached_dest {
+        Some(dest) =&gt; {
+            match msg.set_pv("$du", &amp;dest) {
+                Ok(()) =&gt; {
+                    opensips_log!(INFO, "rust-script",
+                        "LNP cache hit: {} -&gt; {}", dialed, dest);
+                    1
+                }
+                Err(e) =&gt; {
+                    opensips_log!(ERR, "rust-script",
+                        "number_portability: set_pv($du) failed: {}", e);
+                    -1
+                }
+            }
+        }
+        None =&gt; {
+            let simulated_dest = format!("sip:{}@lnp-gateway.local", dialed);
+            LNP_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                cache.entry(dialed.clone()).or_insert(LnpEntry {
+                    destination: simulated_dest.clone(),
+                    cached_at: Instant::now(),
+                });
+            });
+            match msg.set_pv("$du", &amp;simulated_dest) {
+                Ok(()) =&gt; {
+                    opensips_log!(INFO, "rust-script",
+                        "LNP cache miss (stored): {} -&gt; {}",
+                        dialed, simulated_dest);
+                    1
+                }
+                Err(e) =&gt; {
+                    opensips_log!(ERR, "rust-script",
+                        "number_portability: set_pv($du) failed: {}", e);
+                    -1
+                }
+            }
+        }
+    }
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_8" xreflabel="request_logger">
+		<title>8. request_logger</title>
+		<para>
+		CDR-like structured logging that dumps call metadata (Call-ID, From, To,
+		method) and iterates all &sip; headers. Teaches
+		<emphasis>msg.header_iter()</emphasis> which returns an
+		<emphasis>Iterator&lt;Item = (&amp;str, &amp;str)&gt;</emphasis>, tuple
+		destructuring, and PV reads via <emphasis>msg.pv()</emphasis>.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(request_logger, |msg, _param| {
+    let call_id   = msg.pv("$ci").unwrap_or_else(|| "?".to_string());
+    let from_user = msg.pv("$fU").unwrap_or_else(|| "?".to_string());
+    let to_user   = msg.pv("$tU").unwrap_or_else(|| "?".to_string());
+    let method    = msg.method().unwrap_or("?");
+    let src_ip    = msg.source_ip();
+
+    opensips_log!(INFO, "rust-script",
+        "REQUEST: {} from={}  to={}  call-id={}  src={}",
+        method, from_user, to_user, call_id, src_ip);
+
+    // Iterate ALL headers and log them.
+    // header_iter() returns an Iterator&lt;Item = (&amp;str, &amp;str)&gt;.
+    let mut header_count = 0u32;
+    for (name, body) in msg.header_iter() {
+        opensips_log!(DBG, "rust-script",
+            "  HDR: {} = {}", name, body.trim());
+        header_count += 1;
+    }
+
+    opensips_log!(DBG, "rust-script", "  total headers: {}", header_count);
+    1
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_9" xreflabel="rate_limit_by_ua">
+		<title>9. rate_limit_by_ua</title>
+		<para>
+		Rate limiter keyed by User-Agent header instead of source IP. Uses the
+		same <emphasis>thread_local! + RefCell + HashMap</emphasis> pattern as
+		the compiled-in <emphasis>rust_check_rate()</emphasis>. Demonstrates
+		<emphasis>.parse::&lt;u32&gt;()</emphasis> for string-to-number
+		conversion and chained <emphasis>.unwrap_or()</emphasis> for fallback
+		defaults.
+		</para>
+		<programlisting format="linespecific">
+struct UaRateEntry {
+    count: u32,
+    window_start: Instant,
+}
+
+thread_local! {
+    static UA_RATES: RefCell&lt;HashMap&lt;String, UaRateEntry&gt;&gt; =
+        RefCell::new(HashMap::with_capacity(64));
+}
+
+const UA_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+opensips_handler!(rate_limit_by_ua, |msg, param| {
+    // Parse the max-rate from the optional parameter.
+    let max_rate: u32 = param
+        .unwrap_or("100")
+        .parse::&lt;u32&gt;()
+        .unwrap_or(100);
+
+    let ua = msg.header("User-Agent").unwrap_or("unknown").to_string();
+
+    let allowed = UA_RATES.with(|rates| {
+        let mut rates = rates.borrow_mut();
+        let now = Instant::now();
+
+        let entry = rates.entry(ua.clone()).or_insert(UaRateEntry {
+            count: 0,
+            window_start: now,
+        });
+
+        if now.duration_since(entry.window_start) &gt;= UA_RATE_WINDOW {
+            entry.count = 1;
+            entry.window_start = now;
+            true
+        } else if entry.count &lt; max_rate {
+            entry.count += 1;
+            true
+        } else {
+            false
+        }
+    });
+
+    if allowed {
+        1
+    } else {
+        opensips_log!(WARN, "rust-script",
+            "UA rate limit exceeded for: {}", ua);
+        if let Err(e) = msg.call("sl_send_reply",
+                &amp;["429", "Too Many Requests"]) {
+            opensips_log!(ERR, "rust-script",
+                "sl_send_reply(429) failed: {}", e);
+        }
+        -1
+    }
+});
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_10" xreflabel="set_routing_flags">
+		<title>10. set_routing_flags</title>
+		<para>
+		Sets &osips; message flags and <emphasis>$var()</emphasis>
+		pseudo-variables for downstream routing decisions. The config script can
+		then check <emphasis>isflag(1)</emphasis> or
+		<emphasis>$var(call_type)</emphasis>. Teaches
+		<emphasis>msg.flags()</emphasis>, <emphasis>msg.set_flag()</emphasis>,
+		<emphasis>starts_with()</emphasis> string matching, and writing multiple
+		PVs in sequence.
+		</para>
+		<programlisting format="linespecific">
+const FLAG_IS_INVITE: u32 = 1;
+const FLAG_IS_REGISTER: u32 = 2;
+const FLAG_RUST_PROCESSED: u32 = 20;
+
+opensips_handler!(set_routing_flags, |msg, _param| {
+    let method = msg.method().unwrap_or("").to_string();
+
+    if method == "INVITE" {
+        msg.set_flag(FLAG_IS_INVITE);
+    } else if method == "REGISTER" {
+        msg.set_flag(FLAG_IS_REGISTER);
+    }
+
+    msg.set_flag(FLAG_RUST_PROCESSED);
+
+    // Classify the call type based on the dialed number.
+    let call_type = match msg.pv("$rU") {
+        Some(ref ruser) if ruser.starts_with("+1") =&gt; "domestic",
+        Some(ref ruser) if ruser.starts_with("+")  =&gt; "international",
+        Some(_) =&gt; "local",
+        None =&gt; "unknown",
+    };
+
+    if let Err(e) = msg.set_pv("$var(call_type)", call_type) {
+        opensips_log!(ERR, "rust-script",
+            "set_routing_flags: set $var(call_type) failed: {}", e);
+        return -1;
+    }
+
+    if let Err(e) = msg.set_pv("$var(sip_method)", &amp;method) {
+        opensips_log!(ERR, "rust-script",
+            "set_routing_flags: set $var(sip_method) failed: {}", e);
+        return -1;
+    }
+
+    opensips_log!(DBG, "rust-script",
+        "set_routing_flags: method={}, call_type={}, flags=0x{:x}",
+        method, call_type, msg.flags());
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+rust_exec("set_routing_flags");
+if (isflag(1)) { /* INVITE handling */ }
+if ($var(call_type) == "international") { /* ... */ }
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_11" xreflabel="reply_handler">
+		<title>11. reply_handler</title>
+		<para>
+		Classifies &sip; replies by status code range (1xx provisional, 2xx
+		success, etc.) using Rust's <emphasis>match</emphasis> with range
+		patterns (<emphasis>200..=299</emphasis>). Best used in
+		<emphasis>onreply_route</emphasis> or
+		<emphasis>failure_route</emphasis>. Teaches
+		<emphasis>msg.is_reply()</emphasis>,
+		<emphasis>msg.status_code()</emphasis>, and the exhaustive match
+		pattern.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(reply_handler, |msg, _param| {
+    if !msg.is_reply() {
+        opensips_log!(DBG, "rust-script",
+            "reply_handler: not a reply, skipping");
+        return 1;
+    }
+
+    let code = match msg.status_code() {
+        Some(c) =&gt; c,
+        None =&gt; {
+            opensips_log!(WARN, "rust-script",
+                "reply_handler: no status code on reply");
+            return -1;
+        }
+    };
+
+    // Classify the reply using match with range patterns.
+    let category = match code {
+        100..=199 =&gt; "provisional",
+        200..=299 =&gt; "success",
+        300..=399 =&gt; "redirect",
+        400..=499 =&gt; "client-error",
+        500..=599 =&gt; "server-error",
+        600..=699 =&gt; "global-error",
+        _         =&gt; "unknown",
+    };
+
+    opensips_log!(INFO, "rust-script", "REPLY: {} {} ({})",
+        code, msg.status().unwrap_or(""), category);
+
+    if let Err(e) = msg.set_pv("$var(reply_category)", category) {
+        opensips_log!(ERR, "rust-script",
+            "reply_handler: set_pv failed: {}", e);
+    }
+
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg (onreply_route):
+onreply_route[replies] {
+    rust_exec("reply_handler");
+    xlog("L_DBG", "Reply category: $var(reply_category)\n");
+}
+</programlisting>
+	</section>
+
+	<section id="scripting_handler_12" xreflabel="variable_exchange">
+		<title>12. variable_exchange</title>
+		<para>
+		<emphasis role='bold'>Bidirectional PV exchange</emphasis> &mdash; the
+		key pattern for config-to-Rust communication. The config sets
+		<emphasis>$var(input)</emphasis> before calling
+		<emphasis>rust_exec("variable_exchange")</emphasis>, Rust reads it,
+		processes the command (uppercase/reverse/len/prefix), and writes
+		<emphasis>$var(output)</emphasis> + <emphasis>$var(rc)</emphasis> back
+		so the config can branch on the results.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(variable_exchange, |msg, _param| {
+    // Read input from config.
+    let input = match msg.pv("$var(input)") {
+        Some(s) if !s.is_empty() =&gt; s,
+        _ =&gt; {
+            opensips_log!(WARN, "rust-script",
+                "variable_exchange: $var(input) is empty or unset");
+            let _ = msg.set_pv("$var(rc)", "error");
+            let _ = msg.set_pv("$var(output)", "");
+            return -1;
+        }
+    };
+
+    // Parse: "command:argument"
+    let mut parts = input.splitn(2, ':');
+    let command = parts.next().unwrap_or("");
+    let argument = parts.next().unwrap_or("");
+
+    let result = match command {
+        "uppercase" =&gt; argument.to_uppercase(),
+        "reverse"   =&gt; argument.chars().rev().collect::&lt;String&gt;(),
+        "len"       =&gt; argument.len().to_string(),
+        "prefix"    =&gt; format!("+1{}", argument),
+        _ =&gt; {
+            opensips_log!(WARN, "rust-script",
+                "variable_exchange: unknown command '{}'", command);
+            let _ = msg.set_pv("$var(rc)", "error");
+            let _ = msg.set_pv("$var(output)", "");
+            return -1;
+        }
+    };
+
+    // Write results back to config.
+    if let Err(e) = msg.set_pv("$var(output)", &amp;result) {
+        opensips_log!(ERR, "rust-script",
+            "variable_exchange: set $var(output) failed: {}", e);
+        let _ = msg.set_pv("$var(rc)", "error");
+        return -1;
+    }
+    let _ = msg.set_pv("$var(rc)", "ok");
+
+    opensips_log!(INFO, "rust-script",
+        "variable_exchange: {}({}) = {}", command, argument, result);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+$var(input) = "uppercase:hello world";
+rust_exec("variable_exchange");
+# Now: $var(output) = "HELLO WORLD", $var(rc) = "ok"
+</programlisting>
+		<para>
+		Teaches <emphasis>msg.pv()</emphasis> for reading config-set variables,
+		<emphasis>msg.set_pv()</emphasis> for writing results back,
+		<emphasis>splitn()</emphasis> for parsing, and <emphasis>match</emphasis>
+		on string slices for dispatch.
+		</para>
+	</section>
+
+	<section id="scripting_handler_13" xreflabel="call_counter">
+		<title>13. call_counter</title>
+		<para>
+		Persistent per-worker request counter using
+		<emphasis>thread_local! { HashMap&lt;String, u64&gt; }</emphasis>. The
+		simplest demonstration of state that survives across &sip; transactions.
+		Writes <emphasis>$var(count)</emphasis> and
+		<emphasis>$var(counter_name)</emphasis> back to the config.
+		</para>
+		<programlisting format="linespecific">
+thread_local! {
+    static COUNTERS: RefCell&lt;HashMap&lt;String, u64&gt;&gt; =
+        RefCell::new(HashMap::with_capacity(8));
+}
+
+opensips_handler!(call_counter, |msg, param| {
+    let name = param.unwrap_or("default");
+
+    let count = COUNTERS.with(|counters| {
+        let mut counters = counters.borrow_mut();
+        let c = counters.entry(name.to_string()).or_insert(0);
+        *c += 1;
+        *c
+    });
+
+    let count_str = count.to_string();
+    if let Err(e) = msg.set_pv("$var(count)", &amp;count_str) {
+        opensips_log!(ERR, "rust-script",
+            "call_counter: set $var(count) failed: {}", e);
+        return -1;
+    }
+
+    if let Err(e) = msg.set_pv("$var(counter_name)", name) {
+        opensips_log!(ERR, "rust-script",
+            "call_counter: set $var(counter_name) failed: {}", e);
+    }
+
+    opensips_log!(DBG, "rust-script", "call_counter: {}={}", name, count);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+rust_exec("call_counter", "invites");
+xlog("counter: $var(counter_name) = $var(count)\n");
+</programlisting>
+		<para>
+		Teaches named counters via the optional param,
+		<emphasis>entry().or_insert(0)</emphasis> for default initialization,
+		and <emphasis>u64::to_string()</emphasis> for numeric-to-PV conversion.
+		</para>
+	</section>
+
+	<section id="scripting_handler_14" xreflabel="shared_counter">
+		<title>14. shared_counter</title>
+		<para>
+		<emphasis role='bold'>Truly atomic cross-worker counter</emphasis> using
+		<emphasis>SharedAtomicCounter</emphasis> (SDK type that wraps
+		<emphasis>AtomicI64</emphasis> in &osips; shared memory). Unlike
+		<emphasis>$shv()</emphasis> which has a read-modify-write race condition,
+		this uses <emphasis>fetch_add</emphasis> &mdash; a single CPU
+		instruction (<emphasis>lock xadd</emphasis> on x86-64) that is truly
+		atomic across all workers.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(shared_counter, |msg, _param| {
+    // Call the compiled-in rust_counter_inc function.
+    // Uses AtomicI64::fetch_add(1) in shared memory (truly atomic).
+    // Sets $var(shared_count) with the new value.
+    match msg.call("rust_counter_inc", &amp;[]) {
+        Ok(_) =&gt; {
+            opensips_log!(DBG, "rust-script",
+                "shared_counter: incremented (atomic)");
+            1
+        }
+        Err(e) =&gt; {
+            opensips_log!(ERR, "rust-script",
+                "shared_counter: rust_counter_inc failed: {}", e);
+            -1
+        }
+    }
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg -- call directly:
+rust_counter_inc();
+xlog("total requests: $var(shared_count)\n");
+
+# Or from a user script:
+rust_exec("shared_counter");
+</programlisting>
+		<para>
+		The compiled-in <emphasis>rust_counter_inc()</emphasis> allocates the
+		<emphasis>AtomicI64</emphasis> in shared memory during
+		<emphasis>mod_init</emphasis> (before fork). After fork, all workers
+		share the same physical counter. The user-script handler calls it via
+		<emphasis>msg.call("rust_counter_inc", &amp;[])</emphasis>.
+		</para>
+		<para>
+		Teaches the difference between per-worker state
+		(<emphasis>thread_local!</emphasis>), non-atomic shared state
+		(<emphasis>$shv()</emphasis>), and truly atomic shared state
+		(<emphasis>SharedAtomicCounter</emphasis>).
+		</para>
+	</section>
+
+	<section id="scripting_handler_15" xreflabel="pv_manipulation">
+		<title>15. pv_manipulation</title>
+		<para>
+		Comprehensive pseudo-variable manipulation &mdash; reads core &sip; PVs
+		(<emphasis>$rm</emphasis>, <emphasis>$ru</emphasis>,
+		<emphasis>$rU</emphasis>, <emphasis>$rd</emphasis>,
+		<emphasis>$si</emphasis>, <emphasis>$sp</emphasis>), writes string PVs
+		via <emphasis>set_pv()</emphasis>, writes integer PVs via
+		<emphasis>set_pv_int()</emphasis>, and inspects PV types via
+		<emphasis>pv_get()</emphasis> returning the <emphasis>PvValue</emphasis>
+		enum (<emphasis>Int</emphasis>/<emphasis>Str</emphasis>/<emphasis>Null</emphasis>).
+		</para>
+		<programlisting format="linespecific">
+thread_local! {
+    static PV_CALL_COUNT: RefCell&lt;u32&gt; = RefCell::new(0);
+}
+
+fn pv_string_length(counter: u32) -&gt; usize {
+    const LENGTHS: [usize; 20] = [
+        8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048,
+        2048, 1536, 1024, 512, 256, 128, 64, 32, 16, 8,
+    ];
+    LENGTHS[(counter % 20) as usize]
+}
+
+opensips_handler!(pv_manipulation, |msg, _param| {
+    let counter = PV_CALL_COUNT.with(|c| {
+        let mut count = c.borrow_mut();
+        *count += 1;
+        *count
+    });
+
+    // Read $var(pv_counter) from config, increment, write back.
+    let prev_counter = match msg.pv_get("$var(pv_counter)") {
+        Some(PvValue::Int(n)) =&gt; n,
+        Some(PvValue::Str(ref s)) =&gt; s.parse::&lt;i32&gt;().unwrap_or(0),
+        _ =&gt; 0,
+    };
+    let new_counter = prev_counter + 1;
+
+    if let Err(e) = msg.set_pv_int("$var(pv_counter)", new_counter) {
+        opensips_log!(ERR, "rust-script",
+            "pv_manipulation: set $var(pv_counter) failed: {}", e);
+        return -1;
+    }
+
+    // Write a variable-length string PV (memory stress test).
+    let str_len = pv_string_length(counter);
+    let payload = "X".repeat(str_len);
+
+    if let Err(e) = msg.set_pv("$var(pv_str)", &amp;payload) {
+        opensips_log!(ERR, "rust-script",
+            "pv_manipulation: set $var(pv_str) failed: {}", e);
+        return -1;
+    }
+
+    if let Err(e) = msg.set_pv_int("$var(pv_str_len)", str_len as i32) {
+        opensips_log!(ERR, "rust-script",
+            "pv_manipulation: set $var(pv_str_len) failed: {}", e);
+        return -1;
+    }
+
+    // Read back and verify round-trip.
+    let readback = msg.pv("$var(pv_str)").unwrap_or_default();
+    if readback.len() != str_len {
+        opensips_log!(ERR, "rust-script",
+            "pv_manipulation: MISMATCH wrote {} bytes, read back {}",
+            str_len, readback.len());
+        return -1;
+    }
+
+    // Inspect type of $var(pv_input) from config.
+    let input_type = match msg.pv_get("$var(pv_input)") {
+        Some(PvValue::Str(_)) =&gt; "string",
+        Some(PvValue::Int(_)) =&gt; "integer",
+        Some(PvValue::Null)   =&gt; "null",
+        None                  =&gt; "unset",
+    };
+    let _ = msg.set_pv("$var(pv_type)", input_type);
+
+    opensips_log!(DBG, "rust-script",
+        "pv_manipulation: counter={} str_len={} input_type={}",
+        new_counter, str_len, input_type);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+$var(pv_input) = "test-value";
+rust_exec("pv_manipulation");
+# Now: $var(pv_type) = "string", $var(pv_int_test) = 42
+</programlisting>
+		<para>
+		Teaches the three ways to read PVs (<emphasis>pv()</emphasis> format
+		strings, <emphasis>pv_get()</emphasis> raw values,
+		<emphasis>header()</emphasis> direct access), the two ways to write PVs
+		(<emphasis>set_pv()</emphasis> for strings,
+		<emphasis>set_pv_int()</emphasis> for integers), and the
+		<emphasis>PvValue</emphasis> enum for type-safe value inspection.
+		</para>
+	</section>
+
+	<section id="scripting_handler_16" xreflabel="avp_operations">
+		<title>16. avp_operations</title>
+		<para>
+		<emphasis role='bold'>AVP (Attribute-Value Pair) operations</emphasis>
+		&mdash; the critical mechanism for passing data across &sip; transaction
+		boundaries. Unlike <emphasis>$var()</emphasis> which dies when the route
+		ends, <emphasis>$avp()</emphasis> values survive
+		<emphasis>t_relay()</emphasis> and are readable in
+		<emphasis>failure_route</emphasis> and
+		<emphasis>onreply_route</emphasis>.
+		</para>
+		<programlisting format="linespecific">
+thread_local! {
+    static AVP_CALL_COUNT: RefCell&lt;u32&gt; = RefCell::new(0);
+}
+
+opensips_handler!(avp_operations, |msg, param| {
+    let counter = AVP_CALL_COUNT.with(|c| {
+        let mut count = c.borrow_mut();
+        *count += 1;
+        *count
+    });
+
+    // Increment integer AVP.
+    let prev_seq = match msg.pv_get("$avp(rust_seq)") {
+        Some(PvValue::Int(n)) =&gt; n,
+        Some(PvValue::Str(ref s)) =&gt; s.parse::&lt;i32&gt;().unwrap_or(0),
+        _ =&gt; 0,
+    };
+    let new_seq = prev_seq + 1;
+    let _ = msg.set_pv_int("$avp(rust_seq)", new_seq);
+
+    // Write caller info AVPs.
+    let src_ip = msg.source_ip();
+    let _ = msg.set_pv("$avp(rust_caller_ip)", &amp;src_ip);
+
+    let method = msg.method().unwrap_or("").to_string();
+    let call_type = match method.as_str() {
+        "INVITE"   =&gt; "invite",
+        "REGISTER" =&gt; "register",
+        "OPTIONS"  =&gt; "options",
+        "BYE"      =&gt; "bye",
+        "CANCEL"   =&gt; "cancel",
+        "ACK"      =&gt; "ack",
+        _          =&gt; "other",
+    };
+    let _ = msg.set_pv("$avp(rust_call_type)", call_type);
+
+    // Variable-length string AVP (memory stress).
+    let str_len = pv_string_length(counter);
+    let payload = "Y".repeat(str_len);
+    let _ = msg.set_pv("$avp(rust_payload)", &amp;payload);
+
+    // AVP stacking — multiple writes create a LIFO stack.
+    let _ = msg.set_pv("$avp(rust_tag)", "rust-module");
+    let tag = param.unwrap_or("processed");
+    let _ = msg.set_pv("$avp(rust_tag)", tag);
+
+    opensips_log!(DBG, "rust-script",
+        "avp_operations: seq={} type={} str_len={} tag={}",
+        new_seq, call_type, str_len, tag);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+rust_exec("avp_operations");
+# AVPs survive t_relay:
+t_on_failure("1");
+t_relay();
+
+failure_route[1] {
+    xlog("caller was $avp(rust_caller_ip), type=$avp(rust_call_type)\n");
+}
+</programlisting>
+		<para>
+		Demonstrates string AVPs (<emphasis>$avp(rust_caller_ip)</emphasis>,
+		<emphasis>$avp(rust_call_type)</emphasis>), integer AVPs
+		(<emphasis>$avp(rust_timestamp)</emphasis> via
+		<emphasis>set_pv_int()</emphasis>), and AVP stacking (multiple writes
+		to <emphasis>$avp(rust_tag)</emphasis> create a LIFO stack). The
+		optional param controls the top-of-stack tag value.
+		</para>
+		<para>
+		Teaches the critical difference between <emphasis>$var()</emphasis>
+		(route-scoped) and <emphasis>$avp()</emphasis> (transaction-scoped),
+		when to use each, and AVP stacking semantics.
+		</para>
+	</section>
+
+	<section id="scripting_handler_17" xreflabel="pv_edge_cases">
+		<title>17. pv_edge_cases</title>
+		<para>
+		<emphasis role='bold'>Robustness test</emphasis> &mdash; the config
+		intentionally feeds bad/missing data to Rust: deleted AVPs
+		(<emphasis>$null</emphasis>), never-set PVs, empty strings, near-limit
+		3800-byte strings, <emphasis>i32::MAX</emphasis> and
+		<emphasis>-1</emphasis> boundary integers, writes to read-only PVs
+		(<emphasis>$ci</emphasis>), and malformed PV specs. Every case must
+		return <emphasis>None</emphasis>/<emphasis>Err</emphasis> gracefully
+		without crashing &osips;.
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(pv_edge_cases, |msg, _param| {
+    let mut passed = 0i32;
+    let mut failed = 0i32;
+
+    // 1. Deleted AVP (set to $null by config).
+    match msg.pv_get("$avp(edge_test)") {
+        Some(PvValue::Null) | None =&gt; { passed += 1; }
+        Some(_) =&gt; { failed += 1; }
+    }
+
+    // 2. Never-set PV.
+    match msg.pv_get("$var(pv_never_set_xyzzy)") {
+        Some(PvValue::Null) | None =&gt; { passed += 1; }
+        Some(_) =&gt; { failed += 1; }
+    }
+
+    // 3. Empty string PV (write from Rust, verify round-trip).
+    if msg.set_pv("$var(edge_empty)", "").is_ok() {
+        match msg.pv("$var(edge_empty)") {
+            None | Some(_) =&gt; { passed += 1; }
+        }
+    } else { failed += 1; }
+
+    // 4. Near-limit string (3800 bytes).
+    let long_str = "Z".repeat(3800);
+    if msg.set_pv("$var(edge_long)", &amp;long_str).is_ok() {
+        let readback = msg.pv("$var(edge_long)").unwrap_or_default();
+        if readback.len() == 3800 { passed += 1; }
+        else { failed += 1; }
+    } else { failed += 1; }
+
+    // 5. Integer boundary: i32::MAX.
+    if msg.set_pv_int("$var(edge_max_int)", i32::MAX).is_ok() {
+        match msg.pv_get("$var(edge_max_int)") {
+            Some(PvValue::Int(n)) if n == i32::MAX =&gt; { passed += 1; }
+            _ =&gt; { failed += 1; }
+        }
+    } else { failed += 1; }
+
+    // 6. Negative integer: -1.
+    if msg.set_pv_int("$var(edge_neg)", -1).is_ok() {
+        match msg.pv_get("$var(edge_neg)") {
+            Some(PvValue::Int(-1)) =&gt; { passed += 1; }
+            _ =&gt; { failed += 1; }
+        }
+    } else { failed += 1; }
+
+    // 7. Write to read-only PV ($ci = Call-ID). Must return Err.
+    match msg.set_pv("$ci", "fake-call-id") {
+        Err(_) =&gt; { passed += 1; }
+        Ok(()) =&gt; { failed += 1; }
+    }
+
+    // 8. Malformed PV spec. Must return None, not crash.
+    match msg.pv("$invalid(") {
+        None =&gt; { passed += 1; }
+        Some(ref s) if s.is_empty() =&gt; { passed += 1; }
+        Some(_) =&gt; { failed += 1; }
+    }
+
+    // 9. Write to deleted AVP (overwrite after $null).
+    if msg.set_pv("$avp(edge_test)", "resurrected").is_ok() {
+        match msg.pv("$avp(edge_test)") {
+            Some(ref s) if s == "resurrected" =&gt; { passed += 1; }
+            _ =&gt; { failed += 1; }
+        }
+    } else { failed += 1; }
+
+    let total = passed + failed;
+    let _ = msg.set_pv_int("$var(edge_checks)", total);
+    let result = if failed == 0 { "pass" } else { "fail" };
+    let _ = msg.set_pv("$var(edge_result)", result);
+
+    opensips_log!(INFO, "rust-script",
+        "pv_edge_cases: {}/{} checks passed ({})",
+        passed, total, result);
+    if failed &gt; 0 { -1 } else { 1 }
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+$avp(edge_test) = "exists";
+$avp(edge_test) = NULL;         # delete it
+rust_exec("pv_edge_cases");
+# Now: $var(edge_result) = "pass", $var(edge_checks) = 10
+</programlisting>
+		<para>
+		After deletion, writes <emphasis>"resurrected"</emphasis> back to
+		<emphasis>$avp(edge_test)</emphasis> to prove AVPs can be re-created
+		after <emphasis>$null</emphasis> deletion. Reports pass/fail count via
+		<emphasis>$var(edge_checks)</emphasis> and overall result via
+		<emphasis>$var(edge_result)</emphasis>.
+		</para>
+		<para>
+		Teaches defensive programming with Rust's type system:
+		<emphasis>Option::is_none()</emphasis>,
+		<emphasis>Result::is_err()</emphasis>,
+		<emphasis>PvValue::Null</emphasis> matching, and why testing failure
+		paths is as important as testing success paths.
+		</para>
+	</section>
+
+	<section id="scripting_handler_18" xreflabel="http_query">
+		<title>18. http_query</title>
+		<para>
+		<emphasis role='bold'>Raw &http; client using only std</emphasis>
+		&mdash; no external dependencies (no ureq, no reqwest). Uses
+		<emphasis>std::net::TcpStream</emphasis> with &http;/1.0 (server
+		closes connection, giving simple EOF detection) and a 2-second timeout
+		to prevent worker blocking.
+		</para>
+		<programlisting format="linespecific">
+/// Make a raw HTTP/1.0 GET request using only std::net.
+fn simple_http_get(url: &amp;str, timeout_secs: u64)
+    -&gt; Result&lt;(u16, String), String&gt;
+{
+    let rest = url.strip_prefix("http://")
+        .ok_or_else(|| "only http:// URLs supported".to_string())?;
+
+    let (host_port, path) = match rest.split_once('/') {
+        Some((hp, p)) =&gt; (hp, format!("/{}", p)),
+        None =&gt; (rest, "/".to_string()),
+    };
+
+    let (host, port) = match host_port.split_once(':') {
+        Some((h, p)) =&gt; {
+            let port = p.parse::&lt;u16&gt;()
+                .map_err(|e| format!("bad port: {}", e))?;
+            (h, port)
+        }
+        None =&gt; (host_port, 80u16),
+    };
+
+    let timeout = Duration::from_secs(timeout_secs);
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&amp;addr)
+        .map_err(|e| format!("connect to {} failed: {}", addr, e))?;
+
+    stream.set_read_timeout(Some(timeout))
+        .map_err(|e| format!("set read timeout: {}", e))?;
+    stream.set_write_timeout(Some(timeout))
+        .map_err(|e| format!("set write timeout: {}", e))?;
+
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\n\
+         User-Agent: opensips-rust/1.0\r\nAccept: */*\r\n\r\n",
+        path, host
+    );
+    stream.write_all(request.as_bytes())
+        .map_err(|e| format!("write request: {}", e))?;
+
+    let mut response = String::new();
+    stream.read_to_string(&amp;mut response)
+        .map_err(|e| format!("read response: {}", e))?;
+
+    let status_line = response.lines().next()
+        .ok_or_else(|| "empty response".to_string())?;
+    let status_code = status_line
+        .split_whitespace().nth(1)
+        .and_then(|s| s.parse::&lt;u16&gt;().ok())
+        .ok_or_else(|| format!("bad status line: {}", status_line))?;
+
+    let body = response.split("\r\n\r\n").nth(1)
+        .unwrap_or("").to_string();
+
+    Ok((status_code, body))
+}
+
+opensips_handler!(http_query, |msg, param| {
+    let url = match param {
+        Some(u) if !u.is_empty() =&gt; u.to_string(),
+        _ =&gt; match msg.pv("$var(http_url)") {
+            Some(u) if !u.is_empty() =&gt; u,
+            _ =&gt; {
+                let _ = msg.set_pv_int("$var(http_status)", 0);
+                let _ = msg.set_pv("$var(http_body)", "");
+                let _ = msg.set_pv("$var(http_error)",
+                    "no URL: set param or $var(http_url)");
+                let _ = msg.set_pv_int("$var(http_time_ms)", 0);
+                return 1;
+            }
+        }
+    };
+
+    let start = Instant::now();
+    match simple_http_get(&amp;url, 2) {
+        Ok((status, body)) =&gt; {
+            let elapsed_ms = start.elapsed().as_millis() as i32;
+            let _ = msg.set_pv_int("$var(http_status)", status as i32);
+            let truncated = if body.len() &gt; 3800 {
+                &amp;body[..3800]
+            } else {
+                &amp;body
+            };
+            let _ = msg.set_pv("$var(http_body)", truncated);
+            let _ = msg.set_pv("$var(http_error)", "");
+            let _ = msg.set_pv_int("$var(http_time_ms)", elapsed_ms);
+            1
+        }
+        Err(e) =&gt; {
+            let elapsed_ms = start.elapsed().as_millis() as i32;
+            let _ = msg.set_pv_int("$var(http_status)", 0);
+            let _ = msg.set_pv("$var(http_body)", "");
+            let _ = msg.set_pv("$var(http_error)", &amp;e);
+            let _ = msg.set_pv_int("$var(http_time_ms)", elapsed_ms);
+            -1
+        }
+    }
+});
+</programlisting>
+		<programlisting format="linespecific">
+# With a URL (real HTTP call):
+rust_exec("http_query", "http://httpbin.org/get");
+# Now: $var(http_status) = "200", $var(http_body) = response body
+
+# Without a URL (test/placeholder mode):
+rust_exec("http_query");
+# Now: $var(http_status) = "0", $var(http_body) = "no URL provided"
+</programlisting>
+		<para>
+		Writes <emphasis>$var(http_status)</emphasis>,
+		<emphasis>$var(http_body)</emphasis>,
+		<emphasis>$var(http_time_ms)</emphasis>, and
+		<emphasis>$var(http_error)</emphasis>. The helper
+		<emphasis>simple_http_get()</emphasis> demonstrates URL parsing with
+		<emphasis>strip_prefix</emphasis>/<emphasis>split_once</emphasis>,
+		<emphasis>Result</emphasis> chaining with
+		<emphasis>map_err</emphasis>, and
+		<emphasis>Duration</emphasis>-based timeouts on
+		<emphasis>TcpStream</emphasis>. Only supports
+		<emphasis>http://</emphasis> (no TLS in std).
+		</para>
+		<para>
+		Teaches the tradeoff between blocking I/O in a &sip; worker (simple
+		but blocks the worker for the duration of the &http; call) vs async
+		patterns (complex but non-blocking). For production use, prefer the
+		compiled-in <emphasis>http_pool</emphasis> module which uses a
+		dedicated thread pool.
+		</para>
+	</section>
+
+	<section id="scripting_handler_19" xreflabel="json_parse">
+		<title>19. json_parse</title>
+		<para>
+		<emphasis role='bold'>JSON parsing with serde_json</emphasis> &mdash;
+		the standard Rust JSON library. Two modes: config-provided JSON via
+		<emphasis>$var(json_input)</emphasis>, or auto-built JSON from &sip;
+		message fields (method, source IP, source port).
+		</para>
+		<programlisting format="linespecific">
+opensips_handler!(json_parse, |msg, _param| {
+    // Get JSON: from $var(json_input) or auto-build from SIP msg.
+    let json_str = match msg.pv("$var(json_input)") {
+        Some(s) if !s.is_empty() =&gt; s,
+        _ =&gt; {
+            let method = msg.method().unwrap_or("?").to_string();
+            let src_ip = msg.source_ip();
+            let src_port = msg.source_port();
+            let ua = msg.header("User-Agent")
+                .unwrap_or("unknown").to_string();
+            let call_id = msg.pv("$ci")
+                .unwrap_or_else(|| "?".to_string());
+
+            let obj = serde_json::json!({
+                "method": method,
+                "src_ip": src_ip,
+                "src_port": src_port,
+                "user_agent": ua,
+                "call_id": call_id
+            });
+            obj.to_string()
+        }
+    };
+
+    // Parse JSON.
+    let parsed: serde_json::Value = match serde_json::from_str(&amp;json_str) {
+        Ok(v) =&gt; v,
+        Err(e) =&gt; {
+            opensips_log!(ERR, "rust-script",
+                "json_parse: invalid JSON: {}", e);
+            let _ = msg.set_pv("$var(json_parsed)", "no");
+            let _ = msg.set_pv("$var(json_error)", &amp;e.to_string());
+            return -1;
+        }
+    };
+
+    let _ = msg.set_pv("$var(json_parsed)", "yes");
+
+    // Extract fields.
+    let method = parsed["method"].as_str().unwrap_or("N/A");
+    let src_ip = parsed["src_ip"].as_str().unwrap_or("N/A");
+    let _ = msg.set_pv("$var(json_method)", method);
+    let _ = msg.set_pv("$var(json_src_ip)", src_ip);
+
+    // List all top-level field names.
+    let field_names = match parsed.as_object() {
+        Some(map) =&gt; {
+            let names: Vec&lt;&amp;str&gt; = map.keys()
+                .map(|k| k.as_str()).collect();
+            names.join(",")
+        }
+        None =&gt; "not_an_object".to_string(),
+    };
+    let _ = msg.set_pv("$var(json_fields)", &amp;field_names);
+
+    // Write raw JSON back (truncated to 3800 bytes).
+    let raw = if json_str.len() &gt; 3800 {
+        &amp;json_str[..3800]
+    } else {
+        &amp;json_str
+    };
+    let _ = msg.set_pv("$var(json_raw)", raw);
+
+    // Extract numeric fields.
+    if let Some(port) = parsed["src_port"].as_u64() {
+        let _ = msg.set_pv_int("$var(json_src_port)", port as i32);
+    }
+
+    opensips_log!(INFO, "rust-script",
+        "json_parse: fields=[{}] method={} src_ip={}",
+        field_names, method, src_ip);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# Mode 1: config provides JSON
+$var(json_input) = "{\"method\":\"INVITE\",\"src_ip\":\"10.0.0.1\",\"src_port\":5060}";
+rust_exec("json_parse");
+# Now: $var(json_method) = "INVITE", $var(json_src_ip) = "10.0.0.1"
+
+# Mode 2: auto-build from SIP message (no $var(json_input) set)
+rust_exec("json_parse");
+# Now: $var(json_method) = actual SIP method, etc.
+</programlisting>
+		<para>
+		Writes <emphasis>$var(json_parsed)</emphasis>
+		(<emphasis>"ok"</emphasis>/<emphasis>"error"</emphasis>),
+		<emphasis>$var(json_method)</emphasis>,
+		<emphasis>$var(json_src_ip)</emphasis>,
+		<emphasis>$var(json_fields)</emphasis> (comma-separated top-level
+		keys), <emphasis>$var(json_raw)</emphasis> (echo of parsed JSON), and
+		<emphasis>$var(json_src_port)</emphasis> (integer).
+		</para>
+		<para>
+		Teaches <emphasis>serde_json::from_str</emphasis> returning
+		<emphasis>Result&lt;Value, Error&gt;</emphasis>, dynamic field access
+		via <emphasis>value["key"].as_str()</emphasis>, numeric extraction via
+		<emphasis>as_u64()</emphasis>, iterating object keys via
+		<emphasis>as_object()</emphasis>, and the <emphasis>json!</emphasis>
+		macro for building JSON programmatically. Handles malformed JSON
+		gracefully by writing error details to
+		<emphasis>$var(json_error)</emphasis>.
+		</para>
+	</section>
+
+	<section id="scripting_handler_20" xreflabel="async_http_query">
+		<title>20. async_http_query</title>
+		<para>
+		<emphasis role='bold'>Non-blocking &http; query using &osips; async()
+		framework</emphasis> &mdash; the key pattern for calling external
+		services without blocking &sip; workers. Unlike handler 18
+		(<emphasis>http_query</emphasis>) which blocks the worker for the entire
+		&http; call duration, this handler:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			Opens a TCP connection and sends the request
+		</para></listitem>
+		<listitem><para>
+			Hands the fd to the &osips; reactor
+		</para></listitem>
+		<listitem><para>
+			Returns immediately &mdash; the worker processes other &sip;
+			traffic
+		</para></listitem>
+		<listitem><para>
+			When the response arrives, the reactor calls the resume callback
+		</para></listitem>
+		<listitem><para>
+			The resume callback reads the response and writes PVs/AVPs
+		</para></listitem>
+		<listitem><para>
+			The resume route runs with the populated data
+		</para></listitem>
+		</itemizedlist>
+		<programlisting format="linespecific">
+/// State preserved across the async gap.
+struct AsyncHttpState {
+    stream: TcpStream,
+    url: String,
+    start: Instant,
+}
+
+/// Resume callback — called when the HTTP response fd becomes readable.
+unsafe extern "C" fn resume_http_query(
+    _fd: i32,
+    raw_msg: *mut sys::sip_msg,
+    param: *mut std::ffi::c_void,
+) -&gt; i32 {
+    let state = Box::from_raw(param as *mut AsyncHttpState);
+    let mut msg = SipMessage::from_raw(raw_msg);
+
+    // Read the HTTP response.
+    let mut response = String::new();
+    let mut stream = state.stream;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&amp;mut buf) {
+            Ok(0) =&gt; break,
+            Ok(n) =&gt; response.push_str(
+                &amp;String::from_utf8_lossy(&amp;buf[..n])),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock =&gt; {
+                if !response.is_empty() { break; }
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(
+                    Some(Duration::from_millis(500)));
+                match stream.read(&amp;mut buf) {
+                    Ok(0) =&gt; break,
+                    Ok(n) =&gt; {
+                        response.push_str(
+                            &amp;String::from_utf8_lossy(&amp;buf[..n]));
+                        let _ = stream.set_nonblocking(true);
+                    }
+                    Err(_) =&gt; break,
+                }
+            }
+            Err(_) =&gt; break,
+        }
+    }
+
+    let elapsed_ms = state.start.elapsed().as_millis() as i32;
+
+    if response.is_empty() {
+        let _ = msg.set_pv_int("$var(http_status)", 0);
+        let _ = msg.set_pv("$var(http_error)", "failed to read response");
+        let _ = msg.set_pv_int("$var(http_time_ms)", elapsed_ms);
+        return async_ctx::ASYNC_DONE;
+    }
+
+    // Parse status and body, write PVs and AVPs...
+    // (see full source in examples/user-script/src/lib.rs)
+    async_ctx::ASYNC_DONE
+}
+
+opensips_async_handler!(async_http_query, |msg, ctx, param| {
+    let url = match param {
+        Some(u) if !u.is_empty() =&gt; u.to_string(),
+        _ =&gt; match msg.pv("$var(http_url)") {
+            Some(u) if !u.is_empty() =&gt; u,
+            _ =&gt; {
+                let _ = msg.set_pv_int("$var(http_status)", 0);
+                let _ = msg.set_pv("$var(http_error)",
+                    "no URL: set param or $var(http_url)");
+                let _ = msg.set_pv("$var(http_json)", "{}");
+                ctx.done_sync();
+                return 1;
+            }
+        }
+    };
+
+    let start = Instant::now();
+
+    // Connect and send request.
+    let stream = match async_http_connect(&amp;url) {
+        Ok((s, _host, _path)) =&gt; s,
+        Err(e) =&gt; {
+            let _ = msg.set_pv_int("$var(http_status)", 0);
+            let _ = msg.set_pv("$var(http_error)", &amp;e);
+            ctx.done_sync();
+            return -1;
+        }
+    };
+
+    // Get raw fd for the reactor.
+    let fd = stream.as_raw_fd();
+
+    // Allocate resume state.
+    let state = Box::new(AsyncHttpState {
+        stream,
+        url: url.clone(),
+        start,
+    });
+    let state_ptr = Box::into_raw(state) as *mut std::ffi::c_void;
+
+    // Tell OpenSIPS to monitor this fd.
+    ctx.set_fd(fd);
+    ctx.set_resume(resume_http_query);
+    ctx.set_resume_param(state_ptr);
+    ctx.set_timeout(5);
+    1
+});
+</programlisting>
+		<programlisting format="linespecific">
+# In opensips.cfg:
+async(rust_exec("http_query", "http://127.0.0.1:8080/api/lookup"), http_done);
+
+route[http_done] {
+    xlog("status=$var(http_status) body=$var(http_body)\n");
+    xlog("json=$var(http_json)\n");
+
+    # Iterate response headers (stacked AVPs):
+    while ($avp(http_hdr)) {
+        xlog("  header: $avp(http_hdr)\n");
+        $avp(http_hdr) = NULL;  # pop from stack
+    }
+}
+</programlisting>
+		<para>
+		For the full list of output pseudo-variables and error conditions,
+		see <xref linkend="afunc_rust_exec"/>.
+		</para>
+		<para>
+		Teaches <emphasis>opensips_async_handler!</emphasis> macro,
+		<emphasis>AsyncContext</emphasis> methods
+		(<emphasis>set_fd</emphasis>, <emphasis>set_resume</emphasis>,
+		<emphasis>set_resume_param</emphasis>, <emphasis>set_timeout</emphasis>,
+		<emphasis>done_sync</emphasis>),
+		<emphasis>Box::into_raw()</emphasis>/<emphasis>Box::from_raw()</emphasis>
+		for cross-FFI state transfer, and AVP stacking for list-like data.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 7: ASYNC HANDLERS ============ -->
+	<section id="scripting_async" xreflabel="Async Handlers">
+	<title>Async Handlers</title>
+
+	<section id="scripting_async_overview" xreflabel="How async() works">
+		<title>How &osips; async() works</title>
+		<para>
+		The <emphasis>async()</emphasis> script statement suspends the current
+		&sip; transaction, monitors a file descriptor for I/O readiness, then
+		resumes a route when data arrives. This is how modules like
+		<emphasis>rest_client</emphasis> avoid blocking workers during &http;
+		calls.
+		</para>
+		<programlisting format="linespecific">
+# Config syntax:
+async(rust_exec("handler_name", "param"), resume_route_name);
+</programlisting>
+	</section>
+
+	<section id="scripting_async_writing" xreflabel="Writing async handlers">
+		<title>Writing async handlers</title>
+		<para>
+		Use the <emphasis>opensips_async_handler!</emphasis> macro instead of
+		<emphasis>opensips_handler!</emphasis>:
+		</para>
+		<programlisting format="linespecific">
+use opensips_rs::prelude::*;
+
+opensips_async_handler!(async_my_handler, |msg, ctx, param| {
+    // ctx is an AsyncContext with methods to control the async lifecycle:
+    //   ctx.set_fd(fd)            -- tell reactor to monitor this fd
+    //   ctx.set_resume(callback)  -- function called when fd is readable
+    //   ctx.set_resume_param(ptr) -- opaque state for the resume callback
+    //   ctx.set_timeout(secs)     -- timeout before cancellation
+    //   ctx.done_sync()           -- completed synchronously, run resume route now
+    //   ctx.no_io()               -- no async I/O, continue script normally
+
+    if no_work_needed {
+        ctx.done_sync();
+        return 1;
+    }
+
+    // ... set up non-blocking I/O ...
+    ctx.set_fd(fd);
+    ctx.set_resume(my_resume_fn);
+    ctx.set_resume_param(state_ptr);
+    ctx.set_timeout(5);
+    1
+});
+</programlisting>
+		<para>
+		<emphasis role='bold'>Handler naming convention:</emphasis> The function
+		name MUST be prefixed with <emphasis>async_</emphasis>. For full details
+		on async handler resolution and fallback behavior, see
+		<xref linkend="afunc_rust_exec"/>.
+		</para>
+	</section>
+
+	<section id="scripting_async_abi" xreflabel="Async ABI contract">
+		<title>Async ABI contract</title>
+		<para>
+		Async handlers export this signature (generated by
+		<emphasis>opensips_async_handler!</emphasis>):
+		</para>
+		<programlisting format="linespecific">
+extern "C" fn(msg: *mut c_void, ctx: *mut c_void, param: *const c_char, param_len: c_int) -> c_int
+</programlisting>
+		<informaltable>
+		<tgroup cols="3">
+		<thead>
+		<row>
+			<entry>Argument</entry>
+			<entry>Type</entry>
+			<entry>Description</entry>
+		</row>
+		</thead>
+		<tbody>
+		<row>
+			<entry><emphasis>msg</emphasis></entry>
+			<entry><emphasis>*mut c_void</emphasis></entry>
+			<entry>Opaque pointer to &osips; <emphasis>sip_msg</emphasis></entry>
+		</row>
+		<row>
+			<entry><emphasis>ctx</emphasis></entry>
+			<entry><emphasis>*mut c_void</emphasis></entry>
+			<entry>Opaque pointer to <emphasis>async_ctx</emphasis> (wrapped as
+			<emphasis>AsyncContext</emphasis>)</entry>
+		</row>
+		<row>
+			<entry><emphasis>param</emphasis></entry>
+			<entry><emphasis>*const c_char</emphasis></entry>
+			<entry>Optional parameter string (null if omitted)</entry>
+		</row>
+		<row>
+			<entry><emphasis>param_len</emphasis></entry>
+			<entry><emphasis>c_int</emphasis></entry>
+			<entry>Length of param (0 if omitted)</entry>
+		</row>
+		<row>
+			<entry><emphasis role='bold'>return</emphasis></entry>
+			<entry><emphasis>c_int</emphasis></entry>
+			<entry><emphasis role='bold'>1</emphasis> = success,
+			<emphasis role='bold'>-1</emphasis> = failure</entry>
+		</row>
+		</tbody>
+		</tgroup>
+		</informaltable>
+	</section>
+
+	<section id="scripting_async_resume" xreflabel="Resume callbacks">
+		<title>Resume callbacks</title>
+		<para>
+		The resume function is called by the &osips; reactor when the monitored
+		fd becomes readable:
+		</para>
+		<programlisting format="linespecific">
+unsafe extern "C" fn my_resume(fd: i32, msg: *mut sip_msg, param: *mut c_void) -> i32 {
+    let state = Box::from_raw(param as *mut MyState);  // recover ownership
+    let mut msg = SipMessage::from_raw(msg);
+    // ... read from fd, write PVs ...
+    async_ctx::ASYNC_DONE  // -1: done, run resume route
+}
+</programlisting>
+		<para>Return values:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>ASYNC_DONE</emphasis> (-1): async complete, continue to
+			resume route
+		</para></listitem>
+		<listitem><para>
+			<emphasis>ASYNC_DONE_CLOSE_FD</emphasis> (-2): complete + close fd
+		</para></listitem>
+		<listitem><para>
+			<emphasis>ASYNC_CONTINUE</emphasis> (-5): not done yet, keep
+			monitoring
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="scripting_async_memory" xreflabel="Memory model">
+		<title>Memory model</title>
+		<para>
+		Since <emphasis>async()</emphasis> (script-level) resumes in the
+		<emphasis role='bold'>same worker process</emphasis>, regular Rust heap
+		allocation (<emphasis>Box</emphasis>) works for resume state. Use
+		<emphasis>Box::into_raw()</emphasis> to transfer ownership to the raw
+		pointer, and <emphasis>Box::from_raw()</emphasis> in the resume callback
+		to recover it. Rust's ownership system ensures exactly one free.
+		</para>
+		<para>
+		For <emphasis>async_launch()</emphasis> (fire-and-forget where a
+		different process may resume), you would need
+		<emphasis>shm_malloc</emphasis> instead.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 8: SAFETY GUARANTEES ============ -->
+	<section id="scripting_safety" xreflabel="Safety Guarantees">
+	<title>Safety Guarantees</title>
+	<itemizedlist>
+	<listitem><para>
+		<emphasis role='bold'>Panic isolation:</emphasis> If your handler
+		panics, the panic is caught at two boundaries (your function + the
+		module dispatcher). &osips; continues running and the route returns
+		<emphasis role='bold'>-1</emphasis>.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>Symbol isolation:</emphasis> Your
+		<emphasis>.so</emphasis> is loaded with
+		<emphasis>RTLD_LOCAL</emphasis>, so its symbols do not leak into the
+		&osips; global namespace or conflict with other modules.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>Fail-fast loading:</emphasis>
+		<emphasis>RTLD_NOW</emphasis> ensures all symbols are resolved at load
+		time. If your <emphasis>.so</emphasis> has missing dependencies,
+		&osips; will fail at startup with a clear error, not at runtime.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>Function caching:</emphasis> After the first
+		<emphasis>dlsym</emphasis> lookup, function pointers are cached in a
+		HashMap. Subsequent calls to the same function avoid repeated symbol
+		resolution.
+	</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<!-- ============ SECTION 9: TROUBLESHOOTING ============ -->
+	<section id="scripting_troubleshooting" xreflabel="Troubleshooting">
+	<title>Troubleshooting</title>
+
+	<section id="scripting_ts_dlopen" xreflabel="dlopen failed">
+		<title>"dlopen failed: cannot open shared object file"</title>
+		<itemizedlist>
+		<listitem><para>
+			Check the path in <emphasis>script_name</emphasis> is absolute and
+			readable by the &osips; user.
+		</para></listitem>
+		<listitem><para>
+			Verify the <emphasis>.so</emphasis> exists:
+			<emphasis>ls -la /path/to/libmy_handler.so</emphasis>
+		</para></listitem>
+		<listitem><para>
+			Check library dependencies:
+			<emphasis>ldd /path/to/libmy_handler.so</emphasis>
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="scripting_ts_notfound" xreflabel="function not found">
+		<title>"function not found in /path/to/lib.so"</title>
+		<itemizedlist>
+		<listitem><para>
+			Ensure you used <emphasis>opensips_handler!</emphasis> (which
+			applies <emphasis>#[no_mangle]</emphasis>).
+		</para></listitem>
+		<listitem><para>
+			Check exported symbols:
+			<emphasis>nm -D /path/to/libmy_handler.so | grep your_function</emphasis>
+		</para></listitem>
+		<listitem><para>
+			Verify crate-type is <emphasis>cdylib</emphasis> in your
+			Cargo.toml.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="scripting_ts_noscript" xreflabel="no script loaded">
+		<title>"rust_exec called but no script loaded"</title>
+		<itemizedlist>
+		<listitem><para>
+			Add <emphasis>modparam("rust", "script_name",
+			"/path/to/lib.so")</emphasis> to your config.
+		</para></listitem>
+		<listitem><para>
+			The <emphasis>modparam</emphasis> must appear
+			<emphasis>before</emphasis> the route block.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="scripting_ts_panics" xreflabel="Handler panics">
+		<title>Handler panics</title>
+		<itemizedlist>
+		<listitem><para>
+			Check &osips; logs for "panic in function_name(): ..." messages.
+		</para></listitem>
+		<listitem><para>
+			The panic message includes the Rust panic payload for debugging.
+		</para></listitem>
+		<listitem><para>
+			The route continues with return value
+			<emphasis role='bold'>-1</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="scripting_ts_version" xreflabel="Version mismatch">
+		<title>Version mismatch</title>
+		<itemizedlist>
+		<listitem><para>
+			Your script crate must use the same <emphasis>opensips-rs</emphasis>
+			SDK version as the module.
+		</para></listitem>
+		<listitem><para>
+			Rebuild both the module and your script when upgrading &osips;.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	</section>
+
+</chapter>

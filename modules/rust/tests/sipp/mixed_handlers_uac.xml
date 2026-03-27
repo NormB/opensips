@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  SIPp UAC scenario: Mixed Handlers Integration Test
+
+  Exercises the full route chain: caller_screening (pass) → request_logger →
+  set_routing_flags → append_custom_header → 200 OK.
+
+  This scenario sends a normal (non-blocked) INVITE and expects 200 OK,
+  verifying that all handlers in the chain execute without errors.
+  Check OpenSIPS logs for output from each handler.
+
+  Usage:
+    sipp -sf mixed_handlers_uac.xml 127.0.0.1:5060 -m 5 -r 1
+
+  Expected: 200 OK (all handlers in chain succeed)
+-->
+<scenario name="Mixed Handlers Integration Test">
+
+  <!-- Send INVITE with headers that multiple handlers will inspect -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:+15551234567@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Integration Test" <sip:integtest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:+15551234567@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:integtest@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      User-Agent: SIPp-MixedTest/1.0
+      X-Route-To: sip:10.0.0.100:5060
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1 1 IN IP4 [local_ip]
+      s=Mixed Handlers Test
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 6000 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK (all handlers passed) -->
+  <recv response="200" timeout="5000">
+  </recv>
+
+  <!-- Send ACK -->
+  <send>
+    <![CDATA[
+      ACK sip:+15551234567@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Integration Test" <sip:integtest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:+15551234567@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+</scenario>
