@@ -275,6 +275,57 @@ modparam("rust_concurrent_calls", "account_var", "$rU")
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_use_dialog_profiles" xreflabel="use_dialog_profiles">
+		<title><varname>use_dialog_profiles</varname> (integer)</title>
+		<para>
+		When set to 1, use dialog profiles (via
+		<function>get_profile_size()</function> and
+		<function>set_dlg_profile()</function>) for cross-worker
+		accurate concurrent call counts. This requires dialog.so
+		to be loaded.
+		</para>
+		<para>
+		When set to 0, the module uses a per-worker HashMap for
+		counting, which is faster but only sees calls handled by
+		the same worker process.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>use_dialog_profiles</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "use_dialog_profiles", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_profile_name" xreflabel="profile_name">
+		<title><varname>profile_name</varname> (string)</title>
+		<para>
+		The dialog profile name used for cross-worker counting when
+		<varname>use_dialog_profiles</varname> is enabled. This
+		profile must be configured in the dialog module.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>concurrent_calls</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>profile_name</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "profile_name", "concurrent_calls")
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
