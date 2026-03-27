@@ -1,8 +1,8 @@
 //! Shared memory primitives for cross-worker state.
 //!
-//! OpenSIPS workers are separate processes (fork model). After fork,
+//! `OpenSIPS` workers are separate processes (fork model). After fork,
 //! each worker has its own private memory. To share state across workers,
-//! data must live in OpenSIPS shared memory (shm), which is mapped into
+//! data must live in `OpenSIPS` shared memory (shm), which is mapped into
 //! all worker processes at the same virtual address.
 //!
 //! # Why Atomics Work Across Processes
@@ -35,7 +35,7 @@ extern "C" {
     fn opensips_rs_shm_free(p: *mut c_void);
 }
 
-/// An atomic 64-bit counter in OpenSIPS shared memory.
+/// An atomic 64-bit counter in `OpenSIPS` shared memory.
 ///
 /// Visible to ALL worker processes. Uses hardware atomic instructions —
 /// no locks needed, no syscalls, just a single CPU instruction per operation.
@@ -67,7 +67,7 @@ unsafe impl Sync for SharedAtomicCounter {}
 impl SharedAtomicCounter {
     /// Allocate a new counter in shared memory, initialized to 0.
     ///
-    /// MUST be called before fork (during `mod_init`). After fork,
+    /// Must be called before fork (during `mod_init`). After fork,
     /// all workers share the same physical counter.
     ///
     /// Returns `None` if shared memory allocation fails.

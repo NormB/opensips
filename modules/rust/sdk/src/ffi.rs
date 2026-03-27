@@ -34,7 +34,7 @@ where
                 "unknown panic".to_string()
             };
             // Log via our shim if available, otherwise eprintln
-            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {}", msg));
+            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {msg}"));
             -1
         }
     }
@@ -56,7 +56,7 @@ where
             } else {
                 "unknown panic".to_string()
             };
-            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {}", msg));
+            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {msg}"));
             -1
         }
     }

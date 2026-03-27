@@ -1,7 +1,7 @@
 //! Command function traits and the commands! macro.
 //!
 //! Provides the mechanism for declaring script-callable functions
-//! that OpenSIPS can invoke from opensips.cfg routes.
+//! that `OpenSIPS` can invoke from opensips.cfg routes.
 
 use std::ffi::{c_int, c_void};
 
@@ -21,7 +21,7 @@ pub trait CommandFunctionParam {
     /// The CMD_PARAM_* flags for this parameter type.
     const FLAGS: c_int;
 
-    /// Extract the parameter from the raw void pointer passed by OpenSIPS.
+    /// Extract the parameter from the raw void pointer passed by `OpenSIPS`.
     ///
     /// Returns `None` if the pointer is null or the data is invalid
     /// (e.g. invalid UTF-8). Callers must handle the failure explicitly.

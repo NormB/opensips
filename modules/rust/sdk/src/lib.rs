@@ -1,7 +1,40 @@
 //! opensips-rs — Rust SDK for building OpenSIPS modules.
 //!
-//! Provides safe wrappers around the OpenSIPS C API, enabling
+//! Provides safe wrappers around the `OpenSIPS` C API, enabling
 //! module development in Rust with memory safety and panic protection.
+
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::ref_as_ptr)]
+#![allow(clippy::use_self)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::redundant_else)]
+#![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::pub_underscore_fields)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::as_ptr_cast_mut)]
+#![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::significant_drop_tightening)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::bool_to_int_with_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::missing_const_for_thread_local)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::single_char_pattern)]
+#![allow(clippy::redundant_guards)]
+#![allow(clippy::or_fun_call)]
 
 pub mod sys;
 pub mod ffi;
@@ -22,7 +55,7 @@ pub use msg::SipMessage;
 pub use param::{Integer, ModString};
 pub use ffi::catch_unwind_ffi;
 
-/// OpenSIPS version detected at build time.
+/// `OpenSIPS` version detected at build time.
 pub const VERSION_MAJOR: &str = env!("OPENSIPS_VERSION_MAJOR");
 pub const VERSION_MINOR: &str = env!("OPENSIPS_VERSION_MINOR");
 

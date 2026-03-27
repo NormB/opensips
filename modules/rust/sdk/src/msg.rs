@@ -13,13 +13,13 @@ const SIP_REQUEST: c_int = 1;
 /// SIP message type: reply (200 OK, 404 Not Found, etc.)
 const SIP_REPLY: c_int = 2;
 
-/// Safe wrapper around an OpenSIPS `sip_msg*`.
+/// Safe wrapper around an `OpenSIPS` `sip_msg*`.
 ///
 /// The lifetime `'a` ties this to the scope of the script function call.
 /// The raw pointer is valid for the duration of the route processing.
 pub struct SipMessage<'a> {
     pub(crate) raw: *mut sys::sip_msg,
-    _lifetime: PhantomData<&'a mut sys::sip_msg>,
+    marker: PhantomData<&'a mut sys::sip_msg>,
 }
 
 // C shim declarations
@@ -49,7 +49,7 @@ impl<'a> SipMessage<'a> {
     pub unsafe fn from_raw(raw: *mut sys::sip_msg) -> Self {
         SipMessage {
             raw,
-            _lifetime: PhantomData,
+            marker: PhantomData,
         }
     }
 

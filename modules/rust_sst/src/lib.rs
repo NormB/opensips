@@ -18,7 +18,7 @@
 //! `rust_sst_check()` and `rust_sst_update()` remain available for
 //! operators who want per-call control over SST negotiation.
 //!
-//! # OpenSIPS config (automatic mode)
+//! # `OpenSIPS` config (automatic mode)
 //!
 //! ```text
 //! loadmodule "dialog.so"
@@ -36,7 +36,7 @@
 //! }
 //! ```
 //!
-//! # OpenSIPS config (script override)
+//! # `OpenSIPS` config (script override)
 //!
 //! ```text
 //! route {
@@ -57,6 +57,39 @@
 //!     }
 //! }
 //! ```
+
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::use_self)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::ref_as_ptr)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::redundant_else)]
+#![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::as_ptr_cast_mut)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::pub_underscore_fields)]
+#![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::significant_drop_tightening)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::bool_to_int_with_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::missing_const_for_thread_local)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::single_char_pattern)]
+#![allow(clippy::redundant_guards)]
+#![allow(clippy::or_fun_call)]
 
 use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
@@ -196,7 +229,7 @@ fn build_session_expires_header(interval: u32, refresher: &Refresher) -> String 
 
 /// Build a Min-SE header value string.
 fn build_min_se_header(min_se: u32) -> String {
-    format!("{}", min_se)
+    min_se.to_string()
 }
 
 /// Parse a Session-Expires header value.
@@ -232,8 +265,7 @@ fn parse_min_se_value(header: &str) -> u32 {
 /// Check if the Supported header contains "timer".
 fn has_timer_support(supported_hdr: Option<&str>) -> bool {
     supported_hdr
-        .map(|h| h.split(',').any(|ext| ext.trim().eq_ignore_ascii_case("timer")))
-        .unwrap_or(false)
+        .is_some_and(|h| h.split(',').any(|ext| ext.trim().eq_ignore_ascii_case("timer")))
 }
 
 /// Negotiate session timer parameters for a 200 OK response.
@@ -283,6 +315,7 @@ fn get_our_interval() -> u32 {
 ///
 /// Parses SST headers from the request, initializes per-dialog state,
 /// registers per-dialog callbacks, and sets the initial dialog lifetime.
+#[allow(clippy::too_many_lines)]
 unsafe extern "C" fn sst_dialog_created_cb(
     dlg: *mut sys::dlg_cell,
     _type: c_int,
@@ -443,6 +476,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
 /// - 422 replies: adjusts min_se to prevent loops
 /// - 2XX replies to INVITE/UPDATE: inserts Session-Expires + Require: timer,
 ///   sets dialog lifetime
+#[allow(clippy::too_many_lines)]
 unsafe extern "C" fn sst_dialog_response_fwded_cb(
     dlg: *mut sys::dlg_cell,
     _type: c_int,
@@ -474,8 +508,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
     // Handle 422 — adjust min_se to prevent loop
     if status_code == 422 {
         let reply_min_se = msg.header("Min-SE")
-            .map(|h| parse_min_se_value(&h.to_string()))
-            .unwrap_or(0);
+            .map_or(0, parse_min_se_value);
 
         if reply_min_se > 0 {
             TRACKER.with(|t| {
@@ -502,7 +535,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
     }
 
     // Only process 2XX responses
-    if status_code < 200 || status_code >= 300 {
+    if !(200..300).contains(&status_code) {
         return;
     }
 
@@ -584,10 +617,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
                 }).unwrap_or(our_interval)
             });
 
-            let se_hdr_val = format!(
-                "Session-Expires: {};refresher=uac\r\n",
-                interval
-            );
+            let se_hdr_val = format!("Session-Expires: {interval};refresher=uac\r\n");
             let _ = msg.call("append_hf", &[&se_hdr_val]);
             let _ = msg.call("append_hf", &["Require: timer\r\n"]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
@@ -626,6 +656,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
 /// DLGCB_REQ_WITHIN — re-INVITE or UPDATE within the dialog.
 ///
 /// Updates the dialog lifetime based on the new Session-Expires value.
+#[allow(clippy::too_many_lines)]
 unsafe extern "C" fn sst_dialog_request_within_cb(
     dlg: *mut sys::dlg_cell,
     _type: c_int,
@@ -696,7 +727,7 @@ unsafe extern "C" fn sst_dialog_request_within_cb(
         }
     } else if msg.is_reply() {
         let status_code = msg.status_code().unwrap_or(0);
-        if status_code >= 200 && status_code < 300 {
+        if (200..300).contains(&status_code) {
             let se_hdr = msg.header("Session-Expires").map(|s| s.to_string());
             let supported_hdr = msg.header("Supported").map(|s| s.to_string());
             let has_timer = has_timer_support(supported_hdr.as_deref());
@@ -865,7 +896,6 @@ unsafe extern "C" fn w_rust_sst_check(
                 Some((interval, refresher)) => {
                     let min_se_hdr = sip_msg.header("Min-SE");
                     let req_min: u32 = min_se_hdr
-                        .as_deref()
                         .and_then(|v| v.trim().parse().ok())
                         .unwrap_or(0);
                     (interval, req_min, refresher)

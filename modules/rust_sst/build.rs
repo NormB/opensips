@@ -1,5 +1,5 @@
-//! build.rs — Extract OPENSIPS_FULL_VERSION, OPENSIPS_COMPILE_FLAGS,
-//! and SCM info from the OpenSIPS source tree.
+//! build.rs — Extract `OPENSIPS_FULL_VERSION`, `OPENSIPS_COMPILE_FLAGS`,
+//! and SCM info from the `OpenSIPS` source tree.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -25,12 +25,12 @@ fn main() {
         let mut cmd = Command::new("cc");
         cmd.arg("-o").arg(&probe_bin)
            .arg(&probe_src)
-           .arg(format!("-I{}", src_dir));
+           .arg(format!("-I{src_dir}"));
 
         for (name, val) in &dflags {
             match val {
-                Some(v) => { cmd.arg(format!("-D{}={}", name, v)); }
-                None => { cmd.arg(format!("-D{}", name)); }
+                Some(v) => { cmd.arg(format!("-D{name}={v}")); }
+                None => { cmd.arg(format!("-D{name}")); }
             }
         }
 
@@ -41,9 +41,9 @@ fn main() {
                         let stdout = String::from_utf8_lossy(&o.stdout);
                         for line in stdout.lines() {
                             if let Some(v) = line.strip_prefix("FULL_VERSION=") {
-                                println!("cargo:rustc-env=OPENSIPS_FULL_VERSION={}", v);
+                                println!("cargo:rustc-env=OPENSIPS_FULL_VERSION={v}");
                             } else if let Some(v) = line.strip_prefix("COMPILE_FLAGS=") {
-                                println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS={}", v);
+                                println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS={v}");
                             }
                         }
                         return;

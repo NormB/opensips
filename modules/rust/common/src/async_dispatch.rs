@@ -18,6 +18,8 @@ pub struct FireAndForget {
 impl FireAndForget {
     /// Create a new fire-and-forget dispatcher.
     /// Spawns a tokio runtime with a background task that drains the queue.
+    /// # Panics
+    /// Panics if the tokio runtime cannot be created.
     pub fn new(url: String, max_queue: usize, timeout_secs: u64, content_type: String) -> Self {
         let (tx, mut rx) = mpsc::channel::<String>(max_queue);
 
@@ -144,7 +146,7 @@ mod tests {
             "application/json".to_string(),
         );
         for i in 0..10 {
-            ff.send(format!("msg{}", i));
+            ff.send(format!("msg{i}"));
         }
         assert_eq!(ff.sent.get(), 10);
         assert_eq!(ff.dropped.get(), 0);

@@ -1,4 +1,4 @@
-//! HTTP connection pool builder using rustls (never system OpenSSL).
+//! HTTP connection pool builder using rustls (never system `OpenSSL`).
 //!
 //! Each service module creates its own pool with its own config.
 //! The pool is created once per worker in child_init via OnceLock.
@@ -9,6 +9,12 @@ use std::time::Duration;
 /// Per-worker HTTP client pool. Created in child_init, reused for all requests.
 pub struct Pool {
     client: OnceLock<reqwest::blocking::Client>,
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Pool {
@@ -55,9 +61,9 @@ impl Pool {
     /// HTTP GET, return body as string.
     pub fn get_url(&self, url: &str) -> Result<(u16, String), String> {
         let client = self.get().ok_or("HTTP pool not initialized")?;
-        let resp = client.get(url).send().map_err(|e| format!("HTTP GET failed: {}", e))?;
+        let resp = client.get(url).send().map_err(|e| format!("HTTP GET failed: {e}"))?;
         let status = resp.status().as_u16();
-        let body = resp.text().map_err(|e| format!("body read failed: {}", e))?;
+        let body = resp.text().map_err(|e| format!("body read failed: {e}"))?;
         Ok((status, body))
     }
 
@@ -68,9 +74,9 @@ impl Pool {
             .header("Content-Type", content_type)
             .body(body.to_string())
             .send()
-            .map_err(|e| format!("HTTP POST failed: {}", e))?;
+            .map_err(|e| format!("HTTP POST failed: {e}"))?;
         let status = resp.status().as_u16();
-        let resp_body = resp.text().map_err(|e| format!("body read failed: {}", e))?;
+        let resp_body = resp.text().map_err(|e| format!("body read failed: {e}"))?;
         Ok((status, resp_body))
     }
 }

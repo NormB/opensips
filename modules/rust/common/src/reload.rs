@@ -59,7 +59,7 @@ impl<T> FileLoader<T> {
 
     fn read_file(path: &str, parse_line: fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path, e))?;
+            .map_err(|e| format!("failed to read {path}: {e}"))?;
         let entries: Vec<String> = content
             .lines()
             .filter_map(parse_line)

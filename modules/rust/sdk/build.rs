@@ -1,6 +1,6 @@
-//! build.rs — Auto-detect OpenSIPS version and compile flags, generate bindings.
+//! build.rs — Auto-detect `OpenSIPS` version and compile flags, generate bindings.
 //!
-//! Instead of hardcoding defines, we extract them from OpenSIPS's own
+//! Instead of hardcoding defines, we extract them from `OpenSIPS`'s own
 //! build system via `make -n -B` dry-run. This ensures our bindings
 //! match the exact configuration the server was built with.
 
@@ -9,20 +9,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Locate OpenSIPS source
+    // Locate `OpenSIPS` source
     let src_dir = env::var("OPENSIPS_SRC_DIR")
         .unwrap_or_else(|_| "/usr/local/src/opensips".to_string());
     let src_path = Path::new(&src_dir);
 
-    if !src_path.join("Makefile.defs").exists() {
-        panic!(
-            "OpenSIPS source not found at {}. Set OPENSIPS_SRC_DIR.",
-            src_dir
-        );
-    }
+    assert!(
+        src_path.join("Makefile.defs").exists(),
+        "`OpenSIPS` source not found at {src_dir}. Set OPENSIPS_SRC_DIR.",
+    );
 
     println!("cargo:rerun-if-env-changed=OPENSIPS_SRC_DIR");
     println!("cargo:rerun-if-changed=bindings.h.in");
@@ -30,26 +29,26 @@ fn main() {
 
     // Parse version from Makefile.defs
     let (ver_major, ver_minor) = parse_version(src_path);
-    println!("cargo:rustc-env=OPENSIPS_VERSION_MAJOR={}", ver_major);
-    println!("cargo:rustc-env=OPENSIPS_VERSION_MINOR={}", ver_minor);
+    println!("cargo:rustc-env=OPENSIPS_VERSION_MAJOR={ver_major}");
+    println!("cargo:rustc-env=OPENSIPS_VERSION_MINOR={ver_minor}");
 
-    // Extract -D flags from OpenSIPS build system
+    // Extract -D flags from `OpenSIPS` build system
     let dflags = extract_opensips_dflags(src_path);
 
     // Build #define directives for the header
     let defines_for_header: String = dflags
         .iter()
-        .map(|(name, val)| match val {
-            Some(v) => format!("#define {} {}", name, v),
-            None => format!("#define {}", name),
-        })
+        .map(|(name, val)| val.as_ref().map_or_else(
+            || format!("#define {name}"),
+            |v| format!("#define {name} {v}"),
+        ))
         .collect::<Vec<_>>()
         .join("\n");
 
     // Run version probe to extract exact OPENSIPS_FULL_VERSION and OPENSIPS_COMPILE_FLAGS
     let (full_version, compile_flags) = probe_version_strings(src_path, &dflags);
-    println!("cargo:rustc-env=OPENSIPS_FULL_VERSION={}", full_version);
-    println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS={}", compile_flags);
+    println!("cargo:rustc-env=OPENSIPS_FULL_VERSION={full_version}");
+    println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS={compile_flags}");
 
     // Generate bindings.h from template
     let template = fs::read_to_string("bindings.h.in").expect("Failed to read bindings.h.in");
@@ -65,7 +64,7 @@ fn main() {
     // Run bindgen
     let bindings = bindgen::Builder::default()
         .header(bindings_h.to_str().unwrap())
-        .clang_arg(format!("-I{}", src_dir))
+        .clang_arg(format!("-I{src_dir}"))
         // Allow the types we need
         .allowlist_type("module_exports")
         .allowlist_type("cmd_export_.*")
@@ -137,7 +136,7 @@ fn main() {
         .write_to_file(&sys_rs)
         .expect("Failed to write sys.rs");
 
-    // Compile C shim with the same flags OpenSIPS uses
+    // Compile C shim with the same flags `OpenSIPS` uses
     let shim_path = Path::new("shim.c");
     if shim_path.exists() {
         let mut build = cc::Build::new();
@@ -154,9 +153,9 @@ fn main() {
     }
 }
 
-/// Extract -D flags from OpenSIPS's `make -n -B` output.
+/// Extract -D flags from `OpenSIPS`'s `make -n -B` output.
 ///
-/// This is the key insight: instead of hardcoding, we ask OpenSIPS's
+/// This is the key insight: instead of hardcoding, we ask `OpenSIPS`'s
 /// own build system what flags it uses, then reuse them verbatim.
 fn extract_opensips_dflags(src: &Path) -> Vec<(String, Option<String>)> {
     let output = Command::new("make")
@@ -168,7 +167,7 @@ fn extract_opensips_dflags(src: &Path) -> Vec<(String, Option<String>)> {
     let stdout = match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
         Err(e) => {
-            eprintln!("cargo:warning=Failed to run make -n -B: {}", e);
+            eprintln!("cargo:warning=Failed to run make -n -B: {e}");
             return fallback_dflags(src);
         }
     };
@@ -178,12 +177,9 @@ fn extract_opensips_dflags(src: &Path) -> Vec<(String, Option<String>)> {
         .lines()
         .find(|l| l.starts_with("cc ") || l.starts_with("gcc "));
 
-    let cc_line = match cc_line {
-        Some(l) => l,
-        None => {
-            eprintln!("cargo:warning=No cc line found in make -n -B output, using fallback");
-            return fallback_dflags(src);
-        }
+    let Some(cc_line) = cc_line else {
+        eprintln!("cargo:warning=No cc line found in make -n -B output, using fallback");
+        return fallback_dflags(src);
     };
 
     // Extract all -D flags
@@ -238,7 +234,7 @@ fn parse_dflags_from_cc_line(line: &str) -> Vec<(String, Option<String>)> {
     flags
 }
 
-/// Fallback: parse defines from Makefile.conf if make -n fails.
+/// Fallback: parse defines from `Makefile.conf` if make -n fails.
 fn fallback_dflags(src: &Path) -> Vec<(String, Option<String>)> {
     let conf_path = src.join("Makefile.conf");
     let content = if conf_path.exists() {
@@ -269,7 +265,7 @@ fn fallback_dflags(src: &Path) -> Vec<(String, Option<String>)> {
     defs
 }
 
-/// Parse VERSION_MAJOR and VERSION_MINOR from Makefile.defs
+/// Parse `VERSION_MAJOR` and `VERSION_MINOR` from `Makefile.defs`
 fn parse_version(src: &Path) -> (u32, u32) {
     let content = fs::read_to_string(src.join("Makefile.defs"))
         .expect("Failed to read Makefile.defs");
@@ -292,14 +288,12 @@ fn parse_version(src: &Path) -> (u32, u32) {
         }
     }
 
-    if major == 0 {
-        panic!("Could not parse VERSION_MAJOR from Makefile.defs");
-    }
+    assert!(major != 0, "Could not parse VERSION_MAJOR from Makefile.defs");
 
     (major, minor)
 }
 
-/// Compile and run a tiny C program to extract OPENSIPS_FULL_VERSION and OPENSIPS_COMPILE_FLAGS.
+/// Compile and run a tiny C program to extract `OPENSIPS_FULL_VERSION` and `OPENSIPS_COMPILE_FLAGS`.
 /// This ensures the Rust module's version strings match the core exactly.
 fn probe_version_strings(src: &Path, dflags: &[(String, Option<String>)]) -> (String, String) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -319,8 +313,8 @@ fn probe_version_strings(src: &Path, dflags: &[(String, Option<String>)]) -> (St
 
     for (name, val) in dflags {
         match val {
-            Some(v) => { cmd.arg(format!("-D{}={}", name, v)); }
-            None => { cmd.arg(format!("-D{}", name)); }
+            Some(v) => { cmd.arg(format!("-D{name}={v}")); }
+            None => { cmd.arg(format!("-D{name}")); }
         }
     }
 
@@ -328,12 +322,11 @@ fn probe_version_strings(src: &Path, dflags: &[(String, Option<String>)]) -> (St
     match output {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
-            eprintln!("cargo:warning=version_probe compilation failed: {}",
-                String::from_utf8_lossy(&o.stderr));
+            eprintln!("cargo:warning=version_probe compilation failed: {}", String::from_utf8_lossy(&o.stderr));
             return ("unknown".to_string(), "unknown".to_string());
         }
         Err(e) => {
-            eprintln!("cargo:warning=Failed to run cc: {}", e);
+            eprintln!("cargo:warning=Failed to run cc: {e}");
             return ("unknown".to_string(), "unknown".to_string());
         }
     }

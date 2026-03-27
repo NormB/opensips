@@ -11,11 +11,17 @@ use std::ptr;
 
 /// An integer module parameter.
 ///
-/// OpenSIPS writes to the inner value during `modparam()` processing.
+/// `OpenSIPS` writes to the inner value during `modparam()` processing.
 /// Thread-safety: config parsing is single-threaded.
 pub struct Integer(UnsafeCell<c_int>);
 
 unsafe impl Sync for Integer {}
+
+impl Default for Integer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Integer {
     /// Create a new integer parameter with default value 0.
@@ -46,11 +52,17 @@ impl Integer {
 
 /// A string module parameter.
 ///
-/// OpenSIPS writes a `char*` pointer during `modparam()` processing.
+/// `OpenSIPS` writes a `char*` pointer during `modparam()` processing.
 /// The pointer refers to pkg_malloc'd memory owned by OpenSIPS.
 pub struct ModString(UnsafeCell<*mut c_char>);
 
 unsafe impl Sync for ModString {}
+
+impl Default for ModString {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ModString {
     /// Create a new string parameter with a null default.
@@ -61,7 +73,7 @@ impl ModString {
     /// Get the current value as a Rust &str.
     ///
     /// # Safety
-    /// The returned reference borrows from OpenSIPS pkg memory.
+    /// The returned reference borrows from `OpenSIPS` pkg memory.
     /// It is valid for the lifetime of the module.
     pub unsafe fn get_value(&self) -> Option<&str> {
         let p = *self.0.get();
@@ -79,7 +91,7 @@ impl ModString {
 
 /// Trait for types that can be used as module parameters.
 pub trait ModuleParameter {
-    /// The OpenSIPS param type constant (STR_PARAM or INT_PARAM).
+    /// The `OpenSIPS` param type constant (STR_PARAM or INT_PARAM).
     const PARAM_TYPE: u32;
 
     /// Get a void pointer to the underlying storage.

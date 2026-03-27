@@ -1,4 +1,4 @@
-//! Persistent HTTP connection pool using reqwest.
+//! Persistent HTTP connection pool using `reqwest`.
 //!
 //! Demonstrates a pattern that Python/Lua modules cannot do safely:
 //! persistent connections that survive across SIP transactions.
