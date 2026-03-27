@@ -4,6 +4,11 @@
 //! process. Files are parsed line-by-line (comments and blanks skipped).
 //! Matching can be exact (HashSet) or prefix-based (Vec of prefixes).
 //!
+//! Supports typed files per check category (IP, UA, domain) in addition
+//! to generic catch-all files. Typed check functions query only the
+//! relevant typed file plus the generic file; untyped check functions
+//! query all files.
+//!
 //! Allowlist takes precedence: if a value is in both lists, it is allowed.
 //!
 //! # OpenSIPS config
@@ -11,11 +16,29 @@
 //! ```text
 //! loadmodule "rust_acl.so"
 //! modparam("rust_acl", "blocklist_file", "/etc/opensips/blocklist.txt")
+//! modparam("rust_acl", "blocklist_ip_file", "/etc/opensips/blocklist_ip.txt")
+//! modparam("rust_acl", "blocklist_ua_file", "/etc/opensips/blocklist_ua.txt")
+//! modparam("rust_acl", "blocklist_domain_file", "/etc/opensips/blocklist_domain.txt")
 //! modparam("rust_acl", "allowlist_file", "/etc/opensips/allowlist.txt")
+//! modparam("rust_acl", "allowlist_ip_file", "/etc/opensips/allowlist_ip.txt")
+//! modparam("rust_acl", "allowlist_ua_file", "/etc/opensips/allowlist_ua.txt")
+//! modparam("rust_acl", "allowlist_domain_file", "/etc/opensips/allowlist_domain.txt")
 //! modparam("rust_acl", "match_mode", "prefix")
 //!
 //! route {
-//!     # Check blocklist only
+//!     # Check IP-specific blocklist only
+//!     if (!check_blocklist_ip("$si")) {
+//!         sl_send_reply(403, "Forbidden");
+//!         exit;
+//!     }
+//!
+//!     # Check UA-specific blocklist only
+//!     if (!check_blocklist_ua("$ua")) {
+//!         sl_send_reply(403, "Forbidden");
+//!         exit;
+//!     }
+//!
+//!     # Check all blocklists (generic + all typed)
 //!     if (!check_blocklist("$si")) {
 //!         sl_send_reply(403, "Forbidden");
 //!         exit;
@@ -89,11 +112,27 @@ static ALLOWLIST_FILE: ModString = ModString::new();
 /// Match mode: "exact" or "prefix" (default: "prefix").
 static MATCH_MODE: ModString = ModString::new();
 
+// Typed blocklist files (optional)
+static BLOCKLIST_IP_FILE: ModString = ModString::new();
+static BLOCKLIST_UA_FILE: ModString = ModString::new();
+static BLOCKLIST_DOMAIN_FILE: ModString = ModString::new();
+
+// Typed allowlist files (optional)
+static ALLOWLIST_IP_FILE: ModString = ModString::new();
+static ALLOWLIST_UA_FILE: ModString = ModString::new();
+static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
+
 // ── ACL data structures ─────────────────────────────────────────
 
 enum AclData {
     Exact(HashSet<String>),
     Prefix(Vec<String>),
+}
+
+/// A loaded typed file: its data and loader for reload support.
+struct TypedAcl {
+    data: AclData,
+    loader: FileLoader<Vec<String>>,
 }
 
 // ── Pure check functions (testable without FFI) ──────────────────
@@ -120,6 +159,58 @@ fn build_acl_data(entries: &[String], mode: &str) -> AclData {
         "exact" => AclData::Exact(entries.iter().cloned().collect()),
         _ => AclData::Prefix(entries.to_vec()),
     }
+}
+
+/// Check a primary AclData plus an optional typed AclData.
+fn check_with_typed(primary: &AclData, typed: Option<&TypedAcl>, value: &str) -> bool {
+    if let Some(t) = typed {
+        if check_acl_data(&t.data, value) {
+            return true;
+        }
+    }
+    check_acl_data(primary, value)
+}
+
+/// Check a primary AclData plus ALL typed AclData (for untyped check functions).
+fn check_all(
+    primary: &AclData,
+    ip: Option<&TypedAcl>,
+    ua: Option<&TypedAcl>,
+    domain: Option<&TypedAcl>,
+    value: &str,
+) -> bool {
+    check_acl_data(primary, value)
+        || ip.map_or(false, |t| check_acl_data(&t.data, value))
+        || ua.map_or(false, |t| check_acl_data(&t.data, value))
+        || domain.map_or(false, |t| check_acl_data(&t.data, value))
+}
+
+/// Check an optional primary AclData plus an optional typed AclData.
+fn check_optional_with_typed(
+    primary: Option<&AclData>,
+    typed: Option<&TypedAcl>,
+    value: &str,
+) -> bool {
+    if let Some(t) = typed {
+        if check_acl_data(&t.data, value) {
+            return true;
+        }
+    }
+    primary.map_or(false, |data| check_acl_data(data, value))
+}
+
+/// Check an optional primary AclData plus ALL typed AclData.
+fn check_optional_all(
+    primary: Option<&AclData>,
+    ip: Option<&TypedAcl>,
+    ua: Option<&TypedAcl>,
+    domain: Option<&TypedAcl>,
+    value: &str,
+) -> bool {
+    primary.map_or(false, |data| check_acl_data(data, value))
+        || ip.map_or(false, |t| check_acl_data(&t.data, value))
+        || ua.map_or(false, |t| check_acl_data(&t.data, value))
+        || domain.map_or(false, |t| check_acl_data(&t.data, value))
 }
 
 // ── Auto-entry with TTL expiry ──────────────────────────────────
@@ -153,6 +244,14 @@ struct WorkerState {
     blocklist_loader: FileLoader<Vec<String>>,
     allowlist: Option<AclData>,
     allowlist_loader: Option<FileLoader<Vec<String>>>,
+    // Typed blocklist files
+    blocklist_ip: Option<TypedAcl>,
+    blocklist_ua: Option<TypedAcl>,
+    blocklist_domain: Option<TypedAcl>,
+    // Typed allowlist files
+    allowlist_ip: Option<TypedAcl>,
+    allowlist_ua: Option<TypedAcl>,
+    allowlist_domain: Option<TypedAcl>,
     auto_blocked: HashMap<String, AutoEntry>,
     auto_allowed: HashMap<String, AutoEntry>,
     stats: Stats,
@@ -167,6 +266,46 @@ thread_local! {
 
 fn build_vec(entries: Vec<String>) -> Vec<String> {
     entries
+}
+
+/// Load a typed file if the ModString has a value. Returns None if not configured.
+fn load_typed_file(
+    param: &ModString,
+    mode: &str,
+    label: &str,
+) -> Result<Option<TypedAcl>, String> {
+    match unsafe { param.get_value() } {
+        Some(path) if !path.is_empty() => {
+            let path_owned = path.to_string();
+            match FileLoader::new(&path_owned, default_line_parser, build_vec) {
+                Ok(loader) => {
+                    let entries = loader.get();
+                    let data = build_acl_data(&entries, mode);
+                    let count = entries.len();
+                    drop(entries);
+                    opensips_log!(INFO, "rust_acl",
+                        "  {}={} ({} entries)", label, path, count);
+                    Ok(Some(TypedAcl { data, loader }))
+                }
+                Err(e) => Err(format!("failed to load {}: {}", label, e)),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Reload a typed ACL file. Returns the new entry count.
+fn reload_typed(typed: &mut TypedAcl, mode: &str, label: &str) -> Result<usize, String> {
+    match typed.loader.reload() {
+        Ok(count) => {
+            let entries = typed.loader.get();
+            typed.data = build_acl_data(&entries, mode);
+            drop(entries);
+            opensips_log!(INFO, "rust_acl", "{} reloaded: {} entries", label, count);
+            Ok(count)
+        }
+        Err(e) => Err(format!("{} reload failed: {}", label, e)),
+    }
 }
 
 // ── Module lifecycle ─────────────────────────────────────────────
@@ -251,6 +390,34 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
         _ => (None, None, 0),
     };
 
+    // Load typed blocklist files
+    let blocklist_ip = match load_typed_file(&BLOCKLIST_IP_FILE, &mode, "blocklist_ip_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+    let blocklist_ua = match load_typed_file(&BLOCKLIST_UA_FILE, &mode, "blocklist_ua_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+    let blocklist_domain = match load_typed_file(&BLOCKLIST_DOMAIN_FILE, &mode, "blocklist_domain_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+
+    // Load typed allowlist files
+    let allowlist_ip = match load_typed_file(&ALLOWLIST_IP_FILE, &mode, "allowlist_ip_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+    let allowlist_ua = match load_typed_file(&ALLOWLIST_UA_FILE, &mode, "allowlist_ua_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+    let allowlist_domain = match load_typed_file(&ALLOWLIST_DOMAIN_FILE, &mode, "allowlist_domain_file") {
+        Ok(v) => v,
+        Err(e) => { opensips_log!(ERR, "rust_acl", "{}", e); return -1; }
+    };
+
     let stats = Stats::new("rust_acl",
         &["checked", "blocked", "allowed", "auto_blocked", "auto_allowed",
           "entries_blocklist", "entries_allowlist", "reloads"]);
@@ -263,6 +430,12 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             blocklist_loader,
             allowlist,
             allowlist_loader,
+            blocklist_ip,
+            blocklist_ua,
+            blocklist_domain,
+            allowlist_ip,
+            allowlist_ua,
+            allowlist_domain,
             auto_blocked: HashMap::new(),
             auto_allowed: HashMap::new(),
             stats,
@@ -280,7 +453,7 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_acl", "module destroyed");
 }
 
-// ── Script function: check_blocklist(value) ──────────────────────
+// ── Script function: check_blocklist(value) — checks ALL blocklist files ──
 
 unsafe extern "C" fn w_check_blocklist(
     _msg: *mut sys::sip_msg,
@@ -303,8 +476,13 @@ unsafe extern "C" fn w_check_blocklist(
                 Some(state) => {
                     state.stats.inc("checked");
 
-                    let blocked = check_acl_data(&state.blocklist, value)
-                        || check_auto(&state.auto_blocked, value);
+                    let blocked = check_all(
+                        &state.blocklist,
+                        state.blocklist_ip.as_ref(),
+                        state.blocklist_ua.as_ref(),
+                        state.blocklist_domain.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_blocked, value);
 
                     if blocked {
                         state.stats.inc("blocked");
@@ -324,7 +502,145 @@ unsafe extern "C" fn w_check_blocklist(
     })
 }
 
-// ── Script function: check_allowlist(value) ──────────────────────
+// ── Script function: check_blocklist_ip(ip) — checks IP blocklist + generic ──
+
+unsafe extern "C" fn w_check_blocklist_ip(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_blocklist_ip: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    state.stats.inc("checked");
+                    let blocked = check_with_typed(
+                        &state.blocklist,
+                        state.blocklist_ip.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_blocked, value);
+
+                    if blocked {
+                        state.stats.inc("blocked");
+                        -1
+                    } else {
+                        state.stats.inc("allowed");
+                        1
+                    }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_blocklist_ua(ua) — checks UA blocklist + generic ──
+
+unsafe extern "C" fn w_check_blocklist_ua(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_blocklist_ua: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    state.stats.inc("checked");
+                    let blocked = check_with_typed(
+                        &state.blocklist,
+                        state.blocklist_ua.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_blocked, value);
+
+                    if blocked {
+                        state.stats.inc("blocked");
+                        -1
+                    } else {
+                        state.stats.inc("allowed");
+                        1
+                    }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_blocklist_domain(domain) — checks domain blocklist + generic ──
+
+unsafe extern "C" fn w_check_blocklist_domain(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_blocklist_domain: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    state.stats.inc("checked");
+                    let blocked = check_with_typed(
+                        &state.blocklist,
+                        state.blocklist_domain.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_blocked, value);
+
+                    if blocked {
+                        state.stats.inc("blocked");
+                        -1
+                    } else {
+                        state.stats.inc("allowed");
+                        1
+                    }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_allowlist(value) — checks ALL allowlist files ──
 
 unsafe extern "C" fn w_check_allowlist(
     _msg: *mut sys::sip_msg,
@@ -345,10 +661,13 @@ unsafe extern "C" fn w_check_allowlist(
             let borrow = w.borrow();
             match borrow.as_ref() {
                 Some(state) => {
-                    let allowed = match &state.allowlist {
-                        Some(data) => check_acl_data(data, value),
-                        None => false,
-                    } || check_auto(&state.auto_allowed, value);
+                    let allowed = check_optional_all(
+                        state.allowlist.as_ref(),
+                        state.allowlist_ip.as_ref(),
+                        state.allowlist_ua.as_ref(),
+                        state.allowlist_domain.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_allowed, value);
 
                     if allowed { 1 } else { -1 }
                 }
@@ -362,7 +681,124 @@ unsafe extern "C" fn w_check_allowlist(
     })
 }
 
-// ── Script function: check_access(value) ─────────────────────────
+// ── Script function: check_allowlist_ip(ip) — checks IP allowlist + generic ──
+
+unsafe extern "C" fn w_check_allowlist_ip(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_allowlist_ip: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    let allowed = check_optional_with_typed(
+                        state.allowlist.as_ref(),
+                        state.allowlist_ip.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_allowed, value);
+
+                    if allowed { 1 } else { -1 }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_allowlist_ua(ua) — checks UA allowlist + generic ──
+
+unsafe extern "C" fn w_check_allowlist_ua(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_allowlist_ua: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    let allowed = check_optional_with_typed(
+                        state.allowlist.as_ref(),
+                        state.allowlist_ua.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_allowed, value);
+
+                    if allowed { 1 } else { -1 }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_allowlist_domain(domain) — checks domain allowlist + generic ──
+
+unsafe extern "C" fn w_check_allowlist_domain(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let value = match <&str as CommandFunctionParam>::from_raw(p0) {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_acl",
+                    "check_allowlist_domain: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    let allowed = check_optional_with_typed(
+                        state.allowlist.as_ref(),
+                        state.allowlist_domain.as_ref(),
+                        value,
+                    ) || check_auto(&state.auto_allowed, value);
+
+                    if allowed { 1 } else { -1 }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_acl",
+                        "ACL not initialized in this worker");
+                    -2
+                }
+            }
+        })
+    })
+}
+
+// ── Script function: check_access(value) — checks ALL files ─────
 
 unsafe extern "C" fn w_check_access(
     _msg: *mut sys::sip_msg,
@@ -391,12 +827,16 @@ unsafe extern "C" fn w_check_access(
                         return 1;
                     }
 
-                    // 2. Check file-based allowlist
-                    if let Some(ref al) = state.allowlist {
-                        if check_acl_data(al, value) {
-                            state.stats.inc("allowed");
-                            return 1;
-                        }
+                    // 2. Check ALL allowlist files (generic + typed)
+                    if check_optional_all(
+                        state.allowlist.as_ref(),
+                        state.allowlist_ip.as_ref(),
+                        state.allowlist_ua.as_ref(),
+                        state.allowlist_domain.as_ref(),
+                        value,
+                    ) {
+                        state.stats.inc("allowed");
+                        return 1;
                     }
 
                     // 3. Check auto-block
@@ -405,8 +845,14 @@ unsafe extern "C" fn w_check_access(
                         return -1;
                     }
 
-                    // 4. Check file-based blocklist
-                    if check_acl_data(&state.blocklist, value) {
+                    // 4. Check ALL blocklist files (generic + typed)
+                    if check_all(
+                        &state.blocklist,
+                        state.blocklist_ip.as_ref(),
+                        state.blocklist_ua.as_ref(),
+                        state.blocklist_domain.as_ref(),
+                        value,
+                    ) {
                         state.stats.inc("blocked");
                         return -1;
                     }
@@ -425,7 +871,7 @@ unsafe extern "C" fn w_check_access(
     })
 }
 
-// ── Script function: blocklist_reload() ──────────────────────────
+// ── Script function: blocklist_reload() — reloads ALL blocklist files ──
 
 unsafe extern "C" fn w_blocklist_reload(
     _msg: *mut sys::sip_msg,
@@ -437,6 +883,7 @@ unsafe extern "C" fn w_blocklist_reload(
             let mut borrow = w.borrow_mut();
             match borrow.as_mut() {
                 Some(state) => {
+                    // Reload generic blocklist
                     match state.blocklist_loader.reload() {
                         Ok(count) => {
                             let entries = state.blocklist_loader.get();
@@ -446,14 +893,35 @@ unsafe extern "C" fn w_blocklist_reload(
                             state.stats.inc("reloads");
                             opensips_log!(INFO, "rust_acl",
                                 "blocklist reloaded: {} entries", count);
-                            1
                         }
                         Err(e) => {
                             opensips_log!(ERR, "rust_acl",
                                 "blocklist reload failed: {}", e);
-                            -2
+                            return -2;
                         }
                     }
+
+                    // Reload typed blocklist files
+                    if let Some(ref mut typed) = state.blocklist_ip {
+                        if let Err(e) = reload_typed(typed, &state.mode, "blocklist_ip") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+                    if let Some(ref mut typed) = state.blocklist_ua {
+                        if let Err(e) = reload_typed(typed, &state.mode, "blocklist_ua") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+                    if let Some(ref mut typed) = state.blocklist_domain {
+                        if let Err(e) = reload_typed(typed, &state.mode, "blocklist_domain") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+
+                    1
                 }
                 None => {
                     opensips_log!(ERR, "rust_acl",
@@ -465,7 +933,7 @@ unsafe extern "C" fn w_blocklist_reload(
     })
 }
 
-// ── Script function: allowlist_reload() ──────────────────────────
+// ── Script function: allowlist_reload() — reloads ALL allowlist files ──
 
 unsafe extern "C" fn w_allowlist_reload(
     _msg: *mut sys::sip_msg,
@@ -477,6 +945,7 @@ unsafe extern "C" fn w_allowlist_reload(
             let mut borrow = w.borrow_mut();
             match borrow.as_mut() {
                 Some(state) => {
+                    // Reload generic allowlist
                     match state.allowlist_loader.as_ref() {
                         Some(loader) => {
                             match loader.reload() {
@@ -488,21 +957,41 @@ unsafe extern "C" fn w_allowlist_reload(
                                     state.stats.inc("reloads");
                                     opensips_log!(INFO, "rust_acl",
                                         "allowlist reloaded: {} entries", count);
-                                    1
                                 }
                                 Err(e) => {
                                     opensips_log!(ERR, "rust_acl",
                                         "allowlist reload failed: {}", e);
-                                    -2
+                                    return -2;
                                 }
                             }
                         }
                         None => {
-                            opensips_log!(WARN, "rust_acl",
-                                "allowlist_reload called but no allowlist_file configured");
-                            -2
+                            opensips_log!(DBG, "rust_acl",
+                                "no generic allowlist_file configured, skipping");
                         }
                     }
+
+                    // Reload typed allowlist files
+                    if let Some(ref mut typed) = state.allowlist_ip {
+                        if let Err(e) = reload_typed(typed, &state.mode, "allowlist_ip") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+                    if let Some(ref mut typed) = state.allowlist_ua {
+                        if let Err(e) = reload_typed(typed, &state.mode, "allowlist_ua") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+                    if let Some(ref mut typed) = state.allowlist_domain {
+                        if let Err(e) = reload_typed(typed, &state.mode, "allowlist_domain") {
+                            opensips_log!(ERR, "rust_acl", "{}", e);
+                            return -2;
+                        }
+                    }
+
+                    1
                 }
                 None => {
                     opensips_log!(ERR, "rust_acl",
@@ -666,7 +1155,7 @@ const TWO_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 9> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 15> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist"),
         function: Some(w_check_blocklist),
@@ -674,8 +1163,44 @@ static CMDS: SyncArray<sys::cmd_export_, 9> = SyncArray([
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
+        name: cstr_lit!("check_blocklist_ip"),
+        function: Some(w_check_blocklist_ip),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_blocklist_ua"),
+        function: Some(w_check_blocklist_ua),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_blocklist_domain"),
+        function: Some(w_check_blocklist_domain),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
         name: cstr_lit!("check_allowlist"),
         function: Some(w_check_allowlist),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_allowlist_ip"),
+        function: Some(w_check_allowlist_ip),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_allowlist_ua"),
+        function: Some(w_check_allowlist_ua),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_allowlist_domain"),
+        function: Some(w_check_allowlist_domain),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4,
     },
@@ -733,7 +1258,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 4> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 10> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
         type_: 1, // STR_PARAM
@@ -748,6 +1273,36 @@ static PARAMS: SyncArray<sys::param_export_, 4> = SyncArray([
         name: cstr_lit!("match_mode"),
         type_: 1, // STR_PARAM
         param_pointer: MATCH_MODE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("blocklist_ip_file"),
+        type_: 1,
+        param_pointer: BLOCKLIST_IP_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("blocklist_ua_file"),
+        type_: 1,
+        param_pointer: BLOCKLIST_UA_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("blocklist_domain_file"),
+        type_: 1,
+        param_pointer: BLOCKLIST_DOMAIN_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("allowlist_ip_file"),
+        type_: 1,
+        param_pointer: ALLOWLIST_IP_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("allowlist_ua_file"),
+        type_: 1,
+        param_pointer: ALLOWLIST_UA_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("allowlist_domain_file"),
+        type_: 1,
+        param_pointer: ALLOWLIST_DOMAIN_FILE.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1262,5 +1817,171 @@ mod tests {
 
         let _ = std::fs::remove_file(&bl_path);
         let _ = std::fs::remove_file(&al_path);
+    }
+
+    // ── Typed file tests (Task 34) ───────────────────────────────
+
+    fn make_typed_acl(entries: &[&str], mode: &str) -> TypedAcl {
+        use rust_common::reload::{default_line_parser, FileLoader};
+        use std::io::Write;
+
+        let path = format!("{}/rust_acl_typed_{}", std::env::temp_dir().display(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().subsec_nanos());
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for entry in entries {
+                writeln!(f, "{}", entry).unwrap();
+            }
+        }
+        let loader = FileLoader::new(&path, default_line_parser, build_vec).unwrap();
+        let e = loader.get();
+        let data = build_acl_data(&e, mode);
+        drop(e);
+        TypedAcl { data, loader }
+    }
+
+    #[test]
+    fn test_typed_ip_blocklist_isolation() {
+        // IP blocklist has IPs, UA blocklist has user-agents
+        let generic = build_acl_data(&["catch-all-entry".to_string()], "exact");
+        let ip_typed = make_typed_acl(&["192.168.1.100", "10.0.0.1"], "exact");
+        let ua_typed = make_typed_acl(&["friendly-scanner", "SIPVicious"], "exact");
+
+        // check_with_typed for IP should find IP entries but not UA entries
+        assert!(check_with_typed(&generic, Some(&ip_typed), "192.168.1.100"));
+        assert!(!check_with_typed(&generic, Some(&ip_typed), "friendly-scanner"));
+
+        // check_with_typed for UA should find UA entries but not IP entries
+        assert!(check_with_typed(&generic, Some(&ua_typed), "friendly-scanner"));
+        assert!(!check_with_typed(&generic, Some(&ua_typed), "192.168.1.100"));
+
+        // Generic catch-all should always be checked
+        assert!(check_with_typed(&generic, Some(&ip_typed), "catch-all-entry"));
+        assert!(check_with_typed(&generic, Some(&ua_typed), "catch-all-entry"));
+    }
+
+    #[test]
+    fn test_typed_domain_blocklist() {
+        let generic = build_acl_data(&[], "exact");
+        let domain_typed = make_typed_acl(&["spam.example.com", "evil.org"], "exact");
+
+        assert!(check_with_typed(&generic, Some(&domain_typed), "spam.example.com"));
+        assert!(check_with_typed(&generic, Some(&domain_typed), "evil.org"));
+        assert!(!check_with_typed(&generic, Some(&domain_typed), "good.example.com"));
+    }
+
+    #[test]
+    fn test_check_all_queries_every_typed_file() {
+        let generic = build_acl_data(&["generic-entry".to_string()], "exact");
+        let ip_typed = make_typed_acl(&["192.168.1.100"], "exact");
+        let ua_typed = make_typed_acl(&["bad-scanner"], "exact");
+        let domain_typed = make_typed_acl(&["evil.com"], "exact");
+
+        // check_all should find entries in any typed file
+        assert!(check_all(&generic, Some(&ip_typed), Some(&ua_typed), Some(&domain_typed), "192.168.1.100"));
+        assert!(check_all(&generic, Some(&ip_typed), Some(&ua_typed), Some(&domain_typed), "bad-scanner"));
+        assert!(check_all(&generic, Some(&ip_typed), Some(&ua_typed), Some(&domain_typed), "evil.com"));
+        assert!(check_all(&generic, Some(&ip_typed), Some(&ua_typed), Some(&domain_typed), "generic-entry"));
+        assert!(!check_all(&generic, Some(&ip_typed), Some(&ua_typed), Some(&domain_typed), "unknown"));
+    }
+
+    #[test]
+    fn test_check_all_with_none_typed() {
+        let generic = build_acl_data(&["only-generic".to_string()], "exact");
+
+        // All typed are None — only generic should be checked
+        assert!(check_all(&generic, None, None, None, "only-generic"));
+        assert!(!check_all(&generic, None, None, None, "not-in-generic"));
+    }
+
+    #[test]
+    fn test_check_optional_with_typed_allowlist() {
+        let generic_al = build_acl_data(&["trusted-generic".to_string()], "exact");
+        let ip_al = make_typed_acl(&["10.0.0.1"], "exact");
+
+        // With generic + typed IP allowlist
+        assert!(check_optional_with_typed(Some(&generic_al), Some(&ip_al), "10.0.0.1"));
+        assert!(check_optional_with_typed(Some(&generic_al), Some(&ip_al), "trusted-generic"));
+        assert!(!check_optional_with_typed(Some(&generic_al), Some(&ip_al), "unknown"));
+
+        // Without generic allowlist
+        assert!(check_optional_with_typed(None, Some(&ip_al), "10.0.0.1"));
+        assert!(!check_optional_with_typed(None, Some(&ip_al), "trusted-generic"));
+
+        // Without typed allowlist
+        assert!(check_optional_with_typed(Some(&generic_al), None, "trusted-generic"));
+        assert!(!check_optional_with_typed(Some(&generic_al), None, "10.0.0.1"));
+    }
+
+    #[test]
+    fn test_check_optional_all_allowlist() {
+        let generic_al = build_acl_data(&["trusted".to_string()], "exact");
+        let ip_al = make_typed_acl(&["10.0.0.1"], "exact");
+        let ua_al = make_typed_acl(&["good-agent"], "exact");
+        let domain_al = make_typed_acl(&["good.com"], "exact");
+
+        assert!(check_optional_all(Some(&generic_al), Some(&ip_al), Some(&ua_al), Some(&domain_al), "trusted"));
+        assert!(check_optional_all(Some(&generic_al), Some(&ip_al), Some(&ua_al), Some(&domain_al), "10.0.0.1"));
+        assert!(check_optional_all(Some(&generic_al), Some(&ip_al), Some(&ua_al), Some(&domain_al), "good-agent"));
+        assert!(check_optional_all(Some(&generic_al), Some(&ip_al), Some(&ua_al), Some(&domain_al), "good.com"));
+        assert!(!check_optional_all(Some(&generic_al), Some(&ip_al), Some(&ua_al), Some(&domain_al), "bad"));
+    }
+
+    #[test]
+    fn test_typed_check_does_not_cross_types() {
+        // This is the key isolation test: IP check should NOT match UA entries
+        let generic = build_acl_data(&[], "exact");
+        let ip_typed = make_typed_acl(&["192.168.1.100"], "exact");
+        let ua_typed = make_typed_acl(&["friendly-scanner"], "exact");
+
+        // Checking IP-typed: should find 192.168.1.100 but NOT friendly-scanner
+        assert!(check_with_typed(&generic, Some(&ip_typed), "192.168.1.100"));
+        assert!(!check_with_typed(&generic, Some(&ip_typed), "friendly-scanner"));
+
+        // Checking UA-typed: should find friendly-scanner but NOT 192.168.1.100
+        assert!(check_with_typed(&generic, Some(&ua_typed), "friendly-scanner"));
+        assert!(!check_with_typed(&generic, Some(&ua_typed), "192.168.1.100"));
+    }
+
+    #[test]
+    fn test_typed_prefix_mode() {
+        let generic = build_acl_data(&[], "prefix");
+        let ip_typed = make_typed_acl(&["192.168.", "10.0.0."], "prefix");
+
+        assert!(check_with_typed(&generic, Some(&ip_typed), "192.168.1.100"));
+        assert!(check_with_typed(&generic, Some(&ip_typed), "10.0.0.42"));
+        assert!(!check_with_typed(&generic, Some(&ip_typed), "172.16.0.1"));
+    }
+
+    #[test]
+    fn test_typed_reload() {
+        use std::io::Write;
+
+        let path = format!("{}/rust_acl_typed_reload_test", std::env::temp_dir().display());
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "192.168.1.1").unwrap();
+        }
+
+        let loader = FileLoader::new(&path, default_line_parser, build_vec).unwrap();
+        let entries = loader.get();
+        let data = build_acl_data(&entries, "exact");
+        drop(entries);
+        let mut typed = TypedAcl { data, loader };
+
+        assert!(check_acl_data(&typed.data, "192.168.1.1"));
+        assert!(!check_acl_data(&typed.data, "10.0.0.1"));
+
+        // Update file and reload
+        std::fs::write(&path, "10.0.0.1\n").unwrap();
+        let result = reload_typed(&mut typed, "exact", "test_typed");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1);
+
+        assert!(!check_acl_data(&typed.data, "192.168.1.1"));
+        assert!(check_acl_data(&typed.data, "10.0.0.1"));
+
+        let _ = std::fs::remove_file(&path);
     }
 }
