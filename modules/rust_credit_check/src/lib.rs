@@ -250,7 +250,7 @@ unsafe extern "C" fn w_rust_credit_check(
             None => {
                 opensips_log!(ERR, "rust_credit_check",
                     "rust_credit_check: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -263,7 +263,7 @@ unsafe extern "C" fn w_rust_credit_check(
                 Some(s) => s,
                 None => {
                     opensips_log!(ERR, "rust_credit_check", "worker state not initialized");
-                    return -1;
+                    return -2;
                 }
             };
 
@@ -282,7 +282,7 @@ unsafe extern "C" fn w_rust_credit_check(
                     // 2. Cache miss — query billing API
                     let url = match unsafe { BILLING_URL.get_value() } {
                         Some(u) => u,
-                        None => return -1,
+                        None => return -2,
                     };
                     let full_url = format!("{url}?account={account}");
 
@@ -300,20 +300,20 @@ unsafe extern "C" fn w_rust_credit_check(
                                 None => {
                                     opensips_log!(ERR, "rust_credit_check",
                                         "failed to parse balance response: {}", body);
-                                    return if on_error_allows(on_err) { 1 } else { -1 };
+                                    return if on_error_allows(on_err) { 1 } else { -2 };
                                 }
                             }
                         }
                         Ok((status, body)) => {
                             opensips_log!(ERR, "rust_credit_check",
                                 "billing API returned status {}: {}", status, body);
-                            return if on_error_allows(on_err) { 1 } else { -1 };
+                            return if on_error_allows(on_err) { 1 } else { -2 };
                         }
                         Err(e) => {
                             // 7. HTTP error
                             opensips_log!(ERR, "rust_credit_check",
                                 "billing API error for {}: {}", account, e);
-                            return if on_error_allows(on_err) { 1 } else { -1 };
+                            return if on_error_allows(on_err) { 1 } else { -2 };
                         }
                     }
                 }
@@ -354,7 +354,7 @@ unsafe extern "C" fn w_rust_credit_clear(
             None => {
                 opensips_log!(ERR, "rust_credit_check",
                     "rust_credit_clear: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -370,7 +370,7 @@ unsafe extern "C" fn w_rust_credit_clear(
                 None => {
                     opensips_log!(ERR, "rust_credit_check",
                         "worker state not initialized");
-                    -1
+                    -2
                 }
             }
         })

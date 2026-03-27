@@ -164,7 +164,7 @@ unsafe extern "C" fn w_rust_webhook(
             None => {
                 opensips_log!(ERR, "rust_http_webhook",
                     "rust_webhook: missing or invalid payload parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -182,7 +182,7 @@ unsafe extern "C" fn w_rust_webhook(
                 None => {
                     opensips_log!(ERR, "rust_http_webhook",
                         "webhook dispatcher not initialized in this worker");
-                    -1
+                    -2
                 }
             }
         })

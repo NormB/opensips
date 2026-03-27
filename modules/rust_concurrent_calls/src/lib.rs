@@ -235,7 +235,7 @@ unsafe extern "C" fn w_rust_check_concurrent(
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
                     "rust_check_concurrent: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -271,7 +271,7 @@ unsafe extern "C" fn w_rust_check_concurrent(
                 None => {
                     opensips_log!(ERR, "rust_concurrent_calls",
                         "worker state not initialized");
-                    -1
+                    -2
                 }
             }
         })
@@ -291,7 +291,7 @@ unsafe extern "C" fn w_rust_concurrent_inc(
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
                     "rust_concurrent_inc: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -308,7 +308,7 @@ unsafe extern "C" fn w_rust_concurrent_inc(
                 None => {
                     opensips_log!(ERR, "rust_concurrent_calls",
                         "worker state not initialized");
-                    -1
+                    -2
                 }
             }
         })
@@ -328,7 +328,7 @@ unsafe extern "C" fn w_rust_concurrent_dec(
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
                     "rust_concurrent_dec: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
