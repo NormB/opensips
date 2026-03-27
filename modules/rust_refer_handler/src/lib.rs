@@ -13,18 +13,18 @@
 //!
 //! route {
 //!     if (is_method("REFER")) {
-//!         if (rust_handle_refer("$hdr(Refer-To)")) {
+//!         if (handle_refer("$hdr(Refer-To)")) {
 //!             sl_send_reply(202, "Accepted");
 //!         }
 //!     }
 //!     if (is_method("NOTIFY")) {
 //!         # Parse sipfrag body for status code
-//!         rust_handle_notify("$ci", "$var(sipfrag_code)");
+//!         handle_notify("$ci", "$var(sipfrag_code)");
 //!     }
 //! }
 //!
 //! route[check_transfer] {
-//!     if (rust_refer_status("$ci")) {
+//!     if (refer_status("$ci")) {
 //!         xlog("L_INFO", "transfer status: $var(refer_status)\n");
 //!     }
 //! }
@@ -279,7 +279,7 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_refer_handler", "module destroyed");
 }
 
-// ── Script function: rust_handle_refer(refer_to) ─────────────────
+// ── Script function: handle_refer(refer_to) ─────────────────
 
 unsafe extern "C" fn w_rust_handle_refer(
     msg: *mut sys::sip_msg,
@@ -299,7 +299,7 @@ unsafe extern "C" fn w_rust_handle_refer(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_handle_refer: missing or invalid refer_to parameter"
+                    "handle_refer: missing or invalid refer_to parameter"
                 );
                 return -2;
             }
@@ -313,7 +313,7 @@ unsafe extern "C" fn w_rust_handle_refer(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_handle_refer: no Call-ID header"
+                    "handle_refer: no Call-ID header"
                 );
                 return -2;
             }
@@ -358,7 +358,7 @@ unsafe extern "C" fn w_rust_handle_refer(
     })
 }
 
-// ── Script function: rust_handle_notify(call_id, status_code) ────
+// ── Script function: handle_notify(call_id, status_code) ────
 
 unsafe extern "C" fn w_rust_handle_notify(
     _msg: *mut sys::sip_msg,
@@ -378,7 +378,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_handle_notify: missing or invalid call_id parameter"
+                    "handle_notify: missing or invalid call_id parameter"
                 );
                 return -2;
             }
@@ -390,7 +390,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_handle_notify: missing or invalid status_code parameter"
+                    "handle_notify: missing or invalid status_code parameter"
                 );
                 return -2;
             }
@@ -402,7 +402,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_handle_notify: status_code is not a valid integer: {}",
+                    "handle_notify: status_code is not a valid integer: {}",
                     status_code_str
                 );
                 return -2;
@@ -462,7 +462,7 @@ unsafe extern "C" fn w_rust_handle_notify(
     })
 }
 
-// ── Script function: rust_refer_status(call_id) ──────────────────
+// ── Script function: refer_status(call_id) ──────────────────
 
 unsafe extern "C" fn w_rust_refer_status(
     msg: *mut sys::sip_msg,
@@ -482,7 +482,7 @@ unsafe extern "C" fn w_rust_refer_status(
                 opensips_log!(
                     ERR,
                     "rust_refer_handler",
-                    "rust_refer_status: missing or invalid call_id parameter"
+                    "refer_status: missing or invalid call_id parameter"
                 );
                 return -2;
             }
@@ -519,7 +519,7 @@ unsafe extern "C" fn w_rust_refer_status(
 }
 
 
-// ── Script function: rust_refer_stats() ──────────────────────────
+// ── Script function: refer_stats() ──────────────────────────
 
 unsafe extern "C" fn w_rust_refer_stats(
     msg: *mut sys::sip_msg,
@@ -563,25 +563,25 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_handle_refer"),
+        name: cstr_lit!("handle_refer"),
         function: Some(w_rust_handle_refer),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_handle_notify"),
+        name: cstr_lit!("handle_notify"),
         function: Some(w_rust_handle_notify),
         params: TWO_PARAMS_STR_STR,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_refer_status"),
+        name: cstr_lit!("refer_status"),
         function: Some(w_rust_refer_status),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_refer_stats"),
+        name: cstr_lit!("refer_stats"),
         function: Some(w_rust_refer_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE

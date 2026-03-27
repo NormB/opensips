@@ -21,7 +21,7 @@
 //! modparam("rust_http_webhook", "retry_delay_ms", 1000)
 //!
 //! route {
-//!     rust_webhook("{\"method\":\"$rm\",\"ruri\":\"$ru\"}");
+//!     webhook("{\"method\":\"$rm\",\"ruri\":\"$ru\"}");
 //! }
 //! ```
 
@@ -219,7 +219,7 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_http_webhook", "module destroyed");
 }
 
-// ── Script function: rust_webhook(payload) ───────────────────────
+// ── Script function: webhook(payload) ───────────────────────
 
 unsafe extern "C" fn w_rust_webhook(
     _msg: *mut sys::sip_msg,
@@ -231,7 +231,7 @@ unsafe extern "C" fn w_rust_webhook(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_http_webhook",
-                    "rust_webhook: missing or invalid payload parameter");
+                    "webhook: missing or invalid payload parameter");
                 return -2;
             }
         };
@@ -258,7 +258,7 @@ unsafe extern "C" fn w_rust_webhook(
 }
 
 
-// ── Script function: rust_webhook_stats() ────────────────────────
+// ── Script function: webhook_stats() ────────────────────────
 
 unsafe extern "C" fn w_rust_webhook_stats(
     msg: *mut sys::sip_msg,
@@ -307,13 +307,13 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_webhook"),
+        name: cstr_lit!("webhook"),
         function: Some(w_rust_webhook),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_webhook_stats"),
+        name: cstr_lit!("webhook_stats"),
         function: Some(w_rust_webhook_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE

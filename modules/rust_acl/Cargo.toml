@@ -1,8 +1,8 @@
 [package]
-name = "rust-dynamic-blacklist"
+name = "rust-acl"
 version = "0.1.0"
 edition = "2021"
-description = "Live-reload IP/UA/domain blacklist for OpenSIPS"
+description = "Live-reload ACL (blocklist + allowlist) for OpenSIPS"
 
 [lib]
 crate-type = ["cdylib"]

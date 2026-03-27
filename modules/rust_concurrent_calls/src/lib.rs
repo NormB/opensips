@@ -13,23 +13,23 @@
 //!
 //! route {
 //!     if (is_method("INVITE") && !has_totag()) {
-//!         if (!rust_check_concurrent("$fU")) {
+//!         if (!check_concurrent("$fU")) {
 //!             xlog("L_WARN", "over limit: $fU has $var(concurrent_count)/$var(concurrent_limit) calls\n");
 //!             sl_send_reply(486, "Too Many Calls");
 //!             exit;
 //!         }
-//!         rust_concurrent_inc("$fU");
+//!         concurrent_inc("$fU");
 //!     }
 //! }
 //!
 //! onreply_route {
 //!     if (is_method("INVITE") && $rs >= 300) {
-//!         rust_concurrent_dec("$fU");
+//!         concurrent_dec("$fU");
 //!     }
 //! }
 //!
 //! route[handle_bye] {
-//!     rust_concurrent_dec("$fU");
+//!     concurrent_dec("$fU");
 //! }
 //! ```
 //!
@@ -230,9 +230,9 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_concurrent_calls", "module destroyed");
 }
 
-// ── Script function: rust_check_concurrent(account) ──────────────
+// ── Script function: check_concurrent(account) ──────────────
 
-unsafe extern "C" fn w_rust_check_concurrent(
+unsafe extern "C" fn w_check_concurrent(
     msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
@@ -242,7 +242,7 @@ unsafe extern "C" fn w_rust_check_concurrent(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
-                    "rust_check_concurrent: missing or invalid parameter");
+                    "check_concurrent: missing or invalid parameter");
                 return -2;
             }
         };
@@ -286,9 +286,9 @@ unsafe extern "C" fn w_rust_check_concurrent(
     })
 }
 
-// ── Script function: rust_concurrent_inc(account) ────────────────
+// ── Script function: concurrent_inc(account) ────────────────
 
-unsafe extern "C" fn w_rust_concurrent_inc(
+unsafe extern "C" fn w_concurrent_inc(
     _msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
@@ -298,7 +298,7 @@ unsafe extern "C" fn w_rust_concurrent_inc(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
-                    "rust_concurrent_inc: missing or invalid parameter");
+                    "concurrent_inc: missing or invalid parameter");
                 return -2;
             }
         };
@@ -323,9 +323,9 @@ unsafe extern "C" fn w_rust_concurrent_inc(
     })
 }
 
-// ── Script function: rust_concurrent_dec(account) ────────────────
+// ── Script function: concurrent_dec(account) ────────────────
 
-unsafe extern "C" fn w_rust_concurrent_dec(
+unsafe extern "C" fn w_concurrent_dec(
     _msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
@@ -335,7 +335,7 @@ unsafe extern "C" fn w_rust_concurrent_dec(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_concurrent_calls",
-                    "rust_concurrent_dec: missing or invalid parameter");
+                    "concurrent_dec: missing or invalid parameter");
                 return -2;
             }
         };
@@ -360,9 +360,9 @@ unsafe extern "C" fn w_rust_concurrent_dec(
     })
 }
 
-// ── Script function: rust_concurrent_reload() ────────────────────
+// ── Script function: concurrent_reload() ────────────────────
 
-unsafe extern "C" fn w_rust_concurrent_reload(
+unsafe extern "C" fn w_concurrent_reload(
     _msg: *mut sys::sip_msg,
     _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
@@ -397,9 +397,9 @@ unsafe extern "C" fn w_rust_concurrent_reload(
     })
 }
 
-// ── Script function: rust_concurrent_stats() ─────────────────────
+// ── Script function: concurrent_stats() ─────────────────────
 
-unsafe extern "C" fn w_rust_concurrent_stats(
+unsafe extern "C" fn w_concurrent_stats(
     msg: *mut sys::sip_msg,
     _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
@@ -434,32 +434,32 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 6> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_check_concurrent"),
-        function: Some(w_rust_check_concurrent),
+        name: cstr_lit!("check_concurrent"),
+        function: Some(w_check_concurrent),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_concurrent_inc"),
-        function: Some(w_rust_concurrent_inc),
+        name: cstr_lit!("concurrent_inc"),
+        function: Some(w_concurrent_inc),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_concurrent_dec"),
-        function: Some(w_rust_concurrent_dec),
+        name: cstr_lit!("concurrent_dec"),
+        function: Some(w_concurrent_dec),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_concurrent_reload"),
-        function: Some(w_rust_concurrent_reload),
+        name: cstr_lit!("concurrent_reload"),
+        function: Some(w_concurrent_reload),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_concurrent_stats"),
-        function: Some(w_rust_concurrent_stats),
+        name: cstr_lit!("concurrent_stats"),
+        function: Some(w_concurrent_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },

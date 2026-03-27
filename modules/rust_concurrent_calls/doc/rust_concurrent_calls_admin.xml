@@ -33,18 +33,18 @@
 		<orderedlist>
 		<listitem><para>
 			On initial INVITE (no to-tag): call
-			<function>rust_check_concurrent()</function> to verify the
+			<function>check_concurrent()</function> to verify the
 			account is under its limit. If allowed, call
-			<function>rust_concurrent_inc()</function> to increment the
+			<function>concurrent_inc()</function> to increment the
 			counter.
 		</para></listitem>
 		<listitem><para>
 			On failure responses (3xx-6xx to INVITE): call
-			<function>rust_concurrent_dec()</function> to release the
+			<function>concurrent_dec()</function> to release the
 			slot.
 		</para></listitem>
 		<listitem><para>
-			On BYE: call <function>rust_concurrent_dec()</function> to
+			On BYE: call <function>concurrent_dec()</function> to
 			release the slot.
 		</para></listitem>
 		</orderedlist>
@@ -56,14 +56,14 @@
 		consider using an external data store.
 	</para>
 	<para>
-		The <function>rust_check_concurrent()</function> function sets
+		The <function>check_concurrent()</function> function sets
 		<literal>$var(concurrent_count)</literal> and
 		<literal>$var(concurrent_limit)</literal> pseudo-variables for
 		use in script logging or response messages.
 	</para>
 	<para>
 		Limits can be reloaded at runtime using
-		<function>rust_concurrent_reload()</function> without restarting
+		<function>concurrent_reload()</function> without restarting
 		&osips;. Active call counters are preserved across reloads;
 		only the per-account limits are updated.
 	</para>
@@ -161,9 +161,9 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 	<section id="exported_functions" xreflabel="exported_functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_check_concurrent" xreflabel="rust_check_concurrent()">
+	<section id="func_check_concurrent" xreflabel="check_concurrent()">
 		<title>
-		<function moreinfo="none">rust_check_concurrent(account)</function>
+		<function moreinfo="none">check_concurrent(account)</function>
 		</title>
 		<para>
 		Check whether the given account is under its concurrent call
@@ -174,7 +174,7 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 		</para>
 		<para>
 		This function does NOT increment the counter. Use
-		<function>rust_concurrent_inc()</function> separately after a
+		<function>concurrent_inc()</function> separately after a
 		successful check.
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
@@ -206,12 +206,12 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_check_concurrent</function> usage</title>
+		<title><function>check_concurrent</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("INVITE") &amp;&amp; !has_totag()) {
-        if (!rust_check_concurrent("$fU")) {
+        if (!check_concurrent("$fU")) {
             xlog("L_WARN", "$fU over limit: $var(concurrent_count)/$var(concurrent_limit)\n");
             sl_send_reply(486, "Too Many Calls");
             exit;
@@ -223,14 +223,14 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_concurrent_inc" xreflabel="rust_concurrent_inc()">
+	<section id="func_concurrent_inc" xreflabel="concurrent_inc()">
 		<title>
-		<function moreinfo="none">rust_concurrent_inc(account)</function>
+		<function moreinfo="none">concurrent_inc(account)</function>
 		</title>
 		<para>
 		Increment the concurrent call counter for the given account.
 		Call this after a successful
-		<function>rust_check_concurrent()</function> when the INVITE
+		<function>check_concurrent()</function> when the INVITE
 		is being forwarded.
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
@@ -238,7 +238,7 @@ route {
 		<listitem><para>
 			<emphasis>account</emphasis> (string)  - The account
 			identifier. Must match the value used in
-			<function>rust_check_concurrent()</function>. This
+			<function>check_concurrent()</function>. This
 			parameter is mandatory.
 		</para></listitem>
 		</itemizedlist>
@@ -258,13 +258,13 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_concurrent_inc</function> usage</title>
+		<title><function>concurrent_inc</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("INVITE") &amp;&amp; !has_totag()) {
-        if (rust_check_concurrent("$fU")) {
-            rust_concurrent_inc("$fU");
+        if (check_concurrent("$fU")) {
+            concurrent_inc("$fU");
         }
     }
 }
@@ -273,9 +273,9 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_concurrent_dec" xreflabel="rust_concurrent_dec()">
+	<section id="func_concurrent_dec" xreflabel="concurrent_dec()">
 		<title>
-		<function moreinfo="none">rust_concurrent_dec(account)</function>
+		<function moreinfo="none">concurrent_dec(account)</function>
 		</title>
 		<para>
 		Decrement the concurrent call counter for the given account.
@@ -290,7 +290,7 @@ route {
 		<listitem><para>
 			<emphasis>account</emphasis> (string)  - The account
 			identifier. Must match the value used in
-			<function>rust_concurrent_inc()</function>. This parameter
+			<function>concurrent_inc()</function>. This parameter
 			is mandatory.
 		</para></listitem>
 		</itemizedlist>
@@ -310,20 +310,20 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_concurrent_dec</function> usage</title>
+		<title><function>concurrent_dec</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route[handle_bye] {
-    rust_concurrent_dec("$fU");
+    concurrent_dec("$fU");
 }
 ...
 </programlisting>
 		</example>
 	</section>
 
-	<section id="func_rust_concurrent_reload" xreflabel="rust_concurrent_reload()">
+	<section id="func_concurrent_reload" xreflabel="concurrent_reload()">
 		<title>
-		<function moreinfo="none">rust_concurrent_reload()</function>
+		<function moreinfo="none">concurrent_reload()</function>
 		</title>
 		<para>
 		Re-read the limits CSV file from disk and atomically swap the
@@ -356,11 +356,11 @@ route[handle_bye] {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_concurrent_reload</function> usage</title>
+		<title><function>concurrent_reload</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route[reload_limits] {
-    if (rust_concurrent_reload()) {
+    if (concurrent_reload()) {
         xlog("L_INFO", "Call limits reloaded successfully\n");
     } else {
         xlog("L_ERR", "Call limits reload failed\n");
@@ -371,9 +371,9 @@ route[reload_limits] {
 		</example>
 	</section>
 
-	<section id="func_rust_concurrent_stats" xreflabel="rust_concurrent_stats()">
+	<section id="func_concurrent_stats" xreflabel="concurrent_stats()">
 		<title>
-		<function moreinfo="none">rust_concurrent_stats()</function>
+		<function moreinfo="none">concurrent_stats()</function>
 		</title>
 		<para>
 		Retrieve module statistics as a JSON string. Sets
@@ -391,11 +391,11 @@ route[reload_limits] {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_concurrent_stats</function> usage</title>
+		<title><function>concurrent_stats</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_concurrent_stats();
+    concurrent_stats();
     xlog("L_INFO", "Concurrent stats: $var(concurrent_stats)\n");
 }
 ...
@@ -411,7 +411,7 @@ route {
 		<para>
 		The current number of active calls for the checked account.
 		Set as an integer by
-		<function>rust_check_concurrent()</function>.
+		<function>check_concurrent()</function>.
 		</para>
 	</section>
 	<section>
@@ -419,7 +419,7 @@ route {
 		<para>
 		The effective concurrent call limit for the checked account.
 		Set as an integer by
-		<function>rust_check_concurrent()</function>. This is either
+		<function>check_concurrent()</function>. This is either
 		the per-account limit from the limits file or the
 		<varname>default_limit</varname> if the account is not listed.
 		</para>
@@ -429,7 +429,7 @@ route {
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by
-		<function>rust_concurrent_stats()</function>.
+		<function>concurrent_stats()</function>.
 		</para>
 	</section>
 	</section>
@@ -458,14 +458,14 @@ route {
 		<title><varname>incremented</varname></title>
 		<para>
 		Total number of counter increments
-		(<function>rust_concurrent_inc()</function> calls).
+		(<function>concurrent_inc()</function> calls).
 		</para>
 	</section>
 	<section>
 		<title><varname>decremented</varname></title>
 		<para>
 		Total number of counter decrements
-		(<function>rust_concurrent_dec()</function> calls).
+		(<function>concurrent_dec()</function> calls).
 		</para>
 	</section>
 	<section>
@@ -479,7 +479,7 @@ route {
 		<title><varname>reloads</varname></title>
 		<para>
 		Number of successful hot reloads performed via
-		<function>rust_concurrent_reload()</function>.
+		<function>concurrent_reload()</function>.
 		</para>
 	</section>
 	</section>

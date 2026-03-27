@@ -93,7 +93,7 @@
 		<itemizedlist>
 		<listitem><para>
 			<emphasis>signaling</emphasis> &mdash; Required by
-			<emphasis>rust_check_rate()</emphasis> for sending 429 replies.
+			<emphasis>check_rate()</emphasis> for sending 429 replies.
 		</para></listitem>
 		<listitem><para>
 			<emphasis>sl</emphasis> &mdash; Stateless reply support.
@@ -140,7 +140,7 @@
 		<para>
 		Maximum number of requests allowed per source &ip; within the rate
 		limiting window. When exceeded,
-		<xref linkend="func_rust_check_rate"/> returns
+		<xref linkend="func_check_rate"/> returns
 		<emphasis role='bold'>-1</emphasis> and sends a
 		<emphasis>429 Too Many Requests</emphasis> reply automatically.
 		</para>
@@ -213,7 +213,7 @@ modparam("rust", "cache_ttl", 600)
 		<para>
 		Timeout for &http; requests in seconds. Applies to connection
 		establishment, TLS handshake, and response transfer. Used by both
-		<xref linkend="func_rust_http_query"/> and user-script &http; handlers.
+		<xref linkend="func_http_query"/> and user-script &http; handlers.
 		</para>
 		<para>
 		<emphasis>
@@ -286,9 +286,9 @@ modparam("rust", "script_name",
 	<section id="exported_functions" xreflabel="Exported Functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_check_rate" xreflabel="rust_check_rate()">
+	<section id="func_check_rate" xreflabel="check_rate()">
 		<title>
-		<function moreinfo="none">rust_check_rate()</function>
+		<function moreinfo="none">check_rate()</function>
 		</title>
 		<para>
 		Check whether the source &ip; of the current message has exceeded the
@@ -318,10 +318,10 @@ modparam("rust", "script_name",
 		This function can be used from REQUEST_ROUTE and FAILURE_ROUTE.
 		</para>
 		<example>
-		<title><function moreinfo="none">rust_check_rate</function> usage</title>
+		<title><function moreinfo="none">check_rate</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if (!rust_check_rate()) {
+if (!check_rate()) {
     # 429 already sent
     exit;
 }
@@ -330,9 +330,9 @@ if (!rust_check_rate()) {
 		</example>
 	</section>
 
-	<section id="func_rust_cache_lookup" xreflabel="rust_cache_lookup()">
+	<section id="func_cache_lookup" xreflabel="cache_lookup()">
 		<title>
-		<function moreinfo="none">rust_cache_lookup()</function>
+		<function moreinfo="none">cache_lookup()</function>
 		</title>
 		<para>
 		Look up the R-URI user (<emphasis>$rU</emphasis>) in the per-worker
@@ -372,10 +372,10 @@ if (!rust_check_rate()) {
 		This function can be used from REQUEST_ROUTE.
 		</para>
 		<example>
-		<title><function moreinfo="none">rust_cache_lookup</function> usage</title>
+		<title><function moreinfo="none">cache_lookup</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if (rust_cache_lookup()) {
+if (cache_lookup()) {
     xlog("L_DBG", "Cache hit: $rU -> $du\n");
     t_relay();
     exit;
@@ -385,9 +385,9 @@ if (rust_cache_lookup()) {
 		</example>
 	</section>
 
-	<section id="func_rust_cache_store" xreflabel="rust_cache_store()">
+	<section id="func_cache_store" xreflabel="cache_store()">
 		<title>
-		<function moreinfo="none">rust_cache_store()</function>
+		<function moreinfo="none">cache_store()</function>
 		</title>
 		<para>
 		Store the current R-URI user (<emphasis>$rU</emphasis>) and destination
@@ -411,19 +411,19 @@ if (rust_cache_lookup()) {
 		This function can be used from REQUEST_ROUTE.
 		</para>
 		<example>
-		<title><function moreinfo="none">rust_cache_store</function> usage</title>
+		<title><function moreinfo="none">cache_store</function> usage</title>
 		<programlisting format="linespecific">
 ...
 $du = "sip:backend.example.com";
-rust_cache_store();
+cache_store();
 ...
 </programlisting>
 		</example>
 	</section>
 
-	<section id="func_rust_http_query" xreflabel="rust_http_query()">
+	<section id="func_http_query" xreflabel="http_query()">
 		<title>
-		<function moreinfo="none">rust_http_query(url)</function>
+		<function moreinfo="none">http_query(url)</function>
 		</title>
 		<para>
 		Perform a blocking &http; GET request using the persistent connection
@@ -501,10 +501,10 @@ rust_cache_store();
 		This function can be used from REQUEST_ROUTE.
 		</para>
 		<example>
-		<title><function moreinfo="none">rust_http_query</function> usage</title>
+		<title><function moreinfo="none">http_query</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if (rust_http_query("http://api.example.com/auth?user=$fU")) {
+if (http_query("http://api.example.com/auth?user=$fU")) {
     xlog("L_INFO", "HTTP $var(http_status): $var(http_result)\n");
 } else {
     xlog("L_ERR", "HTTP query failed\n");
@@ -514,9 +514,9 @@ if (rust_http_query("http://api.example.com/auth?user=$fU")) {
 		</example>
 	</section>
 
-	<section id="func_rust_counter_inc" xreflabel="rust_counter_inc()">
+	<section id="func_counter_inc" xreflabel="counter_inc()">
 		<title>
-		<function moreinfo="none">rust_counter_inc()</function>
+		<function moreinfo="none">counter_inc()</function>
 		</title>
 		<para>
 		Increment the cross-worker atomic counter and store the new value in
@@ -543,10 +543,10 @@ if (rust_http_query("http://api.example.com/auth?user=$fU")) {
 		This function can be used from REQUEST_ROUTE and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function moreinfo="none">rust_counter_inc</function> usage</title>
+		<title><function moreinfo="none">counter_inc</function> usage</title>
 		<programlisting format="linespecific">
 ...
-rust_counter_inc();
+counter_inc();
 xlog("L_DBG", "Total requests: $var(shared_count)\n");
 ...
 </programlisting>
@@ -1001,7 +1001,7 @@ route {
     # ---- Rate Limiting ----
     # Returns 1 if allowed, -1 if exceeded.
     # On -1, a 429 reply is sent automatically.
-    if (!rust_check_rate()) {
+    if (!check_rate()) {
         xlog("L_WARN", "Rate limit exceeded for $si\n");
         exit;
     }
@@ -1009,7 +1009,7 @@ route {
     # ---- Routing Cache ----
     # On hit: sets $du and returns 1.
     # On miss: returns -1.
-    if (rust_cache_lookup()) {
+    if (cache_lookup()) {
         xlog("L_DBG", "Cache hit: $rU -&gt; $du\n");
         t_relay();
         exit;
@@ -1019,10 +1019,10 @@ route {
     # Query an external routing service.
     # On success: $var(http_status)=HTTP code, $var(http_result)=body
     # On failure: returns -1
-    if (rust_http_query("http://routing.internal/lookup?user=$rU")) {
+    if (http_query("http://routing.internal/lookup?user=$rU")) {
         if ($var(http_status) == 200) {
             $du = $var(http_result);
-            rust_cache_store();
+            cache_store();
             t_relay();
             exit;
         }
@@ -1092,7 +1092,7 @@ modparam("rust", "script_name",
 ####### Routing Logic ###########
 
 route {
-    if (!rust_check_rate()) {
+    if (!check_rate()) {
         exit;
     }
 
@@ -1227,7 +1227,7 @@ modparam("rust", "script_name",
 
 route {
     # ---- Rate Limiting (compiled-in) ----
-    if (!rust_check_rate()) {
+    if (!check_rate()) {
         exit;
     }
 
@@ -1254,7 +1254,7 @@ route {
     xlog("L_DBG", "Worker request count: $var(count)\n");
 
     # ---- Cross-Worker Atomic Counter (compiled-in) ----
-    rust_counter_inc();
+    counter_inc();
     xlog("L_DBG", "Global request count: $var(shared_count)\n");
 
     # ---- PV Manipulation ----

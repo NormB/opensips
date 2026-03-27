@@ -171,7 +171,7 @@ unsafe extern "C" fn w_http_query(
         let url = match <&str as CommandFunctionParam>::from_raw(p0) {
             Some(s) => s,
             None => {
-                opensips_log!(ERR, "rust", "rust_http_query: missing or invalid URL");
+                opensips_log!(ERR, "rust", "http_query: missing or invalid URL");
                 return -1;
             }
         };
@@ -283,31 +283,31 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 7> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_check_rate"),
+        name: cstr_lit!("check_rate"),
         function: Some(w_check_rate),
         params: EMPTY_PARAMS,
         flags: 1 | 2, // REQUEST_ROUTE | FAILURE_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_cache_lookup"),
+        name: cstr_lit!("cache_lookup"),
         function: Some(w_cache_lookup),
         params: EMPTY_PARAMS,
         flags: 1, // REQUEST_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_cache_store"),
+        name: cstr_lit!("cache_store"),
         function: Some(w_cache_store),
         params: EMPTY_PARAMS,
         flags: 1, // REQUEST_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_http_query"),
+        name: cstr_lit!("http_query"),
         function: Some(w_http_query),
         params: ONE_STR_PARAM,
         flags: 1, // REQUEST_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_counter_inc"),
+        name: cstr_lit!("counter_inc"),
         function: Some(w_counter_inc),
         params: EMPTY_PARAMS,
         flags: 1 | 4, // REQUEST_ROUTE | ONREPLY_ROUTE
