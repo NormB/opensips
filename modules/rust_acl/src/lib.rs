@@ -2,7 +2,8 @@
 //!
 //! Loads blocklist and optional allowlist files at startup into each worker
 //! process. Files are parsed line-by-line (comments and blanks skipped).
-//! Matching can be exact (HashSet) or prefix-based (Vec of prefixes).
+//! Matching can be exact (HashSet), prefix-based (Vec of prefixes),
+//! or regex-based (compiled patterns).
 //!
 //! Supports typed files per check category (IP, UA, domain) in addition
 //! to generic catch-all files. Typed check functions query only the
@@ -101,6 +102,8 @@ use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::time::Instant;
 
+use regex::Regex;
+
 // ── Module parameters ────────────────────────────────────────────
 
 /// Path to blocklist file (required). One entry per line, # comments.
@@ -109,7 +112,7 @@ static BLOCKLIST_FILE: ModString = ModString::new();
 /// Path to allowlist file (optional). One entry per line, # comments.
 static ALLOWLIST_FILE: ModString = ModString::new();
 
-/// Match mode: "exact" or "prefix" (default: "prefix").
+/// Match mode: "exact", "prefix", or "regex" (default: "prefix").
 static MATCH_MODE: ModString = ModString::new();
 
 // Typed blocklist files (optional)
@@ -127,6 +130,7 @@ static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
 enum AclData {
     Exact(HashSet<String>),
     Prefix(Vec<String>),
+    Regex(Vec<Regex>),
 }
 
 /// A loaded typed file: its data and loader for reload support.
@@ -145,11 +149,16 @@ fn check_prefix(prefixes: &[String], value: &str) -> bool {
     prefixes.iter().any(|p| value.starts_with(p.as_str()))
 }
 
+fn check_regex(patterns: &[Regex], value: &str) -> bool {
+    patterns.iter().any(|r| r.is_match(value))
+}
+
 /// Check an AclData structure against a value.
 fn check_acl_data(data: &AclData, value: &str) -> bool {
     match data {
         AclData::Exact(set) => check_exact(set, value),
         AclData::Prefix(prefixes) => check_prefix(prefixes, value),
+        AclData::Regex(patterns) => check_regex(patterns, value),
     }
 }
 
@@ -157,6 +166,26 @@ fn check_acl_data(data: &AclData, value: &str) -> bool {
 fn build_acl_data(entries: &[String], mode: &str) -> AclData {
     match mode {
         "exact" => AclData::Exact(entries.iter().cloned().collect()),
+        "regex" => {
+            let patterns: Vec<Regex> = entries
+                .iter()
+                .filter_map(|pat| {
+                    match Regex::new(pat) {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            #[cfg(not(test))]
+                            opensips_log!(WARN, "rust_acl",
+                                "invalid regex pattern '{}': {}", pat, e);
+                            #[cfg(test)]
+                            eprintln!("WARN: invalid regex pattern '{}': {}", pat, e);
+                            let _ = e;
+                            None
+                        }
+                    }
+                })
+                .collect();
+            AclData::Regex(patterns)
+        }
         _ => AclData::Prefix(entries.to_vec()),
     }
 }
@@ -321,9 +350,9 @@ unsafe extern "C" fn mod_init() -> c_int {
     };
 
     let mode = MATCH_MODE.get_value().unwrap_or("prefix");
-    if mode != "exact" && mode != "prefix" {
+    if mode != "exact" && mode != "prefix" && mode != "regex" {
         opensips_log!(ERR, "rust_acl",
-            "modparam match_mode must be exact or prefix, got {}", mode);
+            "modparam match_mode must be exact, prefix, or regex, got {}", mode);
         return -1;
     }
 
@@ -1696,7 +1725,7 @@ mod tests {
                 assert!(set.contains("b"));
                 assert!(set.contains("c"));
             }
-            AclData::Prefix(_) => panic!("expected Exact"),
+            _ => panic!("expected Exact"),
         }
     }
 
@@ -1710,7 +1739,7 @@ mod tests {
                 assert_eq!(v[0], "192.168.");
                 assert_eq!(v[1], "10.0.");
             }
-            AclData::Exact(_) => panic!("expected Prefix"),
+            _ => panic!("expected Prefix"),
         }
     }
 
@@ -1984,4 +2013,134 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    // ── Regex mode tests (Task 35) ───────────────────────────────
+
+    #[test]
+    fn test_regex_basic_match() {
+        let data = build_acl_data(
+            &[".*scanner.*".to_string(), "^SIPVicious".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "friendly-scanner/1.8"));
+        assert!(check_acl_data(&data, "port-scanner-bot"));
+        assert!(check_acl_data(&data, "SIPVicious/0.3"));
+        assert!(!check_acl_data(&data, "sipvicious")); // case-sensitive
+        assert!(!check_acl_data(&data, "good-agent"));
+    }
+
+    #[test]
+    fn test_regex_ip_pattern() {
+        let data = build_acl_data(
+            &[r"^192\.168\.1\.\d+$".to_string(), r"^10\.0\.0\.".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(check_acl_data(&data, "192.168.1.1"));
+        assert!(!check_acl_data(&data, "192.168.2.1"));
+        assert!(check_acl_data(&data, "10.0.0.42"));
+        assert!(!check_acl_data(&data, "172.16.0.1"));
+    }
+
+    #[test]
+    fn test_regex_case_sensitive() {
+        let data = build_acl_data(
+            &["^friendly-scanner".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "friendly-scanner/1.8"));
+        assert!(!check_acl_data(&data, "Friendly-Scanner/1.8"));
+    }
+
+    #[test]
+    fn test_regex_case_insensitive_flag() {
+        // Use inline regex flag for case-insensitive
+        let data = build_acl_data(
+            &["(?i)^friendly-scanner".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "friendly-scanner/1.8"));
+        assert!(check_acl_data(&data, "Friendly-Scanner/1.8"));
+        assert!(check_acl_data(&data, "FRIENDLY-SCANNER"));
+    }
+
+    #[test]
+    fn test_regex_invalid_pattern_skipped() {
+        // Invalid regex should be skipped, valid ones still work
+        let data = build_acl_data(
+            &["[invalid".to_string(), "valid-pattern".to_string()],
+            "regex",
+        );
+        // The invalid pattern is skipped, only valid-pattern works
+        assert!(check_acl_data(&data, "valid-pattern"));
+        assert!(!check_acl_data(&data, "[invalid"));
+        match &data {
+            AclData::Regex(patterns) => assert_eq!(patterns.len(), 1),
+            _ => panic!("expected Regex variant"),
+        }
+    }
+
+    #[test]
+    fn test_regex_anchoring() {
+        // Without anchors, regex matches anywhere in the string
+        let data = build_acl_data(
+            &["scanner".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "friendly-scanner/1.8"));
+        assert!(check_acl_data(&data, "scanner"));
+        assert!(check_acl_data(&data, "port-scanner-bot"));
+
+        // With anchors, must match full string
+        let data = build_acl_data(
+            &["^scanner$".to_string()],
+            "regex",
+        );
+        assert!(check_acl_data(&data, "scanner"));
+        assert!(!check_acl_data(&data, "friendly-scanner"));
+    }
+
+    #[test]
+    fn test_regex_empty_list() {
+        let data = build_acl_data(&[], "regex");
+        assert!(!check_acl_data(&data, "anything"));
+    }
+
+    #[test]
+    fn test_regex_all_invalid_patterns() {
+        let data = build_acl_data(
+            &["[bad1".to_string(), "[bad2".to_string()],
+            "regex",
+        );
+        assert!(!check_acl_data(&data, "anything"));
+        match &data {
+            AclData::Regex(patterns) => assert_eq!(patterns.len(), 0),
+            _ => panic!("expected Regex variant"),
+        }
+    }
+
+    #[test]
+    fn test_build_acl_data_regex() {
+        let entries = vec!["^abc".to_string(), "xyz$".to_string()];
+        let data = build_acl_data(&entries, "regex");
+        match &data {
+            AclData::Regex(patterns) => {
+                assert_eq!(patterns.len(), 2);
+            }
+            _ => panic!("expected Regex"),
+        }
+    }
+
+    #[test]
+    fn test_check_regex_function() {
+        let patterns: Vec<Regex> = vec![
+            Regex::new(".*scanner.*").unwrap(),
+            Regex::new(r"^10\.0\.0\.").unwrap(),
+        ];
+        assert!(check_regex(&patterns, "friendly-scanner"));
+        assert!(check_regex(&patterns, "10.0.0.1"));
+        assert!(!check_regex(&patterns, "good-agent"));
+        assert!(!check_regex(&patterns, "192.168.1.1"));
+    }
+
 }

@@ -43,8 +43,10 @@
 	<para>
 		In <quote>exact</quote> mode, entries are stored in a HashSet
 		for O(1) lookup. In <quote>prefix</quote> mode, entries are
-		stored as a list of prefixes checked via starts_with().
-		Matching is case-sensitive in both modes.
+		stored as a list of prefixes checked via starts_with(). In
+		<quote>regex</quote> mode, entries are compiled as regular
+		expression patterns at load time; invalid patterns are skipped
+		with a warning. Matching is case-sensitive in all modes.
 	</para>
 	<para>
 		The <function>check_access()</function> function implements the
@@ -296,6 +298,16 @@ modparam("rust_acl", "allowlist_domain_file", "/etc/opensips/allowlist_domain.tx
 			<emphasis><quote>prefix</quote></emphasis> - value must
 			start with an entry (case-sensitive). Linear prefix scan.
 		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>regex</quote></emphasis> - each entry is
+			compiled as a regular expression pattern at file load time.
+			On check, all compiled patterns are tested against the
+			value using <function>is_match()</function>. Matching is
+			case-sensitive by default; use the inline
+			<literal>(?i)</literal> flag for case-insensitive matching.
+			Invalid regex patterns are skipped with a warning and do
+			not prevent the rest of the file from loading.
+		</para></listitem>
 		</itemizedlist>
 		</para>
 		<para>
@@ -307,7 +319,7 @@ modparam("rust_acl", "allowlist_domain_file", "/etc/opensips/allowlist_domain.tx
 		<title>Set <varname>match_mode</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
-modparam("rust_acl", "match_mode", "exact")
+modparam("rust_acl", "match_mode", "regex")
 ...
 </programlisting>
 		</example>
