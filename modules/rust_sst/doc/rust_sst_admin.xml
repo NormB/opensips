@@ -1,0 +1,481 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_sst</emphasis> module is a clean Rust
+		implementation of &sip; Session Timers
+		(<ulink url="http://www.ietf.org/rfc/rfc4028.txt">RFC 4028</ulink>)
+		for &osips;. It manages Session-Expires and Min-SE header
+		negotiation, dialog lifetime management, and
+		re-INVITE/UPDATE refresh handling.
+	</para>
+	<para>
+		The module supports two operating modes:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>Automatic mode</emphasis>  - when
+			<emphasis>dialog.so</emphasis> is loaded, the module hooks
+			into dialog lifecycle callbacks and handles all SST
+			negotiation transparently. No script function calls are
+			required beyond <function>create_dialog()</function>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Script override mode</emphasis>  - when
+			<emphasis>dialog.so</emphasis> is not loaded (or for per-call
+			control), the script functions
+			<function>rust_sst_check()</function> and
+			<function>rust_sst_update()</function> allow manual
+			Session-Expires validation and header construction.
+		</para></listitem>
+		</itemizedlist>
+	</para>
+	<para>
+		All timer negotiation logic is extracted into pure, testable
+		Rust functions.
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+
+	<section>
+	<title>Automatic mode (dialog integration)</title>
+	<para>
+		When <emphasis>dialog.so</emphasis> is loaded, the module
+		registers a <literal>DLGCB_CREATED</literal> callback that
+		intercepts every new INVITE dialog. The sequence of operations:
+	</para>
+	<para>
+		<orderedlist>
+		<listitem><para>
+			<emphasis>On INVITE (DLGCB_CREATED):</emphasis>
+			Parses Session-Expires, Min-SE, and Supported: timer headers
+			from the request. Validates the requested interval against
+			the configured <varname>default_min_se</varname>. If the
+			&uac; does not include Session-Expires, the proxy inserts
+			one using the configured <varname>default_interval</varname>.
+			Sets the initial dialog lifetime via
+			<literal>$DLG_timeout</literal>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>On 2XX response (DLGCB_RESPONSE_FWDED):</emphasis>
+			If the &uas; includes Session-Expires, the proxy uses it
+			(subject to the configured minimum). If the &uas; does not
+			include Session-Expires but the &uac; supports timer, the
+			proxy inserts Session-Expires and Require: timer headers
+			with refresher=uac. Updates the dialog lifetime to match
+			the negotiated interval.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>On 422 response:</emphasis>
+			Adjusts the internal Min-SE to the value from the 422
+			reply to prevent negotiation loops.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>On re-INVITE/UPDATE (DLGCB_REQ_WITHIN):</emphasis>
+			Parses Session-Expires from the refresh request/response
+			and updates the dialog lifetime accordingly.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>On dialog termination:</emphasis>
+			Cleans up per-dialog SST state and updates statistics.
+		</para></listitem>
+		</orderedlist>
+	</para>
+	</section>
+
+	<section>
+	<title>Script override mode</title>
+	<para>
+		When <emphasis>dialog.so</emphasis> is not loaded, or when the
+		operator wants manual control, the script functions
+		<function>rust_sst_check()</function> and
+		<function>rust_sst_update()</function> are available.
+	</para>
+	<para>
+		<function>rust_sst_check()</function> validates the
+		Session-Expires from an incoming INVITE against the configured
+		minimum. If the interval is too small, it returns
+		<emphasis>-1</emphasis> (denied) and sets
+		<literal>$var(sst_min_se)</literal> for use in a 422 reply.
+	</para>
+	<para>
+		<function>rust_sst_update()</function> computes the final
+		Session-Expires and Min-SE header values for insertion into
+		a 200 OK response.
+	</para>
+	</section>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			For <emphasis>automatic mode</emphasis>:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>dialog</emphasis>  - required for dialog
+			lifecycle callbacks and <literal>$DLG_timeout</literal>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>sipmsgops</emphasis>  - required for
+			<function>append_hf()</function> and
+			<function>remove_hf()</function> used to insert/modify
+			Session-Expires and Min-SE headers.
+		</para></listitem>
+		</itemizedlist>
+		</listitem>
+		<listitem><para>
+			For <emphasis>script override mode</emphasis>:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>sipmsgops</emphasis>  - required for
+			<function>append_hf()</function> in the script examples.
+		</para></listitem>
+		</itemizedlist>
+		</listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_default_interval" xreflabel="default_interval">
+		<title><varname>default_interval</varname> (integer)</title>
+		<para>
+		Default Session-Expires interval in seconds. This is used when
+		the &uac; does not include a Session-Expires header in the
+		INVITE, and as the baseline for negotiation.
+		</para>
+		<para>
+		The effective interval is always clamped to be at least as
+		large as <varname>default_min_se</varname>. Must be at least 90
+		(RFC 4028 minimum); values below 90 are clamped to 90 at
+		module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1800</quote> (30 minutes).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>default_interval</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "default_interval", 3600)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_default_min_se" xreflabel="default_min_se">
+		<title><varname>default_min_se</varname> (integer)</title>
+		<para>
+		Default Min-SE value in seconds. This represents the proxy
+		minimum acceptable session interval. Per RFC 4028, this value
+		must be at least 90 seconds. The module clamps any value below
+		90 to 90.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>90</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>default_min_se</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "default_min_se", 120)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_default_refresher" xreflabel="default_refresher">
+		<title><varname>default_refresher</varname> (string)</title>
+		<para>
+		Default refresher role: <quote>uac</quote> or
+		<quote>uas</quote>. Determines which endpoint is responsible
+		for sending session refresh requests (re-INVITEs or UPDATEs)
+		when the &uac; does not specify a preference.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>uas</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>default_refresher</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "default_refresher", "uac")
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_rust_sst_check" xreflabel="rust_sst_check()">
+		<title>
+		<function moreinfo="none">rust_sst_check(interval, min_se)</function>
+		</title>
+		<para>
+		Validate the Session-Expires and Min-SE values from an incoming
+		INVITE. The function parses the Session-Expires and Min-SE
+		headers from the &sip; message and checks them against the
+		provided or configured minimums.
+		</para>
+		<para>
+		On return, sets <literal>$var(sst_interval)</literal>,
+		<literal>$var(sst_min_se)</literal>, and
+		<literal>$var(sst_refresher)</literal> for use in script logic.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>interval</emphasis> (string)  - Override for
+			the requested interval. Pass <quote>0</quote> to use the
+			value from the Session-Expires header.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>min_se</emphasis> (string)  - Override for
+			the minimum session interval. Pass <quote>0</quote> to use
+			the configured <varname>default_min_se</varname>.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - interval is acceptable (at
+			or above the effective minimum).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - interval is too
+			small. <literal>$var(sst_min_se)</literal> contains the
+			value to use in a 422 reply.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_sst_check</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (rust_sst_check("0", "0") == -1) {
+            # Session interval too small - send 422
+            append_hf("Min-SE: $var(sst_min_se)\r\n");
+            sl_send_reply(422, "Session Interval Too Small");
+            exit;
+        }
+        xlog("L_DBG", "SST OK: interval=$var(sst_interval)\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_sst_update" xreflabel="rust_sst_update()">
+		<title>
+		<function moreinfo="none">rust_sst_update(interval, min_se, refresher)</function>
+		</title>
+		<para>
+		Compute the Session-Expires and Min-SE header values for a
+		200 OK response. The function applies defaults and enforces
+		minimum values.
+		</para>
+		<para>
+		On return, sets <literal>$var(sst_session_expires)</literal>
+		to the full Session-Expires header value (e.g.,
+		<quote>1800;refresher=uas</quote>) and
+		<literal>$var(sst_min_se)</literal> to the Min-SE value.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>interval</emphasis> (string)  - The desired
+			Session-Expires interval. Pass <quote>0</quote> to use the
+			configured <varname>default_interval</varname>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>min_se</emphasis> (string)  - The desired
+			Min-SE value. Pass <quote>0</quote> to use the configured
+			<varname>default_min_se</varname>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>refresher</emphasis> (string)  - The
+			refresher role: <quote>uac</quote> or <quote>uas</quote>.
+			Defaults to <varname>default_refresher</varname> if
+			unrecognized.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_sst_update</function> usage</title>
+		<programlisting format="linespecific">
+...
+onreply_route[sst_reply] {
+    if ($rs == "200" &amp;&amp; is_method("INVITE")) {
+        rust_sst_update("0", "0", "uas");
+        append_hf("Session-Expires: $var(sst_session_expires)\r\n");
+        append_hf("Min-SE: $var(sst_min_se)\r\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_sst_stats" xreflabel="rust_sst_stats()">
+		<title>
+		<function moreinfo="none">rust_sst_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(sst_stats)</literal> with a JSON object containing
+		all tracked counters for the current worker process.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_sst_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    rust_sst_stats();
+    xlog("L_INFO", "SST stats: $var(sst_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<para>
+		The following pseudo-variables are set by the script functions:
+	</para>
+	<section>
+		<title>$var(sst_interval)</title>
+		<para>
+		The negotiated Session-Expires interval in seconds. Set by
+		<function>rust_sst_check()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(sst_min_se)</title>
+		<para>
+		The effective Min-SE value in seconds. Set by both
+		<function>rust_sst_check()</function> and
+		<function>rust_sst_update()</function>. For a 422 reply,
+		use this value in the Min-SE header.
+		</para>
+	</section>
+	<section>
+		<title>$var(sst_refresher)</title>
+		<para>
+		The negotiated refresher role (<quote>uac</quote> or
+		<quote>uas</quote>). Set by
+		<function>rust_sst_check()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(sst_session_expires)</title>
+		<para>
+		The complete Session-Expires header value including the
+		refresher parameter (e.g., <quote>1800;refresher=uas</quote>).
+		Set by <function>rust_sst_update()</function>. Use this
+		directly in <function>append_hf()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(sst_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by <function>rust_sst_stats()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>sessions_active</varname></title>
+		<para>
+		Number of currently active SST-managed dialog sessions
+		(automatic mode only).
+		</para>
+	</section>
+	<section>
+		<title><varname>sessions_expired</varname></title>
+		<para>
+		Number of dialog sessions that expired via the session timer
+		(automatic mode only).
+		</para>
+	</section>
+	<section>
+		<title><varname>422_sent</varname></title>
+		<para>
+		Number of 422 <quote>Session Interval Too Small</quote>
+		replies observed (automatic mode) or conditions detected
+		(script mode).
+		</para>
+	</section>
+	<section>
+		<title><varname>headers_inserted</varname></title>
+		<para>
+		Number of Session-Expires or Min-SE headers inserted or
+		modified by the module (automatic mode only).
+		</para>
+	</section>
+	</section>
+
+</chapter>

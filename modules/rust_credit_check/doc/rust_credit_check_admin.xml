@@ -1,0 +1,495 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_credit_check</emphasis> module provides
+		prepaid credit/balance checking with a per-worker &http; cache.
+		It queries an external billing API for account balances, caches
+		results with a configurable TTL, and computes maximum call
+		duration based on the balance and a per-minute rate.
+	</para>
+	<para>
+		This module is useful for prepaid VoIP services where call
+		authorization depends on available credit.
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+	<para>
+		When <function>rust_credit_check()</function> is called, the
+		module first checks the per-worker cache for a valid
+		(non-expired) balance entry for the account. On a cache hit,
+		the cached balance is used immediately without any &http;
+		request.
+	</para>
+	<para>
+		On a cache miss or expiry, the module sends a synchronous
+		&http; GET request to the billing API:
+	</para>
+	<programlisting format="linespecific">
+GET {billing_url}?account={account}
+</programlisting>
+	<para>
+		The API must return a JSON response with a
+		<quote>balance</quote> field:
+	</para>
+	<programlisting format="linespecific">
+{"balance": 42.50}
+</programlisting>
+	<para>
+		The balance is cached and then evaluated:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>balance &gt; 0</emphasis>: call is allowed.
+			Max call duration is computed as
+			<literal>(balance / rate_per_min) * 60</literal> seconds.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>balance &lt;= 0</emphasis>: call is denied.
+		</para></listitem>
+		</itemizedlist>
+	</para>
+	<para>
+		On &http; errors or unparseable responses, the
+		<varname>on_error</varname> parameter controls whether the call
+		is allowed or denied (fail-open vs fail-closed).
+	</para>
+	<para>
+		The pseudo-variables <literal>$var(credit_balance)</literal>
+		(string, 2 decimal places) and
+		<literal>$var(credit_max_duration)</literal> (integer, seconds)
+		are set on every call to
+		<function>rust_credit_check()</function>.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>. &http; client functionality is
+			compiled into the Rust shared library.
+		</para></listitem>
+		<listitem><para>
+			An external billing API must be reachable at the configured
+			<varname>billing_url</varname>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_billing_url" xreflabel="billing_url">
+		<title><varname>billing_url</varname> (string)</title>
+		<para>
+		The base &url; of the billing/balance API. The module appends
+		<quote>?account={account}</quote> to form the full request
+		&url;. This parameter is required. The module will fail to
+		load if this parameter is not set or is empty.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (must be set).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>billing_url</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "billing_url", "http://billing:8080/balance")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cache_ttl" xreflabel="cache_ttl">
+		<title><varname>cache_ttl</varname> (integer)</title>
+		<para>
+		Time-to-live in seconds for cached balance entries. After this
+		period, the next <function>rust_credit_check()</function> call
+		for the account will trigger a fresh &http; query. Set to 0 to
+		disable caching (not recommended for production).
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>300</quote> (5 minutes).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cache_ttl</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "cache_ttl", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_credit_http_timeout" xreflabel="http_timeout">
+		<title><varname>http_timeout</varname> (integer)</title>
+		<para>
+		&http; request timeout in seconds for billing API queries.
+		If the API does not respond within this time, the
+		<varname>on_error</varname> policy is applied. Must be at
+		least 1; values below 1 are clamped to 1 at module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>2</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>http_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "http_timeout", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_pool_size" xreflabel="pool_size">
+		<title><varname>pool_size</varname> (integer)</title>
+		<para>
+		Number of &http; connections to maintain per worker process.
+		Connections are reused (keep-alive) for better performance.
+		Must be at least 1; values below 1 are clamped to 1 at module
+		load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>4</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>pool_size</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "pool_size", 8)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_rate_per_min" xreflabel="rate_per_min">
+		<title><varname>rate_per_min</varname> (integer)</title>
+		<para>
+		Cost units consumed per minute of call time. Used to compute
+		the maximum call duration:
+		<literal>max_duration = (balance / rate) * 60</literal>
+		seconds. The result is set in
+		<literal>$var(credit_max_duration)</literal>. Must be at least
+		1; values below 1 are clamped to 1 at module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>rate_per_min</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "rate_per_min", 2)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_on_error" xreflabel="on_error">
+		<title><varname>on_error</varname> (string)</title>
+		<para>
+		Behavior when the billing API is unreachable, returns a
+		non-200 status, or returns unparseable JSON:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis><quote>deny</quote></emphasis>  - reject
+			the call (return -2). Fail-closed.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>allow</quote></emphasis>  - allow
+			the call (return 1). Fail-open.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		Case-insensitive comparison.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>deny</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>on_error</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "on_error", "allow")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_credit_tls_ca_file" xreflabel="tls_ca_file">
+		<title><varname>tls_ca_file</varname> (string)</title>
+		<para>
+		Path to a custom CA certificate file (PEM format) for TLS
+		verification of the billing API endpoint. If not set, the
+		system default CA bundle is used.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (system defaults).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_ca_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "tls_ca_file", "/etc/ssl/certs/billing-ca.pem")
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_rust_credit_check" xreflabel="rust_credit_check()">
+		<title>
+		<function moreinfo="none">rust_credit_check(account)</function>
+		</title>
+		<para>
+		Query the billing API (or per-worker cache) for the given
+		account balance. On return, sets
+		<literal>$var(credit_balance)</literal> and
+		<literal>$var(credit_max_duration)</literal>.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. Typically <literal>$fU</literal>
+			(From-&uri; username). This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - account has positive credit
+			(call allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - account has zero
+			or negative credit (call denied).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - &http; error,
+			missing parameter, or uninitialized worker. Subject to
+			<varname>on_error</varname> policy.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_credit_check</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!rust_credit_check("$fU")) {
+            sl_send_reply(402, "Insufficient Credit");
+            exit;
+        }
+        xlog("L_INFO", "$fU: balance=$var(credit_balance) max=$var(credit_max_duration)s\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_credit_clear" xreflabel="rust_credit_clear()">
+		<title>
+		<function moreinfo="none">rust_credit_clear(account)</function>
+		</title>
+		<para>
+		Clear the cached balance entry for the given account. The next
+		call to <function>rust_credit_check()</function> for this
+		account will trigger a fresh &http; query to the billing API.
+		</para>
+		<para>
+		This is useful after a call ends to force a balance refresh,
+		or when the billing system signals a balance change.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier whose cache entry should be cleared. This
+			parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - cache entry cleared (or
+			was not present).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - missing parameter
+			or uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_credit_clear</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("BYE")) {
+        # Force balance refresh after call ends
+        rust_credit_clear("$fU");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_credit_stats" xreflabel="rust_credit_stats()">
+		<title>
+		<function moreinfo="none">rust_credit_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(credit_stats)</literal> with a JSON object
+		containing all tracked counters for the current worker process.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_credit_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    rust_credit_stats();
+    xlog("L_INFO", "Credit stats: $var(credit_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<section>
+		<title>$var(credit_balance)</title>
+		<para>
+		The account balance as a string with 2 decimal places (e.g.,
+		<quote>42.50</quote> or <quote>0.00</quote>). Set by
+		<function>rust_credit_check()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_max_duration)</title>
+		<para>
+		The maximum call duration in seconds, computed as
+		<literal>(balance / rate_per_min) * 60</literal>. Set as an
+		integer by <function>rust_credit_check()</function>. A value
+		of 0 means no credit available.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by
+		<function>rust_credit_stats()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>checked</varname></title>
+		<para>
+		Total number of credit checks performed.
+		</para>
+	</section>
+	<section>
+		<title><varname>allowed</varname></title>
+		<para>
+		Number of checks where the account had positive credit.
+		</para>
+	</section>
+	<section>
+		<title><varname>denied</varname></title>
+		<para>
+		Number of checks where the account had zero or negative credit.
+		</para>
+	</section>
+	<section>
+		<title><varname>errors</varname></title>
+		<para>
+		Number of &http; errors or unparseable responses from the
+		billing API.
+		</para>
+	</section>
+	<section>
+		<title><varname>cache_hits</varname></title>
+		<para>
+		Number of balance lookups served from the per-worker cache.
+		</para>
+	</section>
+	<section>
+		<title><varname>cache_misses</varname></title>
+		<para>
+		Number of balance lookups that required an &http; query to the
+		billing API.
+		</para>
+	</section>
+	</section>
+
+</chapter>
