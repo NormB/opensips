@@ -1,0 +1,311 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_http_webhook</emphasis> module provides
+		fire-and-forget &http; POST webhook delivery for &sip; event
+		payloads. Script functions return immediately while delivery
+		happens asynchronously in a background tokio task within each
+		worker process.
+	</para>
+	<para>
+		This module is useful for pushing &sip; event data to external
+		systems (CDR collectors, fraud detection, real-time analytics)
+		without blocking &sip; message processing. If the internal queue
+		is full, payloads are silently dropped and a counter is
+		incremented.
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+	<para>
+		Each &osips; worker process maintains its own independent
+		fire-and-forget &http; dispatcher backed by a tokio runtime.
+		When <function>rust_webhook()</function> is called from the
+		script, the payload string is enqueued into a bounded channel.
+		A background task dequeues payloads and sends them as &http;
+		POST requests to the configured &url;.
+	</para>
+	<para>
+		If the queue is full (exceeds <varname>max_queue</varname>),
+		the payload is dropped and the internal drop counter is
+		incremented. The script function always returns 1 (success)
+		unless the dispatcher is not initialized.
+	</para>
+	<para>
+		The &http; client respects the configured timeout and content
+		type. For HTTPS endpoints, a custom CA certificate file can
+		be specified via <varname>tls_ca_file</varname>.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>. All &http; functionality is
+			compiled into the Rust shared library.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_url" xreflabel="url">
+		<title><varname>url</varname> (string)</title>
+		<para>
+		The HTTP(S) endpoint &url; where webhook payloads are POSTed.
+		This parameter is required. The module will fail to load if
+		this parameter is not set or is empty.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (must be set).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>url</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "url", "https://example.com/hook")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_max_queue" xreflabel="max_queue">
+		<title><varname>max_queue</varname> (integer)</title>
+		<para>
+		Maximum number of payloads that can be queued per worker
+		process before new payloads are dropped. Each worker maintains
+		its own independent queue. Must be at least 1; values below 1
+		are clamped to 1 at module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1000</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>max_queue</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "max_queue", 2000)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_http_timeout" xreflabel="http_timeout">
+		<title><varname>http_timeout</varname> (integer)</title>
+		<para>
+		&http; request timeout in seconds. Requests that exceed this
+		timeout are abandoned. Must be at least 1; values below 1
+		are clamped to 1 at module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>5</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>http_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "http_timeout", 10)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_content_type" xreflabel="content_type">
+		<title><varname>content_type</varname> (string)</title>
+		<para>
+		The Content-Type header value sent with each POST request.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>application/json</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>content_type</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "content_type", "application/x-ndjson")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_tls_ca_file" xreflabel="tls_ca_file">
+		<title><varname>tls_ca_file</varname> (string)</title>
+		<para>
+		Path to a custom CA certificate file (PEM format) for TLS
+		verification of the webhook endpoint. If not set, the system
+		default CA bundle is used.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (system defaults).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_ca_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "tls_ca_file", "/etc/ssl/certs/custom-ca.pem")
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_rust_webhook" xreflabel="rust_webhook()">
+		<title>
+		<function moreinfo="none">rust_webhook(payload)</function>
+		</title>
+		<para>
+		Enqueue a payload string for asynchronous &http; POST delivery
+		to the configured webhook &url;. The function returns
+		immediately without waiting for the &http; request to complete.
+		</para>
+		<para>
+		If the per-worker queue is full, the payload is silently
+		dropped and a warning is logged.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>payload</emphasis> (string)  - The payload
+			body to POST. Typically a JSON string constructed using
+			pseudo-variables. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - payload enqueued (or
+			dropped due to full queue).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - missing parameter.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - dispatcher not
+			initialized.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_webhook</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    rust_webhook("{\"method\":\"$rm\",\"from\":\"$fu\",\"ruri\":\"$ru\"}");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_rust_webhook_stats" xreflabel="rust_webhook_stats()">
+		<title>
+		<function moreinfo="none">rust_webhook_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(webhook_stats)</literal> with a JSON object
+		containing all tracked counters for the current worker process.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_webhook_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    rust_webhook_stats();
+    xlog("L_INFO", "Webhook stats: $var(webhook_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<section>
+		<title>$var(webhook_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by
+		<function>rust_webhook_stats()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>sent</varname></title>
+		<para>
+		Number of webhook payloads successfully sent.
+		</para>
+	</section>
+	<section>
+		<title><varname>dropped</varname></title>
+		<para>
+		Number of webhook payloads dropped due to a full queue.
+		</para>
+	</section>
+	<section>
+		<title><varname>failed</varname></title>
+		<para>
+		Number of webhook payloads that failed to deliver (HTTP
+		errors, timeouts).
+		</para>
+	</section>
+	</section>
+
+</chapter>
