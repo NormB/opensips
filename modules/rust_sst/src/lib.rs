@@ -997,6 +997,22 @@ unsafe extern "C" fn w_rust_sst_update(
     })
 }
 
+
+// ── Script function: rust_sst_stats() ────────────────────────────
+
+unsafe extern "C" fn w_rust_sst_stats(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = SST_STATS.with(|s| s.to_json());
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(sst_stats)", &json);
+        1
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -1020,7 +1036,7 @@ const THREE_STR_PARAMS: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_sst_check"),
         function: Some(w_rust_sst_check),
@@ -1032,6 +1048,12 @@ static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
         function: Some(w_rust_sst_update),
         params: THREE_STR_PARAMS,
         flags: 1 | 4, // REQUEST_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_sst_stats"),
+        function: Some(w_rust_sst_stats),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
     sys::cmd_export_ {
@@ -1485,4 +1507,30 @@ mod tests {
         assert!(json.contains("\"sessions_active\":5"));
         assert!(json.contains("\"headers_inserted\":2"));
     }
+
+    // ── stats JSON output test ──────────────────────────────────
+
+    #[test]
+    fn test_sst_stats_json_format() {
+        let stats = Stats::new("test_sst_json", &[
+            "sessions_active",
+            "sessions_expired",
+            "422_sent",
+            "headers_inserted",
+        ]);
+        stats.set("sessions_active", 3);
+        stats.inc("422_sent");
+        stats.inc("headers_inserted");
+        stats.inc("headers_inserted");
+        stats.inc("sessions_expired");
+
+        let json = stats.to_json();
+        assert!(json.starts_with("{"));
+        assert!(json.ends_with("}"));
+        assert!(json.contains(r#""sessions_active":3"#));
+        assert!(json.contains(r#""sessions_expired":1"#));
+        assert!(json.contains(r#""422_sent":1"#));
+        assert!(json.contains(r#""headers_inserted":2"#));
+    }
+
 }
