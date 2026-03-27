@@ -456,4 +456,58 @@ mod tests {
         let ok = ff.send(r#"{"retry":true}"#.to_string());
         assert!(ok);
     }
+
+    // ── Fanout-specific tests ────────────────────────────────────
+
+    #[test]
+    fn test_fanout_three_urls_enqueue() {
+        let ff = FireAndForget::with_options(
+            vec![
+                "http://127.0.0.1:19999/a".to_string(),
+                "http://127.0.0.1:19999/b".to_string(),
+                "http://127.0.0.1:19999/c".to_string(),
+            ],
+            32,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+        );
+        // Each send enqueues once; the fanout happens in the background
+        for i in 0..5 {
+            assert!(ff.send(format!(r#"{{"n":{i}}}"#)));
+        }
+        assert_eq!(ff.sent.get(), 5);
+        assert_eq!(ff.dropped.get(), 0);
+    }
+
+    #[test]
+    fn test_fanout_single_url_backwards_compat() {
+        // with_options with a single URL should behave like new()
+        let ff = FireAndForget::with_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            16,
+            5,
+            "text/plain".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+        );
+        assert!(ff.send("hello".to_string()));
+        assert_eq!(ff.sent.get(), 1);
+    }
+
+    #[test]
+    fn test_parse_urls_preserves_paths() {
+        let u = parse_urls("http://host1:9090/path/to/a,http://host2:9091/other/path");
+        assert_eq!(u[0], "http://host1:9090/path/to/a");
+        assert_eq!(u[1], "http://host2:9091/other/path");
+    }
+
+    #[test]
+    fn test_parse_urls_with_query_params() {
+        let u = parse_urls("http://a/hook?key=val,http://b/hook?key=val2");
+        assert_eq!(u.len(), 2);
+        assert!(u[0].contains("key=val"));
+        assert!(u[1].contains("key=val2"));
+    }
 }
