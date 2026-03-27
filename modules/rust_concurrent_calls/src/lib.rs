@@ -150,7 +150,6 @@ fn decrement(counts: &mut HashMap<String, u32>, account: &str) -> u32 {
 
 struct WorkerState {
     counts: HashMap<String, u32>,
-    #[allow(dead_code)]
     loader: FileLoader<HashMap<String, u32>>,
     stats: Stats,
 }
@@ -211,7 +210,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     let entry_count = loader.get().len();
 
     let stats = Stats::new("rust_concurrent_calls",
-        &["checked", "allowed", "blocked", "incremented", "decremented", "accounts"]);
+        &["checked", "allowed", "blocked", "incremented", "decremented", "accounts", "reloads"]);
     stats.set("accounts", entry_count as u64);
 
     WORKER.with(|w| {
@@ -361,6 +360,42 @@ unsafe extern "C" fn w_rust_concurrent_dec(
     })
 }
 
+// ── Script function: rust_concurrent_reload() ────────────────────
+
+unsafe extern "C" fn w_rust_concurrent_reload(
+    _msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        WORKER.with(|w| {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
+                Some(state) => {
+                    match state.loader.reload() {
+                        Ok(count) => {
+                            state.stats.set("accounts", count as u64);
+                            state.stats.inc("reloads");
+                            opensips_log!(INFO, "rust_concurrent_calls",
+                                "reloaded {} account limits", count);
+                            1
+                        }
+                        Err(e) => {
+                            opensips_log!(ERR, "rust_concurrent_calls",
+                                "reload failed: {}", e);
+                            -2
+                        }
+                    }
+                }
+                None => {
+                    opensips_log!(ERR, "rust_concurrent_calls",
+                        "worker state not initialized");
+                    -2
+                }
+            }
+        })
+    })
+}
 
 // ── Script function: rust_concurrent_stats() ─────────────────────
 
@@ -397,7 +432,7 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 6> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_check_concurrent"),
         function: Some(w_rust_check_concurrent),
@@ -414,6 +449,12 @@ static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
         name: cstr_lit!("rust_concurrent_dec"),
         function: Some(w_rust_concurrent_dec),
         params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_concurrent_reload"),
+        function: Some(w_rust_concurrent_reload),
+        params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
@@ -527,7 +568,6 @@ mod tests {
 
     #[test]
     fn test_parse_no_comma() {
-        // csv_line_parser already filters these, but parse should handle it
         assert_eq!(parse_limit_entry("alice"), None);
     }
 
@@ -559,8 +599,6 @@ mod tests {
 
     #[test]
     fn test_limits_file_comments() {
-        // csv_line_parser strips comments before build_limits sees them,
-        // but if a malformed line slips through, build_limits skips it.
         let entries = vec![
             "alice,5".to_string(),
             "notavalidline".to_string(),
@@ -703,11 +741,9 @@ mod tests {
     #[test]
     fn test_decrement_floor() {
         let mut counts = HashMap::new();
-        // Account not in map — starts at 0, floor at 0
         let new = decrement(&mut counts, "alice");
         assert_eq!(new, 0);
 
-        // Explicitly at 0
         counts.insert("bob".to_string(), 0);
         let new = decrement(&mut counts, "bob");
         assert_eq!(new, 0);
@@ -723,19 +759,16 @@ mod tests {
         limits.insert("bob".to_string(), 5);
         limits.insert("charlie".to_string(), 1);
 
-        // Alice: 1 call, under limit
         increment(&mut counts, "alice");
         let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
 
-        // Alice: 2 calls, at limit
         increment(&mut counts, "alice");
         let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
         assert!(!allowed);
         assert_eq!(count, 2);
         assert_eq!(limit, 2);
 
-        // Bob: 3 calls, under limit of 5
         increment(&mut counts, "bob");
         increment(&mut counts, "bob");
         increment(&mut counts, "bob");
@@ -743,12 +776,10 @@ mod tests {
         assert!(allowed);
         assert_eq!(count, 3);
 
-        // Charlie: 1 call, at limit of 1
         increment(&mut counts, "charlie");
         let (allowed, _, _) = check_limit(&counts, &limits, "charlie", 10);
         assert!(!allowed);
 
-        // Decrement alice, back under limit
         decrement(&mut counts, "alice");
         let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
@@ -763,26 +794,21 @@ mod tests {
         let mut limits = HashMap::new();
         limits.insert("alice".to_string(), 2);
 
-        // Call 1 arrives
         let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
         increment(&mut counts, "alice");
 
-        // Call 2 arrives
         let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
         increment(&mut counts, "alice");
 
-        // Call 3 arrives — blocked
         let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
         assert!(!allowed);
         assert_eq!(count, 2);
         assert_eq!(limit, 2);
 
-        // Call 1 ends
         decrement(&mut counts, "alice");
 
-        // Call 3 retries — now allowed
         let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
         assert_eq!(count, 1);
@@ -810,14 +836,12 @@ mod tests {
         assert!(json.contains(r#""incremented":2"#));
     }
 
-
     // ── configuration validation edge case tests ────────────────
 
     #[test]
     fn test_default_limit_zero_blocks_all() {
         let counts = HashMap::new();
         let limits = HashMap::new();
-        // default_limit=0 means block all unknown accounts
         let (allowed, count, limit) = check_limit(&counts, &limits, "anyone", 0);
         assert!(!allowed);
         assert_eq!(count, 0);
@@ -834,4 +858,58 @@ mod tests {
         assert_eq!(limit, 100_000);
     }
 
+    // ── Reload integration test (file-backed) ────────────────────
+
+    #[test]
+    fn test_reload_updates_limits() {
+        use rust_common::reload::{csv_line_parser, FileLoader};
+        use std::io::Write;
+
+        let path = format!("{}/rust_cc_reload_test", std::env::temp_dir().display());
+
+        // Create initial file
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "alice,5").unwrap();
+            writeln!(f, "bob,10").unwrap();
+        }
+
+        let loader = FileLoader::new(&path, csv_line_parser, build_limits).unwrap();
+        let limits = loader.get();
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits.get("alice"), Some(&5));
+        assert_eq!(limits.get("bob"), Some(&10));
+        drop(limits);
+
+        // Update file: change alice's limit, add charlie
+        std::fs::write(&path, "alice,20\nbob,10\ncharlie,3\n").unwrap();
+
+        let count = loader.reload().unwrap();
+        assert_eq!(count, 3);
+
+        let limits = loader.get();
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits.get("alice"), Some(&20));
+        assert_eq!(limits.get("bob"), Some(&10));
+        assert_eq!(limits.get("charlie"), Some(&3));
+        drop(limits);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reload_file_error_returns_err() {
+        use rust_common::reload::{csv_line_parser, FileLoader};
+
+        let path = format!("{}/rust_cc_reload_err_test", std::env::temp_dir().display());
+        std::fs::write(&path, "alice,5\n").unwrap();
+
+        let loader = FileLoader::new(&path, csv_line_parser, build_limits).unwrap();
+        assert_eq!(loader.get().len(), 1);
+
+        // Delete file, then attempt reload
+        std::fs::remove_file(&path).unwrap();
+        let result = loader.reload();
+        assert!(result.is_err());
+    }
 }

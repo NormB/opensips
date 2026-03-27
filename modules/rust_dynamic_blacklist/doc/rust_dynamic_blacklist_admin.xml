@@ -44,6 +44,13 @@
 	<para>
 		Matching is case-sensitive in both modes.
 	</para>
+	<para>
+		The blacklist can be reloaded at runtime using
+		<function>rust_blacklist_reload()</function> without restarting
+		&osips;. The reload atomically swaps the entire data set so
+		that in-flight lookups see either the old or the new data,
+		never a partial update.
+	</para>
 	</section>
 
 	<section id="dependencies" xreflabel="Dependencies">
@@ -208,6 +215,52 @@ route {
 		</example>
 	</section>
 
+	<section id="func_rust_blacklist_reload" xreflabel="rust_blacklist_reload()">
+		<title>
+		<function moreinfo="none">rust_blacklist_reload()</function>
+		</title>
+		<para>
+		Re-read the blacklist file from disk and atomically swap the
+		in-memory data. This allows updating the blacklist without
+		restarting &osips;. The reload affects only the worker process
+		that executes the function. To reload all workers, trigger
+		this function from a route that is processed by each worker
+		(e.g., via an MI-triggered OPTIONS ping or timer route).
+		</para>
+		<para>
+		On success, the <varname>entries</varname> and
+		<varname>reloads</varname> statistics are updated.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - reload succeeded.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - file read error or
+			worker not initialized.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_blacklist_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[reload_blacklist] {
+    if (rust_blacklist_reload()) {
+        xlog("L_INFO", "Blacklist reloaded successfully\n");
+    } else {
+        xlog("L_ERR", "Blacklist reload failed\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_rust_blacklist_stats" xreflabel="rust_blacklist_stats()">
 		<title>
 		<function moreinfo="none">rust_blacklist_stats()</function>
@@ -277,7 +330,15 @@ route {
 	<section>
 		<title><varname>entries</varname></title>
 		<para>
-		Number of entries loaded from the blacklist file at startup.
+		Number of entries currently loaded from the blacklist file.
+		Updated on reload.
+		</para>
+	</section>
+	<section>
+		<title><varname>reloads</varname></title>
+		<para>
+		Number of successful hot reloads performed via
+		<function>rust_blacklist_reload()</function>.
 		</para>
 	</section>
 	</section>

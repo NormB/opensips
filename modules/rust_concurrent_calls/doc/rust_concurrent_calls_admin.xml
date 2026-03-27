@@ -61,6 +61,12 @@
 		<literal>$var(concurrent_limit)</literal> pseudo-variables for
 		use in script logging or response messages.
 	</para>
+	<para>
+		Limits can be reloaded at runtime using
+		<function>rust_concurrent_reload()</function> without restarting
+		&osips;. Active call counters are preserved across reloads;
+		only the per-account limits are updated.
+	</para>
 	</section>
 
 	<section id="dependencies" xreflabel="Dependencies">
@@ -315,6 +321,56 @@ route[handle_bye] {
 		</example>
 	</section>
 
+	<section id="func_rust_concurrent_reload" xreflabel="rust_concurrent_reload()">
+		<title>
+		<function moreinfo="none">rust_concurrent_reload()</function>
+		</title>
+		<para>
+		Re-read the limits CSV file from disk and atomically swap the
+		per-account limits. Active call counters are preserved; only
+		the limit values are updated. This allows changing account
+		limits without restarting &osips;.
+		</para>
+		<para>
+		The reload affects only the worker process that executes the
+		function. To reload all workers, trigger this function from a
+		route that is processed by each worker (e.g., via an
+		MI-triggered OPTIONS ping or timer route).
+		</para>
+		<para>
+		On success, the <varname>accounts</varname> and
+		<varname>reloads</varname> statistics are updated.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - reload succeeded.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - file read error or
+			worker not initialized.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>rust_concurrent_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[reload_limits] {
+    if (rust_concurrent_reload()) {
+        xlog("L_INFO", "Call limits reloaded successfully\n");
+    } else {
+        xlog("L_ERR", "Call limits reload failed\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_rust_concurrent_stats" xreflabel="rust_concurrent_stats()">
 		<title>
 		<function moreinfo="none">rust_concurrent_stats()</function>
@@ -415,7 +471,15 @@ route {
 	<section>
 		<title><varname>accounts</varname></title>
 		<para>
-		Number of accounts loaded from the limits file at startup.
+		Number of accounts loaded from the limits file. Updated on
+		reload.
+		</para>
+	</section>
+	<section>
+		<title><varname>reloads</varname></title>
+		<para>
+		Number of successful hot reloads performed via
+		<function>rust_concurrent_reload()</function>.
 		</para>
 	</section>
 	</section>
