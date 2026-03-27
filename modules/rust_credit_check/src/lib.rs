@@ -16,7 +16,7 @@
 //!
 //! route {
 //!     if (is_method("INVITE") && !has_totag()) {
-//!         if (!rust_credit_check("$fU")) {
+//!         if (!credit_check("$fU")) {
 //!             sl_send_reply(402, "Insufficient Credit");
 //!             exit;
 //!         }
@@ -277,7 +277,7 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_credit_check", "module destroyed");
 }
 
-// ── Script function: rust_credit_check(account) ──────────────────
+// ── Script function: credit_check(account) ──────────────────
 
 unsafe extern "C" fn w_rust_credit_check(
     msg: *mut sys::sip_msg,
@@ -289,7 +289,7 @@ unsafe extern "C" fn w_rust_credit_check(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_credit_check",
-                    "rust_credit_check: missing or invalid parameter");
+                    "credit_check: missing or invalid parameter");
                 return -2;
             }
         };
@@ -381,7 +381,7 @@ unsafe extern "C" fn w_rust_credit_check(
     })
 }
 
-// ── Script function: rust_credit_clear(account) ──────────────────
+// ── Script function: credit_clear(account) ──────────────────
 
 unsafe extern "C" fn w_rust_credit_clear(
     _msg: *mut sys::sip_msg,
@@ -393,7 +393,7 @@ unsafe extern "C" fn w_rust_credit_clear(
             Some(s) => s,
             None => {
                 opensips_log!(ERR, "rust_credit_check",
-                    "rust_credit_clear: missing or invalid parameter");
+                    "credit_clear: missing or invalid parameter");
                 return -2;
             }
         };
@@ -418,7 +418,7 @@ unsafe extern "C" fn w_rust_credit_clear(
 }
 
 
-// ── Script function: rust_credit_stats() ─────────────────────────
+// ── Script function: credit_stats() ─────────────────────────
 
 unsafe extern "C" fn w_rust_credit_stats(
     msg: *mut sys::sip_msg,
@@ -455,19 +455,19 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_credit_check"),
+        name: cstr_lit!("credit_check"),
         function: Some(w_rust_credit_check),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_credit_clear"),
+        name: cstr_lit!("credit_clear"),
         function: Some(w_rust_credit_clear),
         params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_credit_stats"),
+        name: cstr_lit!("credit_stats"),
         function: Some(w_rust_credit_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
@@ -541,7 +541,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 /// The module_exports struct that OpenSIPS loads via dlsym("exports").
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
-    name: cstr_lit!("rust_credit_check"),
+    name: cstr_lit!("credit_check"),
     type_: 1, // MOD_TYPE_DEFAULT
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),

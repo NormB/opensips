@@ -11,7 +11,7 @@ members = [
     "rust/examples/user-script",
     "rust_sst",
     "rust_http_webhook",
-    "rust_dynamic_blacklist",
+    "rust_acl",
     "rust_concurrent_calls",
     "rust_credit_check",
     "rust_refer_handler",

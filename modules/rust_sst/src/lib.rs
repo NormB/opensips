@@ -15,7 +15,7 @@
 //!
 //! ## Script override mode
 //!
-//! `rust_sst_check()` and `rust_sst_update()` remain available for
+//! `sst_check()` and `sst_update()` remain available for
 //! operators who want per-call control over SST negotiation.
 //!
 //! # `OpenSIPS` config (automatic mode)
@@ -41,7 +41,7 @@
 //! ```text
 //! route {
 //!     if (is_method("INVITE")) {
-//!         if (rust_sst_check("1800", "90") == -1) {
+//!         if (sst_check("1800", "90") == -1) {
 //!             append_hf("Min-SE: $var(sst_min_se)\r\n");
 //!             sl_send_reply(422, "Session Interval Too Small");
 //!             exit;
@@ -51,7 +51,7 @@
 //!
 //! onreply_route[sst_reply] {
 //!     if ($rs == "200" && is_method("INVITE")) {
-//!         rust_sst_update("0", "0", "uas");
+//!         sst_update("0", "0", "uas");
 //!         append_hf("Session-Expires: $var(sst_session_expires)\r\n");
 //!         append_hf("Min-SE: $var(sst_min_se)\r\n");
 //!     }
@@ -883,7 +883,7 @@ unsafe extern "C" fn mod_destroy() {
     opensips_log!(INFO, "rust_sst", "module destroyed");
 }
 
-// ── Script function: rust_sst_check(interval, min_se) ────────────
+// ── Script function: sst_check(interval, min_se) ────────────
 
 unsafe extern "C" fn w_rust_sst_check(
     msg: *mut sys::sip_msg,
@@ -972,7 +972,7 @@ unsafe extern "C" fn w_rust_sst_check(
     })
 }
 
-// ── Script function: rust_sst_update(interval, min_se, refresher) ─
+// ── Script function: sst_update(interval, min_se, refresher) ─
 
 unsafe extern "C" fn w_rust_sst_update(
     msg: *mut sys::sip_msg,
@@ -1027,7 +1027,7 @@ unsafe extern "C" fn w_rust_sst_update(
 }
 
 
-// ── Script function: rust_sst_stats() ────────────────────────────
+// ── Script function: sst_stats() ────────────────────────────
 
 unsafe extern "C" fn w_rust_sst_stats(
     msg: *mut sys::sip_msg,
@@ -1067,19 +1067,19 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
-        name: cstr_lit!("rust_sst_check"),
+        name: cstr_lit!("sst_check"),
         function: Some(w_rust_sst_check),
         params: TWO_STR_PARAMS,
         flags: 1, // REQUEST_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_sst_update"),
+        name: cstr_lit!("sst_update"),
         function: Some(w_rust_sst_update),
         params: THREE_STR_PARAMS,
         flags: 1 | 4, // REQUEST_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
-        name: cstr_lit!("rust_sst_stats"),
+        name: cstr_lit!("sst_stats"),
         function: Some(w_rust_sst_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE

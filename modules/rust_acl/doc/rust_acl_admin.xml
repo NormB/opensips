@@ -1,0 +1,414 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_acl</emphasis> module provides a live-reload
+		file-based access control list for blocking or allowing &sip;
+		traffic by source &ip;, User-Agent, domain, or any arbitrary
+		string value. Both a blocklist and an optional allowlist file
+		are loaded at startup into each worker process. Matching can
+		be exact (HashSet lookup) or prefix-based (linear scan of
+		prefixes).
+	</para>
+	<para>
+		When an allowlist is configured, it takes precedence over the
+		blocklist: a value present in both lists is allowed. Temporary
+		entries can be added at runtime via
+		<function>auto_block()</function> and
+		<function>auto_allow()</function> with TTL-based expiry.
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+	<para>
+		At worker initialization, each process loads the blocklist file
+		(and optional allowlist file) and parses them line-by-line.
+		Blank lines and lines starting with <literal>#</literal> are
+		skipped.
+	</para>
+	<para>
+		In <quote>exact</quote> mode, entries are stored in a HashSet
+		for O(1) lookup. In <quote>prefix</quote> mode, entries are
+		stored as a list of prefixes checked via starts_with().
+		Matching is case-sensitive in both modes.
+	</para>
+	<para>
+		The <function>check_access()</function> function implements the
+		full precedence logic: auto-allow entries are checked first,
+		then the file-based allowlist, then auto-block entries, then
+		the file-based blocklist. If nothing matches, the default is
+		to allow.
+	</para>
+	<para>
+		Both lists can be reloaded at runtime using
+		<function>blocklist_reload()</function> and
+		<function>allowlist_reload()</function> without restarting
+		&osips;.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_blocklist_file" xreflabel="blocklist_file">
+		<title><varname>blocklist_file</varname> (string)</title>
+		<para>
+		Path to the blocklist file. One entry per line. Lines starting
+		with <literal>#</literal> are treated as comments. Blank lines
+		are ignored. This parameter is required.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (must be set).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>blocklist_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "blocklist_file", "/etc/opensips/blocklist.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_allowlist_file" xreflabel="allowlist_file">
+		<title><varname>allowlist_file</varname> (string)</title>
+		<para>
+		Path to the allowlist file (optional). Same format as the
+		blocklist. When configured, entries in the allowlist take
+		precedence over the blocklist in
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>allowlist_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "allowlist_file", "/etc/opensips/allowlist.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_match_mode" xreflabel="match_mode">
+		<title><varname>match_mode</varname> (string)</title>
+		<para>
+		The matching algorithm to use for both lists:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis><quote>exact</quote></emphasis> - value must
+			match an entry exactly (case-sensitive). O(1) lookups.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>prefix</quote></emphasis> - value must
+			start with an entry (case-sensitive). Linear prefix scan.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>prefix</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>match_mode</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "match_mode", "exact")
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_check_blocklist" xreflabel="check_blocklist()">
+		<title>
+		<function moreinfo="none">check_blocklist(value)</function>
+		</title>
+		<para>
+		Check whether the given value matches any entry in the
+		blocklist or auto-block map.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis> - value is NOT blocked (allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis> - value IS blocked.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis> - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_blocklist</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (!check_blocklist("$si")) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_allowlist" xreflabel="check_allowlist()">
+		<title>
+		<function moreinfo="none">check_allowlist(value)</function>
+		</title>
+		<para>
+		Check whether the given value matches the allowlist file or
+		auto-allow map.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis> - value is in the allowlist.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis> - value is NOT in the allowlist.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis> - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<example>
+		<title><function>check_allowlist</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (check_allowlist("$si")) {
+    xlog("L_INFO", "trusted source $si\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_access" xreflabel="check_access()">
+		<title>
+		<function moreinfo="none">check_access(value)</function>
+		</title>
+		<para>
+		Combined access check with precedence: auto-allow, then
+		file allowlist, then auto-block, then file blocklist. If
+		nothing matches, the default is to allow.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis> - allowed.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis> - blocked.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis> - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<example>
+		<title><function>check_access</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (check_access("$ua") == -1) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_blocklist_reload" xreflabel="blocklist_reload()">
+		<title>
+		<function moreinfo="none">blocklist_reload()</function>
+		</title>
+		<para>
+		Re-read the blocklist file from disk and atomically swap the
+		in-memory data.
+		</para>
+		<example>
+		<title><function>blocklist_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (blocklist_reload()) {
+    xlog("L_INFO", "Blocklist reloaded\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_allowlist_reload" xreflabel="allowlist_reload()">
+		<title>
+		<function moreinfo="none">allowlist_reload()</function>
+		</title>
+		<para>
+		Re-read the allowlist file from disk and atomically swap the
+		in-memory data.
+		</para>
+		<example>
+		<title><function>allowlist_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (allowlist_reload()) {
+    xlog("L_INFO", "Allowlist reloaded\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_auto_block" xreflabel="auto_block()">
+		<title>
+		<function moreinfo="none">auto_block(value, ttl_secs)</function>
+		</title>
+		<para>
+		Add a temporary blocklist entry that expires after
+		<emphasis>ttl_secs</emphasis> seconds.
+		</para>
+		<example>
+		<title><function>auto_block</function> usage</title>
+		<programlisting format="linespecific">
+...
+# Block source IP for 5 minutes
+auto_block("$si", "300");
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_auto_allow" xreflabel="auto_allow()">
+		<title>
+		<function moreinfo="none">auto_allow(value, ttl_secs)</function>
+		</title>
+		<para>
+		Add a temporary allowlist entry that expires after
+		<emphasis>ttl_secs</emphasis> seconds.
+		</para>
+		<example>
+		<title><function>auto_allow</function> usage</title>
+		<programlisting format="linespecific">
+...
+# Allow trusted IP for 1 hour
+auto_allow("$si", "3600");
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_access_stats" xreflabel="access_stats()">
+		<title>
+		<function moreinfo="none">access_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(acl_stats)</literal> with a JSON object
+		containing all tracked counters for the current worker process.
+		</para>
+		<example>
+		<title><function>access_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+access_stats();
+xlog("L_INFO", "ACL stats: $var(acl_stats)\n");
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<section>
+		<title>$var(acl_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by <function>access_stats()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>checked</varname></title>
+		<para>Total number of access lookups performed.</para>
+	</section>
+	<section>
+		<title><varname>blocked</varname></title>
+		<para>Number of lookups that resulted in blocked traffic.</para>
+	</section>
+	<section>
+		<title><varname>allowed</varname></title>
+		<para>Number of lookups that resulted in allowed traffic.</para>
+	</section>
+	<section>
+		<title><varname>auto_blocked</varname></title>
+		<para>Number of auto_block() calls.</para>
+	</section>
+	<section>
+		<title><varname>auto_allowed</varname></title>
+		<para>Number of auto_allow() calls.</para>
+	</section>
+	<section>
+		<title><varname>entries_blocklist</varname></title>
+		<para>Number of entries in the blocklist file.</para>
+	</section>
+	<section>
+		<title><varname>entries_allowlist</varname></title>
+		<para>Number of entries in the allowlist file.</para>
+	</section>
+	<section>
+		<title><varname>reloads</varname></title>
+		<para>Number of successful file reloads.</para>
+	</section>
+	</section>
+
+</chapter>

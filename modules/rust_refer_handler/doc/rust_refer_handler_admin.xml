@@ -141,9 +141,9 @@ modparam("rust_refer_handler", "expire_secs", 600)
 	<section id="exported_functions" xreflabel="exported_functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_handle_refer" xreflabel="rust_handle_refer()">
+	<section id="func_handle_refer" xreflabel="handle_refer()">
 		<title>
-		<function moreinfo="none">rust_handle_refer(refer_to)</function>
+		<function moreinfo="none">handle_refer(refer_to)</function>
 		</title>
 		<para>
 		Record a new REFER transaction. The Call-ID is automatically
@@ -178,12 +178,12 @@ modparam("rust_refer_handler", "expire_secs", 600)
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_handle_refer</function> usage</title>
+		<title><function>handle_refer</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("REFER")) {
-        if (rust_handle_refer("$hdr(Refer-To)")) {
+        if (handle_refer("$hdr(Refer-To)")) {
             sl_send_reply(202, "Accepted");
         } else {
             sl_send_reply(500, "Internal Error");
@@ -195,9 +195,9 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_handle_notify" xreflabel="rust_handle_notify()">
+	<section id="func_handle_notify" xreflabel="handle_notify()">
 		<title>
-		<function moreinfo="none">rust_handle_notify(call_id, status_code)</function>
+		<function moreinfo="none">handle_notify(call_id, status_code)</function>
 		</title>
 		<para>
 		Process a NOTIFY message for a tracked REFER transaction.
@@ -247,13 +247,13 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_handle_notify</function> usage</title>
+		<title><function>handle_notify</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("NOTIFY")) {
         # Parse sipfrag body for status code
-        if (rust_handle_notify("$ci", "$var(sipfrag_code)")) {
+        if (handle_notify("$ci", "$var(sipfrag_code)")) {
             sl_send_reply(200, "OK");
         } else {
             sl_send_reply(481, "Subscription does not exist");
@@ -265,9 +265,9 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_refer_status" xreflabel="rust_refer_status()">
+	<section id="func_refer_status" xreflabel="refer_status()">
 		<title>
-		<function moreinfo="none">rust_refer_status(call_id)</function>
+		<function moreinfo="none">refer_status(call_id)</function>
 		</title>
 		<para>
 		Query the current status of a tracked REFER transaction. Sets
@@ -306,11 +306,11 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_refer_status</function> usage</title>
+		<title><function>refer_status</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route[check_transfer] {
-    if (rust_refer_status("$ci")) {
+    if (refer_status("$ci")) {
         xlog("L_INFO", "transfer $ci status: $var(refer_status)\n");
         if ($var(refer_status) == "success") {
             # Transfer completed successfully
@@ -325,9 +325,9 @@ route[check_transfer] {
 		</example>
 	</section>
 
-	<section id="func_rust_refer_stats" xreflabel="rust_refer_stats()">
+	<section id="func_refer_stats" xreflabel="refer_stats()">
 		<title>
-		<function moreinfo="none">rust_refer_stats()</function>
+		<function moreinfo="none">refer_stats()</function>
 		</title>
 		<para>
 		Retrieve module statistics as a JSON string. Sets
@@ -345,11 +345,11 @@ route[check_transfer] {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_refer_stats</function> usage</title>
+		<title><function>refer_stats</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_refer_stats();
+    refer_stats();
     xlog("L_INFO", "Refer stats: $var(refer_stats)\n");
 }
 ...
@@ -364,7 +364,7 @@ route {
 		<title>$var(refer_status)</title>
 		<para>
 		The current status of a tracked REFER transaction. Set by
-		<function>rust_refer_status()</function>. Possible values:
+		<function>refer_status()</function>. Possible values:
 		<itemizedlist>
 		<listitem><para>
 			<quote>pending</quote>  - REFER received, awaiting
@@ -392,7 +392,7 @@ route {
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by
-		<function>rust_refer_stats()</function>.
+		<function>refer_stats()</function>.
 		</para>
 	</section>
 	</section>

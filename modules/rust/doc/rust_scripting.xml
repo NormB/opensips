@@ -29,7 +29,7 @@
 	<tbody>
 	<row>
 		<entry><emphasis role='bold'>Compiled-in</emphasis></entry>
-		<entry>Functions like <emphasis>rust_check_rate()</emphasis> built into
+		<entry>Functions like <emphasis>check_rate()</emphasis> built into
 		the module</entry>
 		<entry>Performance-critical, stateful patterns</entry>
 	</row>
@@ -752,7 +752,7 @@ opensips_handler!(request_logger, |msg, _param| {
 		<para>
 		Rate limiter keyed by User-Agent header instead of source IP. Uses the
 		same <emphasis>thread_local! + RefCell + HashMap</emphasis> pattern as
-		the compiled-in <emphasis>rust_check_rate()</emphasis>. Demonstrates
+		the compiled-in <emphasis>check_rate()</emphasis>. Demonstrates
 		<emphasis>.parse::&lt;u32&gt;()</emphasis> for string-to-number
 		conversion and chained <emphasis>.unwrap_or()</emphasis> for fallback
 		defaults.
@@ -1074,10 +1074,10 @@ xlog("counter: $var(counter_name) = $var(count)\n");
 		</para>
 		<programlisting format="linespecific">
 opensips_handler!(shared_counter, |msg, _param| {
-    // Call the compiled-in rust_counter_inc function.
+    // Call the compiled-in counter_inc function.
     // Uses AtomicI64::fetch_add(1) in shared memory (truly atomic).
     // Sets $var(shared_count) with the new value.
-    match msg.call("rust_counter_inc", &amp;[]) {
+    match msg.call("counter_inc", &amp;[]) {
         Ok(_) =&gt; {
             opensips_log!(DBG, "rust-script",
                 "shared_counter: incremented (atomic)");
@@ -1085,7 +1085,7 @@ opensips_handler!(shared_counter, |msg, _param| {
         }
         Err(e) =&gt; {
             opensips_log!(ERR, "rust-script",
-                "shared_counter: rust_counter_inc failed: {}", e);
+                "shared_counter: counter_inc failed: {}", e);
             -1
         }
     }
@@ -1093,18 +1093,18 @@ opensips_handler!(shared_counter, |msg, _param| {
 </programlisting>
 		<programlisting format="linespecific">
 # In opensips.cfg -- call directly:
-rust_counter_inc();
+counter_inc();
 xlog("total requests: $var(shared_count)\n");
 
 # Or from a user script:
 rust_exec("shared_counter");
 </programlisting>
 		<para>
-		The compiled-in <emphasis>rust_counter_inc()</emphasis> allocates the
+		The compiled-in <emphasis>counter_inc()</emphasis> allocates the
 		<emphasis>AtomicI64</emphasis> in shared memory during
 		<emphasis>mod_init</emphasis> (before fork). After fork, all workers
 		share the same physical counter. The user-script handler calls it via
-		<emphasis>msg.call("rust_counter_inc", &amp;[])</emphasis>.
+		<emphasis>msg.call("counter_inc", &amp;[])</emphasis>.
 		</para>
 		<para>
 		Teaches the difference between per-worker state

@@ -22,7 +22,7 @@
 	<section>
 	<title>How it works</title>
 	<para>
-		When <function>rust_credit_check()</function> is called, the
+		When <function>credit_check()</function> is called, the
 		module first checks the per-worker cache for a valid
 		(non-expired) balance entry for the account. On a cache hit,
 		the cached balance is used immediately without any &http;
@@ -65,7 +65,7 @@ GET {billing_url}?account={account}
 		(string, 2 decimal places) and
 		<literal>$var(credit_max_duration)</literal> (integer, seconds)
 		are set on every call to
-		<function>rust_credit_check()</function>.
+		<function>credit_check()</function>.
 	</para>
 	</section>
 
@@ -131,7 +131,7 @@ modparam("rust_credit_check", "billing_url", "http://billing:8080/balance")
 		<title><varname>cache_ttl</varname> (integer)</title>
 		<para>
 		Time-to-live in seconds for cached balance entries. After this
-		period, the next <function>rust_credit_check()</function> call
+		period, the next <function>credit_check()</function> call
 		for the account will trigger a fresh &http; query. Set to 0 to
 		disable caching (not recommended for production).
 		</para>
@@ -281,9 +281,9 @@ modparam("rust_credit_check", "tls_ca_file", "/etc/ssl/certs/billing-ca.pem")
 	<section id="exported_functions" xreflabel="exported_functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_credit_check" xreflabel="rust_credit_check()">
+	<section id="func_credit_check" xreflabel="credit_check()">
 		<title>
-		<function moreinfo="none">rust_credit_check(account)</function>
+		<function moreinfo="none">credit_check(account)</function>
 		</title>
 		<para>
 		Query the billing API (or per-worker cache) for the given
@@ -320,12 +320,12 @@ modparam("rust_credit_check", "tls_ca_file", "/etc/ssl/certs/billing-ca.pem")
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_credit_check</function> usage</title>
+		<title><function>credit_check</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("INVITE") &amp;&amp; !has_totag()) {
-        if (!rust_credit_check("$fU")) {
+        if (!credit_check("$fU")) {
             sl_send_reply(402, "Insufficient Credit");
             exit;
         }
@@ -337,13 +337,13 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_credit_clear" xreflabel="rust_credit_clear()">
+	<section id="func_credit_clear" xreflabel="credit_clear()">
 		<title>
-		<function moreinfo="none">rust_credit_clear(account)</function>
+		<function moreinfo="none">credit_clear(account)</function>
 		</title>
 		<para>
 		Clear the cached balance entry for the given account. The next
-		call to <function>rust_credit_check()</function> for this
+		call to <function>credit_check()</function> for this
 		account will trigger a fresh &http; query to the billing API.
 		</para>
 		<para>
@@ -374,13 +374,13 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_credit_clear</function> usage</title>
+		<title><function>credit_clear</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("BYE")) {
         # Force balance refresh after call ends
-        rust_credit_clear("$fU");
+        credit_clear("$fU");
     }
 }
 ...
@@ -388,9 +388,9 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_credit_stats" xreflabel="rust_credit_stats()">
+	<section id="func_credit_stats" xreflabel="credit_stats()">
 		<title>
-		<function moreinfo="none">rust_credit_stats()</function>
+		<function moreinfo="none">credit_stats()</function>
 		</title>
 		<para>
 		Retrieve module statistics as a JSON string. Sets
@@ -408,11 +408,11 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_credit_stats</function> usage</title>
+		<title><function>credit_stats</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_credit_stats();
+    credit_stats();
     xlog("L_INFO", "Credit stats: $var(credit_stats)\n");
 }
 ...
@@ -428,7 +428,7 @@ route {
 		<para>
 		The account balance as a string with 2 decimal places (e.g.,
 		<quote>42.50</quote> or <quote>0.00</quote>). Set by
-		<function>rust_credit_check()</function>.
+		<function>credit_check()</function>.
 		</para>
 	</section>
 	<section>
@@ -436,7 +436,7 @@ route {
 		<para>
 		The maximum call duration in seconds, computed as
 		<literal>(balance / rate_per_min) * 60</literal>. Set as an
-		integer by <function>rust_credit_check()</function>. A value
+		integer by <function>credit_check()</function>. A value
 		of 0 means no credit available.
 		</para>
 	</section>
@@ -445,7 +445,7 @@ route {
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by
-		<function>rust_credit_stats()</function>.
+		<function>credit_stats()</function>.
 		</para>
 	</section>
 	</section>

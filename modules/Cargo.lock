@@ -1078,6 +1078,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-acl"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "opensips-build",
+ "opensips-rs",
+ "rust-common",
+]
+
+[[package]]
 name = "rust-common"
 version = "0.1.0"
 dependencies = [
@@ -1109,16 +1119,6 @@ dependencies = [
  "rust-common",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "rust-dynamic-blacklist"
-version = "0.1.0"
-dependencies = [
- "cc",
- "opensips-build",
- "opensips-rs",
- "rust-common",
 ]
 
 [[package]]

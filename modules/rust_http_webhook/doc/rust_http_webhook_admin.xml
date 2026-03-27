@@ -32,7 +32,7 @@
 	<para>
 		Each &osips; worker process maintains its own independent
 		fire-and-forget &http; dispatcher backed by a tokio runtime.
-		When <function>rust_webhook()</function> is called from the
+		When <function>webhook()</function> is called from the
 		script, the payload string is enqueued into a bounded channel.
 		A background task dequeues payloads and sends them as &http;
 		POST requests to the configured &url;(s).
@@ -300,9 +300,9 @@ modparam("rust_http_webhook", "retry_delay_ms", 500)
 	<section id="exported_functions" xreflabel="exported_functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_webhook" xreflabel="rust_webhook()">
+	<section id="func_webhook" xreflabel="webhook()">
 		<title>
-		<function moreinfo="none">rust_webhook(payload)</function>
+		<function moreinfo="none">webhook(payload)</function>
 		</title>
 		<para>
 		Enqueue a payload string for asynchronous &http; POST delivery
@@ -341,20 +341,20 @@ modparam("rust_http_webhook", "retry_delay_ms", 500)
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_webhook</function> usage</title>
+		<title><function>webhook</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_webhook("{\"method\":\"$rm\",\"from\":\"$fu\",\"ruri\":\"$ru\"}");
+    webhook("{\"method\":\"$rm\",\"from\":\"$fu\",\"ruri\":\"$ru\"}");
 }
 ...
 </programlisting>
 		</example>
 	</section>
 
-	<section id="func_rust_webhook_stats" xreflabel="rust_webhook_stats()">
+	<section id="func_webhook_stats" xreflabel="webhook_stats()">
 		<title>
-		<function moreinfo="none">rust_webhook_stats()</function>
+		<function moreinfo="none">webhook_stats()</function>
 		</title>
 		<para>
 		Retrieve module statistics as a JSON string. Sets
@@ -372,11 +372,11 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_webhook_stats</function> usage</title>
+		<title><function>webhook_stats</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_webhook_stats();
+    webhook_stats();
     xlog("L_INFO", "Webhook stats: $var(webhook_stats)\n");
 }
 ...
@@ -392,7 +392,7 @@ route {
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by
-		<function>rust_webhook_stats()</function>.
+		<function>webhook_stats()</function>.
 		</para>
 	</section>
 	</section>

@@ -28,8 +28,8 @@
 			<emphasis>Script override mode</emphasis>  - when
 			<emphasis>dialog.so</emphasis> is not loaded (or for per-call
 			control), the script functions
-			<function>rust_sst_check()</function> and
-			<function>rust_sst_update()</function> allow manual
+			<function>sst_check()</function> and
+			<function>sst_update()</function> allow manual
 			Session-Expires validation and header construction.
 		</para></listitem>
 		</itemizedlist>
@@ -94,18 +94,18 @@
 	<para>
 		When <emphasis>dialog.so</emphasis> is not loaded, or when the
 		operator wants manual control, the script functions
-		<function>rust_sst_check()</function> and
-		<function>rust_sst_update()</function> are available.
+		<function>sst_check()</function> and
+		<function>sst_update()</function> are available.
 	</para>
 	<para>
-		<function>rust_sst_check()</function> validates the
+		<function>sst_check()</function> validates the
 		Session-Expires from an incoming INVITE against the configured
 		minimum. If the interval is too small, it returns
 		<emphasis>-1</emphasis> (denied) and sets
 		<literal>$var(sst_min_se)</literal> for use in a 422 reply.
 	</para>
 	<para>
-		<function>rust_sst_update()</function> computes the final
+		<function>sst_update()</function> computes the final
 		Session-Expires and Min-SE header values for insertion into
 		a 200 OK response.
 	</para>
@@ -243,9 +243,9 @@ modparam("rust_sst", "default_refresher", "uac")
 	<section id="exported_functions" xreflabel="exported_functions">
 	<title>Exported Functions</title>
 
-	<section id="func_rust_sst_check" xreflabel="rust_sst_check()">
+	<section id="func_sst_check" xreflabel="sst_check()">
 		<title>
-		<function moreinfo="none">rust_sst_check(interval, min_se)</function>
+		<function moreinfo="none">sst_check(interval, min_se)</function>
 		</title>
 		<para>
 		Validate the Session-Expires and Min-SE values from an incoming
@@ -287,12 +287,12 @@ modparam("rust_sst", "default_refresher", "uac")
 		This function can be used from REQUEST_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_sst_check</function> usage</title>
+		<title><function>sst_check</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
     if (is_method("INVITE") &amp;&amp; !has_totag()) {
-        if (rust_sst_check("0", "0") == -1) {
+        if (sst_check("0", "0") == -1) {
             # Session interval too small - send 422
             append_hf("Min-SE: $var(sst_min_se)\r\n");
             sl_send_reply(422, "Session Interval Too Small");
@@ -306,9 +306,9 @@ route {
 		</example>
 	</section>
 
-	<section id="func_rust_sst_update" xreflabel="rust_sst_update()">
+	<section id="func_sst_update" xreflabel="sst_update()">
 		<title>
-		<function moreinfo="none">rust_sst_update(interval, min_se, refresher)</function>
+		<function moreinfo="none">sst_update(interval, min_se, refresher)</function>
 		</title>
 		<para>
 		Compute the Session-Expires and Min-SE header values for a
@@ -350,12 +350,12 @@ route {
 		This function can be used from REQUEST_ROUTE and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_sst_update</function> usage</title>
+		<title><function>sst_update</function> usage</title>
 		<programlisting format="linespecific">
 ...
 onreply_route[sst_reply] {
     if ($rs == "200" &amp;&amp; is_method("INVITE")) {
-        rust_sst_update("0", "0", "uas");
+        sst_update("0", "0", "uas");
         append_hf("Session-Expires: $var(sst_session_expires)\r\n");
         append_hf("Min-SE: $var(sst_min_se)\r\n");
     }
@@ -365,9 +365,9 @@ onreply_route[sst_reply] {
 		</example>
 	</section>
 
-	<section id="func_rust_sst_stats" xreflabel="rust_sst_stats()">
+	<section id="func_sst_stats" xreflabel="sst_stats()">
 		<title>
-		<function moreinfo="none">rust_sst_stats()</function>
+		<function moreinfo="none">sst_stats()</function>
 		</title>
 		<para>
 		Retrieve module statistics as a JSON string. Sets
@@ -385,11 +385,11 @@ onreply_route[sst_reply] {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>rust_sst_stats</function> usage</title>
+		<title><function>sst_stats</function> usage</title>
 		<programlisting format="linespecific">
 ...
 route {
-    rust_sst_stats();
+    sst_stats();
     xlog("L_INFO", "SST stats: $var(sst_stats)\n");
 }
 ...
@@ -407,15 +407,15 @@ route {
 		<title>$var(sst_interval)</title>
 		<para>
 		The negotiated Session-Expires interval in seconds. Set by
-		<function>rust_sst_check()</function>.
+		<function>sst_check()</function>.
 		</para>
 	</section>
 	<section>
 		<title>$var(sst_min_se)</title>
 		<para>
 		The effective Min-SE value in seconds. Set by both
-		<function>rust_sst_check()</function> and
-		<function>rust_sst_update()</function>. For a 422 reply,
+		<function>sst_check()</function> and
+		<function>sst_update()</function>. For a 422 reply,
 		use this value in the Min-SE header.
 		</para>
 	</section>
@@ -424,7 +424,7 @@ route {
 		<para>
 		The negotiated refresher role (<quote>uac</quote> or
 		<quote>uas</quote>). Set by
-		<function>rust_sst_check()</function>.
+		<function>sst_check()</function>.
 		</para>
 	</section>
 	<section>
@@ -432,7 +432,7 @@ route {
 		<para>
 		The complete Session-Expires header value including the
 		refresher parameter (e.g., <quote>1800;refresher=uas</quote>).
-		Set by <function>rust_sst_update()</function>. Use this
+		Set by <function>sst_update()</function>. Use this
 		directly in <function>append_hf()</function>.
 		</para>
 	</section>
@@ -440,7 +440,7 @@ route {
 		<title>$var(sst_stats)</title>
 		<para>
 		JSON string containing the module statistics for the current
-		worker process. Set by <function>rust_sst_stats()</function>.
+		worker process. Set by <function>sst_stats()</function>.
 		</para>
 	</section>
 	</section>
