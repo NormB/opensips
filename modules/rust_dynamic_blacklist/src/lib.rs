@@ -228,6 +228,28 @@ unsafe extern "C" fn w_rust_check_blacklist(
     })
 }
 
+
+// ── Script function: rust_blacklist_stats() ──────────────────────
+
+unsafe extern "C" fn w_rust_blacklist_stats(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_json(),
+                None => r#"{"error":"not_initialized"}"#.to_string(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(blacklist_stats)", &json);
+        1
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -242,11 +264,17 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 2> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_check_blacklist"),
         function: Some(w_rust_check_blacklist),
         params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_blacklist_stats"),
+        function: Some(w_rust_blacklist_stats),
+        params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
@@ -486,4 +514,26 @@ mod tests {
         assert!(check_prefix(&prefixes, "evil.example.org"));
         assert!(!check_prefix(&prefixes, "good.example.org"));
     }
+
+    // ── Stats JSON output tests ──────────────────────────────────
+
+    #[test]
+    fn test_blacklist_stats_json() {
+        use rust_common::mi::Stats;
+        let stats = Stats::new("rust_dynamic_blacklist", &["checked", "blocked", "allowed", "entries"]);
+        stats.set("entries", 42);
+        stats.inc("checked");
+        stats.inc("checked");
+        stats.inc("blocked");
+        stats.inc("allowed");
+
+        let json = stats.to_json();
+        assert!(json.starts_with("{"));
+        assert!(json.ends_with("}"));
+        assert!(json.contains(r#""entries":42"#));
+        assert!(json.contains(r#""checked":2"#));
+        assert!(json.contains(r#""blocked":1"#));
+        assert!(json.contains(r#""allowed":1"#));
+    }
+
 }

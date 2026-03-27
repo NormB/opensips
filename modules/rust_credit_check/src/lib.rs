@@ -63,6 +63,7 @@ use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::http::Pool;
+use rust_common::mi::Stats;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -177,6 +178,7 @@ fn on_error_allows(on_error: &str) -> bool {
 struct WorkerState {
     cache: CreditCache,
     pool: Pool,
+    stats: Stats,
 }
 
 thread_local! {
@@ -220,8 +222,11 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     let ttl = CACHE_TTL.get();
     let cache = CreditCache::new(if ttl > 0 { ttl as u64 } else { 300 });
 
+    let stats = Stats::new("rust_credit_check",
+        &["checked", "allowed", "denied", "errors", "cache_hits", "cache_misses"]);
+
     WORKER.with(|w| {
-        *w.borrow_mut() = Some(WorkerState { cache, pool });
+        *w.borrow_mut() = Some(WorkerState { cache, pool, stats });
     });
 
     opensips_log!(DBG, "rust_credit_check", "worker {} initialized", rank);
@@ -262,14 +267,18 @@ unsafe extern "C" fn w_rust_credit_check(
                 }
             };
 
+            state.stats.inc("checked");
+
             // 1. Check cache
             let balance = match state.cache.get(account) {
                 Some(b) => {
+                    state.stats.inc("cache_hits");
                     opensips_log!(DBG, "rust_credit_check",
                         "cache hit for {}: balance={}", account, b);
                     b
                 }
                 None => {
+                    state.stats.inc("cache_misses");
                     // 2. Cache miss — query billing API
                     let url = match unsafe { BILLING_URL.get_value() } {
                         Some(u) => u,
@@ -314,6 +323,7 @@ unsafe extern "C" fn w_rust_credit_check(
             let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
 
             if balance > 0.0 {
+                state.stats.inc("allowed");
                 let max_dur = compute_max_duration(balance, rate);
                 // Serialize balance as string with 2 decimal places
                 let balance_str = format!("{balance:.2}");
@@ -322,6 +332,7 @@ unsafe extern "C" fn w_rust_credit_check(
                 1
             } else {
                 // 6. No credit
+                state.stats.inc("denied");
                 let _ = sip_msg.set_pv("$var(credit_balance)", "0.00");
                 let _ = sip_msg.set_pv_int("$var(credit_max_duration)", 0);
                 -1
@@ -366,6 +377,28 @@ unsafe extern "C" fn w_rust_credit_clear(
     })
 }
 
+
+// ── Script function: rust_credit_stats() ─────────────────────────
+
+unsafe extern "C" fn w_rust_credit_stats(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_json(),
+                None => r#"{"error":"not_initialized"}"#.to_string(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(credit_stats)", &json);
+        1
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -380,7 +413,7 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_credit_check"),
         function: Some(w_rust_credit_check),
@@ -391,6 +424,12 @@ static CMDS: SyncArray<sys::cmd_export_, 3> = SyncArray([
         name: cstr_lit!("rust_credit_clear"),
         function: Some(w_rust_credit_clear),
         params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_credit_stats"),
+        function: Some(w_rust_credit_stats),
+        params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
@@ -653,4 +692,27 @@ mod tests {
         cache.clear("nonexistent"); // should not panic
         assert_eq!(cache.len(), 0);
     }
+
+    // ── Stats JSON output tests ──────────────────────────────────
+
+    #[test]
+    fn test_credit_stats_json() {
+        use rust_common::mi::Stats;
+        let stats = Stats::new("rust_credit_check",
+            &["checked", "allowed", "denied", "errors", "cache_hits", "cache_misses"]);
+        stats.inc("checked");
+        stats.inc("checked");
+        stats.inc("allowed");
+        stats.inc("cache_hits");
+        stats.inc("cache_misses");
+
+        let json = stats.to_json();
+        assert!(json.starts_with("{"));
+        assert!(json.ends_with("}"));
+        assert!(json.contains(r#""checked":2"#));
+        assert!(json.contains(r#""allowed":1"#));
+        assert!(json.contains(r#""denied":0"#));
+        assert!(json.contains(r#""cache_hits":1"#));
+    }
+
 }

@@ -503,6 +503,28 @@ unsafe extern "C" fn w_rust_refer_status(
     })
 }
 
+
+// ── Script function: rust_refer_stats() ──────────────────────────
+
+unsafe extern "C" fn w_rust_refer_stats(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_json(),
+                None => r#"{"error":"not_initialized"}"#.to_string(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(refer_stats)", &json);
+        1
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -524,7 +546,7 @@ const TWO_PARAMS_STR_STR: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("rust_handle_refer"),
         function: Some(w_rust_handle_refer),
@@ -541,6 +563,12 @@ static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
         name: cstr_lit!("rust_refer_status"),
         function: Some(w_rust_refer_status),
         params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("rust_refer_stats"),
+        function: Some(w_rust_refer_stats),
+        params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
@@ -859,4 +887,27 @@ mod tests {
         assert_eq!(swept, 0);
         assert_eq!(tracker.active_count(), 1);
     }
+
+    // ── Stats JSON output tests ──────────────────────────────────
+
+    #[test]
+    fn test_refer_stats_json() {
+        use rust_common::mi::Stats;
+        let stats = Stats::new("rust_refer_handler",
+            &["active_transfers", "completed", "failed", "expired", "unknown_notify"]);
+        stats.set("active_transfers", 5);
+        stats.inc("completed");
+        stats.inc("completed");
+        stats.inc("failed");
+        stats.inc("unknown_notify");
+
+        let json = stats.to_json();
+        assert!(json.starts_with("{"));
+        assert!(json.ends_with("}"));
+        assert!(json.contains(r#""active_transfers":5"#));
+        assert!(json.contains(r#""completed":2"#));
+        assert!(json.contains(r#""failed":1"#));
+        assert!(json.contains(r#""unknown_notify":1"#));
+    }
+
 }
