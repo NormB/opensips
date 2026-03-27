@@ -22,8 +22,10 @@
 	</para>
 	<para>
 		Features include custom &http; headers for authentication or
-		metadata, fanout delivery to multiple &url;s, and retry with
-		exponential backoff for transient failures.
+		metadata, fanout delivery to multiple &url;s, retry with
+		exponential backoff, message batching for high-volume
+		deployments, &sip; method filtering, and &http; error
+		logging with per-status-code statistics.
 	</para>
 	</section>
 
@@ -64,6 +66,76 @@
 		The &http; client respects the configured timeout and content
 		type. For HTTPS endpoints, a custom CA certificate file can
 		be specified via <varname>tls_ca_file</varname>.
+	</para>
+	</section>
+
+	<section>
+	<title>Message Batching</title>
+	<para>
+		When <varname>batch_size</varname> is set to a value greater
+		than 1, the module accumulates multiple payloads and sends
+		them as a single &http; POST containing a JSON array. This
+		reduces &http; overhead for high-volume deployments.
+	</para>
+	<para>
+		The batch is flushed (sent) when either condition is met:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		The number of accumulated messages reaches
+		<varname>batch_size</varname>.
+	</para></listitem>
+	<listitem><para>
+		The time since the first message in the current batch exceeds
+		<varname>batch_timeout_ms</varname> milliseconds.
+	</para></listitem>
+	</itemizedlist>
+	<para>
+		If individual payloads are valid JSON values (objects, arrays,
+		numbers, strings), they are included as-is in the array. If a
+		payload is not valid JSON, it is wrapped as a JSON string.
+		For example, three JSON object payloads become:
+		<literal>[{"method":"INVITE"},{"method":"BYE"},{"method":"ACK"}]</literal>.
+	</para>
+	<para>
+		When <varname>batch_size</varname> is 1 (the default), batching
+		is disabled and each payload is sent individually, preserving
+		backward compatibility.
+	</para>
+	</section>
+
+	<section>
+	<title>Method Filtering</title>
+	<para>
+		The <varname>method_filter</varname> parameter restricts
+		webhook delivery to specific &sip; methods. When set, only
+		messages whose request method matches one of the listed values
+		trigger a webhook. All other messages are silently skipped
+		(the function returns 1, not an error).
+	</para>
+	<para>
+		Method names are case-insensitive. If the parameter is not
+		set or is empty, all &sip; methods trigger webhooks (default
+		behavior).
+	</para>
+	</section>
+
+	<section>
+	<title>Error Logging and Statistics</title>
+	<para>
+		When <varname>log_errors</varname> is set to 1, each &http;
+		failure (non-2xx response or timeout) is logged at WARN level
+		with the target &url; and status code. This is useful for
+		diagnosing connectivity issues with webhook endpoints.
+	</para>
+	<para>
+		The module tracks per-category error counters accessible via
+		<function>webhook_stats()</function>:
+		<varname>errors_4xx</varname> (client errors),
+		<varname>errors_5xx</varname> (server errors), and
+		<varname>errors_timeout</varname> (timeouts/network errors).
+		These counters are always maintained regardless of the
+		<varname>log_errors</varname> setting.
 	</para>
 	</section>
 
@@ -295,6 +367,132 @@ modparam("rust_http_webhook", "retry_delay_ms", 500)
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_batch_size" xreflabel="batch_size">
+		<title><varname>batch_size</varname> (integer)</title>
+		<para>
+		Number of payloads to accumulate before sending them as a
+		single &http; POST containing a JSON array. Set to 1 to
+		disable batching (each payload is sent individually).
+		</para>
+		<para>
+		When batching is enabled (value greater than 1), payloads are
+		buffered and flushed either when the batch reaches this size
+		or when <varname>batch_timeout_ms</varname> milliseconds
+		elapse, whichever comes first. The POST body is a JSON array
+		containing all accumulated payloads.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote> (no batching).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>batch_size</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "batch_size", 10)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_batch_timeout_ms" xreflabel="batch_timeout_ms">
+		<title><varname>batch_timeout_ms</varname> (integer)</title>
+		<para>
+		Maximum time in milliseconds to wait before flushing a
+		partial batch. If the batch has not reached
+		<varname>batch_size</varname> within this interval, it is
+		sent anyway. This prevents messages from being held
+		indefinitely during low-traffic periods.
+		</para>
+		<para>
+		Only effective when <varname>batch_size</varname> is greater
+		than 1.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>100</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>batch_timeout_ms</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "batch_timeout_ms", 200)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_method_filter" xreflabel="method_filter">
+		<title><varname>method_filter</varname> (string)</title>
+		<para>
+		Comma-separated list of &sip; methods for which webhooks
+		should be sent. If not set or empty, webhooks are sent for
+		all &sip; methods (default behavior).
+		</para>
+		<para>
+		When set, only messages whose request method matches one of
+		the listed methods will trigger a webhook. Other messages are
+		silently skipped — the <function>webhook()</function> function
+		returns 1 (not an error) and the <varname>filtered</varname>
+		counter is incremented.
+		</para>
+		<para>
+		Method names are case-insensitive.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (all methods).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>method_filter</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "method_filter", "INVITE,BYE,REGISTER")
+...
+</programlisting>
+		</example>
+		<example>
+		<title><varname>method_filter</varname> for call events only</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "method_filter", "INVITE,BYE,CANCEL,UPDATE,PRACK")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_log_errors" xreflabel="log_errors">
+		<title><varname>log_errors</varname> (integer)</title>
+		<para>
+		Enable logging of &http; delivery failures. When set to 1,
+		each failed webhook delivery (non-2xx response or
+		timeout/network error) is logged at WARN level with the
+		target &url; and &http; status code.
+		</para>
+		<para>
+		Error statistics (<varname>errors_4xx</varname>,
+		<varname>errors_5xx</varname>,
+		<varname>errors_timeout</varname>) are always tracked
+		regardless of this setting.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (logging disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>log_errors</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "log_errors", 1)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -314,6 +512,19 @@ modparam("rust_http_webhook", "retry_delay_ms", 500)
 		of them (fanout). If the per-worker queue is full, the payload
 		is silently dropped and a warning is logged.
 		</para>
+		<para>
+		If <varname>method_filter</varname> is configured and the
+		current &sip; request method is not in the filter set, the
+		payload is silently skipped (not enqueued). The function
+		returns 1 and the <varname>filtered</varname> counter is
+		incremented.
+		</para>
+		<para>
+		If <varname>batch_size</varname> is greater than 1, the
+		payload is added to the current batch buffer. The batch is
+		sent when it reaches the configured size or the timeout
+		expires.
+		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem><para>
@@ -326,7 +537,7 @@ modparam("rust_http_webhook", "retry_delay_ms", 500)
 		<itemizedlist>
 		<listitem><para>
 			<emphasis>1</emphasis>  - payload enqueued (or
-			dropped due to full queue).
+			dropped due to full queue, or filtered out).
 		</para></listitem>
 		<listitem><para>
 			<emphasis>-1 (denied)</emphasis>  - missing parameter.
@@ -350,6 +561,21 @@ route {
 ...
 </programlisting>
 		</example>
+		<example>
+		<title><function>webhook</function> with batching and filtering</title>
+		<programlisting format="linespecific">
+...
+# Only INVITE/BYE webhooks, batched in groups of 10
+modparam("rust_http_webhook", "method_filter", "INVITE,BYE")
+modparam("rust_http_webhook", "batch_size", 10)
+modparam("rust_http_webhook", "batch_timeout_ms", 200)
+
+route {
+    webhook("{\"method\":\"$rm\",\"from\":\"$fu\",\"ruri\":\"$ru\",\"ts\":\"$Ts\"}");
+}
+...
+</programlisting>
+		</example>
 	</section>
 
 	<section id="func_webhook_stats" xreflabel="webhook_stats()">
@@ -360,6 +586,15 @@ route {
 		Retrieve module statistics as a JSON string. Sets
 		<literal>$var(webhook_stats)</literal> with a JSON object
 		containing all tracked counters for the current worker process.
+		</para>
+		<para>
+		The JSON object includes the following fields:
+		<varname>sent</varname>, <varname>dropped</varname>,
+		<varname>failed</varname>, <varname>retried</varname>,
+		<varname>retry_exhausted</varname>,
+		<varname>errors_4xx</varname>, <varname>errors_5xx</varname>,
+		<varname>errors_timeout</varname>, and
+		<varname>filtered</varname>.
 		</para>
 		<para>Return codes:</para>
 		<itemizedlist>
@@ -429,6 +664,35 @@ route {
 		<para>
 		Number of payloads that exhausted all retry attempts without
 		a successful delivery.
+		</para>
+	</section>
+	<section>
+		<title><varname>errors_4xx</varname></title>
+		<para>
+		Number of &http; 4xx (client error) responses received from
+		webhook endpoints.
+		</para>
+	</section>
+	<section>
+		<title><varname>errors_5xx</varname></title>
+		<para>
+		Number of &http; 5xx (server error) responses received from
+		webhook endpoints.
+		</para>
+	</section>
+	<section>
+		<title><varname>errors_timeout</varname></title>
+		<para>
+		Number of webhook deliveries that failed due to a timeout or
+		network error.
+		</para>
+	</section>
+	<section>
+		<title><varname>filtered</varname></title>
+		<para>
+		Number of webhook calls that were skipped because the &sip;
+		request method did not match the
+		<varname>method_filter</varname> configuration.
 		</para>
 	</section>
 	</section>
