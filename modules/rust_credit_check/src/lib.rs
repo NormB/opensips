@@ -199,6 +199,46 @@ unsafe extern "C" fn mod_init() -> c_int {
 
     let on_err = unsafe { ON_ERROR.get_value() }.unwrap_or("deny");
 
+    // Validate cache_ttl
+    let ttl = CACHE_TTL.get();
+    if ttl < 0 {
+        opensips_log!(WARN, "rust_credit_check",
+            "cache_ttl={} is negative, clamping to 0 (no cache)", ttl);
+    }
+
+    // Validate http_timeout
+    let timeout = HTTP_TIMEOUT.get();
+    if timeout <= 0 {
+        opensips_log!(WARN, "rust_credit_check",
+            "http_timeout={} is invalid, clamping to default 2", timeout);
+    } else if timeout > 60 {
+        opensips_log!(WARN, "rust_credit_check",
+            "http_timeout={} is very high (>60s), clamping to 60", timeout);
+    }
+
+    // Validate pool_size
+    let pool = POOL_SIZE.get();
+    if pool <= 0 {
+        opensips_log!(WARN, "rust_credit_check",
+            "pool_size={} is invalid, clamping to default 4", pool);
+    }
+
+    // Validate rate_per_min
+    let rate = RATE_PER_MIN.get();
+    if rate <= 0 {
+        opensips_log!(WARN, "rust_credit_check",
+            "rate_per_min={} is invalid, must be positive for duration calculation", rate);
+    }
+
+    // Validate on_error
+    if on_err != "deny" && on_err != "allow"
+        && !on_err.eq_ignore_ascii_case("deny")
+        && !on_err.eq_ignore_ascii_case("allow")
+    {
+        opensips_log!(WARN, "rust_credit_check",
+            "on_error='{}' is not 'deny' or 'allow', defaulting to 'deny'", on_err);
+    }
+
     opensips_log!(INFO, "rust_credit_check", "module initialized");
     opensips_log!(INFO, "rust_credit_check", "  billing_url={}", url);
     opensips_log!(INFO, "rust_credit_check", "  cache_ttl={}s", CACHE_TTL.get());
@@ -713,6 +753,35 @@ mod tests {
         assert!(json.contains(r#""allowed":1"#));
         assert!(json.contains(r#""denied":0"#));
         assert!(json.contains(r#""cache_hits":1"#));
+    }
+
+
+    // ── configuration validation edge case tests ────────────────
+
+    #[test]
+    fn test_cache_ttl_zero_expires_immediately() {
+        let mut cache = CreditCache::new(0);
+        cache.put("alice", 42.50);
+        // TTL of 0 means instant expiry
+        thread::sleep(Duration::from_millis(1));
+        assert_eq!(cache.get("alice"), None);
+    }
+
+    #[test]
+    fn test_compute_max_duration_negative_rate() {
+        // Negative rate treated same as zero
+        assert_eq!(compute_max_duration(42.50, -1.0), 0);
+    }
+
+    #[test]
+    fn test_on_error_empty_string_denies() {
+        assert!(!on_error_allows(""));
+    }
+
+    #[test]
+    fn test_on_error_whitespace_denies() {
+        assert!(!on_error_allows(" "));
+        assert!(!on_error_allows("  deny  "));
     }
 
 }

@@ -794,6 +794,35 @@ unsafe extern "C" fn mod_init() -> c_int {
     let min_se = DEFAULT_MIN_SE.get();
     let refresher = get_default_refresher();
 
+    // Validate default_refresher value
+    if let Some(r) = unsafe { DEFAULT_REFRESHER.get_value() } {
+        if !r.trim().eq_ignore_ascii_case("uac") && !r.trim().eq_ignore_ascii_case("uas") {
+            opensips_log!(
+                WARN,
+                "rust_sst",
+                "default_refresher='{}' is not 'uac' or 'uas', defaulting to 'uas'",
+                r
+            );
+        }
+    }
+
+    // Validate default_interval
+    if interval < 0 {
+        opensips_log!(
+            WARN,
+            "rust_sst",
+            "default_interval={} is negative, clamping to 1800",
+            interval
+        );
+    } else if interval > 0 && interval < 90 {
+        opensips_log!(
+            WARN,
+            "rust_sst",
+            "default_interval={} is below RFC 4028 minimum of 90, clamping to 90",
+            interval
+        );
+    }
+
     if min_se < 90 {
         opensips_log!(
             WARN,
@@ -1531,6 +1560,34 @@ mod tests {
         assert!(json.contains(r#""sessions_expired":1"#));
         assert!(json.contains(r#""422_sent":1"#));
         assert!(json.contains(r#""headers_inserted":2"#));
+    }
+
+
+    // ── configuration validation tests ──────────────────────────
+
+    #[test]
+    fn test_parse_refresher_invalid_defaults_uas() {
+        // Invalid refresher values should default to UAS
+        assert_eq!(parse_refresher("invalid"), Refresher::Uas);
+        assert_eq!(parse_refresher(""), Refresher::Uas);
+        assert_eq!(parse_refresher("both"), Refresher::Uas);
+    }
+
+    #[test]
+    fn test_sst_check_min_se_clamped_to_90() {
+        // Even with our_min_se=0, the function handles it
+        let (ok, interval, min_se) = sst_check(1800, 0, 0);
+        assert!(ok);
+        assert_eq!(interval, 1800);
+        assert_eq!(min_se, 0);
+    }
+
+    #[test]
+    fn test_sst_update_negative_interval_clamps() {
+        // Interval 0 falls back to default
+        let (se, min) = sst_update(0, 0, &Refresher::Uas, 1800, 90);
+        assert_eq!(se, "1800;refresher=uas");
+        assert_eq!(min, "90");
     }
 
 }

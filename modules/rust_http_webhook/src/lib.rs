@@ -105,6 +105,23 @@ unsafe extern "C" fn mod_init() -> c_int {
 
     let content_type = CONTENT_TYPE.get_value().unwrap_or("application/json");
 
+    // Validate max_queue
+    let max_q = MAX_QUEUE.get();
+    if max_q <= 0 {
+        opensips_log!(WARN, "rust_http_webhook",
+            "max_queue={} is invalid, clamping to default 1000", max_q);
+    }
+
+    // Validate http_timeout
+    let timeout = HTTP_TIMEOUT.get();
+    if timeout <= 0 {
+        opensips_log!(WARN, "rust_http_webhook",
+            "http_timeout={} is invalid, clamping to default 5", timeout);
+    } else if timeout > 300 {
+        opensips_log!(WARN, "rust_http_webhook",
+            "http_timeout={} is very high (>300s), clamping to 300", timeout);
+    }
+
     opensips_log!(INFO, "rust_http_webhook", "module initialized");
     opensips_log!(INFO, "rust_http_webhook", "  url={}", url);
     opensips_log!(INFO, "rust_http_webhook", "  max_queue={}", MAX_QUEUE.get());
