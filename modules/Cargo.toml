@@ -1,0 +1,28 @@
+# Virtual workspace for all OpenSIPS Rust modules.
+# This file coordinates the Cargo build across the rust/ core and
+# the individual rust_* service modules.
+
+[workspace]
+members = [
+    "rust",
+    "rust/sdk",
+    "rust/common",
+    "rust/build-utils",
+    "rust/examples/user-script",
+    "rust_sst",
+    "rust_http_webhook",
+    "rust_dynamic_blacklist",
+    "rust_concurrent_calls",
+    "rust_credit_check",
+    "rust_refer_handler",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://10.0.0.13/gator/opensips-rust"
+
+[profile.release]
+lto = true
+strip = "symbols"

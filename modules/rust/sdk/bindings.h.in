@@ -1,0 +1,35 @@
+/*
+ * Auto-generated bindings header for OpenSIPS Rust SDK.
+ * build.rs substitutes @@OPENSIPS_SRC_DIR@@ before feeding to bindgen.
+ */
+
+/* Core version defines — injected by build.rs */
+@@VERSION_DEFS@@
+
+/* Makefile.conf DEFS — injected by build.rs */
+@@MAKEFILE_DEFS@@
+
+/* Architecture detection */
+@@ARCH_DEFS@@
+
+/* Core includes */
+#include "@@OPENSIPS_SRC_DIR@@/str.h"
+#include "@@OPENSIPS_SRC_DIR@@/ip_addr.h"
+#include "@@OPENSIPS_SRC_DIR@@/sr_module.h"
+#include "@@OPENSIPS_SRC_DIR@@/sr_module_deps.h"
+#include "@@OPENSIPS_SRC_DIR@@/dprint.h"
+#include "@@OPENSIPS_SRC_DIR@@/parser/msg_parser.h"
+#include "@@OPENSIPS_SRC_DIR@@/parser/parse_fline.h"
+#include "@@OPENSIPS_SRC_DIR@@/parser/hf.h"
+#include "@@OPENSIPS_SRC_DIR@@/pvar.h"
+#include "@@OPENSIPS_SRC_DIR@@/action.h"
+#include "@@OPENSIPS_SRC_DIR@@/mod_fix.h"
+#include "@@OPENSIPS_SRC_DIR@@/flags.h"
+#include "@@OPENSIPS_SRC_DIR@@/usr_avp.h"
+#include "@@OPENSIPS_SRC_DIR@@/version.h"
+#include "@@OPENSIPS_SRC_DIR@@/route_struct.h"
+#include "@@OPENSIPS_SRC_DIR@@/mi/mi.h"
+#include "@@OPENSIPS_SRC_DIR@@/async.h"
+
+/* Dialog module callback types (minimal include — no dlg_load.h) */
+#include "@@OPENSIPS_SRC_DIR@@/modules/dialog/dlg_cb.h"
