@@ -168,6 +168,7 @@ enum rtpe_operation {
 	OP_SUBSCRIBE_ANSWER,
 	OP_UNSUBSCRIBE,
 	OP_ROLLBACK,
+	OP_PUBLISH,
 };
 
 enum rtpe_stat {
@@ -260,6 +261,7 @@ static const char *command_strings[] = {
 	[OP_SUBSCRIBE_ANSWER] = "subscribe answer",
 	[OP_UNSUBSCRIBE]    = "unsubscribe",
 	[OP_ROLLBACK]       = "rollback",
+	[OP_PUBLISH]        = "publish",
 };
 
 static const str stat_maps[] = {
@@ -317,6 +319,13 @@ static int rtpengine_unblockdtmf_f(struct sip_msg* msg, str *flags, pv_spec_t *s
 static int rtpengine_start_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar);
 static int rtpengine_stop_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar);
 static int rtpengine_play_dtmf_f(struct sip_msg* msg, str *code, str *flags, pv_spec_t *spvar);
+static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar, pv_spec_t *tpvar);
+static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar);
+static int rtpengine_unsubscribe_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar);
+static int rtpengine_publish_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar,
+		pv_spec_t *bpvar);
 static void rtpengine_notify_process(int rank);
 
 static int rtpengine_api_offer(struct rtp_relay_session *sess,
@@ -563,6 +572,28 @@ static const cmd_export_t cmds[] = {
 	{"rtpengine_play_dtmf", (cmd_function)rtpengine_play_dtmf_f, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_subscribe_request", (cmd_function)rtpengine_subscribe_request_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_subscribe_answer", (cmd_function)rtpengine_subscribe_answer_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_unsubscribe", (cmd_function)rtpengine_unsubscribe_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_publish", (cmd_function)rtpengine_publish_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{0,0,0}},
 		ALL_ROUTES},
@@ -2737,7 +2768,7 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 		ng_flags->rtcp_mux = bencode_list(bencbuf);
 
 		bencode_dictionary_add_str(ng_flags->dict, "sdp", body_in);
-	} else if (op == OP_SUBSCRIBE_ANSWER) {
+	} else if (op == OP_SUBSCRIBE_ANSWER || op == OP_PUBLISH) {
 		bencode_dictionary_add_str(ng_flags->dict, "sdp", body_in);
 	}
 
@@ -4863,6 +4894,32 @@ static int rtpengine_start_forward_f(struct sip_msg* msg, str *flags, pv_spec_t 
 static int rtpengine_stop_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar)
 {
 	return rtpe_function_call_simple(msg, OP_STOP_FORWARD, flags, NULL, NULL, spvar);
+}
+
+static int rtpengine_unsubscribe_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar)
+{
+	return rtpe_function_call_simple(msg, OP_UNSUBSCRIBE, flags, NULL, NULL, spvar);
+}
+
+static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar, pv_spec_t *tpvar)
+{
+	LM_ERR("rtpengine_subscribe_request: not yet implemented\n");
+	return -1;
+}
+
+static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar)
+{
+	LM_ERR("rtpengine_subscribe_answer: not yet implemented\n");
+	return -1;
+}
+
+static int rtpengine_publish_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar)
+{
+	LM_ERR("rtpengine_publish: not yet implemented\n");
+	return -1;
 }
 
 static int rtpengine_play_dtmf_f(struct sip_msg* msg, str *code, str *flags, pv_spec_t *spvar)
