@@ -22,6 +22,14 @@
 		<function>auto_block()</function> and
 		<function>auto_allow()</function> with TTL-based expiry.
 	</para>
+	<para>
+		In addition to the generic catch-all files, the module supports
+		typed files for specific check categories: IP addresses,
+		User-Agent strings, and domains. Typed check functions
+		(e.g. <function>check_blocklist_ip()</function>) query only
+		the relevant typed file plus the generic file, while the
+		generic check functions query all files.
+	</para>
 	</section>
 
 	<section>
@@ -41,15 +49,16 @@
 	<para>
 		The <function>check_access()</function> function implements the
 		full precedence logic: auto-allow entries are checked first,
-		then the file-based allowlist, then auto-block entries, then
-		the file-based blocklist. If nothing matches, the default is
-		to allow.
+		then all allowlist files (generic + typed), then auto-block
+		entries, then all blocklist files (generic + typed). If nothing
+		matches, the default is to allow.
 	</para>
 	<para>
 		Both lists can be reloaded at runtime using
 		<function>blocklist_reload()</function> and
 		<function>allowlist_reload()</function> without restarting
-		&osips;.
+		&osips;. These functions reload the generic file and all
+		configured typed files.
 	</para>
 	</section>
 
@@ -86,9 +95,10 @@
 	<section id="param_blocklist_file" xreflabel="blocklist_file">
 		<title><varname>blocklist_file</varname> (string)</title>
 		<para>
-		Path to the blocklist file. One entry per line. Lines starting
-		with <literal>#</literal> are treated as comments. Blank lines
-		are ignored. This parameter is required.
+		Path to the generic blocklist file. One entry per line. Lines
+		starting with <literal>#</literal> are treated as comments.
+		Blank lines are ignored. This parameter is required. Entries
+		in this file are checked by all check functions.
 		</para>
 		<para>
 		<emphasis>
@@ -108,10 +118,11 @@ modparam("rust_acl", "blocklist_file", "/etc/opensips/blocklist.txt")
 	<section id="param_allowlist_file" xreflabel="allowlist_file">
 		<title><varname>allowlist_file</varname> (string)</title>
 		<para>
-		Path to the allowlist file (optional). Same format as the
-		blocklist. When configured, entries in the allowlist take
+		Path to the generic allowlist file (optional). Same format as
+		the blocklist. When configured, entries in the allowlist take
 		precedence over the blocklist in
-		<function>check_access()</function>.
+		<function>check_access()</function>. Entries in this file are
+		checked by all check functions.
 		</para>
 		<para>
 		<emphasis>
@@ -128,10 +139,154 @@ modparam("rust_acl", "allowlist_file", "/etc/opensips/allowlist.txt")
 		</example>
 	</section>
 
+	<section id="param_blocklist_ip_file" xreflabel="blocklist_ip_file">
+		<title><varname>blocklist_ip_file</varname> (string)</title>
+		<para>
+		Path to an IP-specific blocklist file (optional). Entries in
+		this file are checked only by
+		<function>check_blocklist_ip()</function> and the generic
+		<function>check_blocklist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>blocklist_ip_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "blocklist_ip_file", "/etc/opensips/blocklist_ip.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_blocklist_ua_file" xreflabel="blocklist_ua_file">
+		<title><varname>blocklist_ua_file</varname> (string)</title>
+		<para>
+		Path to a User-Agent-specific blocklist file (optional).
+		Entries in this file are checked only by
+		<function>check_blocklist_ua()</function> and the generic
+		<function>check_blocklist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>blocklist_ua_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "blocklist_ua_file", "/etc/opensips/blocklist_ua.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_blocklist_domain_file" xreflabel="blocklist_domain_file">
+		<title><varname>blocklist_domain_file</varname> (string)</title>
+		<para>
+		Path to a domain-specific blocklist file (optional). Entries
+		in this file are checked only by
+		<function>check_blocklist_domain()</function> and the generic
+		<function>check_blocklist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>blocklist_domain_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "blocklist_domain_file", "/etc/opensips/blocklist_domain.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_allowlist_ip_file" xreflabel="allowlist_ip_file">
+		<title><varname>allowlist_ip_file</varname> (string)</title>
+		<para>
+		Path to an IP-specific allowlist file (optional). Entries in
+		this file are checked only by
+		<function>check_allowlist_ip()</function> and the generic
+		<function>check_allowlist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>allowlist_ip_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "allowlist_ip_file", "/etc/opensips/allowlist_ip.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_allowlist_ua_file" xreflabel="allowlist_ua_file">
+		<title><varname>allowlist_ua_file</varname> (string)</title>
+		<para>
+		Path to a User-Agent-specific allowlist file (optional).
+		Entries in this file are checked only by
+		<function>check_allowlist_ua()</function> and the generic
+		<function>check_allowlist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>allowlist_ua_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "allowlist_ua_file", "/etc/opensips/allowlist_ua.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_allowlist_domain_file" xreflabel="allowlist_domain_file">
+		<title><varname>allowlist_domain_file</varname> (string)</title>
+		<para>
+		Path to a domain-specific allowlist file (optional). Entries
+		in this file are checked only by
+		<function>check_allowlist_domain()</function> and the generic
+		<function>check_allowlist()</function> /
+		<function>check_access()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>allowlist_domain_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "allowlist_domain_file", "/etc/opensips/allowlist_domain.txt")
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="param_match_mode" xreflabel="match_mode">
 		<title><varname>match_mode</varname> (string)</title>
 		<para>
-		The matching algorithm to use for both lists:
+		The matching algorithm to use for all lists:
 		<itemizedlist>
 		<listitem><para>
 			<emphasis><quote>exact</quote></emphasis> - value must
@@ -167,8 +322,8 @@ modparam("rust_acl", "match_mode", "exact")
 		<function moreinfo="none">check_blocklist(value)</function>
 		</title>
 		<para>
-		Check whether the given value matches any entry in the
-		blocklist or auto-block map.
+		Check whether the given value matches any entry in ALL
+		blocklist files (generic + IP + UA + domain) or auto-block map.
 		</para>
 		<para>Return codes:</para>
 		<itemizedlist>
@@ -199,13 +354,86 @@ if (!check_blocklist("$si")) {
 		</example>
 	</section>
 
+	<section id="func_check_blocklist_ip" xreflabel="check_blocklist_ip()">
+		<title>
+		<function moreinfo="none">check_blocklist_ip(ip)</function>
+		</title>
+		<para>
+		Check whether the given IP matches an entry in the IP-typed
+		blocklist file (<varname>blocklist_ip_file</varname>) or the
+		generic blocklist file, or the auto-block map.
+		</para>
+		<para>Return codes: same as
+		<function>check_blocklist()</function>.</para>
+		<example>
+		<title><function>check_blocklist_ip</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (!check_blocklist_ip("$si")) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_blocklist_ua" xreflabel="check_blocklist_ua()">
+		<title>
+		<function moreinfo="none">check_blocklist_ua(ua)</function>
+		</title>
+		<para>
+		Check whether the given User-Agent matches an entry in the
+		UA-typed blocklist file (<varname>blocklist_ua_file</varname>)
+		or the generic blocklist file, or the auto-block map.
+		</para>
+		<para>Return codes: same as
+		<function>check_blocklist()</function>.</para>
+		<example>
+		<title><function>check_blocklist_ua</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (!check_blocklist_ua("$ua")) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_blocklist_domain" xreflabel="check_blocklist_domain()">
+		<title>
+		<function moreinfo="none">check_blocklist_domain(domain)</function>
+		</title>
+		<para>
+		Check whether the given domain matches an entry in the
+		domain-typed blocklist file
+		(<varname>blocklist_domain_file</varname>) or the generic
+		blocklist file, or the auto-block map.
+		</para>
+		<para>Return codes: same as
+		<function>check_blocklist()</function>.</para>
+		<example>
+		<title><function>check_blocklist_domain</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (!check_blocklist_domain("$rd")) {
+    sl_send_reply(403, "Forbidden");
+    exit;
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_check_allowlist" xreflabel="check_allowlist()">
 		<title>
 		<function moreinfo="none">check_allowlist(value)</function>
 		</title>
 		<para>
-		Check whether the given value matches the allowlist file or
-		auto-allow map.
+		Check whether the given value matches ALL allowlist files
+		(generic + IP + UA + domain) or the auto-allow map.
 		</para>
 		<para>Return codes:</para>
 		<itemizedlist>
@@ -231,14 +459,85 @@ if (check_allowlist("$si")) {
 		</example>
 	</section>
 
+	<section id="func_check_allowlist_ip" xreflabel="check_allowlist_ip()">
+		<title>
+		<function moreinfo="none">check_allowlist_ip(ip)</function>
+		</title>
+		<para>
+		Check whether the given IP matches an entry in the IP-typed
+		allowlist file (<varname>allowlist_ip_file</varname>) or the
+		generic allowlist file, or the auto-allow map.
+		</para>
+		<para>Return codes: same as
+		<function>check_allowlist()</function>.</para>
+		<example>
+		<title><function>check_allowlist_ip</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (check_allowlist_ip("$si")) {
+    xlog("L_INFO", "trusted IP $si\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_allowlist_ua" xreflabel="check_allowlist_ua()">
+		<title>
+		<function moreinfo="none">check_allowlist_ua(ua)</function>
+		</title>
+		<para>
+		Check whether the given User-Agent matches an entry in the
+		UA-typed allowlist file (<varname>allowlist_ua_file</varname>)
+		or the generic allowlist file, or the auto-allow map.
+		</para>
+		<para>Return codes: same as
+		<function>check_allowlist()</function>.</para>
+		<example>
+		<title><function>check_allowlist_ua</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (check_allowlist_ua("$ua")) {
+    xlog("L_INFO", "trusted agent $ua\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_allowlist_domain" xreflabel="check_allowlist_domain()">
+		<title>
+		<function moreinfo="none">check_allowlist_domain(domain)</function>
+		</title>
+		<para>
+		Check whether the given domain matches an entry in the
+		domain-typed allowlist file
+		(<varname>allowlist_domain_file</varname>) or the generic
+		allowlist file, or the auto-allow map.
+		</para>
+		<para>Return codes: same as
+		<function>check_allowlist()</function>.</para>
+		<example>
+		<title><function>check_allowlist_domain</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (check_allowlist_domain("$rd")) {
+    xlog("L_INFO", "trusted domain $rd\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_check_access" xreflabel="check_access()">
 		<title>
 		<function moreinfo="none">check_access(value)</function>
 		</title>
 		<para>
 		Combined access check with precedence: auto-allow, then
-		file allowlist, then auto-block, then file blocklist. If
-		nothing matches, the default is to allow.
+		all allowlist files (generic + typed), then auto-block,
+		then all blocklist files (generic + typed). If nothing
+		matches, the default is to allow.
 		</para>
 		<para>Return codes:</para>
 		<itemizedlist>
@@ -270,8 +569,8 @@ if (check_access("$ua") == -1) {
 		<function moreinfo="none">blocklist_reload()</function>
 		</title>
 		<para>
-		Re-read the blocklist file from disk and atomically swap the
-		in-memory data.
+		Re-read ALL blocklist files (generic + IP + UA + domain) from
+		disk and atomically swap the in-memory data.
 		</para>
 		<example>
 		<title><function>blocklist_reload</function> usage</title>
@@ -290,8 +589,8 @@ if (blocklist_reload()) {
 		<function moreinfo="none">allowlist_reload()</function>
 		</title>
 		<para>
-		Re-read the allowlist file from disk and atomically swap the
-		in-memory data.
+		Re-read ALL allowlist files (generic + IP + UA + domain) from
+		disk and atomically swap the in-memory data.
 		</para>
 		<example>
 		<title><function>allowlist_reload</function> usage</title>
@@ -399,11 +698,11 @@ xlog("L_INFO", "ACL stats: $var(acl_stats)\n");
 	</section>
 	<section>
 		<title><varname>entries_blocklist</varname></title>
-		<para>Number of entries in the blocklist file.</para>
+		<para>Number of entries in the generic blocklist file.</para>
 	</section>
 	<section>
 		<title><varname>entries_allowlist</varname></title>
-		<para>Number of entries in the allowlist file.</para>
+		<para>Number of entries in the generic allowlist file.</para>
 	</section>
 	<section>
 		<title><varname>reloads</varname></title>
