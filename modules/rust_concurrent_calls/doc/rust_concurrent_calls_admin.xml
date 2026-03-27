@@ -326,6 +326,46 @@ modparam("rust_concurrent_calls", "profile_name", "concurrent_calls")
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_direction_aware" xreflabel="direction_aware">
+		<title><varname>direction_aware</varname> (integer)</title>
+		<para>
+		When set to 1, enable per-direction (inbound/outbound) limits.
+		The limits file must have three columns:
+		<literal>account,max_inbound,max_outbound</literal>. The
+		direction-specific functions
+		<function>check_concurrent_inbound()</function> and
+		<function>check_concurrent_outbound()</function> become
+		available.
+		</para>
+		<para>
+		When set to 0 (default), the module uses a single limit per
+		account with the two-column format
+		<literal>account,max_calls</literal>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>direction_aware</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "direction_aware", 1)
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Direction-aware limits file format</title>
+		<programlisting format="linespecific">
+# /etc/opensips/call_limits.csv
+# account,max_inbound,max_outbound
+alice,5,3
+trunk-1,100,50
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -575,6 +615,108 @@ route[reload_limits] {
 route {
     concurrent_stats();
     xlog("L_INFO", "Concurrent stats: $var(concurrent_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_concurrent_inbound" xreflabel="check_concurrent_inbound()">
+		<title>
+		<function moreinfo="none">check_concurrent_inbound(account)</function>
+		</title>
+		<para>
+		Check whether the given account is under its inbound concurrent
+		call limit. Requires <varname>direction_aware=1</varname>.
+		Sets <literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> to the inbound count
+		and limit.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - under inbound limit (allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - at or over inbound limit (blocked).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_concurrent_inbound</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!check_concurrent_inbound("$fU")) {
+            sl_send_reply(486, "Too Many Inbound Calls");
+            exit;
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_concurrent_outbound" xreflabel="check_concurrent_outbound()">
+		<title>
+		<function moreinfo="none">check_concurrent_outbound(account)</function>
+		</title>
+		<para>
+		Check whether the given account is under its outbound concurrent
+		call limit. Requires <varname>direction_aware=1</varname>.
+		Sets <literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> to the outbound count
+		and limit.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - under outbound limit (allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - at or over outbound limit (blocked).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_concurrent_outbound</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!check_concurrent_outbound("$rU")) {
+            sl_send_reply(486, "Too Many Outbound Calls");
+            exit;
+        }
+    }
 }
 ...
 </programlisting>
