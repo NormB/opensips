@@ -221,6 +221,21 @@ unsafe extern "C" fn mod_init() -> c_int {
     let max_p = MAX_PENDING.get();
     let exp = EXPIRE_SECS.get();
 
+    // Validate max_pending
+    if max_p <= 0 {
+        opensips_log!(WARN, "rust_refer_handler",
+            "max_pending={} is invalid, clamping to default 1000", max_p);
+    }
+
+    // Validate expire_secs
+    if exp < 0 {
+        opensips_log!(WARN, "rust_refer_handler",
+            "expire_secs={} is negative, clamping to default 300", exp);
+    } else if exp == 0 {
+        opensips_log!(WARN, "rust_refer_handler",
+            "expire_secs=0 means entries expire immediately, verify this is intentional");
+    }
+
     opensips_log!(INFO, "rust_refer_handler", "module initialized");
     opensips_log!(INFO, "rust_refer_handler", "  max_pending={}", max_p);
     opensips_log!(INFO, "rust_refer_handler", "  expire_secs={}s", exp);
@@ -908,6 +923,31 @@ mod tests {
         assert!(json.contains(r#""completed":2"#));
         assert!(json.contains(r#""failed":1"#));
         assert!(json.contains(r#""unknown_notify":1"#));
+    }
+
+
+    // ── configuration validation edge case tests ────────────────
+
+    #[test]
+    fn test_tracker_zero_max_pending_sweeps_aggressively() {
+        // max_pending=0 means every insert triggers a sweep
+        let mut tracker = ReferTracker::new(0, 0);
+        tracker.handle_refer("call-1", "sip:a@example.com");
+        thread::sleep(Duration::from_millis(10));
+        // Next insert sweeps call-1 since expire_secs=0
+        tracker.handle_refer("call-2", "sip:b@example.com");
+        // Only call-2 should remain
+        assert_eq!(tracker.active_count(), 1);
+        assert_eq!(tracker.get_status("call-2"), Some("pending"));
+    }
+
+    #[test]
+    fn test_tracker_large_expire_keeps_entries() {
+        let mut tracker = ReferTracker::new(1000, 86400);
+        tracker.handle_refer("call-1", "sip:a@example.com");
+        let swept = tracker.sweep_expired();
+        assert_eq!(swept, 0);
+        assert_eq!(tracker.active_count(), 1);
     }
 
 }

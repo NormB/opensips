@@ -173,6 +173,15 @@ unsafe extern "C" fn mod_init() -> c_int {
 
     let default = DEFAULT_LIMIT.get();
 
+    // Validate default_limit
+    if default < 0 {
+        opensips_log!(WARN, "rust_concurrent_calls",
+            "default_limit={} is negative, clamping to 0 (block all)", default);
+    } else if default > 100_000 {
+        opensips_log!(WARN, "rust_concurrent_calls",
+            "default_limit={} is very high (>100000), verify this is intentional", default);
+    }
+
     opensips_log!(INFO, "rust_concurrent_calls", "module initialized");
     opensips_log!(INFO, "rust_concurrent_calls", "  limits_file={}", file);
     opensips_log!(INFO, "rust_concurrent_calls", "  default_limit={}", default);
@@ -799,6 +808,30 @@ mod tests {
         assert!(json.contains(r#""accounts":10"#));
         assert!(json.contains(r#""checked":1"#));
         assert!(json.contains(r#""incremented":2"#));
+    }
+
+
+    // ── configuration validation edge case tests ────────────────
+
+    #[test]
+    fn test_default_limit_zero_blocks_all() {
+        let counts = HashMap::new();
+        let limits = HashMap::new();
+        // default_limit=0 means block all unknown accounts
+        let (allowed, count, limit) = check_limit(&counts, &limits, "anyone", 0);
+        assert!(!allowed);
+        assert_eq!(count, 0);
+        assert_eq!(limit, 0);
+    }
+
+    #[test]
+    fn test_default_limit_very_high() {
+        let counts = HashMap::new();
+        let limits = HashMap::new();
+        let (allowed, count, limit) = check_limit(&counts, &limits, "user", 100_000);
+        assert!(allowed);
+        assert_eq!(count, 0);
+        assert_eq!(limit, 100_000);
     }
 
 }
