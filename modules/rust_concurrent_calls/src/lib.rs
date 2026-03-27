@@ -124,6 +124,12 @@ static AUTO_TRACK: Integer = Integer::with_default(1);
 /// PV expression to extract account from SIP message (default: "$fU").
 static ACCOUNT_VAR: ModString = ModString::new();
 
+/// Enable dialog profiles for cross-worker accurate counts (0 = local HashMap, 1 = dialog profiles).
+static USE_DIALOG_PROFILES: Integer = Integer::with_default(0);
+
+/// Dialog profile name for cross-worker counting (default: "concurrent_calls").
+static PROFILE_NAME: ModString = ModString::new();
+
 // ── Pure logic (testable without FFI) ────────────────────────────
 
 /// Parse a CSV line "account,limit" into a (String, u32) pair.
@@ -159,6 +165,21 @@ fn check_limit(
     let count = counts.get(account).copied().unwrap_or(0);
     let limit = limits.get(account).copied().unwrap_or(default_limit);
     (count < limit, count, limit)
+}
+
+/// Check limit using an external (profile-based) count instead of the local HashMap.
+///
+/// When dialog profiles are enabled, the profile count comes from
+/// get_profile_size() which is accurate across all workers.
+/// Returns (allowed, profile_count, limit).
+fn check_limit_with_profile_count(
+    profile_count: u32,
+    limits: &HashMap<String, u32>,
+    account: &str,
+    default_limit: u32,
+) -> (bool, u32, u32) {
+    let limit = limits.get(account).copied().unwrap_or(default_limit);
+    (profile_count < limit, profile_count, limit)
 }
 
 /// Increment the call count for an account. Returns the new count.
@@ -368,6 +389,12 @@ unsafe extern "C" fn mod_init() -> c_int {
     opensips_log!(INFO, "rust_concurrent_calls", "  auto_track={}", auto_track);
     opensips_log!(INFO, "rust_concurrent_calls", "  account_var={}", account_var);
 
+    let use_profiles = USE_DIALOG_PROFILES.get();
+    let profile_name = unsafe { PROFILE_NAME.get_value() }
+        .unwrap_or("concurrent_calls");
+    opensips_log!(INFO, "rust_concurrent_calls", "  use_dialog_profiles={}", use_profiles);
+    opensips_log!(INFO, "rust_concurrent_calls", "  profile_name={}", profile_name);
+
     0
 }
 
@@ -432,6 +459,13 @@ unsafe extern "C" fn w_check_concurrent(
             }
         };
 
+        let use_profiles = USE_DIALOG_PROFILES.get() != 0;
+        let profile = if use_profiles {
+            unsafe { PROFILE_NAME.get_value() }.unwrap_or("concurrent_calls")
+        } else {
+            ""
+        };
+
         WORKER.with(|w| {
             let borrow = w.borrow();
             match borrow.as_ref() {
@@ -440,9 +474,31 @@ unsafe extern "C" fn w_check_concurrent(
 
                     let limits = state.loader.get();
                     let default = DEFAULT_LIMIT.get() as u32;
-                    let (allowed, count, limit) = check_limit(
-                        &state.counts, &limits, account, default,
-                    );
+
+                    // When dialog profiles are enabled, use get_profile_size
+                    // for cross-worker accurate counts
+                    let (allowed, count, limit) = if use_profiles {
+                        let mut sip_msg = unsafe {
+                            opensips_rs::SipMessage::from_raw(msg)
+                        };
+                        let profile_count = match sip_msg.call(
+                            "get_profile_size",
+                            &[profile, account],
+                        ) {
+                            Ok(c) if c >= 0 => c as u32,
+                            _ => {
+                                // Fallback to local count on error
+                                state.counts.get(account).copied().unwrap_or(0)
+                            }
+                        };
+                        check_limit_with_profile_count(
+                            profile_count, &limits, account, default,
+                        )
+                    } else {
+                        check_limit(
+                            &state.counts, &limits, account, default,
+                        )
+                    };
 
                     // Set $var(concurrent_count) and $var(concurrent_limit)
                     let mut sip_msg = unsafe {
@@ -487,6 +543,16 @@ unsafe extern "C" fn w_concurrent_inc(
                 return -2;
             }
         };
+
+        // When dialog profiles are enabled, also set the profile
+        if USE_DIALOG_PROFILES.get() != 0 {
+            let profile = unsafe { PROFILE_NAME.get_value() }
+                .unwrap_or("concurrent_calls");
+            let mut sip_msg = unsafe {
+                opensips_rs::SipMessage::from_raw(_msg)
+            };
+            let _ = sip_msg.call("set_dlg_profile", &[profile, account]);
+        }
 
         WORKER.with(|w| {
             let mut borrow = w.borrow_mut();
@@ -665,7 +731,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -685,6 +751,16 @@ static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
         name: cstr_lit!("account_var"),
         type_: 1, // STR_PARAM
         param_pointer: ACCOUNT_VAR.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("use_dialog_profiles"),
+        type_: 2, // INT_PARAM
+        param_pointer: USE_DIALOG_PROFILES.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("profile_name"),
+        type_: 1, // STR_PARAM
+        param_pointer: PROFILE_NAME.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1225,6 +1301,93 @@ mod tests {
         let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
         assert!(allowed);
         assert_eq!(count, 1);
+    }
+
+    // ── Dialog profile check tests (Task 40) ────────────────────
+
+    #[test]
+    fn test_check_limit_with_profile_count_under() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let (allowed, count, limit) = check_limit_with_profile_count(2, &limits, "alice", 10);
+        assert!(allowed);
+        assert_eq!(count, 2);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn test_check_limit_with_profile_count_at_limit() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let (allowed, count, limit) = check_limit_with_profile_count(5, &limits, "alice", 10);
+        assert!(!allowed);
+        assert_eq!(count, 5);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn test_check_limit_with_profile_count_over() {
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+        let (allowed, count, limit) = check_limit_with_profile_count(7, &limits, "alice", 10);
+        assert!(!allowed);
+        assert_eq!(count, 7);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn test_check_limit_with_profile_count_default_limit() {
+        let limits = HashMap::new();
+        let (allowed, count, limit) = check_limit_with_profile_count(0, &limits, "unknown", 10);
+        assert!(allowed);
+        assert_eq!(count, 0);
+        assert_eq!(limit, 10);
+    }
+
+    #[test]
+    fn test_check_limit_with_profile_count_zero_limit() {
+        let mut limits = HashMap::new();
+        limits.insert("blocked".to_string(), 0);
+        let (allowed, count, limit) = check_limit_with_profile_count(0, &limits, "blocked", 10);
+        assert!(!allowed);
+        assert_eq!(count, 0);
+        assert_eq!(limit, 0);
+    }
+
+    #[test]
+    fn test_profile_vs_local_different_counts() {
+        // Simulate: local count is 1 (this worker), profile count is 5 (all workers)
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 1);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 5);
+
+        // Local check says allowed (1 < 5)
+        let (local_allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
+        assert!(local_allowed);
+
+        // Profile check says blocked (5 >= 5)
+        let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
+        assert!(!profile_allowed);
+    }
+
+    #[test]
+    fn test_profile_count_matches_cross_worker_total() {
+        // Simulate 3 workers each with 2 calls = 6 total
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 10);
+
+        // Each worker sees only its own 2 calls
+        let mut w1_counts = HashMap::new();
+        w1_counts.insert("alice".to_string(), 2);
+        let (w1_allowed, w1_count, _) = check_limit(&w1_counts, &limits, "alice", 10);
+        assert!(w1_allowed);
+        assert_eq!(w1_count, 2);
+
+        // Profile-based check sees all 6
+        let (profile_allowed, profile_count, _) = check_limit_with_profile_count(6, &limits, "alice", 10);
+        assert!(profile_allowed);
+        assert_eq!(profile_count, 6);
     }
 
     #[test]
