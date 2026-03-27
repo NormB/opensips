@@ -350,6 +350,49 @@ modparam("rust_acl", "track_counters", "1")
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_access_policy" xreflabel="access_policy">
+		<title><varname>access_policy</varname> (string)</title>
+		<para>
+		Controls the precedence logic used by
+		<function>check_access()</function>:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis><quote>allowlist-first</quote></emphasis>
+			(default) - if in allowlist, allow; else if in blocklist,
+			block; else allow.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>blocklist-first</quote></emphasis> - if in
+			blocklist, block; else if in allowlist, allow; else allow.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>allowlist-only</quote></emphasis> - only
+			check the allowlist. In list, allow; not in list, block.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>blocklist-only</quote></emphasis> - only
+			check the blocklist. In list, block; not in list, allow.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		Unknown values are rejected at startup with an error.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>allowlist-first</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>access_policy</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "access_policy", "blocklist-first")
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -572,10 +615,12 @@ if (check_allowlist_domain("$rd")) {
 		<function moreinfo="none">check_access(value)</function>
 		</title>
 		<para>
-		Combined access check with precedence: auto-allow, then
-		all allowlist files (generic + typed), then auto-block,
-		then all blocklist files (generic + typed). If nothing
-		matches, the default is to allow.
+		Combined access check using the configured
+		<varname>access_policy</varname>. The default
+		<quote>allowlist-first</quote> policy checks: auto-allow,
+		then all allowlist files, then auto-block, then all blocklist
+		files. If nothing matches, the default is to allow. See
+		<varname>access_policy</varname> for other precedence options.
 		</para>
 		<para>Return codes:</para>
 		<itemizedlist>
