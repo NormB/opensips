@@ -1,6 +1,6 @@
 //! Runtime script loader — dlopen/dlsym dispatch for user-supplied `.so` files.
 //!
-//! Mirrors the pattern used by OpenSIPS's python_exec() and lua_exec():
+//! Mirrors the pattern used by `OpenSIPS`'s `python_exec()` and lua_exec():
 //!   modparam("rust", "script_name", "/path/to/libmy_handler.so")
 //!   rust_exec("function_name")
 //!   rust_exec("function_name", "optional_param")
@@ -106,8 +106,9 @@ static mut SCRIPT: Option<UserScript> = None;
 ///
 /// Called from `mod_init` when `script_name` is configured.
 /// Returns `Ok(())` on success, `Err(message)` on failure.
+#[allow(static_mut_refs)]
 pub fn load_script(path: &str) -> Result<(), String> {
-    let c_path = CString::new(path).map_err(|e| format!("invalid path: {}", e))?;
+    let c_path = CString::new(path).map_err(|e| format!("invalid path: {e}"))?;
 
     unsafe {
         // Clear any stale dlerror
@@ -121,7 +122,7 @@ pub fn load_script(path: &str) -> Result<(), String> {
             } else {
                 std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
             };
-            return Err(format!("dlopen({}) failed: {}", path, msg));
+            return Err(format!("dlopen({path}) failed: {msg}"));
         }
 
         SCRIPT = Some(UserScript {
@@ -183,6 +184,7 @@ fn resolve_handler(script: &mut UserScript, name: &str) -> Option<HandlerFn> {
 /// Returns:
 /// - The user function's return code (typically 1 or -1)
 /// - `-1` if no script is loaded, the function doesn't exist, or the call panics
+#[allow(static_mut_refs)]
 pub fn dispatch(msg: *mut c_void, func: &str, param: Option<&str>) -> c_int {
     let script = unsafe { SCRIPT.as_mut() };
 
@@ -235,7 +237,7 @@ pub fn dispatch(msg: *mut c_void, func: &str, param: Option<&str>) -> c_int {
 /// Returns `None` if the symbol doesn't exist — this is expected for
 /// handlers that don't support async, and triggers fallback to sync dispatch.
 fn resolve_async_handler(script: &mut UserScript, name: &str) -> Option<AsyncHandlerFn> {
-    let async_name = format!("async_{}", name);
+    let async_name = format!("async_{name}");
 
     if let Some(&f) = script.async_cache.get(&async_name) {
         return Some(f);
@@ -271,6 +273,7 @@ fn resolve_async_handler(script: &mut UserScript, name: &str) -> Option<AsyncHan
 ///
 /// This fallback is critical: all existing handlers work unchanged inside
 /// `async()` blocks — they just run synchronously.
+#[allow(static_mut_refs)]
 pub fn dispatch_async(msg: *mut c_void, ctx: *mut c_void, func: &str, param: Option<&str>) -> c_int {
     let script = unsafe { SCRIPT.as_mut() };
 
@@ -317,6 +320,7 @@ pub fn dispatch_async(msg: *mut c_void, ctx: *mut c_void, func: &str, param: Opt
 }
 
 /// Check if a script is currently loaded.
+#[allow(dead_code, static_mut_refs)]
 pub fn is_loaded() -> bool {
     unsafe { SCRIPT.is_some() }
 }
@@ -324,6 +328,7 @@ pub fn is_loaded() -> bool {
 /// Unload the user script via `dlclose`.
 ///
 /// Called from `mod_destroy`. Safe to call if no script is loaded.
+#[allow(static_mut_refs)]
 pub fn unload() {
     unsafe {
         if let Some(script) = SCRIPT.take() {

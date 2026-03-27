@@ -110,7 +110,7 @@ impl SipMessage<'_> {
 
             // Call the actual function
             let func_ptr = cmd_ref.function
-                .ok_or(CallError::NotFound(func.to_string()))?;
+                .ok_or_else(|| CallError::NotFound(func.to_string()))?;
             let result = func_ptr(
                 self.raw,
                 cmd_params[0],

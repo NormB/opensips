@@ -25,6 +25,39 @@
 //! }
 //! ```
 
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::use_self)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::ref_as_ptr)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::redundant_else)]
+#![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::as_ptr_cast_mut)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::pub_underscore_fields)]
+#![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::significant_drop_tightening)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::bool_to_int_with_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::missing_const_for_thread_local)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::single_char_pattern)]
+#![allow(clippy::redundant_guards)]
+#![allow(clippy::or_fun_call)]
+
 use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
@@ -242,7 +275,7 @@ unsafe extern "C" fn w_rust_credit_check(
                         Some(u) => u,
                         None => return -1,
                     };
-                    let full_url = format!("{}?account={}", url, account);
+                    let full_url = format!("{url}?account={account}");
 
                     match state.pool.get_url(&full_url) {
                         Ok((status, body)) if status == 200 => {
@@ -283,7 +316,7 @@ unsafe extern "C" fn w_rust_credit_check(
             if balance > 0.0 {
                 let max_dur = compute_max_duration(balance, rate);
                 // Serialize balance as string with 2 decimal places
-                let balance_str = format!("{:.2}", balance);
+                let balance_str = format!("{balance:.2}");
                 let _ = sip_msg.set_pv("$var(credit_balance)", &balance_str);
                 let _ = sip_msg.set_pv_int("$var(credit_max_duration)", max_dur);
                 1

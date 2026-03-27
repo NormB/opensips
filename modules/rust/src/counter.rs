@@ -1,7 +1,7 @@
 //! Atomic cross-worker request counter using shared memory.
 //!
 //! Demonstrates the pattern that is impossible in Python/Lua/Perl modules:
-//! a truly atomic counter shared across all OpenSIPS worker processes,
+//! a truly atomic counter shared across all `OpenSIPS` worker processes,
 //! using hardware atomic instructions with zero locking overhead.
 //!
 //! # How It Works

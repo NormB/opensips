@@ -47,9 +47,9 @@ pub enum CallError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Pv(e) => write!(f, "PV error: {:?}", e),
-            Error::Call(e) => write!(f, "Call error: {:?}", e),
-            Error::NullPointer(ctx) => write!(f, "null pointer in {}", ctx),
+            Error::Pv(e) => write!(f, "PV error: {e:?}"),
+            Error::Call(e) => write!(f, "Call error: {e:?}"),
+            Error::NullPointer(ctx) => write!(f, "null pointer in {ctx}"),
             Error::Utf8 => write!(f, "UTF-8 conversion failed"),
         }
     }

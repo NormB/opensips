@@ -1,6 +1,6 @@
 //! Per-caller rate limiter using thread-local state.
 //!
-//! Each OpenSIPS worker process has its own rate table, so no locking
+//! Each `OpenSIPS` worker process has its own rate table, so no locking
 //! is needed. This is a pattern that cannot be safely done in Python/Lua
 //! because those interpreters share mutable state across calls.
 //!

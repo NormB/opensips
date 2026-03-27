@@ -1,7 +1,7 @@
-//! opensips-build — Shared build-time helpers for OpenSIPS Rust modules.
+//! opensips-build — Shared build-time helpers for `OpenSIPS` Rust modules.
 //!
 //! Extracts -D flags, SCM version info, and full version strings from
-//! the OpenSIPS source tree. Used as a `[build-dependencies]` by all
+//! the `OpenSIPS` source tree. Used as a `[build-dependencies]` by all
 //! module and service build.rs files to eliminate duplicated logic.
 
 use std::path::Path;
@@ -10,10 +10,11 @@ use std::process::Command;
 /// A parsed -D flag: name and optional value.
 pub type DFlag = (String, Option<String>);
 
-/// Extract all -D flags from OpenSIPS's `make -n -B` dry-run output.
+/// Extract all -D flags from `OpenSIPS`'s `make -n -B` dry-run output.
 ///
-/// This is the canonical way to discover what defines OpenSIPS was
+/// This is the canonical way to discover what defines `OpenSIPS` was
 /// built with, ensuring Rust modules match the exact configuration.
+#[must_use]
 pub fn extract_dflags(src: &Path) -> Vec<DFlag> {
     let output = Command::new("make")
         .arg("-n")
@@ -24,7 +25,7 @@ pub fn extract_dflags(src: &Path) -> Vec<DFlag> {
     let stdout = match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
         Err(e) => {
-            eprintln!("cargo:warning=Failed to run make -n -B: {}", e);
+            eprintln!("cargo:warning=Failed to run make -n -B: {e}");
             return Vec::new();
         }
     };
@@ -33,18 +34,16 @@ pub fn extract_dflags(src: &Path) -> Vec<DFlag> {
         .lines()
         .find(|l| l.starts_with("cc ") || l.starts_with("gcc "));
 
-    match cc_line {
-        Some(line) => parse_dflags(line),
-        None => {
-            eprintln!("cargo:warning=No cc line found in make -n -B output");
-            Vec::new()
-        }
-    }
+    cc_line.map_or_else(|| {
+        eprintln!("cargo:warning=No cc line found in make -n -B output");
+        Vec::new()
+    }, parse_dflags)
 }
 
 /// Parse -D flags from a compiler command line.
 ///
 /// Handles: `-DFOO`, `-DFOO=BAR`, `-DFOO='"string"'`, `-DFOO='"/path/"'`
+#[must_use]
 pub fn parse_dflags(line: &str) -> Vec<DFlag> {
     let mut flags = Vec::new();
     let chars: Vec<char> = line.chars().collect();
@@ -55,12 +54,12 @@ pub fn parse_dflags(line: &str) -> Vec<DFlag> {
             i += 2;
             let start = i;
             let mut in_sq = false;
-            let mut in_dq = false;
+            let mut in_double_q = false;
             while i < chars.len() {
                 match chars[i] {
-                    '\'' if !in_dq => in_sq = !in_sq,
-                    '"' if !in_sq => in_dq = !in_dq,
-                    ' ' | '\t' if !in_sq && !in_dq => break,
+                    '\'' if !in_double_q => in_sq = !in_sq,
+                    '"' if !in_sq => in_double_q = !in_double_q,
+                    ' ' | '\t' if !in_sq && !in_double_q => break,
                     _ => {}
                 }
                 i += 1;
@@ -83,7 +82,7 @@ pub fn parse_dflags(line: &str) -> Vec<DFlag> {
     flags
 }
 
-/// SCM version info extracted from OpenSIPS -D flags.
+/// SCM version info extracted from `OpenSIPS` -D flags.
 pub struct ScmInfo {
     pub scm_type: String,
     pub scm_rev: String,
@@ -92,8 +91,9 @@ pub struct ScmInfo {
 /// Extract VERSIONTYPE and THISREVISION from parsed -D flags.
 ///
 /// These correspond to `OPENSIPS_SCM_TYPE` and `OPENSIPS_SCM_REV`
-/// in the module's `scm_version` struct, which OpenSIPS 4.0
+/// in the module's `scm_version` struct, which `OpenSIPS` 4.0
 /// validates at module load time.
+#[must_use]
 pub fn extract_scm_info(dflags: &[DFlag]) -> ScmInfo {
     let mut scm_type = "unknown".to_string();
     let mut scm_rev = "unknown".to_string();

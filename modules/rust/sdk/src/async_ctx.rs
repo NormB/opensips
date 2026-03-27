@@ -1,4 +1,4 @@
-//! Safe wrapper around OpenSIPS `async_ctx` for async command support.
+//! Safe wrapper around `OpenSIPS` `async_ctx` for async command support.
 //!
 //! When a module registers an async command (`acmd_export_`), OpenSIPS calls
 //! it with an `async_ctx *` parameter. The module populates this context to
@@ -36,7 +36,7 @@ pub const ASYNC_DONE_CLOSE_FD: i32 = -2;
 pub const ASYNC_DONE_NO_IO: i32 = -3;
 pub const ASYNC_DONE: i32 = -1;
 
-/// Safe wrapper around OpenSIPS `async_ctx`.
+/// Safe wrapper around `OpenSIPS` `async_ctx`.
 ///
 /// Provided to async handler functions via `opensips_async_handler!`.
 /// Methods on this type set the global `async_status` variable and
@@ -75,6 +75,7 @@ impl AsyncContext {
     ///   - `ASYNC_DONE_NO_IO` (-3): complete, no more I/O
     ///   - `ASYNC_CONTINUE` (-5): not done yet, keep monitoring
     ///   - `ASYNC_CHANGE_FD` (-4): switch to a different fd
+    #[allow(clippy::missing_transmute_annotations)]
     pub fn set_resume(&self, f: unsafe extern "C" fn(i32, *mut sys::sip_msg, *mut c_void) -> i32) {
         unsafe {
             // resume_f expects `fn(...) -> async_ret_code` where async_ret_code
