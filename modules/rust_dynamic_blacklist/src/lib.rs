@@ -195,7 +195,7 @@ unsafe extern "C" fn w_rust_check_blacklist(
             None => {
                 opensips_log!(ERR, "rust_dynamic_blacklist",
                     "rust_check_blacklist: missing or invalid parameter");
-                return -1;
+                return -2;
             }
         };
 
@@ -221,7 +221,7 @@ unsafe extern "C" fn w_rust_check_blacklist(
                 None => {
                     opensips_log!(ERR, "rust_dynamic_blacklist",
                         "blacklist not initialized in this worker");
-                    -1
+                    -2
                 }
             }
         })

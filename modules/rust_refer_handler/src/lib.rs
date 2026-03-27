@@ -286,7 +286,7 @@ unsafe extern "C" fn w_rust_handle_refer(
                     "rust_refer_handler",
                     "rust_handle_refer: missing or invalid refer_to parameter"
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -300,7 +300,7 @@ unsafe extern "C" fn w_rust_handle_refer(
                     "rust_refer_handler",
                     "rust_handle_refer: no Call-ID header"
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -336,7 +336,7 @@ unsafe extern "C" fn w_rust_handle_refer(
                         "rust_refer_handler",
                         "worker state not initialized"
                     );
-                    -1
+                    -2
                 }
             }
         })
@@ -365,7 +365,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                     "rust_refer_handler",
                     "rust_handle_notify: missing or invalid call_id parameter"
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -377,7 +377,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                     "rust_refer_handler",
                     "rust_handle_notify: missing or invalid status_code parameter"
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -390,7 +390,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                     "rust_handle_notify: status_code is not a valid integer: {}",
                     status_code_str
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -440,7 +440,7 @@ unsafe extern "C" fn w_rust_handle_notify(
                         "rust_refer_handler",
                         "worker state not initialized"
                     );
-                    -1
+                    -2
                 }
             }
         })
@@ -469,7 +469,7 @@ unsafe extern "C" fn w_rust_refer_status(
                     "rust_refer_handler",
                     "rust_refer_status: missing or invalid call_id parameter"
                 );
-                return -1;
+                return -2;
             }
         };
 
@@ -496,7 +496,7 @@ unsafe extern "C" fn w_rust_refer_status(
                         "rust_refer_handler",
                         "worker state not initialized"
                     );
-                    -1
+                    -2
                 }
             }
         })
