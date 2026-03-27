@@ -5,6 +5,9 @@
 //! background tokio task. If the queue is full, the payload is dropped
 //! and the drop counter incremented.
 //!
+//! Supports custom headers, multiple URLs (fanout), and retry with
+//! exponential backoff.
+//!
 //! # OpenSIPS config
 //!
 //! ```text
@@ -13,6 +16,9 @@
 //! modparam("rust_http_webhook", "max_queue", 2000)
 //! modparam("rust_http_webhook", "http_timeout", 5)
 //! modparam("rust_http_webhook", "content_type", "application/json")
+//! modparam("rust_http_webhook", "headers", "Authorization: Bearer xxx|X-Source: opensips")
+//! modparam("rust_http_webhook", "max_retries", 3)
+//! modparam("rust_http_webhook", "retry_delay_ms", 1000)
 //!
 //! route {
 //!     rust_webhook("{\"method\":\"$rm\",\"ruri\":\"$ru\"}");
@@ -56,7 +62,7 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
-use rust_common::async_dispatch::FireAndForget;
+use rust_common::async_dispatch::{parse_headers, parse_urls, FireAndForget, RetryConfig};
 use rust_common::mi::Stats;
 
 use std::cell::RefCell;
@@ -65,7 +71,7 @@ use std::ptr;
 
 // ── Module parameters ────────────────────────────────────────────
 
-/// Webhook endpoint URL (required).
+/// Webhook endpoint URL(s) (required). Comma-separated for fanout.
 static URL: ModString = ModString::new();
 
 /// Maximum queued payloads before dropping (default: 1000).
@@ -80,6 +86,16 @@ static CONTENT_TYPE: ModString = ModString::new();
 /// Path to a custom CA certificate file for TLS verification (optional).
 static TLS_CA_FILE: ModString = ModString::new();
 
+/// Custom headers, pipe-separated: "Name: Value|Name2: Value2"
+static HEADERS: ModString = ModString::new();
+
+/// Maximum retry attempts on HTTP failure (default: 0 = no retry).
+static MAX_RETRIES: Integer = Integer::with_default(0);
+
+/// Base retry delay in milliseconds (default: 1000). Exponential backoff:
+/// delay * 2^(attempt-1).
+static RETRY_DELAY_MS: Integer = Integer::with_default(1000);
+
 // ── Per-worker state ─────────────────────────────────────────────
 
 thread_local! {
@@ -88,6 +104,8 @@ thread_local! {
         "sent",
         "dropped",
         "failed",
+        "retried",
+        "retry_exhausted",
     ]);
 }
 
@@ -122,11 +140,35 @@ unsafe extern "C" fn mod_init() -> c_int {
             "http_timeout={} is very high (>300s), clamping to 300", timeout);
     }
 
+    // Parse and validate URLs
+    let urls = parse_urls(url);
+    if urls.is_empty() {
+        opensips_log!(ERR, "rust_http_webhook",
+            "modparam 'url' resulted in 0 valid URLs after parsing");
+        return -1;
+    }
+
+    // Parse and validate headers
+    let headers_str = HEADERS.get_value().unwrap_or("");
+    let headers = parse_headers(headers_str);
+
+    let max_retries = MAX_RETRIES.get();
+    let retry_delay = RETRY_DELAY_MS.get();
+
     opensips_log!(INFO, "rust_http_webhook", "module initialized");
-    opensips_log!(INFO, "rust_http_webhook", "  url={}", url);
+    for (i, u) in urls.iter().enumerate() {
+        opensips_log!(INFO, "rust_http_webhook", "  url[{}]={}", i, u);
+    }
     opensips_log!(INFO, "rust_http_webhook", "  max_queue={}", MAX_QUEUE.get());
     opensips_log!(INFO, "rust_http_webhook", "  http_timeout={}s", HTTP_TIMEOUT.get());
     opensips_log!(INFO, "rust_http_webhook", "  content_type={}", content_type);
+    if !headers.is_empty() {
+        opensips_log!(INFO, "rust_http_webhook", "  custom_headers={}", headers.len());
+    }
+    if max_retries > 0 {
+        opensips_log!(INFO, "rust_http_webhook",
+            "  max_retries={}, retry_delay_ms={}", max_retries, retry_delay);
+    }
 
     if let Some(ca) = TLS_CA_FILE.get_value() {
         opensips_log!(INFO, "rust_http_webhook", "  tls_ca_file={}", ca);
@@ -137,25 +179,34 @@ unsafe extern "C" fn mod_init() -> c_int {
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     // Only initialize for worker processes (rank >= 1).
-    // Rank 0 is the main/attendant process, negative ranks are special.
     if rank < 1 {
         return 0;
     }
 
-    let url = match URL.get_value() {
+    let url_raw = match URL.get_value() {
         Some(u) => u.to_string(),
         None => return -1,
     };
     let content_type = CONTENT_TYPE.get_value()
         .unwrap_or("application/json")
         .to_string();
+    let headers_str = HEADERS.get_value().unwrap_or("").to_string();
+
+    let urls = parse_urls(&url_raw);
+    let custom_headers = parse_headers(&headers_str);
+    let retry = RetryConfig {
+        max_retries: MAX_RETRIES.get().max(0) as u32,
+        retry_delay_ms: RETRY_DELAY_MS.get().max(100) as u64,
+    };
 
     WEBHOOK.with(|w| {
-        *w.borrow_mut() = Some(FireAndForget::new(
-            url,
-            MAX_QUEUE.get() as usize,
-            HTTP_TIMEOUT.get() as u64,
+        *w.borrow_mut() = Some(FireAndForget::with_options(
+            urls,
+            MAX_QUEUE.get().max(1) as usize,
+            HTTP_TIMEOUT.get().max(1) as u64,
             content_type,
+            custom_headers,
+            retry,
         ));
     });
 
@@ -224,6 +275,8 @@ unsafe extern "C" fn w_rust_webhook_stats(
                         s.set("sent", ff.sent.get());
                         s.set("dropped", ff.dropped.get());
                         s.set("failed", ff.failed.get());
+                        s.set("retried", ff.retried.get());
+                        s.set("retry_exhausted", ff.retry_exhausted.get());
                         s.to_json()
                     })
                 }
@@ -283,7 +336,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 6> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("url"),
         type_: 1, // STR_PARAM
@@ -308,6 +361,21 @@ static PARAMS: SyncArray<sys::param_export_, 6> = SyncArray([
         name: cstr_lit!("tls_ca_file"),
         type_: 1, // STR_PARAM
         param_pointer: TLS_CA_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("headers"),
+        type_: 1, // STR_PARAM
+        param_pointer: HEADERS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("max_retries"),
+        type_: 2, // INT_PARAM
+        param_pointer: MAX_RETRIES.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("retry_delay_ms"),
+        type_: 2, // INT_PARAM
+        param_pointer: RETRY_DELAY_MS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
