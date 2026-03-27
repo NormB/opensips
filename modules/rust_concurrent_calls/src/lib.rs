@@ -130,6 +130,9 @@ static USE_DIALOG_PROFILES: Integer = Integer::with_default(0);
 /// Dialog profile name for cross-worker counting (default: "concurrent_calls").
 static PROFILE_NAME: ModString = ModString::new();
 
+/// Enable per-direction (inbound/outbound) limits (0 = single limit, 1 = direction-aware).
+static DIRECTION_AWARE: Integer = Integer::with_default(0);
+
 // ── Pure logic (testable without FFI) ────────────────────────────
 
 /// Parse a CSV line "account,limit" into a (String, u32) pair.
@@ -151,6 +154,68 @@ fn build_limits(entries: Vec<String>) -> HashMap<String, u32> {
         .iter()
         .filter_map(|line| parse_limit_entry(line))
         .collect()
+}
+
+/// Per-direction limits for an account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectionLimits {
+    inbound: u32,
+    outbound: u32,
+}
+
+/// Parse a direction-aware CSV line "account,max_inbound,max_outbound".
+fn parse_direction_limit_entry(csv_line: &str) -> Option<(String, DirectionLimits)> {
+    let mut parts = csv_line.splitn(3, ',');
+    let account = parts.next()?.trim();
+    let inbound_str = parts.next()?.trim();
+    let outbound_str = parts.next()?.trim();
+    let inbound = inbound_str.parse::<u32>().ok()?;
+    let outbound = outbound_str.parse::<u32>().ok()?;
+    if account.is_empty() {
+        return None;
+    }
+    Some((account.to_string(), DirectionLimits { inbound, outbound }))
+}
+
+/// Build a HashMap of direction-aware limits from parsed CSV lines.
+#[allow(clippy::needless_pass_by_value)]
+fn build_direction_limits(entries: Vec<String>) -> HashMap<String, DirectionLimits> {
+    entries
+        .iter()
+        .filter_map(|line| parse_direction_limit_entry(line))
+        .collect()
+}
+
+/// Check if an account is under its inbound concurrent call limit.
+///
+/// Returns (allowed, current_count, limit).
+fn check_inbound_limit(
+    counts: &HashMap<String, u32>,
+    limits: &HashMap<String, DirectionLimits>,
+    account: &str,
+    default_limit: u32,
+) -> (bool, u32, u32) {
+    let count = counts.get(account).copied().unwrap_or(0);
+    let limit = limits.get(account)
+        .map(|dl| dl.inbound)
+        .unwrap_or(default_limit);
+    (count < limit, count, limit)
+}
+
+/// Check if an account is under its outbound concurrent call limit.
+///
+/// Returns (allowed, current_count, limit).
+fn check_outbound_limit(
+    counts: &HashMap<String, u32>,
+    limits: &HashMap<String, DirectionLimits>,
+    account: &str,
+    default_limit: u32,
+) -> (bool, u32, u32) {
+    let count = counts.get(account).copied().unwrap_or(0);
+    let limit = limits.get(account)
+        .map(|dl| dl.outbound)
+        .unwrap_or(default_limit);
+    (count < limit, count, limit)
 }
 
 /// Check if an account is under its concurrent call limit.
@@ -212,6 +277,10 @@ struct WorkerState {
     loader: FileLoader<HashMap<String, u32>>,
     stats: Stats,
     dialog_tracker: dialog::DialogTracker<CallDialogState>,
+    // Direction-aware state (only used when direction_aware=1)
+    inbound_counts: HashMap<String, u32>,
+    outbound_counts: HashMap<String, u32>,
+    direction_loader: Option<FileLoader<HashMap<String, DirectionLimits>>>,
 }
 
 thread_local! {
@@ -389,6 +458,9 @@ unsafe extern "C" fn mod_init() -> c_int {
     opensips_log!(INFO, "rust_concurrent_calls", "  auto_track={}", auto_track);
     opensips_log!(INFO, "rust_concurrent_calls", "  account_var={}", account_var);
 
+    let direction_aware = DIRECTION_AWARE.get();
+    opensips_log!(INFO, "rust_concurrent_calls", "  direction_aware={}", direction_aware);
+
     let use_profiles = USE_DIALOG_PROFILES.get();
     let profile_name = unsafe { PROFILE_NAME.get_value() }
         .unwrap_or("concurrent_calls");
@@ -424,12 +496,30 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
           "accounts", "reloads", "auto_tracked"]);
     stats.set("accounts", entry_count as u64);
 
+    // Load direction-aware limits if enabled
+    let direction_aware = DIRECTION_AWARE.get() != 0;
+    let direction_loader = if direction_aware {
+        match FileLoader::new(&file, csv_line_parser, build_direction_limits) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                opensips_log!(WARN, "rust_concurrent_calls",
+                    "direction_aware enabled but failed to load direction limits: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     WORKER.with(|w| {
         *w.borrow_mut() = Some(WorkerState {
             counts: HashMap::with_capacity(256),
             loader,
             stats,
             dialog_tracker: dialog::DialogTracker::new(3600),
+            inbound_counts: HashMap::with_capacity(256),
+            outbound_counts: HashMap::with_capacity(256),
+            direction_loader,
         });
     });
 
@@ -611,6 +701,116 @@ unsafe extern "C" fn w_concurrent_dec(
     })
 }
 
+// ── Script function: check_concurrent_inbound(account) ───────
+
+unsafe extern "C" fn w_check_concurrent_inbound(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "check_concurrent_inbound: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    state.stats.inc("checked");
+
+                    let default = DEFAULT_LIMIT.get() as u32;
+                    let (allowed, count, limit) = match &state.direction_loader {
+                        Some(dl) => {
+                            let limits = dl.get();
+                            check_inbound_limit(&state.inbound_counts, &limits, account, default)
+                        }
+                        None => {
+                            opensips_log!(WARN, "rust_concurrent_calls",
+                                "check_concurrent_inbound called but direction_aware=0");
+                            let limits = state.loader.get();
+                            check_limit(&state.counts, &limits, account, default)
+                        }
+                    };
+
+                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit as i32);
+
+                    if allowed {
+                        state.stats.inc("allowed");
+                        1
+                    } else {
+                        state.stats.inc("blocked");
+                        -1
+                    }
+                }
+                None => -2,
+            }
+        })
+    })
+}
+
+// ── Script function: check_concurrent_outbound(account) ──────
+
+unsafe extern "C" fn w_check_concurrent_outbound(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "check_concurrent_outbound: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    state.stats.inc("checked");
+
+                    let default = DEFAULT_LIMIT.get() as u32;
+                    let (allowed, count, limit) = match &state.direction_loader {
+                        Some(dl) => {
+                            let limits = dl.get();
+                            check_outbound_limit(&state.outbound_counts, &limits, account, default)
+                        }
+                        None => {
+                            opensips_log!(WARN, "rust_concurrent_calls",
+                                "check_concurrent_outbound called but direction_aware=0");
+                            let limits = state.loader.get();
+                            check_limit(&state.counts, &limits, account, default)
+                        }
+                    };
+
+                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit as i32);
+
+                    if allowed {
+                        state.stats.inc("allowed");
+                        1
+                    } else {
+                        state.stats.inc("blocked");
+                        -1
+                    }
+                }
+                None => -2,
+            }
+        })
+    })
+}
+
 // ── Script function: concurrent_reload() ────────────────────
 
 unsafe extern "C" fn w_concurrent_reload(
@@ -683,7 +883,7 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 6> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 8> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_concurrent"),
         function: Some(w_check_concurrent),
@@ -714,6 +914,18 @@ static CMDS: SyncArray<sys::cmd_export_, 6> = SyncArray([
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_concurrent_inbound"),
+        function: Some(w_check_concurrent_inbound),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_concurrent_outbound"),
+        function: Some(w_check_concurrent_outbound),
+        params: ONE_STR_PARAM,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
     // Null terminator
     sys::cmd_export_ {
         name: ptr::null(),
@@ -731,7 +943,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 8> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -761,6 +973,11 @@ static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
         name: cstr_lit!("profile_name"),
         type_: 1, // STR_PARAM
         param_pointer: PROFILE_NAME.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("direction_aware"),
+        type_: 2, // INT_PARAM
+        param_pointer: DIRECTION_AWARE.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1369,6 +1586,122 @@ mod tests {
         // Profile check says blocked (5 >= 5)
         let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
         assert!(!profile_allowed);
+    }
+
+    // ── Direction-aware limit tests (Task 41) ────────────────────
+
+    #[test]
+    fn test_parse_direction_limit_entry() {
+        let result = parse_direction_limit_entry("alice,5,3");
+        assert_eq!(result, Some(("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 })));
+    }
+
+    #[test]
+    fn test_parse_direction_limit_whitespace() {
+        let result = parse_direction_limit_entry("  bob , 10 , 5 ");
+        assert_eq!(result, Some(("bob".to_string(), DirectionLimits { inbound: 10, outbound: 5 })));
+    }
+
+    #[test]
+    fn test_parse_direction_limit_invalid() {
+        assert_eq!(parse_direction_limit_entry("alice,5"), None);
+        assert_eq!(parse_direction_limit_entry("alice,abc,3"), None);
+        assert_eq!(parse_direction_limit_entry(",5,3"), None);
+    }
+
+    #[test]
+    fn test_build_direction_limits() {
+        let entries = vec![
+            "alice,5,3".to_string(),
+            "trunk-1,100,50".to_string(),
+        ];
+        let limits = build_direction_limits(entries);
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits.get("alice"), Some(&DirectionLimits { inbound: 5, outbound: 3 }));
+        assert_eq!(limits.get("trunk-1"), Some(&DirectionLimits { inbound: 100, outbound: 50 }));
+    }
+
+    #[test]
+    fn test_check_inbound_limit_under() {
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 2);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
+
+        let (allowed, count, limit) = check_inbound_limit(&counts, &limits, "alice", 10);
+        assert!(allowed);
+        assert_eq!(count, 2);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn test_check_inbound_limit_at() {
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 5);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
+
+        let (allowed, _, _) = check_inbound_limit(&counts, &limits, "alice", 10);
+        assert!(!allowed);
+    }
+
+    #[test]
+    fn test_check_outbound_limit_under() {
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 1);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
+
+        let (allowed, count, limit) = check_outbound_limit(&counts, &limits, "alice", 10);
+        assert!(allowed);
+        assert_eq!(count, 1);
+        assert_eq!(limit, 3);
+    }
+
+    #[test]
+    fn test_check_outbound_limit_at() {
+        let mut counts = HashMap::new();
+        counts.insert("alice".to_string(), 3);
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
+
+        let (allowed, _, _) = check_outbound_limit(&counts, &limits, "alice", 10);
+        assert!(!allowed);
+    }
+
+    #[test]
+    fn test_direction_default_limit() {
+        let counts = HashMap::new();
+        let limits: HashMap<String, DirectionLimits> = HashMap::new();
+
+        let (allowed, _, limit) = check_inbound_limit(&counts, &limits, "unknown", 10);
+        assert!(allowed);
+        assert_eq!(limit, 10);
+
+        let (allowed, _, limit) = check_outbound_limit(&counts, &limits, "unknown", 10);
+        assert!(allowed);
+        assert_eq!(limit, 10);
+    }
+
+    #[test]
+    fn test_direction_asymmetric_limits() {
+        // Inbound limit 100, outbound limit 5
+        let mut limits = HashMap::new();
+        limits.insert("trunk".to_string(), DirectionLimits { inbound: 100, outbound: 5 });
+
+        let mut in_counts = HashMap::new();
+        in_counts.insert("trunk".to_string(), 50);
+
+        let mut out_counts = HashMap::new();
+        out_counts.insert("trunk".to_string(), 5);
+
+        // Inbound: 50 < 100, allowed
+        let (allowed, _, _) = check_inbound_limit(&in_counts, &limits, "trunk", 10);
+        assert!(allowed);
+
+        // Outbound: 5 >= 5, blocked
+        let (allowed, _, _) = check_outbound_limit(&out_counts, &limits, "trunk", 10);
+        assert!(!allowed);
     }
 
     #[test]
