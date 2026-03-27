@@ -8,7 +8,7 @@ description = "Shared building blocks for OpenSIPS Rust service modules"
 [dependencies]
 opensips-rs = { path = "../sdk" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustls-native-certs = "0.8"
