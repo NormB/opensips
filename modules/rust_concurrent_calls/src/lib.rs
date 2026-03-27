@@ -1,20 +1,42 @@
 //! rust_concurrent_calls — Per-account concurrent call limiting for OpenSIPS.
 //!
 //! Tracks active calls per account (typically `$fU`) and enforces configurable
-//! limits. Uses explicit inc/dec from the OpenSIPS script — no dialog callback
-//! complexity.
+//! limits. Supports both automatic dialog callback tracking (when dialog.so is
+//! loaded) and explicit inc/dec from the OpenSIPS script.
 //!
-//! # OpenSIPS config
+//! # OpenSIPS config (automatic mode — with dialog.so)
+//!
+//! ```text
+//! loadmodule "dialog.so"
+//! loadmodule "rust_concurrent_calls.so"
+//! modparam("rust_concurrent_calls", "limits_file", "/etc/opensips/call_limits.csv")
+//! modparam("rust_concurrent_calls", "default_limit", 10)
+//! modparam("rust_concurrent_calls", "auto_track", 1)
+//! modparam("rust_concurrent_calls", "account_var", "$fU")
+//!
+//! route {
+//!     if (is_method("INVITE") && !has_totag()) {
+//!         if (!check_concurrent("$fU")) {
+//!             sl_send_reply(486, "Too Many Calls");
+//!             exit;
+//!         }
+//!         # No need for concurrent_inc() — auto_track handles it
+//!     }
+//! }
+//! # No need for concurrent_dec() on BYE — auto_track handles it
+//! ```
+//!
+//! # OpenSIPS config (manual mode — without dialog.so)
 //!
 //! ```text
 //! loadmodule "rust_concurrent_calls.so"
 //! modparam("rust_concurrent_calls", "limits_file", "/etc/opensips/call_limits.csv")
 //! modparam("rust_concurrent_calls", "default_limit", 10)
+//! modparam("rust_concurrent_calls", "auto_track", 0)
 //!
 //! route {
 //!     if (is_method("INVITE") && !has_totag()) {
 //!         if (!check_concurrent("$fU")) {
-//!             xlog("L_WARN", "over limit: $fU has $var(concurrent_count)/$var(concurrent_limit) calls\n");
 //!             sl_send_reply(486, "Too Many Calls");
 //!             exit;
 //!         }
@@ -79,6 +101,7 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
+use rust_common::dialog;
 use rust_common::mi::Stats;
 use rust_common::reload::{csv_line_parser, FileLoader};
 
@@ -94,6 +117,12 @@ static LIMITS_FILE: ModString = ModString::new();
 
 /// Default concurrent call limit for accounts not in the limits file.
 static DEFAULT_LIMIT: Integer = Integer::with_default(10);
+
+/// Enable automatic dialog tracking (1 = enabled, 0 = manual only).
+static AUTO_TRACK: Integer = Integer::with_default(1);
+
+/// PV expression to extract account from SIP message (default: "$fU").
+static ACCOUNT_VAR: ModString = ModString::new();
 
 // ── Pure logic (testable without FFI) ────────────────────────────
 
@@ -146,16 +175,132 @@ fn decrement(counts: &mut HashMap<String, u32>, account: &str) -> u32 {
     *entry
 }
 
+// ── Dialog tracker state ─────────────────────────────────────────
+
+/// Per-dialog state stored in the DialogTracker.
+#[derive(Default)]
+struct CallDialogState {
+    /// The account identifier associated with this dialog.
+    account: String,
+}
+
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
     counts: HashMap<String, u32>,
     loader: FileLoader<HashMap<String, u32>>,
     stats: Stats,
+    dialog_tracker: dialog::DialogTracker<CallDialogState>,
 }
 
 thread_local! {
     static WORKER: RefCell<Option<WorkerState>> = const { RefCell::new(None) };
+}
+
+// ── Dialog callback trampolines ──────────────────────────────────
+
+/// DLGCB_CREATED callback: auto-increment account counter and register
+/// per-dialog TERMINATED/EXPIRED callbacks.
+///
+/// # Safety
+/// Called by OpenSIPS dialog module with valid pointers.
+unsafe extern "C" fn dlg_on_created(
+    dlg: *mut dialog::dlg_cell,
+    _cb_type: c_int,
+    params: *mut dialog::dlg_cb_params,
+) {
+    // Extract account from the SIP message
+    let msg_ptr = if !params.is_null() {
+        unsafe { (*params).msg }
+    } else {
+        ptr::null_mut()
+    };
+
+    if msg_ptr.is_null() {
+        return;
+    }
+
+    // Get the account variable expression
+    let account_var_expr = unsafe { ACCOUNT_VAR.get_value() }
+        .unwrap_or("$fU");
+
+    // Read the account from the SIP message PV
+    let sip_msg = unsafe {
+        opensips_rs::SipMessage::from_raw(msg_ptr as *mut sys::sip_msg)
+    };
+    let account = match sip_msg.pv(account_var_expr) {
+        Some(a) if !a.is_empty() => a,
+        _ => return,
+    };
+
+    // Get dialog ID (Call-ID)
+    let call_id = match unsafe { dialog::callid_from_dlg(dlg as *mut c_void) } {
+        Some(id) => id,
+        None => return,
+    };
+
+    // Increment counter and track dialog
+    WORKER.with(|w| {
+        let mut borrow = w.borrow_mut();
+        if let Some(state) = borrow.as_mut() {
+            let new_count = increment(&mut state.counts, &account);
+            state.stats.inc("incremented");
+            state.stats.inc("auto_tracked");
+
+            // Store account in dialog tracker
+            state.dialog_tracker.on_created(&call_id);
+            state.dialog_tracker.with_state(&call_id, |s| {
+                s.account = account.clone();
+            });
+
+            opensips_log!(DBG, "rust_concurrent_calls",
+                "auto_track inc {}: now {} (dialog {})", account, new_count, call_id);
+        }
+    });
+
+    // Register per-dialog TERMINATED|EXPIRED callback
+    let _ = unsafe {
+        dialog::dlg::register_dlg_cb(
+            dlg as *mut c_void,
+            (dialog::DLGCB_TERMINATED | dialog::DLGCB_EXPIRED) as u32,
+            Some(dlg_on_terminated),
+            ptr::null_mut(),
+            None,
+        )
+    };
+}
+
+/// DLGCB_TERMINATED/EXPIRED callback: auto-decrement account counter.
+///
+/// # Safety
+/// Called by OpenSIPS dialog module with valid pointers.
+unsafe extern "C" fn dlg_on_terminated(
+    dlg: *mut dialog::dlg_cell,
+    _cb_type: c_int,
+    _params: *mut dialog::dlg_cb_params,
+) {
+    let call_id = match unsafe { dialog::callid_from_dlg(dlg as *mut c_void) } {
+        Some(id) => id,
+        None => return,
+    };
+
+    WORKER.with(|w| {
+        let mut borrow = w.borrow_mut();
+        if let Some(state) = borrow.as_mut() {
+            // Look up the account from our tracker
+            let account = state.dialog_tracker.on_terminated(&call_id)
+                .map(|s| s.account);
+
+            if let Some(acct) = account {
+                if !acct.is_empty() {
+                    let new_count = decrement(&mut state.counts, &acct);
+                    state.stats.inc("decremented");
+                    opensips_log!(DBG, "rust_concurrent_calls",
+                        "auto_track dec {}: now {} (dialog {})", acct, new_count, call_id);
+                }
+            }
+        }
+    });
 }
 
 // ── Module lifecycle ─────────────────────────────────────────────
@@ -171,6 +316,9 @@ unsafe extern "C" fn mod_init() -> c_int {
     };
 
     let default = DEFAULT_LIMIT.get();
+    let auto_track = AUTO_TRACK.get();
+    let account_var = unsafe { ACCOUNT_VAR.get_value() }
+        .unwrap_or("$fU");
 
     // Validate default_limit
     if default < 0 {
@@ -181,9 +329,44 @@ unsafe extern "C" fn mod_init() -> c_int {
             "default_limit={} is very high (>100000), verify this is intentional", default);
     }
 
+    // Try to load dialog API if auto_track is enabled
+    if auto_track != 0 {
+        match dialog::load_api() {
+            Ok(()) => {
+                // Register DLGCB_CREATED global callback
+                match unsafe {
+                    dialog::dlg::register_global_cb(
+                        dialog::DLGCB_CREATED as u32,
+                        Some(dlg_on_created),
+                        ptr::null_mut(),
+                        None,
+                    )
+                } {
+                    Ok(()) => {
+                        opensips_log!(INFO, "rust_concurrent_calls",
+                            "auto_track enabled: dialog callbacks registered (account_var={})",
+                            account_var);
+                    }
+                    Err(e) => {
+                        opensips_log!(ERR, "rust_concurrent_calls",
+                            "auto_track: failed to register DLGCB_CREATED: {}", e);
+                        return -1;
+                    }
+                }
+            }
+            Err(e) => {
+                opensips_log!(WARN, "rust_concurrent_calls",
+                    "auto_track enabled but dialog API unavailable ({}). \
+                     Falling back to manual mode. Load dialog.so before this module.", e);
+            }
+        }
+    }
+
     opensips_log!(INFO, "rust_concurrent_calls", "module initialized");
     opensips_log!(INFO, "rust_concurrent_calls", "  limits_file={}", file);
     opensips_log!(INFO, "rust_concurrent_calls", "  default_limit={}", default);
+    opensips_log!(INFO, "rust_concurrent_calls", "  auto_track={}", auto_track);
+    opensips_log!(INFO, "rust_concurrent_calls", "  account_var={}", account_var);
 
     0
 }
@@ -210,7 +393,8 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     let entry_count = loader.get().len();
 
     let stats = Stats::new("rust_concurrent_calls",
-        &["checked", "allowed", "blocked", "incremented", "decremented", "accounts", "reloads"]);
+        &["checked", "allowed", "blocked", "incremented", "decremented",
+          "accounts", "reloads", "auto_tracked"]);
     stats.set("accounts", entry_count as u64);
 
     WORKER.with(|w| {
@@ -218,6 +402,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             counts: HashMap::with_capacity(256),
             loader,
             stats,
+            dialog_tracker: dialog::DialogTracker::new(3600),
         });
     });
 
@@ -480,7 +665,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 3> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -490,6 +675,16 @@ static PARAMS: SyncArray<sys::param_export_, 3> = SyncArray([
         name: cstr_lit!("default_limit"),
         type_: 2, // INT_PARAM
         param_pointer: DEFAULT_LIMIT.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("auto_track"),
+        type_: 2, // INT_PARAM
+        param_pointer: AUTO_TRACK.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("account_var"),
+        type_: 1, // STR_PARAM
+        param_pointer: ACCOUNT_VAR.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -911,5 +1106,150 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let result = loader.reload();
         assert!(result.is_err());
+    }
+
+    // ── Dialog tracker integration tests (Task 39) ───────────────
+
+    #[test]
+    fn test_dialog_auto_track_inc_dec() {
+        // Simulate automatic dialog tracking: created increments, terminated decrements.
+        let mut counts = HashMap::new();
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+
+        // Simulate DLGCB_CREATED: increment and track
+        let account = "alice";
+        let call_id = "call-abc-123";
+        increment(&mut counts, account);
+        tracker.on_created(call_id);
+        tracker.with_state(call_id, |s| {
+            s.account = account.to_string();
+        });
+
+        assert_eq!(counts.get("alice"), Some(&1));
+        assert!(tracker.contains(call_id));
+
+        // Simulate DLGCB_TERMINATED: look up account, decrement
+        let terminated_state = tracker.on_terminated(call_id);
+        assert!(terminated_state.is_some());
+        let acct = terminated_state.unwrap().account;
+        assert_eq!(acct, "alice");
+        decrement(&mut counts, &acct);
+
+        assert_eq!(counts.get("alice"), Some(&0));
+        assert!(!tracker.contains(call_id));
+    }
+
+    #[test]
+    fn test_dialog_auto_track_multiple_calls() {
+        let mut counts = HashMap::new();
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+
+        // Alice makes 3 calls
+        for i in 0..3 {
+            let call_id = format!("call-alice-{}", i);
+            increment(&mut counts, "alice");
+            tracker.on_created(&call_id);
+            tracker.with_state(&call_id, |s| {
+                s.account = "alice".to_string();
+            });
+        }
+        assert_eq!(counts.get("alice"), Some(&3));
+        assert_eq!(tracker.active_count(), 3);
+
+        // Terminate first 2 calls
+        for i in 0..2 {
+            let call_id = format!("call-alice-{}", i);
+            let state = tracker.on_terminated(&call_id).unwrap();
+            decrement(&mut counts, &state.account);
+        }
+        assert_eq!(counts.get("alice"), Some(&1));
+        assert_eq!(tracker.active_count(), 1);
+    }
+
+    #[test]
+    fn test_dialog_auto_track_expired() {
+        let mut counts = HashMap::new();
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+
+        increment(&mut counts, "bob");
+        tracker.on_created("call-expired");
+        tracker.with_state("call-expired", |s| {
+            s.account = "bob".to_string();
+        });
+
+        // Dialog expires (not terminated)
+        let state = tracker.on_expired("call-expired").unwrap();
+        decrement(&mut counts, &state.account);
+        assert_eq!(counts.get("bob"), Some(&0));
+    }
+
+    #[test]
+    fn test_dialog_auto_track_unknown_terminated() {
+        // TERMINATED for a dialog we never tracked should be a no-op
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+        let result = tracker.on_terminated("never-seen");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_dialog_auto_track_with_limits() {
+        let mut counts = HashMap::new();
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 2);
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+
+        // Simulate: check, then auto-inc on CREATED
+        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
+        assert!(allowed);
+        increment(&mut counts, "alice");
+        tracker.on_created("c1");
+        tracker.with_state("c1", |s| s.account = "alice".to_string());
+
+        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
+        assert!(allowed);
+        increment(&mut counts, "alice");
+        tracker.on_created("c2");
+        tracker.with_state("c2", |s| s.account = "alice".to_string());
+
+        // Third call should be blocked
+        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
+        assert!(!allowed);
+        assert_eq!(count, 2);
+        assert_eq!(limit, 2);
+
+        // First call ends
+        let state = tracker.on_terminated("c1").unwrap();
+        decrement(&mut counts, &state.account);
+
+        // Now allowed again
+        let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
+        assert!(allowed);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_dialog_auto_track_mixed_accounts() {
+        let mut counts = HashMap::new();
+        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
+
+        // Alice and Bob both make calls
+        increment(&mut counts, "alice");
+        tracker.on_created("call-a1");
+        tracker.with_state("call-a1", |s| s.account = "alice".to_string());
+
+        increment(&mut counts, "bob");
+        tracker.on_created("call-b1");
+        tracker.with_state("call-b1", |s| s.account = "bob".to_string());
+
+        assert_eq!(counts.get("alice"), Some(&1));
+        assert_eq!(counts.get("bob"), Some(&1));
+
+        // Bob's call ends
+        let state = tracker.on_terminated("call-b1").unwrap();
+        assert_eq!(state.account, "bob");
+        decrement(&mut counts, &state.account);
+
+        assert_eq!(counts.get("alice"), Some(&1));
+        assert_eq!(counts.get("bob"), Some(&0));
     }
 }
