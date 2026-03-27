@@ -238,9 +238,9 @@ fn check_all(
     value: &str,
 ) -> bool {
     check_acl_data(primary, value)
-        || ip.map_or(false, |t| check_acl_data(&t.data, value))
-        || ua.map_or(false, |t| check_acl_data(&t.data, value))
-        || domain.map_or(false, |t| check_acl_data(&t.data, value))
+        || ip.is_some_and(|t| check_acl_data(&t.data, value))
+        || ua.is_some_and(|t| check_acl_data(&t.data, value))
+        || domain.is_some_and(|t| check_acl_data(&t.data, value))
 }
 
 /// Check an optional primary AclData plus an optional typed AclData.
@@ -254,7 +254,7 @@ fn check_optional_with_typed(
             return true;
         }
     }
-    primary.map_or(false, |data| check_acl_data(data, value))
+    primary.is_some_and(|data| check_acl_data(data, value))
 }
 
 /// Check an optional primary AclData plus ALL typed AclData.
@@ -265,10 +265,10 @@ fn check_optional_all(
     domain: Option<&TypedAcl>,
     value: &str,
 ) -> bool {
-    primary.map_or(false, |data| check_acl_data(data, value))
-        || ip.map_or(false, |t| check_acl_data(&t.data, value))
-        || ua.map_or(false, |t| check_acl_data(&t.data, value))
-        || domain.map_or(false, |t| check_acl_data(&t.data, value))
+    primary.is_some_and(|data| check_acl_data(data, value))
+        || ip.is_some_and(|t| check_acl_data(&t.data, value))
+        || ua.is_some_and(|t| check_acl_data(&t.data, value))
+        || domain.is_some_and(|t| check_acl_data(&t.data, value))
 }
 
 // ── Auto-entry with TTL expiry ──────────────────────────────────
@@ -323,7 +323,7 @@ fn find_matching_entry(data: &AclData, value: &str) -> Option<String> {
         AclData::Prefix(prefixes) => {
             prefixes.iter()
                 .find(|p| value.starts_with(p.as_str()))
-                .map(|p| p.clone())
+                .cloned()
         }
         AclData::Regex(patterns) => {
             patterns.iter()
@@ -538,10 +538,10 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     stats.set("entries_allowlist", allowlist_count as u64);
 
     let track_counters = unsafe { TRACK_COUNTERS.get_value() }
-        .map_or(false, |v| v == "1");
+        .is_some_and(|v| v == "1");
 
     let access_policy = unsafe { ACCESS_POLICY.get_value() }
-        .and_then(|s| AccessPolicy::from_str(s))
+        .and_then(AccessPolicy::from_str)
         .unwrap_or(AccessPolicy::AllowlistFirst);
 
     WORKER.with(|w| {
@@ -939,6 +939,7 @@ unsafe extern "C" fn w_check_allowlist_domain(
 
 // ── Pure access policy check (testable without FFI) ──────────────
 
+#[allow(clippy::too_many_arguments)]
 fn check_access_with_policy(
     policy: AccessPolicy,
     blocklist: &AclData,
@@ -964,14 +965,23 @@ fn check_access_with_policy(
 
     match policy {
         AccessPolicy::AllowlistFirst => {
-            if in_allowlist() { 1 }
-            else if in_blocklist() { -1 }
-            else { 1 } // default allow
+            if in_allowlist() {
+                1
+            } else if in_blocklist() {
+                -1
+            } else {
+                1 // default allow
+            }
         }
+        #[allow(clippy::if_same_then_else)]
         AccessPolicy::BlocklistFirst => {
-            if in_blocklist() { -1 }
-            else if in_allowlist() { 1 }
-            else { 1 } // default allow
+            if in_blocklist() {
+                -1
+            } else if in_allowlist() {
+                1
+            } else {
+                1 // default allow
+            }
         }
         AccessPolicy::AllowlistOnly => {
             if in_allowlist() { 1 } else { -1 }
