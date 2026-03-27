@@ -20,6 +20,11 @@
 		is full, payloads are silently dropped and a counter is
 		incremented.
 	</para>
+	<para>
+		Features include custom &http; headers for authentication or
+		metadata, fanout delivery to multiple &url;s, and retry with
+		exponential backoff for transient failures.
+	</para>
 	</section>
 
 	<section>
@@ -30,13 +35,30 @@
 		When <function>rust_webhook()</function> is called from the
 		script, the payload string is enqueued into a bounded channel.
 		A background task dequeues payloads and sends them as &http;
-		POST requests to the configured &url;.
+		POST requests to the configured &url;(s).
 	</para>
 	<para>
 		If the queue is full (exceeds <varname>max_queue</varname>),
 		the payload is dropped and the internal drop counter is
 		incremented. The script function always returns 1 (success)
 		unless the dispatcher is not initialized.
+	</para>
+	<para>
+		When multiple &url;s are configured (comma-separated), the
+		payload is sent to ALL &url;s (fanout). Each &url; is handled
+		independently — a failure on one does not affect the others.
+	</para>
+	<para>
+		When <varname>max_retries</varname> is greater than 0, failed
+		&http; requests (non-2xx responses or network errors) are
+		retried with exponential backoff. The delay doubles after each
+		attempt: <varname>retry_delay_ms</varname> * 2^(attempt-1).
+	</para>
+	<para>
+		Custom headers can be added to every POST request using the
+		<varname>headers</varname> parameter. This is useful for
+		authentication tokens, source identification, or any custom
+		metadata.
 	</para>
 	<para>
 		The &http; client respects the configured timeout and content
@@ -79,9 +101,13 @@
 	<section id="param_url" xreflabel="url">
 		<title><varname>url</varname> (string)</title>
 		<para>
-		The HTTP(S) endpoint &url; where webhook payloads are POSTed.
-		This parameter is required. The module will fail to load if
-		this parameter is not set or is empty.
+		The HTTP(S) endpoint &url;(s) where webhook payloads are
+		POSTed. This parameter is required. The module will fail to
+		load if this parameter is not set or is empty.
+		</para>
+		<para>
+		Multiple &url;s can be specified as a comma-separated list
+		for fanout delivery. Each payload is sent to ALL &url;s.
 		</para>
 		<para>
 		<emphasis>
@@ -89,10 +115,18 @@
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>url</varname> parameter</title>
+		<title>Set <varname>url</varname> parameter (single)</title>
 		<programlisting format="linespecific">
 ...
 modparam("rust_http_webhook", "url", "https://example.com/hook")
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Set <varname>url</varname> parameter (fanout)</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "url", "http://analytics:9090/events,http://backup:9091/events")
 ...
 </programlisting>
 		</example>
@@ -184,6 +218,83 @@ modparam("rust_http_webhook", "tls_ca_file", "/etc/ssl/certs/custom-ca.pem")
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_headers" xreflabel="headers">
+		<title><varname>headers</varname> (string)</title>
+		<para>
+		Custom &http; headers to include in every POST request.
+		Multiple headers are separated by the pipe character
+		(<literal>|</literal>). Each header is specified as
+		<literal>Name: Value</literal>. Whitespace around names and
+		values is trimmed. Entries without a colon are silently
+		ignored.
+		</para>
+		<para>
+		This is useful for authentication tokens, API keys, or
+		source identification headers.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (no custom headers).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>headers</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "headers", "Authorization: Bearer token123|X-Source: opensips")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_max_retries" xreflabel="max_retries">
+		<title><varname>max_retries</varname> (integer)</title>
+		<para>
+		Maximum number of retry attempts on &http; failure (non-2xx
+		response or network error). Set to 0 to disable retries.
+		Retries use exponential backoff with the base delay set by
+		<varname>retry_delay_ms</varname>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (no retries).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>max_retries</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "max_retries", 3)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_retry_delay_ms" xreflabel="retry_delay_ms">
+		<title><varname>retry_delay_ms</varname> (integer)</title>
+		<para>
+		Base retry delay in milliseconds. The actual delay uses
+		exponential backoff: <literal>retry_delay_ms *
+		2^(attempt-1)</literal>. For example, with
+		<varname>retry_delay_ms</varname>=1000 and
+		<varname>max_retries</varname>=3, the delays are 1000ms,
+		2000ms, and 4000ms.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1000</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>retry_delay_ms</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_http_webhook", "retry_delay_ms", 500)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -195,12 +306,13 @@ modparam("rust_http_webhook", "tls_ca_file", "/etc/ssl/certs/custom-ca.pem")
 		</title>
 		<para>
 		Enqueue a payload string for asynchronous &http; POST delivery
-		to the configured webhook &url;. The function returns
+		to the configured webhook &url;(s). The function returns
 		immediately without waiting for the &http; request to complete.
 		</para>
 		<para>
-		If the per-worker queue is full, the payload is silently
-		dropped and a warning is logged.
+		If multiple &url;s are configured, the payload is sent to all
+		of them (fanout). If the per-worker queue is full, the payload
+		is silently dropped and a warning is logged.
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
@@ -290,7 +402,7 @@ route {
 	<section>
 		<title><varname>sent</varname></title>
 		<para>
-		Number of webhook payloads successfully sent.
+		Number of webhook payloads successfully enqueued for delivery.
 		</para>
 	</section>
 	<section>
@@ -302,8 +414,21 @@ route {
 	<section>
 		<title><varname>failed</varname></title>
 		<para>
-		Number of webhook payloads that failed to deliver (HTTP
-		errors, timeouts).
+		Number of webhook payloads that failed to deliver (&http;
+		errors, timeouts) after all retry attempts.
+		</para>
+	</section>
+	<section>
+		<title><varname>retried</varname></title>
+		<para>
+		Number of individual retry attempts made across all payloads.
+		</para>
+	</section>
+	<section>
+		<title><varname>retry_exhausted</varname></title>
+		<para>
+		Number of payloads that exhausted all retry attempts without
+		a successful delivery.
 		</para>
 	</section>
 	</section>

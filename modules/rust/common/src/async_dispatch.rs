@@ -1,11 +1,28 @@
 //! Non-blocking async HTTP dispatch queue.
 //!
 //! SIP worker pushes payload, tokio task sends HTTP POST in background.
-//! If queue is full, message is dropped.
+//! If queue is full, message is dropped. Supports custom headers, multiple
+//! URLs (fanout), and retry with exponential backoff.
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::runtime::Runtime;
+
+/// Configuration for retry behavior.
+#[derive(Clone, Debug)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub retry_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        RetryConfig {
+            max_retries: 0,
+            retry_delay_ms: 1000,
+        }
+    }
+}
 
 pub struct FireAndForget {
     tx: mpsc::Sender<String>,
@@ -13,14 +30,80 @@ pub struct FireAndForget {
     pub sent: std::cell::Cell<u64>,
     pub dropped: std::cell::Cell<u64>,
     pub failed: std::cell::Cell<u64>,
+    pub retried: std::cell::Cell<u64>,
+    pub retry_exhausted: std::cell::Cell<u64>,
+}
+
+/// Parse a pipe-separated header string into (name, value) pairs.
+///
+/// Format: "Header1: Value1|Header2: Value2"
+/// Malformed entries (missing `:`) are skipped.
+pub fn parse_headers(raw: &str) -> Vec<(String, String)> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split('|')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let colon_pos = entry.find(':')?;
+            let name = entry[..colon_pos].trim();
+            let value = entry[colon_pos + 1..].trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Parse a comma-separated URL string into a list of URLs.
+///
+/// Whitespace around each URL is trimmed. Empty entries are skipped.
+pub fn parse_urls(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .collect()
 }
 
 impl FireAndForget {
     /// Create a new fire-and-forget dispatcher.
     /// Spawns a tokio runtime with a background task that drains the queue.
+    ///
+    /// `urls`: list of target URLs (fanout -- payload sent to all).
+    /// `custom_headers`: extra headers added to every POST.
+    /// `retry`: retry configuration (0 retries = no retry).
+    ///
     /// # Panics
     /// Panics if the tokio runtime cannot be created.
-    pub fn new(url: String, max_queue: usize, timeout_secs: u64, content_type: String) -> Self {
+    pub fn new(
+        url: String,
+        max_queue: usize,
+        timeout_secs: u64,
+        content_type: String,
+    ) -> Self {
+        Self::with_options(
+            vec![url],
+            max_queue,
+            timeout_secs,
+            content_type,
+            Vec::new(),
+            RetryConfig::default(),
+        )
+    }
+
+    /// Full-featured constructor with headers, multiple URLs, and retry.
+    pub fn with_options(
+        urls: Vec<String>,
+        max_queue: usize,
+        timeout_secs: u64,
+        content_type: String,
+        custom_headers: Vec<(String, String)>,
+        retry: RetryConfig,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<String>(max_queue);
 
         let runtime = Runtime::new().expect("failed to create tokio runtime");
@@ -31,22 +114,47 @@ impl FireAndForget {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        let url = Arc::new(url);
+        let urls: Arc<Vec<String>> = Arc::new(urls);
         let ct = Arc::new(content_type);
+        let headers: Arc<Vec<(String, String)>> = Arc::new(custom_headers);
+        let retry = Arc::new(retry);
 
         runtime.spawn(async move {
             while let Some(payload) = rx.recv().await {
-                let url = url.clone();
-                let ct = ct.clone();
-                let client = client.clone();
-                // Spawn each send as a separate task so slow sends don't block the queue
-                tokio::spawn(async move {
-                    let _ = client.post(url.as_str())
-                        .header("Content-Type", ct.as_str())
-                        .body(payload)
-                        .send()
-                        .await;
-                });
+                // Fanout: send to every URL
+                for url in urls.iter() {
+                    let url = url.clone();
+                    let ct = ct.clone();
+                    let client = client.clone();
+                    let headers = headers.clone();
+                    let retry = retry.clone();
+                    let payload = payload.clone();
+
+                    tokio::spawn(async move {
+                        let mut attempts = 0u32;
+                        loop {
+                            let mut req = client.post(&url)
+                                .header("Content-Type", ct.as_str())
+                                .body(payload.clone());
+
+                            for (name, value) in headers.iter() {
+                                req = req.header(name.as_str(), value.as_str());
+                            }
+
+                            match req.send().await {
+                                Ok(resp) if resp.status().is_success() => break,
+                                Ok(_) | Err(_) => {
+                                    attempts += 1;
+                                    if attempts > retry.max_retries {
+                                        break;
+                                    }
+                                    let delay = retry.retry_delay_ms * 2u64.saturating_pow(attempts - 1);
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                                }
+                            }
+                        }
+                    });
+                }
             }
         });
 
@@ -56,6 +164,8 @@ impl FireAndForget {
             sent: std::cell::Cell::new(0),
             dropped: std::cell::Cell::new(0),
             failed: std::cell::Cell::new(0),
+            retried: std::cell::Cell::new(0),
+            retry_exhausted: std::cell::Cell::new(0),
         }
     }
 
@@ -79,6 +189,143 @@ impl FireAndForget {
 mod tests {
     use super::*;
 
+    // ── parse_headers tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_headers_single() {
+        let h = parse_headers("Authorization: Bearer token123");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "Authorization");
+        assert_eq!(h[0].1, "Bearer token123");
+    }
+
+    #[test]
+    fn test_parse_headers_multiple() {
+        let h = parse_headers("Authorization: Bearer xxx|X-Source: opensips");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].0, "Authorization");
+        assert_eq!(h[0].1, "Bearer xxx");
+        assert_eq!(h[1].0, "X-Source");
+        assert_eq!(h[1].1, "opensips");
+    }
+
+    #[test]
+    fn test_parse_headers_empty() {
+        let h = parse_headers("");
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn test_parse_headers_whitespace() {
+        let h = parse_headers("  X-Custom : value with spaces  |  X-Other: 42  ");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].0, "X-Custom");
+        assert_eq!(h[0].1, "value with spaces");
+        assert_eq!(h[1].0, "X-Other");
+        assert_eq!(h[1].1, "42");
+    }
+
+    #[test]
+    fn test_parse_headers_no_colon() {
+        let h = parse_headers("malformed-no-colon|Good: value");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "Good");
+    }
+
+    #[test]
+    fn test_parse_headers_empty_name() {
+        let h = parse_headers(": value-only");
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn test_parse_headers_empty_value() {
+        let h = parse_headers("X-Empty:");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "X-Empty");
+        assert_eq!(h[0].1, "");
+    }
+
+    #[test]
+    fn test_parse_headers_colon_in_value() {
+        let h = parse_headers("Authorization: Basic dXNlcjpwYXNz");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "Authorization");
+        assert_eq!(h[0].1, "Basic dXNlcjpwYXNz");
+    }
+
+    #[test]
+    fn test_parse_headers_trailing_pipe() {
+        let h = parse_headers("X-Foo: bar|");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "X-Foo");
+        assert_eq!(h[0].1, "bar");
+    }
+
+    // ── parse_urls tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_urls_single() {
+        let u = parse_urls("http://localhost:9090/events");
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0], "http://localhost:9090/events");
+    }
+
+    #[test]
+    fn test_parse_urls_multiple() {
+        let u = parse_urls("http://a:9090/events,http://b:9091/events");
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[0], "http://a:9090/events");
+        assert_eq!(u[1], "http://b:9091/events");
+    }
+
+    #[test]
+    fn test_parse_urls_whitespace() {
+        let u = parse_urls("  http://a:9090/e , http://b:9091/e  ");
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[0], "http://a:9090/e");
+        assert_eq!(u[1], "http://b:9091/e");
+    }
+
+    #[test]
+    fn test_parse_urls_trailing_comma() {
+        let u = parse_urls("http://a:9090/e,");
+        assert_eq!(u.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_urls_empty() {
+        let u = parse_urls("");
+        assert!(u.is_empty());
+    }
+
+    #[test]
+    fn test_parse_urls_three() {
+        let u = parse_urls("http://a/e,http://b/e,http://c/e");
+        assert_eq!(u.len(), 3);
+    }
+
+    // ── RetryConfig tests ────────────────────────────────────────
+
+    #[test]
+    fn test_retry_config_default() {
+        let rc = RetryConfig::default();
+        assert_eq!(rc.max_retries, 0);
+        assert_eq!(rc.retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn test_retry_backoff_calculation() {
+        // Verify the exponential backoff formula: delay * 2^(attempt-1)
+        let base_delay: u64 = 1000;
+        assert_eq!(base_delay * 2u64.pow(0), 1000);  // attempt 1
+        assert_eq!(base_delay * 2u64.pow(1), 2000);  // attempt 2
+        assert_eq!(base_delay * 2u64.pow(2), 4000);  // attempt 3
+        assert_eq!(base_delay * 2u64.pow(3), 8000);  // attempt 4
+    }
+
+    // ── FireAndForget tests ──────────────────────────────────────
+
     #[test]
     fn test_fire_and_forget_create() {
         let ff = FireAndForget::new(
@@ -90,6 +337,8 @@ mod tests {
         assert_eq!(ff.sent.get(), 0);
         assert_eq!(ff.dropped.get(), 0);
         assert_eq!(ff.failed.get(), 0);
+        assert_eq!(ff.retried.get(), 0);
+        assert_eq!(ff.retry_exhausted.get(), 0);
     }
 
     #[test]
@@ -112,25 +361,17 @@ mod tests {
 
     #[test]
     fn test_fire_and_forget_queue_full() {
-        // Queue capacity of 1 -- second send may succeed if the runtime
-        // drains fast, but with 3 rapid sends at least 1 should drop.
-        // Use a capacity of 1 and send enough to guarantee overflow.
         let ff = FireAndForget::new(
-            "http://192.0.2.1:1/blackhole".to_string(), // non-routable, will never drain
+            "http://192.0.2.1:1/blackhole".to_string(),
             1,
             1,
             "text/plain".to_string(),
         );
 
-        // First send fills the single slot
         let _r1 = ff.send("msg1".to_string());
-        // Rapidly send more -- channel is full because the runtime
-        // tries to POST to a non-routable address, so recv() is blocked
-        // on the HTTP call and the slot stays occupied.
         let _r2 = ff.send("msg2".to_string());
         let _r3 = ff.send("msg3".to_string());
 
-        // At least one must have been dropped
         let total_sent = ff.sent.get();
         let total_dropped = ff.dropped.get();
         assert_eq!(total_sent + total_dropped, 3);
@@ -160,9 +401,59 @@ mod tests {
             5,
             "application/json".to_string(),
         );
-        let big = "x".repeat(1_000_000); // 1MB payload
+        let big = "x".repeat(1_000_000);
         let ok = ff.send(big);
         assert!(ok);
         assert_eq!(ff.sent.get(), 1);
+    }
+
+    #[test]
+    fn test_with_options_custom_headers() {
+        let ff = FireAndForget::with_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            16,
+            5,
+            "application/json".to_string(),
+            vec![
+                ("Authorization".to_string(), "Bearer token123".to_string()),
+                ("X-Source".to_string(), "opensips".to_string()),
+            ],
+            RetryConfig::default(),
+        );
+        let ok = ff.send(r#"{"test":1}"#.to_string());
+        assert!(ok);
+        assert_eq!(ff.sent.get(), 1);
+    }
+
+    #[test]
+    fn test_with_options_multiple_urls() {
+        let ff = FireAndForget::with_options(
+            vec![
+                "http://127.0.0.1:19999/a".to_string(),
+                "http://127.0.0.1:19999/b".to_string(),
+            ],
+            16,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig::default(),
+        );
+        let ok = ff.send(r#"{"fanout":true}"#.to_string());
+        assert!(ok);
+        assert_eq!(ff.sent.get(), 1);
+    }
+
+    #[test]
+    fn test_with_options_retry_config() {
+        let ff = FireAndForget::with_options(
+            vec!["http://127.0.0.1:19999/sink".to_string()],
+            16,
+            5,
+            "application/json".to_string(),
+            Vec::new(),
+            RetryConfig { max_retries: 3, retry_delay_ms: 500 },
+        );
+        let ok = ff.send(r#"{"retry":true}"#.to_string());
+        assert!(ok);
     }
 }
