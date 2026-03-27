@@ -128,6 +128,10 @@ static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
 /// Enable per-entry match counters (0=off, 1=on, default: 0).
 static TRACK_COUNTERS: ModString = ModString::new();
 
+/// Access policy for check_access(): "allowlist-first", "blocklist-first",
+/// "allowlist-only", or "blocklist-only" (default: "allowlist-first").
+static ACCESS_POLICY: ModString = ModString::new();
+
 // ── ACL data structures ─────────────────────────────────────────
 
 enum AclData {
@@ -140,6 +144,28 @@ enum AclData {
 struct TypedAcl {
     data: AclData,
     loader: FileLoader<Vec<String>>,
+}
+
+// ── Access policy enum ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AccessPolicy {
+    AllowlistFirst,
+    BlocklistFirst,
+    AllowlistOnly,
+    BlocklistOnly,
+}
+
+impl AccessPolicy {
+    fn from_str(s: &str) -> Option<AccessPolicy> {
+        match s {
+            "allowlist-first" => Some(AccessPolicy::AllowlistFirst),
+            "blocklist-first" => Some(AccessPolicy::BlocklistFirst),
+            "allowlist-only" => Some(AccessPolicy::AllowlistOnly),
+            "blocklist-only" => Some(AccessPolicy::BlocklistOnly),
+            _ => None,
+        }
+    }
 }
 
 // ── Pure check functions (testable without FFI) ──────────────────
@@ -328,6 +354,7 @@ struct WorkerState {
     mode: String,
     track_counters: bool,
     entry_counters: HashMap<String, u64>,
+    access_policy: AccessPolicy,
 }
 
 thread_local! {
@@ -412,6 +439,15 @@ unsafe extern "C" fn mod_init() -> c_int {
     if tc == "1" {
         opensips_log!(INFO, "rust_acl", "  track_counters=enabled");
     }
+
+    let policy_str = ACCESS_POLICY.get_value().unwrap_or("allowlist-first");
+    if AccessPolicy::from_str(policy_str).is_none() {
+        opensips_log!(ERR, "rust_acl",
+            "modparam access_policy must be allowlist-first, blocklist-first, \
+             allowlist-only, or blocklist-only, got {}", policy_str);
+        return -1;
+    }
+    opensips_log!(INFO, "rust_acl", "  access_policy={}", policy_str);
 
     0
 }
@@ -504,6 +540,10 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     let track_counters = unsafe { TRACK_COUNTERS.get_value() }
         .map_or(false, |v| v == "1");
 
+    let access_policy = unsafe { ACCESS_POLICY.get_value() }
+        .and_then(|s| AccessPolicy::from_str(s))
+        .unwrap_or(AccessPolicy::AllowlistFirst);
+
     WORKER.with(|w| {
         *w.borrow_mut() = Some(WorkerState {
             blocklist,
@@ -522,6 +562,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             mode,
             track_counters,
             entry_counters: HashMap::new(),
+            access_policy,
         });
     });
 
@@ -896,6 +937,51 @@ unsafe extern "C" fn w_check_allowlist_domain(
     })
 }
 
+// ── Pure access policy check (testable without FFI) ──────────────
+
+fn check_access_with_policy(
+    policy: AccessPolicy,
+    blocklist: &AclData,
+    blocklist_ip: Option<&TypedAcl>,
+    blocklist_ua: Option<&TypedAcl>,
+    blocklist_domain: Option<&TypedAcl>,
+    allowlist: Option<&AclData>,
+    allowlist_ip: Option<&TypedAcl>,
+    allowlist_ua: Option<&TypedAcl>,
+    allowlist_domain: Option<&TypedAcl>,
+    auto_blocked: &HashMap<String, AutoEntry>,
+    auto_allowed: &HashMap<String, AutoEntry>,
+    value: &str,
+) -> i32 {
+    let in_allowlist = || {
+        check_auto(auto_allowed, value)
+            || check_optional_all(allowlist, allowlist_ip, allowlist_ua, allowlist_domain, value)
+    };
+    let in_blocklist = || {
+        check_auto(auto_blocked, value)
+            || check_all(blocklist, blocklist_ip, blocklist_ua, blocklist_domain, value)
+    };
+
+    match policy {
+        AccessPolicy::AllowlistFirst => {
+            if in_allowlist() { 1 }
+            else if in_blocklist() { -1 }
+            else { 1 } // default allow
+        }
+        AccessPolicy::BlocklistFirst => {
+            if in_blocklist() { -1 }
+            else if in_allowlist() { 1 }
+            else { 1 } // default allow
+        }
+        AccessPolicy::AllowlistOnly => {
+            if in_allowlist() { 1 } else { -1 }
+        }
+        AccessPolicy::BlocklistOnly => {
+            if in_blocklist() { -1 } else { 1 }
+        }
+    }
+}
+
 // ── Script function: check_access(value) — checks ALL files ─────
 
 unsafe extern "C" fn w_check_access(
@@ -919,45 +1005,27 @@ unsafe extern "C" fn w_check_access(
                 Some(state) => {
                     state.stats.inc("checked");
 
-                    // 1. Check auto-allow first
-                    if check_auto(&state.auto_allowed, value) {
-                        state.stats.inc("allowed");
-                        return 1;
-                    }
-
-                    // 2. Check ALL allowlist files (generic + typed)
-                    if check_optional_all(
-                        state.allowlist.as_ref(),
-                        state.allowlist_ip.as_ref(),
-                        state.allowlist_ua.as_ref(),
-                        state.allowlist_domain.as_ref(),
-                        value,
-                    ) {
-                        state.stats.inc("allowed");
-                        return 1;
-                    }
-
-                    // 3. Check auto-block
-                    if check_auto(&state.auto_blocked, value) {
-                        state.stats.inc("blocked");
-                        return -1;
-                    }
-
-                    // 4. Check ALL blocklist files (generic + typed)
-                    if check_all(
+                    let result = check_access_with_policy(
+                        state.access_policy,
                         &state.blocklist,
                         state.blocklist_ip.as_ref(),
                         state.blocklist_ua.as_ref(),
                         state.blocklist_domain.as_ref(),
+                        state.allowlist.as_ref(),
+                        state.allowlist_ip.as_ref(),
+                        state.allowlist_ua.as_ref(),
+                        state.allowlist_domain.as_ref(),
+                        &state.auto_blocked,
+                        &state.auto_allowed,
                         value,
-                    ) {
-                        state.stats.inc("blocked");
-                        return -1;
-                    }
+                    );
 
-                    // 5. Default: allow
-                    state.stats.inc("allowed");
-                    1
+                    if result == 1 {
+                        state.stats.inc("allowed");
+                    } else {
+                        state.stats.inc("blocked");
+                    }
+                    result
                 }
                 None => {
                     opensips_log!(ERR, "rust_acl",
@@ -1388,7 +1456,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
         type_: 1, // STR_PARAM
@@ -1438,6 +1506,11 @@ static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
         name: cstr_lit!("track_counters"),
         type_: 1, // STR_PARAM
         param_pointer: TRACK_COUNTERS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("access_policy"),
+        type_: 1, // STR_PARAM
+        param_pointer: ACCESS_POLICY.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -2338,6 +2411,199 @@ mod tests {
     fn test_counters_disabled_by_default() {
         // track_counters defaults to false; verify the flag
         assert!(!false); // placeholder: real test is in e2e
+    }
+
+
+    // ── Access policy tests (Task 65) ────────────────────────────
+
+    #[test]
+    fn test_access_policy_parse() {
+        assert_eq!(AccessPolicy::from_str("allowlist-first"), Some(AccessPolicy::AllowlistFirst));
+        assert_eq!(AccessPolicy::from_str("blocklist-first"), Some(AccessPolicy::BlocklistFirst));
+        assert_eq!(AccessPolicy::from_str("allowlist-only"), Some(AccessPolicy::AllowlistOnly));
+        assert_eq!(AccessPolicy::from_str("blocklist-only"), Some(AccessPolicy::BlocklistOnly));
+        assert_eq!(AccessPolicy::from_str("invalid"), None);
+        assert_eq!(AccessPolicy::from_str(""), None);
+    }
+
+    #[test]
+    fn test_policy_allowlist_first_both_lists() {
+        // Value in both lists: allowlist wins
+        let bl = build_acl_data(&["shared".to_string()], "exact");
+        let al = build_acl_data(&["shared".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &bl, None, None, None,
+            Some(&al), None, None, None,
+            &auto_bl, &auto_al, "shared",
+        );
+        assert_eq!(result, 1); // allowlist wins
+    }
+
+    #[test]
+    fn test_policy_allowlist_first_only_blocklist() {
+        let bl = build_acl_data(&["bad".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al, "bad",
+        );
+        assert_eq!(result, -1); // blocked
+    }
+
+    #[test]
+    fn test_policy_allowlist_first_neither() {
+        let bl = build_acl_data(&["bad".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al, "unknown",
+        );
+        assert_eq!(result, 1); // default allow
+    }
+
+    #[test]
+    fn test_policy_blocklist_first_both_lists() {
+        // Value in both lists: blocklist wins
+        let bl = build_acl_data(&["shared".to_string()], "exact");
+        let al = build_acl_data(&["shared".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::BlocklistFirst,
+            &bl, None, None, None,
+            Some(&al), None, None, None,
+            &auto_bl, &auto_al, "shared",
+        );
+        assert_eq!(result, -1); // blocklist wins
+    }
+
+    #[test]
+    fn test_policy_blocklist_first_only_allowlist() {
+        let bl = build_acl_data(&[], "exact");
+        let al = build_acl_data(&["good".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::BlocklistFirst,
+            &bl, None, None, None,
+            Some(&al), None, None, None,
+            &auto_bl, &auto_al, "good",
+        );
+        assert_eq!(result, 1); // allowed
+    }
+
+    #[test]
+    fn test_policy_blocklist_first_neither() {
+        let bl = build_acl_data(&[], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::BlocklistFirst,
+            &bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al, "unknown",
+        );
+        assert_eq!(result, 1); // default allow
+    }
+
+    #[test]
+    fn test_policy_allowlist_only_in_list() {
+        let bl = build_acl_data(&[], "exact");
+        let al = build_acl_data(&["trusted".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::AllowlistOnly,
+            &bl, None, None, None,
+            Some(&al), None, None, None,
+            &auto_bl, &auto_al, "trusted",
+        );
+        assert_eq!(result, 1); // in allowlist
+    }
+
+    #[test]
+    fn test_policy_allowlist_only_not_in_list() {
+        let bl = build_acl_data(&[], "exact");
+        let al = build_acl_data(&["trusted".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::AllowlistOnly,
+            &bl, None, None, None,
+            Some(&al), None, None, None,
+            &auto_bl, &auto_al, "unknown",
+        );
+        assert_eq!(result, -1); // NOT in allowlist -> block
+    }
+
+    #[test]
+    fn test_policy_blocklist_only_in_list() {
+        let bl = build_acl_data(&["bad".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::BlocklistOnly,
+            &bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al, "bad",
+        );
+        assert_eq!(result, -1); // in blocklist
+    }
+
+    #[test]
+    fn test_policy_blocklist_only_not_in_list() {
+        let bl = build_acl_data(&["bad".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        let result = check_access_with_policy(
+            AccessPolicy::BlocklistOnly,
+            &bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al, "good",
+        );
+        assert_eq!(result, 1); // NOT in blocklist -> allow
+    }
+
+    #[test]
+    fn test_policy_with_auto_entries() {
+        let bl = build_acl_data(&[], "exact");
+        let mut auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        auto_insert(&mut auto_bl, "auto-blocked", 300);
+        let mut auto_al: HashMap<String, AutoEntry> = HashMap::new();
+        auto_insert(&mut auto_al, "auto-allowed", 300);
+
+        // AllowlistFirst: auto-allow wins
+        assert_eq!(check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &bl, None, None, None, None, None, None, None,
+            &auto_bl, &auto_al, "auto-allowed",
+        ), 1);
+
+        // BlocklistFirst: auto-block wins
+        assert_eq!(check_access_with_policy(
+            AccessPolicy::BlocklistFirst,
+            &bl, None, None, None, None, None, None, None,
+            &auto_bl, &auto_al, "auto-blocked",
+        ), -1);
     }
 
 }
