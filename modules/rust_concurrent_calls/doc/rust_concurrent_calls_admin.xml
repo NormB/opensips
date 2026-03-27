@@ -23,13 +23,57 @@
 	<section>
 	<title>How it works</title>
 	<para>
-		The module uses explicit increment/decrement calls from the
-		&osips; script rather than dialog callbacks. This design keeps
-		the module simple and gives the script author full control over
-		when counts are adjusted.
+		The module supports two operating modes:
 	</para>
 	<para>
-		Typical usage:
+		<emphasis>Automatic mode</emphasis> (default): When
+		<varname>dialog.so</varname> is loaded and
+		<varname>auto_track</varname> is enabled, the module
+		automatically increments the counter when a dialog is
+		created (DLGCB_CREATED) and decrements it when the dialog
+		terminates or expires (DLGCB_TERMINATED/DLGCB_EXPIRED).
+		The account is extracted from the SIP message using the
+		configurable <varname>account_var</varname> pseudo-variable
+		(default: <literal>$fU</literal>). In this mode, you only
+		need to call <function>check_concurrent()</function> in
+		the script; increment and decrement are handled automatically.
+	</para>
+	<para>
+		<emphasis>Manual mode</emphasis>: When
+		<varname>auto_track</varname> is disabled (set to 0) or
+		<varname>dialog.so</varname> is not loaded, the module uses
+		explicit <function>concurrent_inc()</function> and
+		<function>concurrent_dec()</function> calls from the script.
+		This gives the script author full control over when counts
+		are adjusted.
+	</para>
+	<para>
+		The manual functions (<function>concurrent_inc()</function>
+		and <function>concurrent_dec()</function>) remain available
+		regardless of the <varname>auto_track</varname> setting,
+		allowing mixed usage if needed.
+	</para>
+	<para>
+		Typical usage (automatic mode):
+		<orderedlist>
+		<listitem><para>
+			Load <emphasis>dialog.so</emphasis> before this module.
+		</para></listitem>
+		<listitem><para>
+			On initial INVITE (no to-tag): call
+			<function>check_concurrent()</function> to verify the
+			account is under its limit. The counter is automatically
+			incremented when the dialog is created.
+		</para></listitem>
+		<listitem><para>
+			No need to handle BYE or failure responses for counter
+			management — the dialog callbacks handle decrement
+			automatically.
+		</para></listitem>
+		</orderedlist>
+	</para>
+	<para>
+		Typical usage (manual mode):
 		<orderedlist>
 		<listitem><para>
 			On initial INVITE (no to-tag): call
@@ -77,7 +121,10 @@
 		The following modules must be loaded before this module:
 		<itemizedlist>
 		<listitem><para>
-			<emphasis>None</emphasis>.
+			<emphasis>dialog</emphasis> — Required for automatic
+			tracking mode (<varname>auto_track=1</varname>). If
+			dialog.so is not loaded and auto_track is enabled, the
+			module falls back to manual mode with a warning.
 		</para></listitem>
 		</itemizedlist>
 		</para>
@@ -156,6 +203,78 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_auto_track" xreflabel="auto_track">
+		<title><varname>auto_track</varname> (integer)</title>
+		<para>
+		Enable automatic dialog callback tracking. When set to 1 and
+		dialog.so is loaded, the module automatically increments the
+		concurrent call counter when a dialog is created and decrements
+		it when the dialog terminates or expires. This eliminates the
+		need for explicit <function>concurrent_inc()</function> and
+		<function>concurrent_dec()</function> calls in the script.
+		</para>
+		<para>
+		When set to 0, the module operates in manual mode where the
+		script must explicitly manage counters.
+		</para>
+		<para>
+		If auto_track is enabled but dialog.so is not loaded, the
+		module logs a warning and falls back to manual mode.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>auto_track</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Enable automatic tracking (default)
+modparam("rust_concurrent_calls", "auto_track", 1)
+
+# Disable automatic tracking (manual mode)
+modparam("rust_concurrent_calls", "auto_track", 0)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_account_var" xreflabel="account_var">
+		<title><varname>account_var</varname> (string)</title>
+		<para>
+		The pseudo-variable expression used to extract the account
+		identifier from the SIP message during automatic dialog
+		tracking. This is evaluated in the DLGCB_CREATED callback.
+		</para>
+		<para>
+		Common values include <literal>$fU</literal> (From-URI
+		username), <literal>$rU</literal> (Request-URI username),
+		or any other PV expression that identifies the account.
+		</para>
+		<para>
+		This parameter is only used when
+		<varname>auto_track</varname> is enabled.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>$fU</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>account_var</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Use From-URI username (default)
+modparam("rust_concurrent_calls", "account_var", "$fU")
+
+# Use Request-URI username
+modparam("rust_concurrent_calls", "account_var", "$rU")
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -173,7 +292,9 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 		current count and the effective limit for the account.
 		</para>
 		<para>
-		This function does NOT increment the counter. Use
+		This function does NOT increment the counter. In automatic
+		mode (<varname>auto_track=1</varname>), the counter is
+		incremented by the dialog callback. In manual mode, use
 		<function>concurrent_inc()</function> separately after a
 		successful check.
 		</para>
@@ -206,7 +327,7 @@ modparam("rust_concurrent_calls", "default_limit", 5)
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>check_concurrent</function> usage</title>
+		<title><function>check_concurrent</function> usage (automatic mode)</title>
 		<programlisting format="linespecific">
 ...
 route {
@@ -216,6 +337,7 @@ route {
             sl_send_reply(486, "Too Many Calls");
             exit;
         }
+        # auto_track handles inc/dec via dialog callbacks
     }
 }
 ...
@@ -229,9 +351,11 @@ route {
 		</title>
 		<para>
 		Increment the concurrent call counter for the given account.
-		Call this after a successful
+		In manual mode, call this after a successful
 		<function>check_concurrent()</function> when the INVITE
-		is being forwarded.
+		is being forwarded. In automatic mode, this is handled by
+		the dialog callback, but the function remains available for
+		mixed usage.
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
@@ -258,7 +382,7 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>concurrent_inc</function> usage</title>
+		<title><function>concurrent_inc</function> usage (manual mode)</title>
 		<programlisting format="linespecific">
 ...
 route {
@@ -282,8 +406,11 @@ route {
 		The counter floors at zero and will never go negative.
 		</para>
 		<para>
-		Call this when a call ends (BYE) or when an INVITE receives a
-		failure response and the counter was previously incremented.
+		In manual mode, call this when a call ends (BYE) or when an
+		INVITE receives a failure response and the counter was
+		previously incremented. In automatic mode, this is handled
+		by the dialog callback, but the function remains available
+		for mixed usage.
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
@@ -310,7 +437,7 @@ route {
 		and ONREPLY_ROUTE.
 		</para>
 		<example>
-		<title><function>concurrent_dec</function> usage</title>
+		<title><function>concurrent_dec</function> usage (manual mode)</title>
 		<programlisting format="linespecific">
 ...
 route[handle_bye] {
@@ -458,14 +585,16 @@ route {
 		<title><varname>incremented</varname></title>
 		<para>
 		Total number of counter increments
-		(<function>concurrent_inc()</function> calls).
+		(<function>concurrent_inc()</function> calls and automatic
+		dialog-created events).
 		</para>
 	</section>
 	<section>
 		<title><varname>decremented</varname></title>
 		<para>
 		Total number of counter decrements
-		(<function>concurrent_dec()</function> calls).
+		(<function>concurrent_dec()</function> calls and automatic
+		dialog-terminated/expired events).
 		</para>
 	</section>
 	<section>
@@ -480,6 +609,13 @@ route {
 		<para>
 		Number of successful hot reloads performed via
 		<function>concurrent_reload()</function>.
+		</para>
+	</section>
+	<section>
+		<title><varname>auto_tracked</varname></title>
+		<para>
+		Number of dialogs automatically tracked via dialog callbacks
+		(only incremented when <varname>auto_track</varname> is enabled).
 		</para>
 	</section>
 	</section>
