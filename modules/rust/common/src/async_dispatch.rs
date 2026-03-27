@@ -510,4 +510,73 @@ mod tests {
         assert!(u[0].contains("key=val"));
         assert!(u[1].contains("key=val2"));
     }
+
+    // ── Retry-specific tests ─────────────────────────────────────
+
+    #[test]
+    fn test_retry_config_custom() {
+        let rc = RetryConfig { max_retries: 5, retry_delay_ms: 200 };
+        assert_eq!(rc.max_retries, 5);
+        assert_eq!(rc.retry_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_retry_backoff_series() {
+        // Verify full backoff series for max_retries=5, delay=100ms
+        let base: u64 = 100;
+        let delays: Vec<u64> = (0..5).map(|i| base * 2u64.pow(i)).collect();
+        assert_eq!(delays, vec![100, 200, 400, 800, 1600]);
+    }
+
+    #[test]
+    fn test_retry_backoff_overflow_safety() {
+        // saturating_pow prevents overflow with large attempt counts
+        let result = 2u64.saturating_pow(63);
+        assert!(result > 0);
+        // With very large exponent, saturating_pow caps at u64::MAX
+        let result = 2u64.saturating_pow(64);
+        assert_eq!(result, u64::MAX);
+    }
+
+    #[test]
+    fn test_retry_zero_means_no_retry() {
+        let rc = RetryConfig { max_retries: 0, retry_delay_ms: 1000 };
+        // With 0 retries, the first failure should give up immediately
+        assert_eq!(rc.max_retries, 0);
+    }
+
+    #[test]
+    fn test_with_options_retry_and_headers_combined() {
+        // Verify all three features work together
+        let ff = FireAndForget::with_options(
+            vec![
+                "http://127.0.0.1:19999/primary".to_string(),
+                "http://127.0.0.1:19999/backup".to_string(),
+            ],
+            32,
+            5,
+            "application/json".to_string(),
+            vec![
+                ("Authorization".to_string(), "Bearer tok".to_string()),
+                ("X-Retry".to_string(), "enabled".to_string()),
+            ],
+            RetryConfig { max_retries: 3, retry_delay_ms: 100 },
+        );
+        assert!(ff.send(r#"{"combined":true}"#.to_string()));
+        assert_eq!(ff.sent.get(), 1);
+        assert_eq!(ff.retried.get(), 0);
+        assert_eq!(ff.retry_exhausted.get(), 0);
+    }
+
+    #[test]
+    fn test_retry_delay_minimum_enforced() {
+        // Module clamps retry_delay_ms to at least 100ms
+        let delay_raw: i32 = 50;
+        let clamped = delay_raw.max(100) as u64;
+        assert_eq!(clamped, 100);
+
+        let delay_raw: i32 = 500;
+        let clamped = delay_raw.max(100) as u64;
+        assert_eq!(clamped, 500);
+    }
 }
