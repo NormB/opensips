@@ -1445,6 +1445,25 @@ rtpengine_play_dtmf("0"); # send the 0 code upstream
 		subscribe to the caller's outgoing media.
 		</para>
 		<para>
+		To subscribe to <emphasis>all</emphasis> call participants in a
+		single request, use the <emphasis>all</emphasis> flag. The &rtp;
+		proxy returns a multi-section offer SDP with one
+		<emphasis>m=</emphasis> line per participant. The subscribe answer
+		must provide a matching multi-section SDP. This is the recommended
+		approach for recording or monitoring both legs of a call, as it
+		avoids the address-confirmation conflicts that can occur with
+		multiple separate subscribe requests on the same call.
+		</para>
+		<para>
+		Codec transcoding can be requested for the forked stream using
+		<emphasis>codec=[transcode=[...]]</emphasis> in the flags. For
+		example, <emphasis>codec=[transcode=[L16/16000]]</emphasis> tells
+		the &rtp; proxy to transcode the forked audio from the call's
+		native codec (e.g. PCMU 8kHz) to 16-bit linear PCM at 16kHz.
+		This is useful for feeding high-quality audio to ASR systems.
+		The main call's codec negotiation is completely unaffected.
+		</para>
+		<para>
 		<emphasis>Important: &rtp; proxy address latching.</emphasis> After
 		completing the subscribe handshake, the &rtp; proxy will not begin
 		forwarding forked RTP until the subscriber endpoint's address is
@@ -1463,8 +1482,12 @@ rtpengine_play_dtmf("0"); # send the 0 code upstream
 		subscription. Key flags:
 		<emphasis>from-tag=...</emphasis> selects which call leg to subscribe
 		to; <emphasis>to-tag=...</emphasis> identifies the other party so the
-		&rtp; proxy can locate the call. All standard rtpengine flags
-		(codec, ICE, etc.) are also accepted.
+		&rtp; proxy can locate the call;
+		<emphasis>all</emphasis> subscribes to all call participants at once
+		(returns multi-section offer SDP);
+		<emphasis>codec=[transcode=[L16/16000]]</emphasis> requests codec
+		transcoding for the forked stream (does not affect the main call).
+		All standard rtpengine flags (ICE, etc.) are also accepted.
 		</para></listitem>
 		<listitem><para>
 		<emphasis>sock_var(var, optional)</emphasis> - variable used to
@@ -1508,6 +1531,33 @@ if (rtpengine_subscribe_request("from-tag=$tt to-tag=$ft",
     # Proceed to rtpengine_subscribe_answer() with this tag
 } else {
     xlog("subscribe_request FAILED\n");
+}
+...
+		</programlisting>
+		</example>
+		<example>
+		<title><function>rtpengine_subscribe_request</function> with all flag and L16 transcoding</title>
+		<programlisting format="linespecific">
+...
+# Subscribe to ALL call participants with L16/16000 transcoding.
+# Returns multi-section offer SDP (one m= line per participant).
+# The forked audio is transcoded to 16-bit linear PCM at 16kHz —
+# ideal for feeding to an ASR system. The main call continues
+# using its original codec (e.g. PCMU 8kHz).
+if (rtpengine_subscribe_request("all codec=[transcode=[L16/16000]]",
+        $var(rtpe_sock), $var(offer_sdp), $var(sub_tag))) {
+    # Build answer SDP with two m= lines (one per leg, consecutive ports)
+    $var(port2) = $var(port) + 2;
+    $var(answer_sdp) = "v=0\r\no=- 1 1 IN IP4 10.0.0.100\r\ns=-\r\n"
+        + "c=IN IP4 10.0.0.100\r\nt=0 0\r\n"
+        + "m=audio " + $var(port) + " RTP/AVP 96\r\n"
+        + "a=rtpmap:96 L16/16000\r\na=recvonly\r\n"
+        + "m=audio " + $var(port2) + " RTP/AVP 96\r\n"
+        + "a=rtpmap:96 L16/16000\r\na=recvonly\r\n";
+
+    rtpengine_subscribe_answer(
+        "to-tag=$var(sub_tag) allow-transcoding trust-address",
+        $var(rtpe_sock), $var(answer_sdp));
 }
 ...
 		</programlisting>
