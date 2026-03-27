@@ -324,6 +324,32 @@ modparam("rust_acl", "match_mode", "regex")
 </programlisting>
 		</example>
 	</section>
+	<section id="param_track_counters" xreflabel="track_counters">
+		<title><varname>track_counters</varname> (integer)</title>
+		<para>
+		Enable per-entry match counters. When enabled, the module
+		tracks how many times each blocklist/allowlist entry was
+		matched. The counters can be retrieved via
+		<function>access_entry_stats()</function>.
+		</para>
+		<para>
+		Since counter tracking adds a small overhead per check
+		(hash map lookup and increment), it is disabled by default.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>track_counters</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "track_counters", "1")
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -673,6 +699,32 @@ xlog("L_INFO", "ACL stats: $var(acl_stats)\n");
 </programlisting>
 		</example>
 	</section>
+
+	<section id="func_access_entry_stats" xreflabel="access_entry_stats()">
+		<title>
+		<function moreinfo="none">access_entry_stats()</function>
+		</title>
+		<para>
+		Retrieve per-entry match counters as a JSON array. Sets
+		<literal>$var(acl_entry_stats)</literal> with a JSON array of
+		the top 100 most-matched entries, sorted by count descending.
+		Each element contains <literal>entry</literal> (the matched
+		pattern) and <literal>count</literal> (number of matches).
+		</para>
+		<para>
+		Requires <varname>track_counters</varname> to be enabled.
+		If counters are disabled, returns an error JSON string.
+		</para>
+		<example>
+		<title><function>access_entry_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+access_entry_stats();
+xlog("L_INFO", "Entry stats: $var(acl_entry_stats)\n");
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
@@ -682,6 +734,14 @@ xlog("L_INFO", "ACL stats: $var(acl_stats)\n");
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by <function>access_stats()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(acl_entry_stats)</title>
+		<para>
+		JSON array of per-entry match counters for the current worker
+		process. Set by <function>access_entry_stats()</function>.
+		Requires <varname>track_counters</varname> to be enabled.
 		</para>
 	</section>
 	</section>

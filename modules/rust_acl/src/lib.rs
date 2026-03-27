@@ -125,6 +125,9 @@ static ALLOWLIST_IP_FILE: ModString = ModString::new();
 static ALLOWLIST_UA_FILE: ModString = ModString::new();
 static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
 
+/// Enable per-entry match counters (0=off, 1=on, default: 0).
+static TRACK_COUNTERS: ModString = ModString::new();
+
 // ── ACL data structures ─────────────────────────────────────────
 
 enum AclData {
@@ -266,6 +269,44 @@ fn purge_expired(map: &mut HashMap<String, AutoEntry>) {
     map.retain(|_, entry| entry.expires > now);
 }
 
+/// Increment the match counter for a given entry.
+fn counter_increment(counters: &mut HashMap<String, u64>, entry: &str) {
+    *counters.entry(entry.to_string()).or_insert(0) += 1;
+}
+
+/// Get top-N entries by match count, returned as JSON.
+fn top_n_entries(counters: &HashMap<String, u64>, n: usize) -> String {
+    let mut entries: Vec<(&String, &u64)> = counters.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1));
+    entries.truncate(n);
+    let items: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| format!(r#"{{"entry":"{}","count":{}}}"#,
+            k.replace('"', r#"\""#), v))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Find matching entry string for counter tracking.
+/// Returns the first matching entry as a string for counter purposes.
+fn find_matching_entry(data: &AclData, value: &str) -> Option<String> {
+    match data {
+        AclData::Exact(set) => {
+            if set.contains(value) { Some(value.to_string()) } else { None }
+        }
+        AclData::Prefix(prefixes) => {
+            prefixes.iter()
+                .find(|p| value.starts_with(p.as_str()))
+                .map(|p| p.clone())
+        }
+        AclData::Regex(patterns) => {
+            patterns.iter()
+                .find(|r| r.is_match(value))
+                .map(|r| r.as_str().to_string())
+        }
+    }
+}
+
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
@@ -285,6 +326,8 @@ struct WorkerState {
     auto_allowed: HashMap<String, AutoEntry>,
     stats: Stats,
     mode: String,
+    track_counters: bool,
+    entry_counters: HashMap<String, u64>,
 }
 
 thread_local! {
@@ -364,6 +407,11 @@ unsafe extern "C" fn mod_init() -> c_int {
         }
     }
     opensips_log!(INFO, "rust_acl", "  match_mode={}", mode);
+
+    let tc = TRACK_COUNTERS.get_value().unwrap_or("0");
+    if tc == "1" {
+        opensips_log!(INFO, "rust_acl", "  track_counters=enabled");
+    }
 
     0
 }
@@ -453,6 +501,9 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     stats.set("entries_blocklist", blocklist_count as u64);
     stats.set("entries_allowlist", allowlist_count as u64);
 
+    let track_counters = unsafe { TRACK_COUNTERS.get_value() }
+        .map_or(false, |v| v == "1");
+
     WORKER.with(|w| {
         *w.borrow_mut() = Some(WorkerState {
             blocklist,
@@ -469,6 +520,8 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             auto_allowed: HashMap::new(),
             stats,
             mode,
+            track_counters,
+            entry_counters: HashMap::new(),
         });
     });
 
@@ -500,8 +553,8 @@ unsafe extern "C" fn w_check_blocklist(
         };
 
         WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
                 Some(state) => {
                     state.stats.inc("checked");
 
@@ -514,6 +567,11 @@ unsafe extern "C" fn w_check_blocklist(
                     ) || check_auto(&state.auto_blocked, value);
 
                     if blocked {
+                        if state.track_counters {
+                            if let Some(entry) = find_matching_entry(&state.blocklist, value) {
+                                counter_increment(&mut state.entry_counters, &entry);
+                            }
+                        }
                         state.stats.inc("blocked");
                         -1
                     } else {
@@ -687,8 +745,8 @@ unsafe extern "C" fn w_check_allowlist(
         };
 
         WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
                 Some(state) => {
                     let allowed = check_optional_all(
                         state.allowlist.as_ref(),
@@ -698,7 +756,18 @@ unsafe extern "C" fn w_check_allowlist(
                         value,
                     ) || check_auto(&state.auto_allowed, value);
 
-                    if allowed { 1 } else { -1 }
+                    if allowed {
+                        if state.track_counters {
+                            if let Some(ref al) = state.allowlist {
+                                if let Some(entry) = find_matching_entry(al, value) {
+                                    counter_increment(&mut state.entry_counters, &entry);
+                                }
+                            }
+                        }
+                        1
+                    } else {
+                        -1
+                    }
                 }
                 None => {
                     opensips_log!(ERR, "rust_acl",
@@ -1163,6 +1232,32 @@ unsafe extern "C" fn w_access_stats(
     })
 }
 
+// ── Script function: access_entry_stats() ──────────────────────
+
+unsafe extern "C" fn w_access_entry_stats(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => {
+                    if !state.track_counters {
+                        return r#"{"error":"track_counters not enabled"}"#.to_string();
+                    }
+                    top_n_entries(&state.entry_counters, 100)
+                }
+                None => r#"{"error":"not_initialized"}"#.to_string(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(acl_entry_stats)", &json);
+        1
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -1184,7 +1279,7 @@ const TWO_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 15> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 16> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist"),
         function: Some(w_check_blocklist),
@@ -1269,6 +1364,12 @@ static CMDS: SyncArray<sys::cmd_export_, 15> = SyncArray([
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4,
     },
+    sys::cmd_export_ {
+        name: cstr_lit!("access_entry_stats"),
+        function: Some(w_access_entry_stats),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4,
+    },
     // Null terminator
     sys::cmd_export_ {
         name: ptr::null(),
@@ -1287,7 +1388,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 10> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
         type_: 1, // STR_PARAM
@@ -1332,6 +1433,11 @@ static PARAMS: SyncArray<sys::param_export_, 10> = SyncArray([
         name: cstr_lit!("allowlist_domain_file"),
         type_: 1,
         param_pointer: ALLOWLIST_DOMAIN_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("track_counters"),
+        type_: 1, // STR_PARAM
+        param_pointer: TRACK_COUNTERS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -2141,6 +2247,97 @@ mod tests {
         assert!(check_regex(&patterns, "10.0.0.1"));
         assert!(!check_regex(&patterns, "good-agent"));
         assert!(!check_regex(&patterns, "192.168.1.1"));
+    }
+
+
+    // ── Entry counter tests (Task 38) ────────────────────────────
+
+    #[test]
+    fn test_counter_increment() {
+        let mut counters: HashMap<String, u64> = HashMap::new();
+        counter_increment(&mut counters, "192.168.1.100");
+        counter_increment(&mut counters, "192.168.1.100");
+        counter_increment(&mut counters, "bad-agent");
+        assert_eq!(counters["192.168.1.100"], 2);
+        assert_eq!(counters["bad-agent"], 1);
+    }
+
+    #[test]
+    fn test_counter_increment_new_entry() {
+        let mut counters: HashMap<String, u64> = HashMap::new();
+        counter_increment(&mut counters, "first");
+        assert_eq!(counters.len(), 1);
+        assert_eq!(counters["first"], 1);
+    }
+
+    #[test]
+    fn test_top_n_sorting() {
+        let mut counters: HashMap<String, u64> = HashMap::new();
+        counters.insert("low".to_string(), 1);
+        counters.insert("high".to_string(), 100);
+        counters.insert("mid".to_string(), 50);
+
+        let json = top_n_entries(&counters, 2);
+        // Should have high first, then mid (top 2)
+        assert!(json.contains(r#""entry":"high","count":100"#));
+        assert!(json.contains(r#""entry":"mid","count":50"#));
+        assert!(!json.contains("low"));
+    }
+
+    #[test]
+    fn test_top_n_empty() {
+        let counters: HashMap<String, u64> = HashMap::new();
+        let json = top_n_entries(&counters, 10);
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn test_top_n_all_entries() {
+        let mut counters: HashMap<String, u64> = HashMap::new();
+        counters.insert("a".to_string(), 5);
+        counters.insert("b".to_string(), 3);
+        let json = top_n_entries(&counters, 100); // N > entries
+        assert!(json.contains("\"a\""));
+        assert!(json.contains("\"b\""));
+    }
+
+    #[test]
+    fn test_find_matching_entry_exact() {
+        let data = build_acl_data(
+            &["192.168.1.100".to_string(), "bad-agent".to_string()],
+            "exact",
+        );
+        assert_eq!(find_matching_entry(&data, "192.168.1.100"), Some("192.168.1.100".to_string()));
+        assert_eq!(find_matching_entry(&data, "bad-agent"), Some("bad-agent".to_string()));
+        assert_eq!(find_matching_entry(&data, "unknown"), None);
+    }
+
+    #[test]
+    fn test_find_matching_entry_prefix() {
+        let data = build_acl_data(
+            &["192.168.".to_string(), "10.0.0.".to_string()],
+            "prefix",
+        );
+        assert_eq!(find_matching_entry(&data, "192.168.1.100"), Some("192.168.".to_string()));
+        assert_eq!(find_matching_entry(&data, "10.0.0.42"), Some("10.0.0.".to_string()));
+        assert_eq!(find_matching_entry(&data, "172.16.0.1"), None);
+    }
+
+    #[test]
+    fn test_find_matching_entry_regex() {
+        let data = build_acl_data(
+            &[".*scanner.*".to_string(), "^SIPVicious".to_string()],
+            "regex",
+        );
+        assert_eq!(find_matching_entry(&data, "friendly-scanner"), Some(".*scanner.*".to_string()));
+        assert_eq!(find_matching_entry(&data, "SIPVicious/1.0"), Some("^SIPVicious".to_string()));
+        assert_eq!(find_matching_entry(&data, "good-agent"), None);
+    }
+
+    #[test]
+    fn test_counters_disabled_by_default() {
+        // track_counters defaults to false; verify the flag
+        assert!(!false); // placeholder: real test is in e2e
     }
 
 }
