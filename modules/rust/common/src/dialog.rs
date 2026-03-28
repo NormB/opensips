@@ -166,6 +166,22 @@ impl<T: Default> DialogTracker<T> {
             .get(dialog_id)
             .map(|e| e.created.elapsed().as_secs())
     }
+
+    /// Collect a JSON array from all active dialogs using a formatter function.
+    ///
+    /// The formatter receives `(dialog_id, &DialogEntry<T>)` and returns a
+    /// JSON object string for that dialog. Results are joined into a JSON array.
+    pub fn collect_json<F>(&self, formatter: F) -> String
+    where
+        F: Fn(&str, &DialogEntry<T>) -> String,
+    {
+        let states = self.states.borrow();
+        let entries: Vec<String> = states
+            .iter()
+            .map(|(id, entry)| formatter(id, entry))
+            .collect();
+        format!("[{}]", entries.join(","))
+    }
 }
 
 // ── Convenience: extract Call-ID from callback parameters ────────────
@@ -321,5 +337,39 @@ mod tests {
         let val = tracker.with_state("call-1", |s| s.value);
         assert_eq!(val, Some(0)); // Default::default()
         assert_eq!(tracker.active_count(), 1);
+    }
+
+    #[test]
+    fn collect_json_empty() {
+        let tracker: DialogTracker<TestState> = DialogTracker::new(300);
+        let json = tracker.collect_json(|id, _entry| format!("{{\"id\":\"{}\"}}", id));
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn collect_json_single() {
+        let tracker: DialogTracker<TestState> = DialogTracker::new(300);
+        tracker.on_created("call-1");
+        tracker.with_state("call-1", |s| s.value = 42);
+        let json = tracker.collect_json(|id, entry| {
+            format!("{{\"id\":\"{}\",\"value\":{}}}", id, entry.state.value)
+        });
+        assert_eq!(json, r#"[{"id":"call-1","value":42}]"#);
+    }
+
+    #[test]
+    fn collect_json_multiple() {
+        let tracker: DialogTracker<TestState> = DialogTracker::new(300);
+        tracker.on_created("a");
+        tracker.on_created("b");
+        tracker.with_state("a", |s| s.value = 1);
+        tracker.with_state("b", |s| s.value = 2);
+        let json = tracker.collect_json(|id, entry| {
+            format!("{{\"id\":\"{}\",\"v\":{}}}", id, entry.state.value)
+        });
+        assert!(json.starts_with('['));
+        assert!(json.ends_with(']'));
+        assert!(json.contains(r#""id":"a""#));
+        assert!(json.contains(r#""id":"b""#));
     }
 }
