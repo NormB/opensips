@@ -173,6 +173,7 @@ struct SstState {
     interval: u32,
     min_se: u32,
     refresher: Refresher,
+    refresh_count: u32,
 }
 
 // ── Thread-local state ───────────────────────────────────────────
@@ -229,6 +230,35 @@ fn lookup_policy(account: &str) -> Option<AccountPolicy> {
         loader.as_ref().and_then(|l| {
             let data = l.get();
             data.get(account).cloned()
+        })
+    })
+}
+
+/// Build JSON status for all active SST-tracked dialogs.
+fn build_sst_status_json() -> String {
+    TRACKER.with(|t| {
+        t.collect_json(|callid, entry| {
+            let s = &entry.state;
+            let age = entry.created.elapsed().as_secs();
+            let time_remaining = if s.interval as u64 > age {
+                s.interval as u64 - age
+            } else {
+                0
+            };
+            let escaped_callid = callid.replace('\\', "\\\\").replace('"', "\\\"");
+            let mut buf = String::with_capacity(128);
+            buf.push_str("{\"call_id\":\"");
+            buf.push_str(&escaped_callid);
+            buf.push_str("\",\"interval\":");
+            buf.push_str(&s.interval.to_string());
+            buf.push_str(",\"refresher\":\"");
+            buf.push_str(s.refresher.as_str());
+            buf.push_str("\",\"time_remaining\":");
+            buf.push_str(&time_remaining.to_string());
+            buf.push_str(",\"refresh_count\":");
+            buf.push_str(&s.refresh_count.to_string());
+            buf.push_str("}");
+            buf
         })
     })
 }
@@ -436,6 +466,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
         interval: std::cmp::max(our_interval, 90),
         min_se: std::cmp::max(req_min_se, our_min_se),
         refresher: req_refresher.unwrap_or_else(get_default_refresher),
+        refresh_count: 0,
     };
 
     if req_se > 0 {
@@ -776,6 +807,7 @@ unsafe extern "C" fn sst_dialog_request_within_cb(
                     t.with_state(&callid, |s| {
                         s.interval = new_interval;
                         s.supported = if has_timer { SstSupported::Uac } else { SstSupported::Undefined };
+                        s.refresh_count += 1;
                     });
                 });
 
@@ -1150,6 +1182,21 @@ unsafe extern "C" fn w_rust_sst_reload(
     })
 }
 
+// ── Script function: sst_status() ────────────────────────────
+
+unsafe extern "C" fn w_rust_sst_status(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let json = build_sst_status_json();
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(sst_status)", &json);
+        1
+    })
+}
+
 // ── Script function: sst_stats() ────────────────────────────
 
 unsafe extern "C" fn w_rust_sst_stats(
@@ -1188,7 +1235,7 @@ const THREE_STR_PARAMS: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 6> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("sst_check"),
         function: Some(w_rust_sst_check),
@@ -1204,6 +1251,12 @@ static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("sst_stats"),
         function: Some(w_rust_sst_stats),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("sst_status"),
+        function: Some(w_rust_sst_status),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
@@ -1818,6 +1871,65 @@ mod tests {
         let entries = vec!["alice,abc,xyz,uac".to_string()];
         let map = build_policies(entries);
         assert!(map.is_empty()); // interval=0 (parse fail) => skipped
+    }
+
+    // ── sst_status / refresh_count tests ─────────────────────────
+
+    #[test]
+    fn test_sst_state_refresh_count_default() {
+        let state = SstState::default();
+        assert_eq!(state.refresh_count, 0);
+    }
+
+    #[test]
+    fn test_tracker_refresh_count_increment() {
+        let tracker: DialogTracker<SstState> = DialogTracker::new(3600);
+        tracker.on_created("call-1");
+        tracker.with_state("call-1", |s| {
+            s.interval = 1800;
+            s.refresher = Refresher::Uac;
+            s.refresh_count += 1;
+        });
+        tracker.with_state("call-1", |s| {
+            s.refresh_count += 1;
+        });
+        let count = tracker.with_state_ref("call-1", |s| s.refresh_count);
+        assert_eq!(count, Some(2));
+    }
+
+    #[test]
+    fn test_build_sst_status_json_empty() {
+        // When no dialogs are tracked, should return "[]"
+        TRACKER.with(|t| {
+            // Ensure empty
+            while t.active_count() > 0 {
+                // cleanup any leftover from other tests
+                break;
+            }
+        });
+        let json = build_sst_status_json();
+        assert!(json.starts_with('['));
+        assert!(json.ends_with(']'));
+    }
+
+    #[test]
+    fn test_status_json_contains_fields() {
+        TRACKER.with(|t| {
+            t.on_created("status-test-call");
+            t.with_state("status-test-call", |s| {
+                s.interval = 1800;
+                s.refresher = Refresher::Uac;
+                s.refresh_count = 3;
+            });
+        });
+        let json = build_sst_status_json();
+        assert!(json.contains(r#""call_id":"status-test-call""#));
+        assert!(json.contains(r#""interval":1800"#));
+        assert!(json.contains(r#""refresher":"uac""#));
+        assert!(json.contains(r#""refresh_count":3"#));
+        assert!(json.contains(r#""time_remaining":"#));
+        // cleanup
+        TRACKER.with(|t| { t.on_terminated("status-test-call"); });
     }
 
 }

@@ -409,6 +409,43 @@ onreply_route[sst_reply] {
 		</example>
 	</section>
 
+
+	<section id="func_sst_status" xreflabel="sst_status()">
+		<title>
+		<function moreinfo="none">sst_status()</function>
+		</title>
+		<para>
+		Retrieve a JSON array listing all active SST-tracked dialogs
+		on the current worker process. Sets
+		<literal>$var(sst_status)</literal> with a JSON array where
+		each element contains: <literal>call_id</literal>,
+		<literal>interval</literal>, <literal>refresher</literal>,
+		<literal>time_remaining</literal>, and
+		<literal>refresh_count</literal>.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis> -- always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>sst_status</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    sst_status();
+    xlog("L_INFO", "Active SST dialogs: $var(sst_status)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_sst_stats" xreflabel="sst_stats()">
 		<title>
 		<function moreinfo="none">sst_stats()</function>
@@ -521,6 +558,18 @@ route[reload] {
 		refresher parameter (e.g., <quote>1800;refresher=uas</quote>).
 		Set by <function>sst_update()</function>. Use this
 		directly in <function>append_hf()</function>.
+		</para>
+	</section>
+
+	<section>
+		<title>$var(sst_status)</title>
+		<para>
+		JSON array string listing all active SST-tracked dialogs
+		on the current worker. Each element contains
+		<literal>call_id</literal>, <literal>interval</literal>,
+		<literal>refresher</literal>, <literal>time_remaining</literal>,
+		and <literal>refresh_count</literal>. Set by
+		<function>sst_status()</function>.
 		</para>
 	</section>
 	<section>
