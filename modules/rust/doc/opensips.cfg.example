@@ -1,0 +1,142 @@
+#
+# OpenSIPS Configuration Example — Rust Module
+#
+# Demonstrates compiled-in functions, user-script handlers, and async
+# HTTP queries. See modules/rust/examples/ for focused examples.
+#
+# Adjust paths and parameters for your environment.
+#
+
+####### Global Parameters #########
+
+log_level=3
+log_stderror=no
+log_facility=LOG_LOCAL0
+
+udp_workers=4
+auto_aliases=no
+
+socket=udp:0.0.0.0:5060
+
+####### Modules Section ###########
+
+mpath="/usr/local/lib64/opensips/modules/"
+
+# Required protocol and signaling modules
+loadmodule "proto_udp.so"
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "sipmsgops.so"
+
+# Rust module
+loadmodule "rust.so"
+
+# Rate limiter: 50 requests per 10-second window per source IP
+modparam("rust", "max_rate", 50)
+modparam("rust", "window_seconds", 10)
+
+# Routing cache: entries expire after 300 seconds
+modparam("rust", "cache_ttl", 300)
+
+# HTTP connection pool: 5-second timeout, pool of 4 connections
+modparam("rust", "http_timeout", 5)
+modparam("rust", "pool_size", 4)
+
+# User script for rust_exec() — comment out if not using
+modparam("rust", "script_name",
+    "/usr/local/lib64/opensips/scripts/libmy_opensips_handler.so")
+
+####### Routing Logic ###########
+
+route {
+    # ---- Rate Limiting (compiled-in) ----
+    # Returns -1 and sends 429 if rate exceeded.
+    if (!rust_check_rate()) {
+        xlog("L_WARN", "Rate limit exceeded for $si\n");
+        exit;
+    }
+
+    # ---- Routing Cache (compiled-in) ----
+    # On hit, $du is set to the cached destination.
+    if (rust_cache_lookup()) {
+        xlog("L_DBG", "Cache hit for $rU -> $du\n");
+        t_relay();
+        exit;
+    }
+
+    xlog("L_DBG", "Cache miss for $rU, performing lookup\n");
+
+    # ---- Async HTTP Query (non-blocking) ----
+    # Worker is released during the HTTP call. route[api_done] runs
+    # when the response arrives. Falls back to sync if the user script
+    # has no async_http_query handler.
+    async(rust_exec("http_query",
+        "http://routing.internal/lookup?user=$rU"), api_done);
+}
+
+# ---- Async Resume Route ----
+# Runs when the HTTP response arrives (or immediately on sync fallback).
+# Available PVs: $var(http_status), $var(http_body), $var(http_json),
+#                $var(http_error), $var(http_time_ms)
+# Available AVPs: $avp(http_hdr) (stacked, one per response header)
+route[api_done] {
+    if ($var(http_status) == 0) {
+        xlog("L_ERR", "HTTP lookup failed: $var(http_error)\n");
+        sl_send_reply(503, "Service Unavailable");
+        exit;
+    }
+
+    xlog("L_INFO", "HTTP $var(http_status) in $var(http_time_ms)ms\n");
+
+    if ($var(http_status) == 200) {
+        $du = $var(http_body);
+        rust_cache_store();
+        t_relay();
+        exit;
+    }
+
+    sl_send_reply(404, "Not Found");
+}
+
+# ---- Blocking HTTP Query (alternative) ----
+# Use this if you don't need async or don't have a user script.
+# WARNING: blocks the worker for the duration of the HTTP call.
+route[sync_lookup] {
+    if (rust_http_query("http://routing.internal/lookup?user=$rU")) {
+        xlog("L_DBG", "HTTP $var(http_status): $var(http_result)\n");
+        $du = $var(http_result);
+        rust_cache_store();
+        t_relay();
+        exit;
+    }
+
+    xlog("L_ERR", "Routing lookup failed for $rU\n");
+    sl_send_reply(404, "Not Found");
+}
+
+# ---- User Script Examples ----
+# These require script_name to be set. Each handler runs synchronously
+# unless wrapped in async().
+route[script_examples] {
+    # Call a handler with no parameter
+    rust_exec("hello_world");
+
+    # Call with a parameter
+    rust_exec("greet", "howdy");
+
+    # Routing decision based on return value
+    if (!rust_exec("check_caller")) {
+        sl_send_reply(403, "Forbidden");
+        exit;
+    }
+
+    # Variable exchange: set $var(input) -> call Rust -> read $var(output)
+    $var(input) = "uppercase:hello world";
+    rust_exec("variable_exchange");
+    xlog("L_INFO", "Result: $var(output)\n");
+
+    # Cross-worker atomic counter (compiled-in)
+    rust_counter_inc();
+    xlog("L_DBG", "Total requests: $var(shared_count)\n");
+}

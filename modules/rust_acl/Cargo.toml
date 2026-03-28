@@ -1,0 +1,27 @@
+[package]
+name = "rust-acl"
+version = "0.1.0"
+edition = "2021"
+description = "Live-reload ACL (blocklist + allowlist) for OpenSIPS"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+database = ["sqlx", "tokio"]
+
+[dependencies]
+regex = "1"
+opensips-rs = { path = "../rust/sdk" }
+rust-common = { path = "../rust/common" }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "postgres", "mysql", "sqlite"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
+
+[build-dependencies]
+opensips-build = { path = "../rust/build-utils" }
+cc = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "sqlite"] }
