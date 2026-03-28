@@ -262,7 +262,7 @@ fn record_burst_snapshot(
     account: &str,
     count: u32,
 ) {
-    let deque = history.entry(account.to_string()).or_insert_with(VecDeque::new);
+    let deque = history.entry(account.to_string()).or_default();
     deque.push_back((Instant::now(), count));
 }
 
@@ -424,7 +424,7 @@ unsafe extern "C" fn dlg_on_created(
 
     // Read the account from the SIP message PV
     let sip_msg = unsafe {
-        opensips_rs::SipMessage::from_raw(msg_ptr as *mut sys::sip_msg)
+        opensips_rs::SipMessage::from_raw(msg_ptr.cast())
     };
     let account = match sip_msg.pv(account_var_expr) {
         Some(a) if !a.is_empty() => a,
@@ -460,7 +460,7 @@ unsafe extern "C" fn dlg_on_created(
     let _ = unsafe {
         dialog::dlg::register_dlg_cb(
             dlg as *mut c_void,
-            (dialog::DLGCB_TERMINATED | dialog::DLGCB_EXPIRED) as u32,
+            dialog::DLGCB_TERMINATED | dialog::DLGCB_EXPIRED,
             Some(dlg_on_terminated),
             ptr::null_mut(),
             None,
@@ -534,7 +534,7 @@ unsafe extern "C" fn mod_init() -> c_int {
                 // Register DLGCB_CREATED global callback
                 match unsafe {
                     dialog::dlg::register_global_cb(
-                        dialog::DLGCB_CREATED as u32,
+                        dialog::DLGCB_CREATED,
                         Some(dlg_on_created),
                         ptr::null_mut(),
                         None,
@@ -675,8 +675,8 @@ unsafe extern "C" fn w_check_concurrent(
         };
 
         WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
                 Some(state) => {
                     state.stats.inc("checked");
 
@@ -739,6 +739,11 @@ unsafe extern "C" fn w_check_concurrent(
                         1
                     } else {
                         state.stats.inc("blocked");
+                        // Set cooldown on rejection (Task 43)
+                        let cooldown_secs = COOLDOWN_SECS.get();
+                        if cooldown_secs > 0 {
+                            set_cooldown(&mut state.cooldowns, account);
+                        }
                         opensips_log!(DBG, "rust_concurrent_calls",
                             "account {} at limit: {}/{}", account, count, limit);
                         -1
@@ -1977,7 +1982,7 @@ mod tests {
         // Insert old snapshot (2 seconds ago)
         let old_time = Instant::now() - std::time::Duration::from_secs(2);
         history.entry("alice".to_string())
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back((old_time, 1));
         // With 1-second window, the old snapshot should be pruned
         let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 1);
