@@ -1567,7 +1567,6 @@ dependencies = [
 name = "rust-acl"
 version = "0.1.0"
 dependencies = [
- "cc",
  "opensips-build",
  "opensips-rs",
  "regex",

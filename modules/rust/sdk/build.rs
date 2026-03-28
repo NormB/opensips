@@ -151,6 +151,25 @@ fn main() {
 
         build.warnings(false).compile("opensips_shim");
     }
+
+    // Compile test_stubs.c (weak symbol stubs) into a separate archive.
+    // These provide stub implementations of OpenSIPS core symbols (dprint,
+    // log_level, etc.) so that test binaries can link without the real core.
+    // For cdylib builds, the weak stubs are overridden by the real symbols.
+    //
+    // On aarch64, the standard linker processes archives lazily and may not
+    // pull in test_stubs.o to resolve references from shim.o in another
+    // archive. We use +whole-archive (via cc's link_lib_modifier) to force
+    // all members to be included regardless of link order.
+    let stubs_path = Path::new("test_stubs.c");
+    if stubs_path.exists() {
+        println!("cargo:rerun-if-changed=test_stubs.c");
+        cc::Build::new()
+            .file("test_stubs.c")
+            .warnings(false)
+            .link_lib_modifier("+whole-archive")
+            .compile("opensips_test_stubs");
+    }
 }
 
 /// Extract -D flags from `OpenSIPS`'s `make -n -B` output.
