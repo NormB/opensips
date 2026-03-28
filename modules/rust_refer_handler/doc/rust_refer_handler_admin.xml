@@ -18,6 +18,35 @@
 		call transfers (blind and attended) and taking action based
 		on transfer success or failure.
 	</para>
+	<para>
+		Key features include:
+		<itemizedlist>
+		<listitem><para>
+			Blind and attended transfer tracking with Replaces
+			header parsing.
+		</para></listitem>
+		<listitem><para>
+			Automatic REFER/NOTIFY interception via dialog
+			callbacks (<varname>auto_process</varname> mode).
+		</para></listitem>
+		<listitem><para>
+			NOTIFY generation with sipfrag status and CSeq
+			tracking.
+		</para></listitem>
+		<listitem><para>
+			Transfer target policy enforcement via glob-pattern
+			allow lists.
+		</para></listitem>
+		<listitem><para>
+			Transfer lifecycle event publishing for external
+			integrations.
+		</para></listitem>
+		<listitem><para>
+			Transfer timeout detection with optional reconnect
+			of original parties.
+		</para></listitem>
+		</itemizedlist>
+	</para>
 	</section>
 
 	<section>
@@ -50,15 +79,25 @@
 		change the status. The notify_count is still incremented.
 	</para>
 	<para>
-		The script is responsible for parsing the Refer-To header and
-		sipfrag status codes and passing them as parameters to the
-		module functions. This keeps the module simple and testable.
+		In manual mode (default), the script is responsible for
+		calling <function>handle_refer()</function> and
+		<function>handle_notify()</function> explicitly. In
+		<varname>auto_process</varname> mode, the module registers
+		dialog callbacks to automatically intercept in-dialog REFER
+		and NOTIFY messages.
+	</para>
+	<para>
+		For attended transfers, the <function>handle_attended_refer()</function>
+		function parses the Replaces header to extract the consultation
+		call leg information (call-id, from-tag, to-tag).
 	</para>
 	<para>
 		Stale REFER state is automatically expired after
 		<varname>expire_secs</varname>. When the number of tracked
 		transfers exceeds <varname>max_pending</varname>, an automatic
-		sweep removes expired entries.
+		sweep removes expired entries. Transfers that exceed
+		<varname>transfer_timeout_secs</varname> without reaching a
+		terminal state are marked as failed.
 	</para>
 	</section>
 
@@ -70,7 +109,8 @@
 		The following modules must be loaded before this module:
 		<itemizedlist>
 		<listitem><para>
-			<emphasis>None</emphasis>.
+			<emphasis>dialog</emphasis> - Required only when
+			<varname>auto_process</varname> is set to 1.
 		</para></listitem>
 		</itemizedlist>
 		</para>
@@ -136,6 +176,164 @@ modparam("rust_refer_handler", "expire_secs", 600)
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_auto_process" xreflabel="auto_process">
+		<title><varname>auto_process</varname> (integer)</title>
+		<para>
+		When set to 1, the module registers dialog callbacks
+		(<emphasis>DLGCB_CREATED</emphasis> and
+		<emphasis>DLGCB_REQ_WITHIN</emphasis>) to automatically
+		intercept in-dialog REFER and NOTIFY messages. This eliminates
+		the need for explicit <function>handle_refer()</function> and
+		<function>handle_notify()</function> calls in the script.
+		</para>
+		<para>
+		Requires the <emphasis>dialog</emphasis> module to be loaded.
+		If dialog.so is not available and auto_process is set to 1,
+		the module will fail to initialize.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>auto_process</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+loadmodule "dialog.so"
+loadmodule "rust_refer_handler.so"
+modparam("rust_refer_handler", "auto_process", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_allowed_targets" xreflabel="allowed_targets">
+		<title><varname>allowed_targets</varname> (string)</title>
+		<para>
+		Comma-separated list of glob patterns that define which
+		transfer targets are allowed. If set, only REFER requests
+		whose Refer-To value matches at least one pattern will be
+		accepted. Patterns support <literal>*</literal> (matches
+		zero or more characters) and <literal>?</literal> (matches
+		exactly one character). Matching is case-insensitive.
+		</para>
+		<para>
+		If not set or empty, all transfer targets are allowed.
+		</para>
+		<para>
+		This policy is enforced by both
+		<function>handle_refer()</function>,
+		<function>handle_attended_refer()</function>, and
+		<function>check_transfer_target()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>not set</quote> (all targets
+			allowed).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>allowed_targets</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_refer_handler", "allowed_targets",
+    "sip:*@example.com,sip:+1*@pbx.local")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		When set to 1, the module publishes JSON events on transfer
+		lifecycle changes (start, success, failure). The events are
+		tracked via the <emphasis>events_published</emphasis>
+		statistic counter.
+		</para>
+		<para>
+		The JSON payload includes:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>call_id</emphasis>  - The Call-ID of the
+			transfer.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>refer_to</emphasis>  - The transfer target.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>status</emphasis>  - The transfer status
+			(pending, trying, success, failed).
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_refer_handler", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_transfer_timeout_secs" xreflabel="transfer_timeout_secs">
+		<title><varname>transfer_timeout_secs</varname> (integer)</title>
+		<para>
+		Maximum time in seconds to wait for a REFER-initiated call
+		to reach a terminal state (success or failed). If the timeout
+		is exceeded, the transfer is automatically marked as failed.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>30</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>transfer_timeout_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_refer_handler", "transfer_timeout_secs", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_reconnect_on_failure" xreflabel="reconnect_on_failure">
+		<title><varname>reconnect_on_failure</varname> (integer)</title>
+		<para>
+		When set to 1 and a transfer times out or fails, the module
+		will signal that the original parties should be reconnected.
+		The reconnect intent is available via the transfer status
+		(failed + reconnect_on_failure flag) for the script to act
+		upon.
+		</para>
+		<para>
+		This parameter works in conjunction with
+		<varname>transfer_timeout_secs</varname>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>reconnect_on_failure</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_refer_handler", "transfer_timeout_secs", 30)
+modparam("rust_refer_handler", "reconnect_on_failure", 1)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -146,13 +344,18 @@ modparam("rust_refer_handler", "expire_secs", 600)
 		<function moreinfo="none">handle_refer(refer_to)</function>
 		</title>
 		<para>
-		Record a new REFER transaction. The Call-ID is automatically
+		Record a new blind REFER transaction. The Call-ID is automatically
 		extracted from the &sip; message. The transfer state is
 		initialized to <quote>pending</quote>.
 		</para>
 		<para>
 		If a REFER for the same Call-ID already exists, it is
 		overwritten with fresh state.
+		</para>
+		<para>
+		If <varname>allowed_targets</varname> is configured, the
+		refer_to value is checked against the pattern list. If the
+		target does not match, the function returns -1 (denied).
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
@@ -167,6 +370,10 @@ modparam("rust_refer_handler", "expire_secs", 600)
 		<itemizedlist>
 		<listitem><para>
 			<emphasis>1</emphasis>  - REFER recorded successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - target not in
+			allowed_targets list.
 		</para></listitem>
 		<listitem><para>
 			<emphasis>-2 (error)</emphasis>  - missing parameter,
@@ -195,6 +402,77 @@ route {
 		</example>
 	</section>
 
+	<section id="func_handle_attended_refer" xreflabel="handle_attended_refer()">
+		<title>
+		<function moreinfo="none">handle_attended_refer(refer_to, replaces)</function>
+		</title>
+		<para>
+		Record a new attended REFER transaction with a Replaces header.
+		The Call-ID is automatically extracted from the &sip; message.
+		The Replaces header value is parsed to extract the consultation
+		call leg (call-id, from-tag, to-tag) and stored with the
+		transfer state. The parsed Replaces value is also set in
+		<literal>$var(refer_replaces)</literal>.
+		</para>
+		<para>
+		If the Replaces header cannot be parsed (empty or malformed),
+		the transfer is still tracked but the function returns -1.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>refer_to</emphasis> (string)  - The value
+			of the Refer-To header. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>replaces</emphasis> (string)  - The value
+			of the Replaces header. Typically
+			<literal>$hdr(Replaces)</literal>. This parameter is
+			mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - attended REFER recorded with
+			valid Replaces header.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - Replaces header
+			could not be parsed, or target not in allowed_targets.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - missing parameter,
+			no Call-ID, or uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>handle_attended_refer</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("REFER")) {
+        if (is_present_hf("Replaces")) {
+            if (handle_attended_refer("$hdr(Refer-To)", "$hdr(Replaces)")) {
+                xlog("L_INFO", "attended transfer: replaces=$var(refer_replaces)\n");
+                sl_send_reply(202, "Accepted");
+            }
+        } else {
+            if (handle_refer("$hdr(Refer-To)")) {
+                sl_send_reply(202, "Accepted");
+            }
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_handle_notify" xreflabel="handle_notify()">
 		<title>
 		<function moreinfo="none">handle_notify(call_id, status_code)</function>
@@ -213,6 +491,11 @@ route {
 			<emphasis>300-699</emphasis>  -&gt; failed (terminal)
 		</para></listitem>
 		</itemizedlist>
+		</para>
+		<para>
+		When <varname>publish_events</varname> is enabled, a JSON
+		event is generated for terminal state transitions (success
+		or failed).
 		</para>
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
@@ -325,6 +608,133 @@ route[check_transfer] {
 		</example>
 	</section>
 
+	<section id="func_send_refer_notify" xreflabel="send_refer_notify()">
+		<title>
+		<function moreinfo="none">send_refer_notify(call_id, status_code)</function>
+		</title>
+		<para>
+		Prepare a NOTIFY message with sipfrag status for a tracked
+		REFER transaction. Sets pseudo-variables that the script can
+		use to send the NOTIFY via <function>t_uac_dlg()</function>
+		or other means.
+		</para>
+		<para>
+		The function tracks CSeq increments per call_id to ensure
+		each NOTIFY has a unique, monotonically increasing CSeq
+		value.
+		</para>
+		<para>The following pseudo-variables are set:</para>
+		<itemizedlist>
+		<listitem><para>
+			<literal>$var(refer_notify_cseq)</literal>  - The
+			CSeq number for this NOTIFY.
+		</para></listitem>
+		<listitem><para>
+			<literal>$var(refer_notify_body)</literal>  - The
+			sipfrag body (e.g., <quote>SIP/2.0 200 OK</quote>).
+		</para></listitem>
+		<listitem><para>
+			<literal>$var(refer_notify_status)</literal>  - The
+			raw status code as a string.
+		</para></listitem>
+		</itemizedlist>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>call_id</emphasis> (string)  - The Call-ID
+			of the tracked REFER. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>status_code</emphasis> (string)  - The
+			sipfrag status code to include in the NOTIFY body.
+			This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - NOTIFY prepared successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - missing parameter
+			or invalid status code.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>send_refer_notify</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[send_transfer_notify] {
+    # Prepare the NOTIFY
+    send_refer_notify("$ci", "200");
+
+    # Use the prepared values to send via t_uac_dlg
+    xlog("L_INFO", "sending NOTIFY cseq=$var(refer_notify_cseq) "
+        "body=$var(refer_notify_body)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_transfer_target" xreflabel="check_transfer_target()">
+		<title>
+		<function moreinfo="none">check_transfer_target(refer_to)</function>
+		</title>
+		<para>
+		Check if a transfer target is allowed according to the
+		<varname>allowed_targets</varname> configuration. This
+		function can be used independently of
+		<function>handle_refer()</function> for custom policy
+		enforcement.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>refer_to</emphasis> (string)  - The transfer
+			target URI to check. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - target is allowed.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - target is blocked.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - missing parameter
+			or uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_transfer_target</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("REFER")) {
+        if (!check_transfer_target("$hdr(Refer-To)")) {
+            sl_send_reply(403, "Transfer target not allowed");
+            exit;
+        }
+        handle_refer("$hdr(Refer-To)");
+        sl_send_reply(202, "Accepted");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_refer_stats" xreflabel="refer_stats()">
 		<title>
 		<function moreinfo="none">refer_stats()</function>
@@ -388,6 +798,38 @@ route {
 		</para>
 	</section>
 	<section>
+		<title>$var(refer_replaces)</title>
+		<para>
+		The raw Replaces header value from an attended transfer. Set
+		by <function>handle_attended_refer()</function>. Contains the
+		full Replaces header value including call-id, from-tag, and
+		to-tag parameters.
+		</para>
+	</section>
+	<section>
+		<title>$var(refer_notify_cseq)</title>
+		<para>
+		The CSeq number for the next NOTIFY to send. Set by
+		<function>send_refer_notify()</function>. Monotonically
+		increasing per call_id.
+		</para>
+	</section>
+	<section>
+		<title>$var(refer_notify_body)</title>
+		<para>
+		The sipfrag body for a NOTIFY message. Set by
+		<function>send_refer_notify()</function>. Contains a SIP
+		status line, e.g., <quote>SIP/2.0 200 OK</quote>.
+		</para>
+	</section>
+	<section>
+		<title>$var(refer_notify_status)</title>
+		<para>
+		The raw status code string for a NOTIFY message. Set by
+		<function>send_refer_notify()</function>.
+		</para>
+	</section>
+	<section>
 		<title>$var(refer_stats)</title>
 		<para>
 		JSON string containing the module statistics for the current
@@ -429,6 +871,21 @@ route {
 		<title><varname>unknown_notify</varname></title>
 		<para>
 		Number of NOTIFY messages received with no matching REFER.
+		</para>
+	</section>
+	<section>
+		<title><varname>timed_out</varname></title>
+		<para>
+		Number of REFER transactions that exceeded
+		<varname>transfer_timeout_secs</varname> and were
+		automatically marked as failed.
+		</para>
+	</section>
+	<section>
+		<title><varname>events_published</varname></title>
+		<para>
+		Number of transfer lifecycle events that were published
+		(when <varname>publish_events</varname> is enabled).
 		</para>
 	</section>
 	</section>
