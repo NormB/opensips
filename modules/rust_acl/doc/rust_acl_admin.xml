@@ -12,8 +12,10 @@
 		traffic by source &ip;, User-Agent, domain, or any arbitrary
 		string value. Both a blocklist and an optional allowlist file
 		are loaded at startup into each worker process. Matching can
-		be exact (HashSet lookup) or prefix-based (linear scan of
-		prefixes).
+		be exact (HashSet lookup), prefix-based (linear scan of
+		prefixes), regex-based (compiled patterns), CIDR range-based
+		(subnet matching), glob-based (wildcard patterns), or
+		auto-detected per entry.
 	</para>
 	<para>
 		When an allowlist is configured, it takes precedence over the
@@ -46,7 +48,23 @@
 		stored as a list of prefixes checked via starts_with(). In
 		<quote>regex</quote> mode, entries are compiled as regular
 		expression patterns at load time; invalid patterns are skipped
-		with a warning. Matching is case-sensitive in all modes.
+		with a warning. In <quote>cidr</quote> mode, entries are
+		parsed as CIDR ranges (e.g. <literal>10.0.0.0/24</literal>)
+		and checked via subnet mask comparison. Both IPv4 and IPv6
+		are supported. In <quote>glob</quote> mode, entries are
+		glob patterns where <literal>*</literal> matches any sequence
+		of characters and <literal>?</literal> matches exactly one
+		character; matching is case-insensitive.
+	</para>
+	<para>
+		In <quote>auto</quote> mode, the entry type is detected
+		per-line at load time. Entries containing <literal>/</literal>
+		followed by digits with an IP-like prefix are parsed as CIDR;
+		entries delimited by <literal>/</literal> on both ends are
+		compiled as regex; entries containing <literal>*</literal> or
+		<literal>?</literal> are treated as globs; everything else is
+		an exact string match. This allows a single file to contain
+		a mix of IPs, CIDRs, FQDNs, and glob/regex patterns.
 	</para>
 	<para>
 		The <function>check_access()</function> function implements the
@@ -307,6 +325,31 @@ modparam("rust_acl", "allowlist_domain_file", "/etc/opensips/allowlist_domain.tx
 			<literal>(?i)</literal> flag for case-insensitive matching.
 			Invalid regex patterns are skipped with a warning and do
 			not prevent the rest of the file from loading.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>cidr</quote></emphasis> - each entry is
+			parsed as a CIDR range (e.g. <literal>10.0.0.0/24</literal>,
+			<literal>2001:db8::/32</literal>). On check, the value is
+			parsed as an &ip; address and tested against all ranges via
+			subnet mask comparison. Both IPv4 and IPv6 are supported.
+			Invalid CIDR entries are skipped with a warning.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>glob</quote></emphasis> - each entry is
+			a glob pattern. <literal>*</literal> matches zero or more
+			characters, <literal>?</literal> matches exactly one
+			character. Matching is case-insensitive. Useful for domain
+			blocking (<literal>*.evil.com</literal>) or IP range
+			shorthand (<literal>192.168.*</literal>).
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>auto</quote></emphasis> - each entry's
+			type is auto-detected at file load time. Entries are
+			classified as CIDR (contains <literal>/</literal> + digits
+			with an IP prefix), regex (delimited by
+			<literal>/</literal>), glob (contains <literal>*</literal>
+			or <literal>?</literal>), or exact string match. This allows
+			a single file to contain a mix of entry types.
 		</para></listitem>
 		</itemizedlist>
 		</para>
@@ -798,6 +841,38 @@ xlog("L_INFO", "Entry stats: $var(acl_entry_stats)\n");
 </programlisting>
 		</example>
 	</section>
+
+	<section id="func_access_prometheus" xreflabel="access_prometheus()">
+		<title>
+		<function moreinfo="none">access_prometheus()</function>
+		</title>
+		<para>
+		Retrieve module statistics in Prometheus text exposition format.
+		Sets <literal>$var(acl_prom)</literal> with a multi-line string
+		containing all counters formatted with <literal># HELP</literal>,
+		<literal># TYPE</literal>, and metric value lines. Counters use
+		the Prometheus <literal>counter</literal> type; gauges like
+		<varname>entries_blocklist</varname> use the
+		<literal>gauge</literal> type.
+		</para>
+		<para>
+		This output can be exposed via <emphasis>httpd</emphasis> or
+		a custom MI command for scraping by a Prometheus server.
+		</para>
+		<example>
+		<title><function>access_prometheus</function> usage</title>
+		<programlisting format="linespecific">
+...
+access_prometheus();
+# $var(acl_prom) now contains:
+# # HELP rust_acl_checked rust_acl checked
+# # TYPE rust_acl_checked counter
+# rust_acl_checked 12345
+# ...
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
@@ -815,6 +890,13 @@ xlog("L_INFO", "Entry stats: $var(acl_entry_stats)\n");
 		JSON array of per-entry match counters for the current worker
 		process. Set by <function>access_entry_stats()</function>.
 		Requires <varname>track_counters</varname> to be enabled.
+		</para>
+	</section>
+	<section>
+		<title>$var(acl_prom)</title>
+		<para>
+		Prometheus text exposition format string containing all module
+		statistics. Set by <function>access_prometheus()</function>.
 		</para>
 	</section>
 	</section>

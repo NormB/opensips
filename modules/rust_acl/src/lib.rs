@@ -3,7 +3,8 @@
 //! Loads blocklist and optional allowlist files at startup into each worker
 //! process. Files are parsed line-by-line (comments and blanks skipped).
 //! Matching can be exact (HashSet), prefix-based (Vec of prefixes),
-//! or regex-based (compiled patterns).
+//! regex-based (compiled patterns), CIDR range-based, glob-based,
+//! or auto-detected per entry.
 //!
 //! Supports typed files per check category (IP, UA, domain) in addition
 //! to generic catch-all files. Typed check functions query only the
@@ -93,8 +94,10 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::ModString;
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
+use rust_common::cidr::CidrRange;
 use rust_common::event;
 use rust_common::mi::Stats;
+use rust_common::glob;
 use rust_common::reload::{default_line_parser, FileLoader};
 
 use std::cell::RefCell;
@@ -142,6 +145,19 @@ enum AclData {
     Exact(HashSet<String>),
     Prefix(Vec<String>),
     Regex(Vec<Regex>),
+    Cidr(Vec<CidrRange>),
+    Glob(Vec<String>),
+    /// Auto mode: each entry is classified individually at load time.
+    /// Contains a mix of entry types for maximum flexibility.
+    Auto(AutoAclData),
+}
+
+/// Container for auto-detected entries of mixed types.
+struct AutoAclData {
+    exact: HashSet<String>,
+    cidrs: Vec<CidrRange>,
+    globs: Vec<String>,
+    regexes: Vec<Regex>,
 }
 
 /// A loaded typed file: its data and loader for reload support.
@@ -186,19 +202,86 @@ fn check_regex(patterns: &[Regex], value: &str) -> bool {
     patterns.iter().any(|r| r.is_match(value))
 }
 
+/// Check a list of CIDR ranges against a value (IP address string).
+fn check_cidr(ranges: &[CidrRange], value: &str) -> bool {
+    ranges.iter().any(|r| r.contains_str(value))
+}
+
+/// Check a list of glob patterns against a value.
+fn check_glob(patterns: &[String], value: &str) -> bool {
+    patterns.iter().any(|p| glob::glob_match(p, value))
+}
+
 /// Check an AclData structure against a value.
 fn check_acl_data(data: &AclData, value: &str) -> bool {
     match data {
         AclData::Exact(set) => check_exact(set, value),
         AclData::Prefix(prefixes) => check_prefix(prefixes, value),
         AclData::Regex(patterns) => check_regex(patterns, value),
+        AclData::Cidr(ranges) => check_cidr(ranges, value),
+        AclData::Glob(patterns) => check_glob(patterns, value),
+        AclData::Auto(auto) => {
+            check_exact(&auto.exact, value)
+                || check_cidr(&auto.cidrs, value)
+                || check_glob(&auto.globs, value)
+                || check_regex(&auto.regexes, value)
+        }
     }
+}
+
+/// Detect the entry type from its format.
+///
+/// - Contains `/` followed by digits at the end -> CIDR
+/// - Starts with `/` and ends with `/` -> Regex
+/// - Contains `*` or `?` -> Glob
+/// - Otherwise -> Exact string match
+fn detect_entry_type(entry: &str) -> &'static str {
+    // Check for regex: /pattern/
+    if entry.starts_with('/') && entry.ends_with('/') && entry.len() > 2 {
+        return "regex";
+    }
+    // Check for CIDR: contains / followed by digits at the end
+    if let Some(idx) = entry.rfind('/') {
+        let suffix = &entry[idx + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            // Verify the prefix looks like an IP address
+            let addr_part = &entry[..idx];
+            if addr_part.contains('.') || addr_part.contains(':') {
+                return "cidr";
+            }
+        }
+    }
+    // Check for glob: contains * or ?
+    if entry.contains('*') || entry.contains('?') {
+        return "glob";
+    }
+    "exact"
 }
 
 /// Rebuild AclData from raw entries and mode string.
 fn build_acl_data(entries: &[String], mode: &str) -> AclData {
     match mode {
         "exact" => AclData::Exact(entries.iter().cloned().collect()),
+        "cidr" => {
+            let ranges: Vec<CidrRange> = entries
+                .iter()
+                .filter_map(|e| {
+                    match CidrRange::parse(e) {
+                        Some(r) => Some(r),
+                        None => {
+                            #[cfg(not(test))]
+                            opensips_log!(WARN, "rust_acl",
+                                "invalid CIDR entry '{}', skipping", e);
+                            #[cfg(test)]
+                            eprintln!("WARN: invalid CIDR entry '{}', skipping", e);
+                            None
+                        }
+                    }
+                })
+                .collect();
+            AclData::Cidr(ranges)
+        }
+        "glob" => AclData::Glob(entries.to_vec()),
         "regex" => {
             let patterns: Vec<Regex> = entries
                 .iter()
@@ -218,6 +301,48 @@ fn build_acl_data(entries: &[String], mode: &str) -> AclData {
                 })
                 .collect();
             AclData::Regex(patterns)
+        }
+        "auto" => {
+            let mut exact = HashSet::new();
+            let mut cidrs = Vec::new();
+            let mut globs = Vec::new();
+            let mut regexes = Vec::new();
+
+            for entry in entries {
+                match detect_entry_type(entry) {
+                    "cidr" => {
+                        match CidrRange::parse(entry) {
+                            Some(r) => cidrs.push(r),
+                            None => {
+                                #[cfg(not(test))]
+                                opensips_log!(WARN, "rust_acl",
+                                    "auto: invalid CIDR '{}', treating as exact", entry);
+                                #[cfg(test)]
+                                eprintln!("WARN: auto: invalid CIDR '{}', treating as exact", entry);
+                                exact.insert(entry.clone());
+                            }
+                        }
+                    }
+                    "glob" => globs.push(entry.clone()),
+                    "regex" => {
+                        // Strip leading/trailing slashes
+                        let pat = &entry[1..entry.len() - 1];
+                        match Regex::new(pat) {
+                            Ok(r) => regexes.push(r),
+                            Err(e) => {
+                                #[cfg(not(test))]
+                                opensips_log!(WARN, "rust_acl",
+                                    "auto: invalid regex '{}': {}", pat, e);
+                                #[cfg(test)]
+                                eprintln!("WARN: auto: invalid regex '{}': {}", pat, e);
+                                let _ = e;
+                            }
+                        }
+                    }
+                    _ => { exact.insert(entry.clone()); }
+                }
+            }
+            AclData::Auto(AutoAclData { exact, cidrs, globs, regexes })
         }
         _ => AclData::Prefix(entries.to_vec()),
     }
@@ -334,6 +459,30 @@ fn find_matching_entry(data: &AclData, value: &str) -> Option<String> {
                 .find(|r| r.is_match(value))
                 .map(|r| r.as_str().to_string())
         }
+        AclData::Cidr(ranges) => {
+            ranges.iter()
+                .find(|r| r.contains_str(value))
+                .map(|r| r.to_string())
+        }
+        AclData::Glob(patterns) => {
+            patterns.iter()
+                .find(|p| glob::glob_match(p, value))
+                .cloned()
+        }
+        AclData::Auto(auto) => {
+            if auto.exact.contains(value) {
+                return Some(value.to_string());
+            }
+            if let Some(r) = auto.cidrs.iter().find(|r| r.contains_str(value)) {
+                return Some(r.to_string());
+            }
+            if let Some(g) = auto.globs.iter().find(|p| glob::glob_match(p, value)) {
+                return Some(g.clone());
+            }
+            auto.regexes.iter()
+                .find(|r| r.is_match(value))
+                .map(|r| r.as_str().to_string())
+        }
     }
 }
 
@@ -424,9 +573,9 @@ unsafe extern "C" fn mod_init() -> c_int {
     };
 
     let mode = MATCH_MODE.get_value().unwrap_or("prefix");
-    if mode != "exact" && mode != "prefix" && mode != "regex" {
+    if !matches!(mode, "exact" | "prefix" | "regex" | "cidr" | "glob" | "auto") {
         opensips_log!(ERR, "rust_acl",
-            "modparam match_mode must be exact, prefix, or regex, got {}", mode);
+            "modparam match_mode must be exact, prefix, regex, cidr, glob, or auto; got {}", mode);
         return -1;
     }
 
@@ -1336,6 +1485,28 @@ unsafe extern "C" fn w_access_stats(
     })
 }
 
+// ── Script function: acl_prometheus() ──
+
+unsafe extern "C" fn w_access_prometheus(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let prom = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_prometheus(),
+                None => String::new(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(acl_prom)", &prom);
+        1
+    })
+}
+
+
 // ── Script function: access_entry_stats() ──────────────────────
 
 unsafe extern "C" fn w_access_entry_stats(
@@ -1383,7 +1554,7 @@ const TWO_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 16> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 17> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist"),
         function: Some(w_check_blocklist),
@@ -1473,6 +1644,12 @@ static CMDS: SyncArray<sys::cmd_export_, 16> = SyncArray([
         function: Some(w_access_entry_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("access_prometheus"),
+        function: Some(w_access_prometheus),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
     sys::cmd_export_ {
@@ -1912,8 +2089,6 @@ mod tests {
 
     #[test]
     fn test_acl_stats_json() {
-        use rust_common::event;
-use rust_common::mi::Stats;
         let stats = Stats::new("rust_acl",
             &["checked", "blocked", "allowed", "entries_blocklist", "entries_allowlist"]);
         stats.set("entries_blocklist", 42);
@@ -2669,5 +2844,400 @@ use rust_common::mi::Stats;
         ]);
         assert!(payload.contains(r#""value":"alice""#));
         assert!(payload.contains(r#""result":"allowed""#));
+    }
+
+    // ── CIDR mode tests (Task 63) ───────────────────────────────
+
+    #[test]
+    fn test_cidr_mode_basic() {
+        let data = build_acl_data(
+            &["10.0.0.0/24".to_string(), "192.168.1.0/24".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.254"));
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "10.0.1.1"));
+        assert!(!check_acl_data(&data, "172.16.0.1"));
+    }
+
+    #[test]
+    fn test_cidr_mode_slash_32() {
+        let data = build_acl_data(
+            &["192.168.1.100/32".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "192.168.1.101"));
+    }
+
+    #[test]
+    fn test_cidr_mode_slash_0() {
+        let data = build_acl_data(
+            &["0.0.0.0/0".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "192.168.1.1"));
+        assert!(check_acl_data(&data, "255.255.255.255"));
+    }
+
+    #[test]
+    fn test_cidr_mode_16() {
+        let data = build_acl_data(
+            &["192.168.0.0/16".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "192.168.0.1"));
+        assert!(check_acl_data(&data, "192.168.255.255"));
+        assert!(!check_acl_data(&data, "192.169.0.1"));
+    }
+
+    #[test]
+    fn test_cidr_mode_invalid_entry_skipped() {
+        let data = build_acl_data(
+            &["not-a-cidr/24".to_string(), "10.0.0.0/24".to_string()],
+            "cidr",
+        );
+        // Invalid entry skipped, valid one works
+        assert!(check_acl_data(&data, "10.0.0.1"));
+    }
+
+    #[test]
+    fn test_cidr_mode_non_ip_value() {
+        let data = build_acl_data(
+            &["10.0.0.0/24".to_string()],
+            "cidr",
+        );
+        assert!(!check_acl_data(&data, "not-an-ip"));
+        assert!(!check_acl_data(&data, ""));
+    }
+
+    #[test]
+    fn test_cidr_mode_ipv6() {
+        let data = build_acl_data(
+            &["2001:db8::/32".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "2001:db8::1"));
+        assert!(check_acl_data(&data, "2001:db8:ffff::1"));
+        assert!(!check_acl_data(&data, "2001:db9::1"));
+    }
+
+    #[test]
+    fn test_cidr_boundary_25() {
+        let data = build_acl_data(
+            &["10.0.0.0/25".to_string()],
+            "cidr",
+        );
+        assert!(check_acl_data(&data, "10.0.0.0"));
+        assert!(check_acl_data(&data, "10.0.0.127"));
+        assert!(!check_acl_data(&data, "10.0.0.128"));
+        assert!(!check_acl_data(&data, "10.0.0.255"));
+    }
+
+    // ── Glob mode tests (Task 63) ────────────────────────────────
+
+    #[test]
+    fn test_glob_mode_basic() {
+        let data = build_acl_data(
+            &["*.example.com".to_string(), "10.0.0.*".to_string()],
+            "glob",
+        );
+        assert!(check_acl_data(&data, "evil.example.com"));
+        assert!(check_acl_data(&data, "sub.evil.example.com"));
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.255"));
+        assert!(!check_acl_data(&data, "example.com"));
+        assert!(!check_acl_data(&data, "10.0.1.1"));
+    }
+
+    #[test]
+    fn test_glob_mode_question_mark() {
+        let data = build_acl_data(
+            &["10.0.0.?".to_string()],
+            "glob",
+        );
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.9"));
+        assert!(!check_acl_data(&data, "10.0.0.10"));
+    }
+
+    #[test]
+    fn test_glob_mode_case_insensitive() {
+        let data = build_acl_data(
+            &["*.EXAMPLE.COM".to_string()],
+            "glob",
+        );
+        assert!(check_acl_data(&data, "foo.example.com"));
+        assert!(check_acl_data(&data, "FOO.EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn test_glob_mode_fqdn() {
+        let data = build_acl_data(
+            &["evil.example.com".to_string()],
+            "glob",
+        );
+        // Exact match still works in glob mode (no wildcards)
+        assert!(check_acl_data(&data, "evil.example.com"));
+        assert!(!check_acl_data(&data, "good.example.com"));
+    }
+
+    // ── Auto-detect mode tests (Task 63) ─────────────────────────
+
+    #[test]
+    fn test_detect_entry_type_cidr() {
+        assert_eq!(detect_entry_type("10.0.0.0/24"), "cidr");
+        assert_eq!(detect_entry_type("192.168.0.0/16"), "cidr");
+        assert_eq!(detect_entry_type("::1/128"), "cidr");
+        assert_eq!(detect_entry_type("2001:db8::/32"), "cidr");
+    }
+
+    #[test]
+    fn test_detect_entry_type_glob() {
+        assert_eq!(detect_entry_type("*.example.com"), "glob");
+        assert_eq!(detect_entry_type("192.168.*"), "glob");
+        assert_eq!(detect_entry_type("10.0.0.?"), "glob");
+    }
+
+    #[test]
+    fn test_detect_entry_type_regex() {
+        assert_eq!(detect_entry_type("/^scanner.*/"), "regex");
+        assert_eq!(detect_entry_type("/.*evil.*/"), "regex");
+    }
+
+    #[test]
+    fn test_detect_entry_type_exact() {
+        assert_eq!(detect_entry_type("10.0.0.1"), "exact");
+        assert_eq!(detect_entry_type("evil.example.com"), "exact");
+        assert_eq!(detect_entry_type("friendly-scanner"), "exact");
+    }
+
+    #[test]
+    fn test_detect_entry_type_edge_cases() {
+        // Single slash should not be CIDR (no IP before it)
+        assert_eq!(detect_entry_type("/"), "exact");
+        // Just a regex delimiter with nothing inside
+        assert_eq!(detect_entry_type("//"), "exact");
+        // Path-like string should not be CIDR
+        assert_eq!(detect_entry_type("path/to/file"), "exact");
+    }
+
+    #[test]
+    fn test_auto_mode_mixed_entries() {
+        let data = build_acl_data(
+            &[
+                "10.0.0.0/24".to_string(),      // CIDR
+                "192.168.1.100".to_string(),     // Exact
+                "*.evil.com".to_string(),        // Glob
+                "/^scanner.*/".to_string(),      // Regex
+            ],
+            "auto",
+        );
+        // CIDR match
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.254"));
+        assert!(!check_acl_data(&data, "10.0.1.1"));
+        // Exact match
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "192.168.1.101"));
+        // Glob match
+        assert!(check_acl_data(&data, "sub.evil.com"));
+        assert!(!check_acl_data(&data, "good.com"));
+        // Regex match
+        assert!(check_acl_data(&data, "scanner-bot"));
+        assert!(!check_acl_data(&data, "good-agent"));
+    }
+
+    #[test]
+    fn test_auto_mode_all_cidrs() {
+        let data = build_acl_data(
+            &[
+                "10.0.0.0/8".to_string(),
+                "172.16.0.0/12".to_string(),
+                "192.168.0.0/16".to_string(),
+            ],
+            "auto",
+        );
+        assert!(check_acl_data(&data, "10.255.255.255"));
+        assert!(check_acl_data(&data, "172.31.255.255"));
+        assert!(check_acl_data(&data, "192.168.1.1"));
+        assert!(!check_acl_data(&data, "8.8.8.8"));
+    }
+
+    #[test]
+    fn test_auto_mode_invalid_cidr_falls_to_exact() {
+        let data = build_acl_data(
+            &["bad.host/24".to_string()],
+            "auto",
+        );
+        // "bad.host/24" has a dot and looks like CIDR but fails IP parse,
+        // so it falls back to exact match
+        assert!(check_acl_data(&data, "bad.host/24"));
+        assert!(!check_acl_data(&data, "bad.host"));
+    }
+
+    #[test]
+    fn test_auto_mode_empty() {
+        let data = build_acl_data(&[], "auto");
+        assert!(!check_acl_data(&data, "anything"));
+    }
+
+    #[test]
+    fn test_auto_mode_find_matching_entry() {
+        let data = build_acl_data(
+            &[
+                "10.0.0.0/24".to_string(),
+                "evil.example.com".to_string(),
+                "*.bad.com".to_string(),
+            ],
+            "auto",
+        );
+        assert_eq!(find_matching_entry(&data, "10.0.0.42"), Some("10.0.0.0/24".to_string()));
+        assert_eq!(find_matching_entry(&data, "evil.example.com"), Some("evil.example.com".to_string()));
+        assert_eq!(find_matching_entry(&data, "sub.bad.com"), Some("*.bad.com".to_string()));
+        assert_eq!(find_matching_entry(&data, "unknown"), None);
+    }
+
+    // ── CIDR find_matching_entry tests ───────────────────────────
+
+    #[test]
+    fn test_find_matching_entry_cidr() {
+        let data = build_acl_data(
+            &["10.0.0.0/24".to_string(), "192.168.0.0/16".to_string()],
+            "cidr",
+        );
+        assert_eq!(find_matching_entry(&data, "10.0.0.42"), Some("10.0.0.0/24".to_string()));
+        assert_eq!(find_matching_entry(&data, "192.168.1.1"), Some("192.168.0.0/16".to_string()));
+        assert_eq!(find_matching_entry(&data, "172.16.0.1"), None);
+    }
+
+    // ── Glob find_matching_entry tests ───────────────────────────
+
+    #[test]
+    fn test_find_matching_entry_glob() {
+        let data = build_acl_data(
+            &["*.example.com".to_string(), "10.0.0.*".to_string()],
+            "glob",
+        );
+        assert_eq!(find_matching_entry(&data, "foo.example.com"), Some("*.example.com".to_string()));
+        assert_eq!(find_matching_entry(&data, "10.0.0.1"), Some("10.0.0.*".to_string()));
+        assert_eq!(find_matching_entry(&data, "unknown"), None);
+    }
+
+    // ── E2E-style test: mixed blocklist file ─────────────────────
+
+    #[test]
+    fn test_e2e_auto_blocklist_file() {
+        use std::io::Write;
+
+        let path = format!("{}/rust_acl_e2e_auto", std::env::temp_dir().display());
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "# Mixed blocklist with auto-detection").unwrap();
+            writeln!(f, "10.0.0.0/24").unwrap();
+            writeln!(f, "192.168.1.100").unwrap();
+            writeln!(f, "*.evil.com").unwrap();
+            writeln!(f, "172.16.0.0/12").unwrap();
+            writeln!(f, "/^SIPVicious/").unwrap();
+            writeln!(f, "bad-agent").unwrap();
+            writeln!(f, "").unwrap();
+            writeln!(f, "# End of list").unwrap();
+        }
+
+        let loader = FileLoader::new(&path, default_line_parser, build_vec).unwrap();
+        let entries = loader.get();
+        let data = build_acl_data(&entries, "auto");
+        drop(entries);
+
+        // CIDR entries
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.254"));
+        assert!(!check_acl_data(&data, "10.0.1.1"));
+        assert!(check_acl_data(&data, "172.16.0.1"));
+        assert!(check_acl_data(&data, "172.31.255.255"));
+        assert!(!check_acl_data(&data, "172.32.0.1"));
+
+        // Exact entries
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "192.168.1.101"));
+        assert!(check_acl_data(&data, "bad-agent"));
+        assert!(!check_acl_data(&data, "good-agent"));
+
+        // Glob entries
+        assert!(check_acl_data(&data, "sub.evil.com"));
+        assert!(check_acl_data(&data, "deep.sub.evil.com"));
+        assert!(!check_acl_data(&data, "evil.com"));
+
+        // Regex entries
+        assert!(check_acl_data(&data, "SIPVicious/0.3"));
+        assert!(!check_acl_data(&data, "sipvicious"));
+
+        // Nothing matches
+        assert!(!check_acl_data(&data, "8.8.8.8"));
+        assert!(!check_acl_data(&data, "good.example.com"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── E2E-style test: CIDR blocklist with allowlist ────────────
+
+    #[test]
+    fn test_e2e_cidr_with_allowlist() {
+        use std::io::Write;
+
+        let bl_path = format!("{}/rust_acl_e2e_cidr_bl", std::env::temp_dir().display());
+        let al_path = format!("{}/rust_acl_e2e_cidr_al", std::env::temp_dir().display());
+
+        // Block entire 10.0.0.0/8 but allow 10.0.0.40/32
+        {
+            let mut f = std::fs::File::create(&bl_path).unwrap();
+            writeln!(f, "10.0.0.0/8").unwrap();
+        }
+        {
+            let mut f = std::fs::File::create(&al_path).unwrap();
+            writeln!(f, "10.0.0.40").unwrap();
+        }
+
+        let bl_loader = FileLoader::new(&bl_path, default_line_parser, build_vec).unwrap();
+        let al_loader = FileLoader::new(&al_path, default_line_parser, build_vec).unwrap();
+
+        let bl_entries = bl_loader.get();
+        let al_entries = al_loader.get();
+        let blocklist = build_acl_data(&bl_entries, "auto");
+        let allowlist = build_acl_data(&al_entries, "auto");
+        drop(bl_entries);
+        drop(al_entries);
+
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // 10.0.0.40 is in allowlist -> allowed
+        assert_eq!(check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            Some(&allowlist), None, None, None,
+            &auto_bl, &auto_al, "10.0.0.40",
+        ), 1);
+
+        // 10.0.0.1 is in blocklist only -> blocked
+        assert_eq!(check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            Some(&allowlist), None, None, None,
+            &auto_bl, &auto_al, "10.0.0.1",
+        ), -1);
+
+        // 8.8.8.8 is in neither -> allowed (default)
+        assert_eq!(check_access_with_policy(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            Some(&allowlist), None, None, None,
+            &auto_bl, &auto_al, "8.8.8.8",
+        ), 1);
+
+        let _ = std::fs::remove_file(&bl_path);
+        let _ = std::fs::remove_file(&al_path);
     }
 }
