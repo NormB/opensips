@@ -310,6 +310,35 @@ modparam("rust_sst", "adaptive_min_se", 1)
 ...
 </programlisting>
 		</example>
+
+	<section id="param_force_refresher" xreflabel="force_refresher">
+		<title><varname>force_refresher</varname> (string)</title>
+		<para>
+		Force the refresher role regardless of negotiation. When set
+		to <quote>uac</quote> or <quote>uas</quote>, the module
+		always uses this refresher in Session-Expires headers,
+		overriding whatever the endpoints negotiate. This is useful
+		for endpoints that advertise timer support but fail to send
+		session refresh requests.
+		</para>
+		<para>
+		Set to an empty string (or omit) to disable and allow
+		normal negotiation.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote></quote> (disabled, normal negotiation).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>force_refresher</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Force the proxy (UAS side) to always be the refresher
+modparam("rust_sst", "force_refresher", "uas")
+...
+</programlisting>
+		</example>
 	</section>
 	</section>
 
