@@ -282,6 +282,35 @@ sip_trunk_1,900,90,uac
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_adaptive_min_se" xreflabel="adaptive_min_se">
+		<title><varname>adaptive_min_se</varname> (integer)</title>
+		<para>
+		Enable adaptive Min-SE learning from 422 replies. When enabled,
+		the module maintains a per-worker map of destination hosts to
+		the highest Min-SE value seen in 422 replies from that host.
+		On subsequent INVITEs to the same destination, the learned
+		Min-SE is used instead of <varname>default_min_se</varname>
+		if it is higher, preventing repeated 422 rejections.
+		</para>
+		<para>
+		Set to <emphasis>1</emphasis> to enable,
+		<emphasis>0</emphasis> to disable.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>adaptive_min_se</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "adaptive_min_se", 1)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">

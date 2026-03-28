@@ -122,6 +122,9 @@ static DEFAULT_REFRESHER: ModString = ModString::new();
 /// Format: account,interval,min_se,refresher
 static POLICIES_FILE: ModString = ModString::new();
 
+/// Enable adaptive min_se learning from 422 replies (0=off, 1=on, default 0).
+static ADAPTIVE_MIN_SE: Integer = Integer::with_default(0);
+
 /// Whether dialog API was loaded (set once in mod_init).
 static DLG_LOADED: AtomicBool = AtomicBool::new(false);
 
@@ -251,6 +254,65 @@ fn lookup_policy(account: &str) -> Option<AccountPolicy> {
     })
 }
 
+/// Get the learned min_se for a destination, if adaptive_min_se is enabled.
+fn get_adaptive_min_se(dest_host: &str) -> Option<u32> {
+    if ADAPTIVE_MIN_SE.get() == 0 {
+        return None;
+    }
+    ADAPTIVE_MAP.with(|m| {
+        m.borrow().get(dest_host).copied()
+    })
+}
+
+/// Record a learned min_se from a 422 reply for a destination.
+fn record_adaptive_min_se(dest_host: &str, min_se: u32) {
+    if ADAPTIVE_MIN_SE.get() == 0 || min_se == 0 {
+        return;
+    }
+    ADAPTIVE_MAP.with(|m| {
+        let mut map = m.borrow_mut();
+        let current = map.get(dest_host).copied().unwrap_or(0);
+        if min_se > current {
+            map.insert(dest_host.to_string(), min_se);
+            opensips_log!(
+                DBG,
+                "rust_sst",
+                "adaptive min_se: {} -> {} for destination {}",
+                current,
+                min_se,
+                dest_host
+            );
+        }
+    });
+}
+
+/// Extract host from R-URI or destination.
+fn extract_dest_host(ruri: &str) -> String {
+    // Parse "sip:user@host:port" -> "host"
+    let without_scheme = if let Some(idx) = ruri.find(':') {
+        &ruri[idx + 1..]
+    } else {
+        ruri
+    };
+    let without_user = if let Some(idx) = without_scheme.find('@') {
+        &without_scheme[idx + 1..]
+    } else {
+        without_scheme
+    };
+    // Remove port and parameters
+    let host = without_user
+        .split(':')
+        .next()
+        .unwrap_or(without_user)
+        .split(';')
+        .next()
+        .unwrap_or(without_user)
+        .split('>')
+        .next()
+        .unwrap_or(without_user);
+    host.trim().to_string()
+}
+
 /// Build JSON status for all active SST-tracked dialogs.
 fn build_sst_status_json() -> String {
     TRACKER.with(|t| {
@@ -292,6 +354,8 @@ thread_local! {
         "sessions_uas_refresher",
     ]);
     static POLICIES: RefCell<Option<FileLoader<HashMap<String, AccountPolicy>>>> = RefCell::new(None);
+    /// Per-worker map of destination host -> learned Min-SE from 422 replies.
+    static ADAPTIVE_MAP: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
 // ── Pure logic (testable without FFI) ────────────────────────────
@@ -458,6 +522,15 @@ unsafe extern "C" fn sst_dialog_created_cb(
 
     let our_min_se = get_our_min_se();
     let our_interval = get_our_interval();
+
+    // Check adaptive min_se for this destination
+    let ruri = msg.pv("$ru").unwrap_or_default();
+    let dest_host = extract_dest_host(&ruri);
+    let adaptive = if !dest_host.is_empty() { get_adaptive_min_se(&dest_host) } else { None };
+    let our_min_se = match adaptive {
+        Some(learned) if learned > our_min_se => learned,
+        _ => our_min_se,
+    };
 
     // Parse SST-related headers from the INVITE
     let se_hdr = msg.header("Session-Expires").map(|s| s.to_string());
@@ -647,6 +720,15 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
                 });
             });
             SST_STATS.with(|s| s.inc("422_sent"));
+
+            // Adaptive min_se: learn from 422 reply
+            let ruri = msg.pv("$ru").unwrap_or_default();
+            if !ruri.is_empty() {
+                let dest = extract_dest_host(&ruri);
+                if !dest.is_empty() {
+                    record_adaptive_min_se(&dest, reply_min_se);
+                }
+            }
         }
 
         opensips_log!(
@@ -1347,7 +1429,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([sys::acmd_export_ {
     params: EMPTY_PARAMS,
 }]);
 
-static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 6> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("default_interval"),
         type_: 2, // INT_PARAM
@@ -1367,6 +1449,11 @@ static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
         name: cstr_lit!("policies_file"),
         type_: 1, // STR_PARAM
         param_pointer: POLICIES_FILE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("adaptive_min_se"),
+        type_: 2, // INT_PARAM
+        param_pointer: ADAPTIVE_MIN_SE.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -2020,6 +2107,64 @@ mod tests {
             None => false,
         };
         assert!(!is_stale);
+    }
+
+    // ── adaptive min_se tests ────────────────────────────────────
+
+    #[test]
+    fn test_extract_dest_host_full_uri() {
+        assert_eq!(extract_dest_host("sip:alice@example.com:5060;transport=tcp"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_dest_host_no_user() {
+        assert_eq!(extract_dest_host("sip:10.0.0.1:5060"), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_extract_dest_host_simple() {
+        assert_eq!(extract_dest_host("sip:user@host"), "host");
+    }
+
+    #[test]
+    fn test_extract_dest_host_with_angle() {
+        assert_eq!(extract_dest_host("sip:user@host>"), "host");
+    }
+
+    #[test]
+    fn test_extract_dest_host_empty() {
+        assert_eq!(extract_dest_host(""), "");
+    }
+
+    #[test]
+    fn test_record_and_get_adaptive() {
+        // Test the adaptive map directly
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().clear());
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().insert("10.0.0.1".to_string(), 180));
+        let val = ADAPTIVE_MAP.with(|m| m.borrow().get("10.0.0.1").copied());
+        assert_eq!(val, Some(180));
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_adaptive_keeps_highest() {
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().clear());
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().insert("host1".to_string(), 120));
+        // Higher value should replace
+        let current = ADAPTIVE_MAP.with(|m| m.borrow().get("host1").copied().unwrap_or(0));
+        if 180 > current {
+            ADAPTIVE_MAP.with(|m| m.borrow_mut().insert("host1".to_string(), 180));
+        }
+        let val = ADAPTIVE_MAP.with(|m| m.borrow().get("host1").copied());
+        assert_eq!(val, Some(180));
+        // Lower value should NOT replace
+        let current = ADAPTIVE_MAP.with(|m| m.borrow().get("host1").copied().unwrap_or(0));
+        if 90 > current {
+            ADAPTIVE_MAP.with(|m| m.borrow_mut().insert("host1".to_string(), 90));
+        }
+        let val = ADAPTIVE_MAP.with(|m| m.borrow().get("host1").copied());
+        assert_eq!(val, Some(180)); // Still 180
+        ADAPTIVE_MAP.with(|m| m.borrow_mut().clear());
     }
 
     // ── per-refresher direction stat tests ──────────────────────
