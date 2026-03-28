@@ -102,6 +102,7 @@ use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::dialog;
+use rust_common::event;
 use rust_common::mi::Stats;
 use rust_common::reload::{csv_line_parser, FileLoader};
 
@@ -139,6 +140,9 @@ static COOLDOWN_SECS: Integer = Integer::with_default(0);
 
 /// Burst threshold: flag if concurrent count increases by this many within burst_window_secs (0 = disabled).
 static BURST_THRESHOLD: Integer = Integer::with_default(0);
+
+/// Enable event publishing (0=off, 1=on, default 0).
+static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 
 /// Time window in seconds for burst detection.
 static BURST_WINDOW_SECS: Integer = Integer::with_default(10);
@@ -746,6 +750,15 @@ unsafe extern "C" fn w_check_concurrent(
                         }
                         opensips_log!(DBG, "rust_concurrent_calls",
                             "account {} at limit: {}/{}", account, count, limit);
+                        // Publish E_CONCURRENT_LIMIT event
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("account", &event::json_str(account)),
+                                ("count", &count.to_string()),
+                                ("limit", &limit.to_string()),
+                            ]);
+                            opensips_log!(NOTICE, "rust_concurrent_calls", "EVENT E_CONCURRENT_LIMIT {}", payload);
+                        }
                         -1
                     }
                 }
@@ -1267,7 +1280,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -1317,6 +1330,11 @@ static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
         name: cstr_lit!("burst_window_secs"),
         type_: 2, // INT_PARAM
         param_pointer: BURST_WINDOW_SECS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("publish_events"),
+        type_: 2, // INT_PARAM
+        param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1645,7 +1663,8 @@ mod tests {
 
     #[test]
     fn test_concurrent_stats_json() {
-        use rust_common::mi::Stats;
+        use rust_common::event;
+use rust_common::mi::Stats;
         let stats = Stats::new("rust_concurrent_calls",
             &["checked", "allowed", "blocked", "incremented", "decremented", "accounts"]);
         stats.set("accounts", 10);
@@ -2341,5 +2360,30 @@ mod tests {
 
         assert_eq!(counts.get("alice"), Some(&1));
         assert_eq!(counts.get("bob"), Some(&0));
+    }
+
+    // ── event publishing tests ──────────────────────────────────
+
+    #[test]
+    fn test_event_payload_concurrent_limit() {
+        let payload = event::format_payload(&[
+            ("account", &event::json_str("alice")),
+            ("count", "10"),
+            ("limit", "10"),
+        ]);
+        assert!(payload.contains(r#""account":"alice""#));
+        assert!(payload.contains(r#""count":10"#));
+        assert!(payload.contains(r#""limit":10"#));
+    }
+
+    #[test]
+    fn test_event_payload_concurrent_burst() {
+        let payload = event::format_payload(&[
+            ("account", &event::json_str("bob")),
+            ("recent_count", "5"),
+            ("threshold", "3"),
+        ]);
+        assert!(payload.contains(r#""account":"bob""#));
+        assert!(payload.contains(r#""recent_count":5"#));
     }
 }

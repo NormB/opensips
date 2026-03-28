@@ -97,6 +97,7 @@ use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 
 use rust_common::dialog::{self, DialogTracker};
+use rust_common::event;
 use rust_common::mi::Stats;
 use rust_common::reload::FileLoader;
 
@@ -124,6 +125,9 @@ static POLICIES_FILE: ModString = ModString::new();
 
 /// Enable adaptive min_se learning from 422 replies (0=off, 1=on, default 0).
 static ADAPTIVE_MIN_SE: Integer = Integer::with_default(0);
+
+/// Enable event publishing (0=off, 1=on, default 0).
+static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 
 /// Force refresher role: "" (disabled), "uac", or "uas" (default "").
 /// When set, always use this refresher regardless of negotiation.
@@ -174,7 +178,7 @@ impl Refresher {
 }
 
 /// Per-dialog SST state, stored in the DialogTracker.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct SstState {
     requester: SstRequester,
     supported: SstSupported,
@@ -184,20 +188,6 @@ struct SstState {
     refresh_count: u32,
     /// Timestamp of last refresh (re-INVITE/UPDATE), or dialog creation if none.
     last_refresh: Option<Instant>,
-}
-
-impl Default for SstState {
-    fn default() -> Self {
-        SstState {
-            requester: SstRequester::default(),
-            supported: SstSupported::default(),
-            interval: 0,
-            min_se: 0,
-            refresher: Refresher::default(),
-            refresh_count: 0,
-            last_refresh: None,
-        }
-    }
 }
 
 // ── Thread-local state ───────────────────────────────────────────
@@ -323,11 +313,7 @@ fn build_sst_status_json() -> String {
         t.collect_json(|callid, entry| {
             let s = &entry.state;
             let age = entry.created.elapsed().as_secs();
-            let time_remaining = if s.interval as u64 > age {
-                s.interval as u64 - age
-            } else {
-                0
-            };
+            let time_remaining = (s.interval as u64).saturating_sub(age);
             let escaped_callid = callid.replace('\\', "\\\\").replace('"', "\\\"");
             let mut buf = String::with_capacity(128);
             buf.push_str("{\"call_id\":\"");
@@ -340,7 +326,7 @@ fn build_sst_status_json() -> String {
             buf.push_str(&time_remaining.to_string());
             buf.push_str(",\"refresh_count\":");
             buf.push_str(&s.refresh_count.to_string());
-            buf.push_str("}");
+            buf.push('}');
             buf
         })
     })
@@ -1024,6 +1010,16 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
                 since_refresh
             );
             SST_STATS.with(|s| s.inc("stale_sessions"));
+
+            // Publish E_SST_STALE event
+            if event::is_enabled() {
+                let payload = event::format_payload(&[
+                    ("call_id", &event::json_str(&callid)),
+                    ("interval", &interval.to_string()),
+                    ("since_last_refresh", &since_refresh.to_string()),
+                ]);
+                opensips_log!(NOTICE, "rust_sst", "EVENT E_SST_STALE {}", payload);
+            }
         }
     }
 
@@ -1036,6 +1032,13 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
         s.set("sessions_active", count);
         if was_expired {
             s.inc("sessions_expired");
+            // Publish E_SST_EXPIRED event
+            if event::is_enabled() {
+                let payload = event::format_payload(&[
+                    ("call_id", &event::json_str(&callid)),
+                ]);
+                opensips_log!(NOTICE, "rust_sst", "EVENT E_SST_EXPIRED {}", payload);
+            }
         }
     });
 
@@ -1092,6 +1095,12 @@ unsafe extern "C" fn mod_init() -> c_int {
             "default_min_se={} is below RFC 4028 minimum of 90, clamping",
             min_se
         );
+    }
+
+    // Initialize event publishing
+    if PUBLISH_EVENTS.get() != 0 {
+        event::set_enabled(true);
+        opensips_log!(INFO, "rust_sst", "event publishing enabled");
     }
 
     // Validate force_refresher
@@ -1471,7 +1480,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([sys::acmd_export_ {
     params: EMPTY_PARAMS,
 }]);
 
-static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 8> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("default_interval"),
         type_: 2, // INT_PARAM
@@ -1501,6 +1510,11 @@ static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
         name: cstr_lit!("force_refresher"),
         type_: 1, // STR_PARAM
         param_pointer: FORCE_REFRESHER.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("publish_events"),
+        type_: 2, // INT_PARAM
+        param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -2154,6 +2168,28 @@ mod tests {
             None => false,
         };
         assert!(!is_stale);
+    }
+
+    // ── event publishing tests ──────────────────────────────────
+
+    #[test]
+    fn test_event_payload_sst_stale() {
+        let payload = event::format_payload(&[
+            ("call_id", &event::json_str("abc-123")),
+            ("interval", "1800"),
+            ("since_last_refresh", "2000"),
+        ]);
+        assert!(payload.contains(r#""call_id":"abc-123""#));
+        assert!(payload.contains(r#""interval":1800"#));
+        assert!(payload.contains(r#""since_last_refresh":2000"#));
+    }
+
+    #[test]
+    fn test_event_payload_sst_expired() {
+        let payload = event::format_payload(&[
+            ("call_id", &event::json_str("xyz-789")),
+        ]);
+        assert_eq!(payload, r#"{"call_id":"xyz-789"}"#);
     }
 
     // ── force refresher tests ─────────────────────────────────

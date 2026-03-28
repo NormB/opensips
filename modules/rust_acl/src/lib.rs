@@ -93,6 +93,7 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::ModString;
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
+use rust_common::event;
 use rust_common::mi::Stats;
 use rust_common::reload::{default_line_parser, FileLoader};
 
@@ -127,6 +128,9 @@ static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
 
 /// Enable per-entry match counters (0=off, 1=on, default: 0).
 static TRACK_COUNTERS: ModString = ModString::new();
+
+/// Enable event publishing (0=off, 1=on, default 0).
+static PUBLISH_EVENTS: ModString = ModString::new();
 
 /// Access policy for check_access(): "allowlist-first", "blocklist-first",
 /// "allowlist-only", or "blocklist-only" (default: "allowlist-first").
@@ -614,6 +618,14 @@ unsafe extern "C" fn w_check_blocklist(
                             }
                         }
                         state.stats.inc("blocked");
+                        // Publish E_ACL_BLOCKED event
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("value", &event::json_str(value)),
+                                ("source", &event::json_str("blocklist")),
+                            ]);
+                            opensips_log!(NOTICE, "rust_acl", "EVENT E_ACL_BLOCKED {}", payload);
+                        }
                         -1
                     } else {
                         state.stats.inc("allowed");
@@ -1032,8 +1044,22 @@ unsafe extern "C" fn w_check_access(
 
                     if result == 1 {
                         state.stats.inc("allowed");
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("value", &event::json_str(value)),
+                                ("result", &event::json_str("allowed")),
+                            ]);
+                            opensips_log!(NOTICE, "rust_acl", "EVENT E_ACL_ALLOWED {}", payload);
+                        }
                     } else {
                         state.stats.inc("blocked");
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("value", &event::json_str(value)),
+                                ("result", &event::json_str("blocked")),
+                            ]);
+                            opensips_log!(NOTICE, "rust_acl", "EVENT E_ACL_BLOCKED {}", payload);
+                        }
                     }
                     result
                 }
@@ -1466,7 +1492,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 13> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
         type_: 1, // STR_PARAM
@@ -1521,6 +1547,11 @@ static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
         name: cstr_lit!("access_policy"),
         type_: 1, // STR_PARAM
         param_pointer: ACCESS_POLICY.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("publish_events"),
+        type_: 1, // STR_PARAM
+        param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1881,7 +1912,8 @@ mod tests {
 
     #[test]
     fn test_acl_stats_json() {
-        use rust_common::mi::Stats;
+        use rust_common::event;
+use rust_common::mi::Stats;
         let stats = Stats::new("rust_acl",
             &["checked", "blocked", "allowed", "entries_blocklist", "entries_allowlist"]);
         stats.set("entries_blocklist", 42);
@@ -2616,4 +2648,26 @@ mod tests {
         ), -1);
     }
 
+
+    // ── event publishing tests ──────────────────────────────────
+
+    #[test]
+    fn test_event_payload_acl_blocked() {
+        let payload = event::format_payload(&[
+            ("value", &event::json_str("10.0.0.1")),
+            ("source", &event::json_str("blocklist")),
+        ]);
+        assert!(payload.contains(r#""value":"10.0.0.1""#));
+        assert!(payload.contains(r#""source":"blocklist""#));
+    }
+
+    #[test]
+    fn test_event_payload_acl_allowed() {
+        let payload = event::format_payload(&[
+            ("value", &event::json_str("alice")),
+            ("result", &event::json_str("allowed")),
+        ]);
+        assert!(payload.contains(r#""value":"alice""#));
+        assert!(payload.contains(r#""result":"allowed""#));
+    }
 }

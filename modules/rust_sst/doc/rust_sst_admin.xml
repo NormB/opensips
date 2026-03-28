@@ -310,6 +310,7 @@ modparam("rust_sst", "adaptive_min_se", 1)
 ...
 </programlisting>
 		</example>
+	</section>
 
 	<section id="param_force_refresher" xreflabel="force_refresher">
 		<title><varname>force_refresher</varname> (string)</title>
@@ -336,6 +337,34 @@ modparam("rust_sst", "adaptive_min_se", 1)
 ...
 # Force the proxy (UAS side) to always be the refresher
 modparam("rust_sst", "force_refresher", "uas")
+...
+</programlisting>
+		</example>
+	</section>
+	
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		Enable event publishing. When set to 1, the module publishes
+		significant events as NOTICE-level structured log messages
+		that operators can consume via syslog or log aggregation.
+		If the NATS module is loaded, events are also published to
+		NATS subjects under <literal>opensips.events.*</literal>.
+		</para>
+		<para>
+		Events published by this module: E_SST_EXPIRED (on session timeout) and E_SST_STALE (when a session should have been refreshed but was not).
+		Each event includes a JSON payload with relevant details.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "publish_events", 1)
 ...
 </programlisting>
 		</example>
