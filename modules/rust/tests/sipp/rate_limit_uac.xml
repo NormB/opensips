@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  SIPp UAC scenario: Rate Limiter Test
+
+  Sends max_rate+1 INVITE requests from the same source IP.
+  The last request should receive a 429 "Rate Limited" response.
+
+  Usage:
+    sipp -sf rate_limit_uac.xml 127.0.0.1:5060 -m 101 -r 200 -l 10
+
+  Parameters:
+    -m 101   : Send 101 messages total (assumes max_rate=100)
+    -r 200   : 200 messages per second (burst to trigger limit quickly)
+    -l 10    : Max 10 simultaneous calls
+-->
+<scenario name="Rate Limit Test">
+
+  <!-- Send INVITE -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Rate Test" <sip:ratetest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:test@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:ratetest@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1 1 IN IP4 [local_ip]
+      s=Rate Test
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 6000 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <!-- Expect any response (200 OK for allowed, 429 for rate limited) -->
+  <recv response="." optional="false" timeout="5000">
+    <action>
+      <ereg regexp="429" search_in="msg" check_it="true" assign_to="is_429" />
+    </action>
+  </recv>
+
+  <!-- If we got a non-429 response, send ACK -->
+  <send optional="true" cond="inverse" next="is_429">
+    <![CDATA[
+      ACK sip:test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Rate Test" <sip:ratetest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:test@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+</scenario>

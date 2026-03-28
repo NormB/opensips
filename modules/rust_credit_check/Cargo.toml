@@ -1,0 +1,18 @@
+[package]
+name = "rust-credit-check"
+version = "0.1.0"
+edition = "2021"
+description = "Prepaid credit/balance checking with per-worker cache for OpenSIPS"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opensips-rs = { path = "../rust/sdk" }
+rust-common = { path = "../rust/common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+opensips-build = { path = "../rust/build-utils" }
+cc = "1"

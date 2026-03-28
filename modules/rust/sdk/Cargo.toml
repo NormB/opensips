@@ -1,0 +1,17 @@
+[package]
+name = "opensips-rs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Rust SDK for building OpenSIPS modules"
+keywords = ["opensips", "sip", "voip", "ffi"]
+
+[build-dependencies]
+bindgen = "0.71"
+cc = "1"
+
+[dependencies]
+# No runtime dependencies — pure FFI SDK
+
+[features]
+default = []
