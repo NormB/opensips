@@ -106,7 +106,7 @@ use rust_common::mi::Stats;
 use rust_common::reload::{csv_line_parser, FileLoader};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::time::Instant;
@@ -136,6 +136,12 @@ static DIRECTION_AWARE: Integer = Integer::with_default(0);
 
 /// Cooldown period in seconds after a limit rejection (0 = disabled).
 static COOLDOWN_SECS: Integer = Integer::with_default(0);
+
+/// Burst threshold: flag if concurrent count increases by this many within burst_window_secs (0 = disabled).
+static BURST_THRESHOLD: Integer = Integer::with_default(0);
+
+/// Time window in seconds for burst detection.
+static BURST_WINDOW_SECS: Integer = Integer::with_default(10);
 
 // ── Pure logic (testable without FFI) ────────────────────────────
 
@@ -250,6 +256,53 @@ fn is_in_cooldown(cooldowns: &HashMap<String, Instant>, account: &str, cooldown_
     }
 }
 
+/// Record a count snapshot for burst detection.
+fn record_burst_snapshot(
+    history: &mut HashMap<String, VecDeque<(Instant, u32)>>,
+    account: &str,
+    count: u32,
+) {
+    let deque = history.entry(account.to_string()).or_insert_with(VecDeque::new);
+    deque.push_back((Instant::now(), count));
+}
+
+/// Check for burst: returns (is_burst, delta) comparing current count
+/// to the count at the start of the time window.
+fn check_burst_from_history(
+    history: &mut HashMap<String, VecDeque<(Instant, u32)>>,
+    account: &str,
+    current_count: u32,
+    threshold: u32,
+    window_secs: u64,
+) -> (bool, i32) {
+    let window = std::time::Duration::from_secs(window_secs);
+    let now = Instant::now();
+
+    let deque = match history.get_mut(account) {
+        Some(d) => d,
+        None => return (false, 0),
+    };
+
+    // Prune entries older than the window
+    while let Some(&(ts, _)) = deque.front() {
+        if now.duration_since(ts) > window {
+            deque.pop_front();
+        } else {
+            break;
+        }
+    }
+
+    // Get the oldest count in the window
+    let oldest_count = match deque.front() {
+        Some(&(_, c)) => c,
+        None => return (false, 0),
+    };
+
+    let delta = current_count as i32 - oldest_count as i32;
+    let is_burst = delta >= threshold as i32;
+    (is_burst, delta)
+}
+
 /// Record a cooldown for an account (called when a limit rejection happens).
 fn set_cooldown(cooldowns: &mut HashMap<String, Instant>, account: &str) {
     cooldowns.insert(account.to_string(), Instant::now());
@@ -334,6 +387,8 @@ struct WorkerState {
     limit_overrides: HashMap<String, u32>,
     // Cooldown tracking (Task 43) — per-account cooldown expiry
     cooldowns: HashMap<String, Instant>,
+    // Burst detection (Task 44) — per-account count snapshots
+    burst_history: HashMap<String, VecDeque<(Instant, u32)>>,
 }
 
 thread_local! {
@@ -516,6 +571,11 @@ unsafe extern "C" fn mod_init() -> c_int {
     opensips_log!(INFO, "rust_concurrent_calls", "  direction_aware={}", direction_aware);
     opensips_log!(INFO, "rust_concurrent_calls", "  cooldown_secs={}", cooldown);
 
+    let burst_threshold = BURST_THRESHOLD.get();
+    let burst_window = BURST_WINDOW_SECS.get();
+    opensips_log!(INFO, "rust_concurrent_calls", "  burst_threshold={}", burst_threshold);
+    opensips_log!(INFO, "rust_concurrent_calls", "  burst_window_secs={}", burst_window);
+
     let use_profiles = USE_DIALOG_PROFILES.get();
     let profile_name = unsafe { PROFILE_NAME.get_value() }
         .unwrap_or("concurrent_calls");
@@ -548,7 +608,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
 
     let stats = Stats::new("rust_concurrent_calls",
         &["checked", "allowed", "blocked", "incremented", "decremented",
-          "accounts", "reloads", "auto_tracked", "cooldown_blocked"]);
+          "accounts", "reloads", "auto_tracked", "cooldown_blocked", "burst_detected"]);
     stats.set("accounts", entry_count as u64);
 
     // Load direction-aware limits if enabled
@@ -577,6 +637,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             direction_loader,
             limit_overrides: HashMap::new(),
             cooldowns: HashMap::new(),
+            burst_history: HashMap::new(),
         });
     });
 
@@ -986,6 +1047,69 @@ unsafe extern "C" fn w_concurrent_set_limit(
     })
 }
 
+// ── Script function: check_burst(account) ────────────────────
+
+unsafe extern "C" fn w_check_burst(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+            Some(s) => s,
+            None => {
+                opensips_log!(ERR, "rust_concurrent_calls",
+                    "check_burst: missing or invalid parameter");
+                return -2;
+            }
+        };
+
+        let threshold = BURST_THRESHOLD.get();
+        if threshold <= 0 {
+            // Burst detection disabled
+            let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+            let _ = sip_msg.set_pv_int("$var(burst_delta)", 0);
+            return -1;
+        }
+
+        let window_secs = BURST_WINDOW_SECS.get();
+
+        WORKER.with(|w| {
+            let mut borrow = w.borrow_mut();
+            match borrow.as_mut() {
+                Some(state) => {
+                    let current_count = state.counts.get(account).copied().unwrap_or(0);
+
+                    // Record snapshot
+                    record_burst_snapshot(&mut state.burst_history, account, current_count);
+
+                    // Check burst
+                    let (is_burst, delta) = check_burst_from_history(
+                        &mut state.burst_history,
+                        account,
+                        current_count,
+                        threshold as u32,
+                        window_secs as u64,
+                    );
+
+                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+                    let _ = sip_msg.set_pv_int("$var(burst_delta)", delta);
+
+                    if is_burst {
+                        state.stats.inc("burst_detected");
+                        opensips_log!(DBG, "rust_concurrent_calls",
+                            "burst detected for {}: delta={} threshold={}", account, delta, threshold);
+                        1
+                    } else {
+                        -1
+                    }
+                }
+                None => -2,
+            }
+        })
+    })
+}
+
 // ── Script function: concurrent_reload() ────────────────────
 
 unsafe extern "C" fn w_concurrent_reload(
@@ -1060,7 +1184,7 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 10> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 11> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_concurrent"),
         function: Some(w_check_concurrent),
@@ -1089,6 +1213,12 @@ static CMDS: SyncArray<sys::cmd_export_, 10> = SyncArray([
         name: cstr_lit!("concurrent_stats"),
         function: Some(w_concurrent_stats),
         params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("check_burst"),
+        function: Some(w_check_burst),
+        params: ONE_STR_PARAM,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     sys::cmd_export_ {
@@ -1132,7 +1262,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 11> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -1172,6 +1302,16 @@ static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
         name: cstr_lit!("cooldown_secs"),
         type_: 2, // INT_PARAM
         param_pointer: COOLDOWN_SECS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("burst_threshold"),
+        type_: 2, // INT_PARAM
+        param_pointer: BURST_THRESHOLD.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("burst_window_secs"),
+        type_: 2, // INT_PARAM
+        param_pointer: BURST_WINDOW_SECS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1780,6 +1920,102 @@ mod tests {
         // Profile check says blocked (5 >= 5)
         let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
         assert!(!profile_allowed);
+    }
+
+    // ── Burst detection tests (Task 44) ──────────────────────────
+
+    #[test]
+    fn test_burst_empty_history() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(!is_burst);
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn test_burst_single_snapshot() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 2);
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 2, 3, 10);
+        assert!(!is_burst);
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn test_burst_detected() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 1);
+        // Current count jumped to 5 (delta = 4, threshold = 3)
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(is_burst);
+        assert_eq!(delta, 4);
+    }
+
+    #[test]
+    fn test_burst_not_detected_below_threshold() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 3);
+        // Current count is 5 (delta = 2, threshold = 3)
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(!is_burst);
+        assert_eq!(delta, 2);
+    }
+
+    #[test]
+    fn test_burst_at_threshold() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 2);
+        // Current count is 5 (delta = 3, threshold = 3)
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(is_burst);
+        assert_eq!(delta, 3);
+    }
+
+    #[test]
+    fn test_burst_window_expiry() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        // Insert old snapshot (2 seconds ago)
+        let old_time = Instant::now() - std::time::Duration::from_secs(2);
+        history.entry("alice".to_string())
+            .or_insert_with(VecDeque::new)
+            .push_back((old_time, 1));
+        // With 1-second window, the old snapshot should be pruned
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 1);
+        // After pruning, no snapshots remain, so no burst
+        assert!(!is_burst);
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn test_burst_per_account() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 1);
+        record_burst_snapshot(&mut history, "bob", 10);
+
+        let (alice_burst, _) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(alice_burst); // delta = 4 >= 3
+
+        let (bob_burst, _) = check_burst_from_history(&mut history, "bob", 11, 3, 10);
+        assert!(!bob_burst); // delta = 1 < 3
+    }
+
+    #[test]
+    fn test_burst_negative_delta() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 10);
+        // Count went down (calls ended)
+        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
+        assert!(!is_burst);
+        assert_eq!(delta, -5);
+    }
+
+    #[test]
+    fn test_record_burst_snapshot() {
+        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
+        record_burst_snapshot(&mut history, "alice", 1);
+        record_burst_snapshot(&mut history, "alice", 2);
+        record_burst_snapshot(&mut history, "alice", 3);
+        assert_eq!(history.get("alice").unwrap().len(), 3);
     }
 
     // ── Cooldown tests (Task 43) ─────────────────────────────────
