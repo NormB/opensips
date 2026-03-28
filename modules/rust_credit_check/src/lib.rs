@@ -80,6 +80,7 @@ use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::async_dispatch::FireAndForget;
 use rust_common::http::Pool;
+use rust_common::event;
 use rust_common::mi::Stats;
 
 use std::cell::RefCell;
@@ -89,6 +90,9 @@ use std::ptr;
 use std::time::Instant;
 
 // ── Module parameters ────────────────────────────────────────────
+
+/// Enable event publishing (0=off, 1=on, default 0).
+static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 
 /// Billing API endpoint (required). GET {url}?account={account}
 static BILLING_URL: ModString = ModString::new();
@@ -526,6 +530,12 @@ unsafe extern "C" fn mod_init() -> c_int {
         }
     }
 
+    // Initialize event publishing
+    if PUBLISH_EVENTS.get() != 0 {
+        event::set_enabled(true);
+        opensips_log!(INFO, "rust_credit_check", "event publishing enabled");
+    }
+
     opensips_log!(INFO, "rust_credit_check", "module initialized");
     opensips_log!(INFO, "rust_credit_check", "  billing_url={}", url);
     opensips_log!(INFO, "rust_credit_check", "  cache_ttl={}s", CACHE_TTL.get());
@@ -756,6 +766,13 @@ unsafe extern "C" fn w_rust_credit_check(
                 1
             } else {
                 state.stats.inc("denied");
+                // Publish E_CREDIT_DENIED event
+                if event::is_enabled() {
+                    let payload = event::format_payload(&[
+                        ("account", &event::json_str(account)),
+                    ]);
+                    opensips_log!(NOTICE, "rust_credit_check", "EVENT E_CREDIT_DENIED {}", payload);
+                }
                 let _ = sip_msg.set_pv("$var(credit_balance)", "0.00");
                 let _ = sip_msg.set_pv_int("$var(credit_max_duration)", 0);
                 -1
@@ -887,6 +904,14 @@ unsafe extern "C" fn w_rust_credit_debit(
                 Some(dispatcher) => {
                     if dispatcher.send(payload) {
                         state.stats.inc("debits_sent");
+                        // Publish E_CREDIT_DEBIT event
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("account", &event::json_str(account)),
+                                ("amount", &format!("{:.2}", cost)),
+                            ]);
+                            opensips_log!(NOTICE, "rust_credit_check", "EVENT E_CREDIT_DEBIT {}", payload);
+                        }
                         opensips_log!(DBG, "rust_credit_check",
                             "debit sent: account={} dur={}s cost={:.2}", account, duration, cost);
                         // Clear cache for this account since balance changed
@@ -955,6 +980,14 @@ unsafe extern "C" fn w_rust_credit_end(
                 Some(dispatcher) => {
                     if dispatcher.send(payload) {
                         state.stats.inc("debits_sent");
+                        // Publish E_CREDIT_DEBIT event
+                        if event::is_enabled() {
+                            let payload = event::format_payload(&[
+                                ("account", &event::json_str(account)),
+                                ("amount", &format!("{:.2}", cost)),
+                            ]);
+                            opensips_log!(NOTICE, "rust_credit_check", "EVENT E_CREDIT_DEBIT {}", payload);
+                        }
                         state.cache.clear(account);
                         opensips_log!(DBG, "rust_credit_check",
                             "call ended: {} dur={}s cost={:.2}", account, duration, cost);
@@ -1279,7 +1312,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 16> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 17> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("billing_url"),
         type_: 1, // STR_PARAM
@@ -1360,6 +1393,11 @@ static PARAMS: SyncArray<sys::param_export_, 16> = SyncArray([
         name: cstr_lit!("cache_warmup_url"),
         type_: 1,
         param_pointer: CACHE_WARMUP_URL.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("publish_events"),
+        type_: 2, // INT_PARAM
+        param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1883,7 +1921,8 @@ mod tests {
 
     #[test]
     fn test_credit_stats_json() {
-        use rust_common::mi::Stats;
+        use rust_common::event;
+use rust_common::mi::Stats;
         let stats = Stats::new("rust_credit_check",
             &["checked", "allowed", "denied", "errors", "cache_hits", "cache_misses"]);
         stats.inc("checked");
@@ -1925,5 +1964,27 @@ mod tests {
     fn test_on_error_whitespace_denies() {
         assert!(!on_error_allows(" "));
         assert!(!on_error_allows("  deny  "));
+    }
+
+    // ── event publishing tests ──────────────────────────────────
+
+    #[test]
+    fn test_event_payload_credit_denied() {
+        let payload = event::format_payload(&[
+            ("account", &event::json_str("alice")),
+            ("balance", "0.50"),
+        ]);
+        assert!(payload.contains(r#""account":"alice""#));
+        assert!(payload.contains(r#""balance":0.50"#));
+    }
+
+    #[test]
+    fn test_event_payload_credit_debit() {
+        let payload = event::format_payload(&[
+            ("account", &event::json_str("bob")),
+            ("amount", "2.50"),
+        ]);
+        assert!(payload.contains(r#""account":"bob""#));
+        assert!(payload.contains(r#""amount":2.50"#));
     }
 }

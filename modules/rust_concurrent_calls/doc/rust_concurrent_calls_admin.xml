@@ -439,6 +439,34 @@ modparam("rust_concurrent_calls", "burst_window_secs", 10)
 </programlisting>
 		</example>
 	</section>
+	
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		Enable event publishing. When set to 1, the module publishes
+		significant events as NOTICE-level structured log messages
+		that operators can consume via syslog or log aggregation.
+		If the NATS module is loaded, events are also published to
+		NATS subjects under <literal>opensips.events.*</literal>.
+		</para>
+		<para>
+		Events published by this module: E_CONCURRENT_LIMIT (when a call is rejected at limit) and E_CONCURRENT_BURST (when burst detection triggers).
+		Each event includes a JSON payload with relevant details.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">

@@ -393,6 +393,34 @@ modparam("rust_acl", "access_policy", "blocklist-first")
 </programlisting>
 		</example>
 	</section>
+	
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		Enable event publishing. When set to 1, the module publishes
+		significant events as NOTICE-level structured log messages
+		that operators can consume via syslog or log aggregation.
+		If the NATS module is loaded, events are also published to
+		NATS subjects under <literal>opensips.events.*</literal>.
+		</para>
+		<para>
+		Events published by this module: E_ACL_BLOCKED (on blocklist match) and E_ACL_ALLOWED (on access check pass).
+		Each event includes a JSON payload with relevant details.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
