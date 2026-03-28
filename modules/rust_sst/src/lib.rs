@@ -288,6 +288,8 @@ thread_local! {
         "422_sent",
         "headers_inserted",
         "stale_sessions",
+        "sessions_uac_refresher",
+        "sessions_uas_refresher",
     ]);
     static POLICIES: RefCell<Option<FileLoader<HashMap<String, AccountPolicy>>>> = RefCell::new(None);
 }
@@ -539,6 +541,16 @@ unsafe extern "C" fn sst_dialog_created_cb(
         let count = TRACKER.with(|t| t.active_count()) as u64;
         s.set("sessions_active", count);
     });
+
+    // Track refresher direction stat
+    let refresher_dir = TRACKER.with(|t| {
+        t.with_state_ref(&callid, |s| s.refresher.clone())
+    });
+    match refresher_dir {
+        Some(Refresher::Uac) => SST_STATS.with(|s| s.inc("sessions_uac_refresher")),
+        Some(Refresher::Uas) => SST_STATS.with(|s| s.inc("sessions_uas_refresher")),
+        None => {}
+    }
 
     // Set initial dialog lifetime via $DLG_timeout
     let interval = TRACKER.with(|t| {
@@ -2008,6 +2020,39 @@ mod tests {
             None => false,
         };
         assert!(!is_stale);
+    }
+
+    // ── per-refresher direction stat tests ──────────────────────
+
+    #[test]
+    fn test_refresher_direction_stats() {
+        let stats = Stats::new("test_dir", &[
+            "sessions_uac_refresher",
+            "sessions_uas_refresher",
+        ]);
+        stats.inc("sessions_uac_refresher");
+        stats.inc("sessions_uac_refresher");
+        stats.inc("sessions_uas_refresher");
+        assert_eq!(stats.get("sessions_uac_refresher"), 2);
+        assert_eq!(stats.get("sessions_uas_refresher"), 1);
+    }
+
+    #[test]
+    fn test_refresher_stats_in_json() {
+        let stats = Stats::new("test_dir_json", &[
+            "sessions_active",
+            "sessions_expired",
+            "422_sent",
+            "headers_inserted",
+            "stale_sessions",
+            "sessions_uac_refresher",
+            "sessions_uas_refresher",
+        ]);
+        stats.inc("sessions_uac_refresher");
+        stats.set("sessions_uas_refresher", 5);
+        let json = stats.to_json();
+        assert!(json.contains(r#""sessions_uac_refresher":1"#));
+        assert!(json.contains(r#""sessions_uas_refresher":5"#));
     }
 
     #[test]
