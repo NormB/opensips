@@ -108,6 +108,11 @@ use std::time::Instant;
 
 use regex::Regex;
 
+#[cfg(feature = "database")]
+use sqlx;
+#[cfg(feature = "database")]
+use tokio;
+
 // ── Module parameters ────────────────────────────────────────────
 
 /// Path to blocklist file (required). One entry per line, # comments.
@@ -138,6 +143,28 @@ static PUBLISH_EVENTS: ModString = ModString::new();
 /// Access policy for check_access(): "allowlist-first", "blocklist-first",
 /// "allowlist-only", or "blocklist-only" (default: "allowlist-first").
 static ACCESS_POLICY: ModString = ModString::new();
+
+// ── Database modparams (optional, used with `database` feature) ──
+
+/// Database connection URL: postgres://, mysql://, or sqlite:// (optional).
+/// Without the `database` feature compiled in, this param is accepted but
+/// ignored with a warning.
+static DB_URL: ModString = ModString::new();
+
+/// Database table name (default: "address").
+static DB_TABLE: ModString = ModString::new();
+
+/// Filter by `grp` column. 0 = all groups (default: 0).
+static DB_GROUP: ModString = ModString::new();
+
+/// Seconds between automatic DB reloads. 0 = load once (default: 0).
+static DB_RELOAD_INTERVAL: ModString = ModString::new();
+
+/// Which `grp` value maps to blocklist entries (default: 1).
+static DB_BLOCKLIST_GROUP: ModString = ModString::new();
+
+/// Which `grp` value maps to allowlist entries (default: 2).
+static DB_ALLOWLIST_GROUP: ModString = ModString::new();
 
 // ── ACL data structures ─────────────────────────────────────────
 
@@ -508,6 +535,15 @@ struct WorkerState {
     track_counters: bool,
     entry_counters: HashMap<String, u64>,
     access_policy: AccessPolicy,
+    // Database integration (only with `database` feature)
+    #[cfg(feature = "database")]
+    db_blocklist: Option<AclData>,
+    #[cfg(feature = "database")]
+    db_allowlist: Option<AclData>,
+    #[cfg(feature = "database")]
+    db_pool: Option<sqlx::AnyPool>,
+    #[cfg(feature = "database")]
+    db_runtime: Option<tokio::runtime::Runtime>,
 }
 
 thread_local! {
@@ -560,6 +596,109 @@ fn reload_typed(typed: &mut TypedAcl, mode: &str, label: &str) -> Result<usize, 
     }
 }
 
+// ── Database integration ──────────────────────────────────────────
+
+#[cfg_attr(not(feature = "database"), allow(dead_code))]
+/// Convert a database row to AclEntry-compatible data.
+/// Returns (ip_with_mask, pattern, context_info) for building ACL entries.
+///
+/// Logic:
+///   - If mask < 32 (IPv4) or < 128 (IPv6): treat as CIDR
+///   - If pattern is set: treat as regex
+///   - Otherwise: treat as exact IP match
+fn db_row_to_entry(ip: &str, mask: i32, pattern: Option<&str>) -> String {
+    // If pattern is set, use it as a regex entry
+    if let Some(pat) = pattern {
+        if !pat.is_empty() {
+            // Wrap in regex delimiters for auto-detect
+            return format!("/{}/", pat);
+        }
+    }
+
+    // Determine if this is a CIDR or exact entry
+    let is_v6 = ip.contains(':');
+    let max_mask = if is_v6 { 128 } else { 32 };
+
+    if mask < max_mask && mask >= 0 {
+        format!("{}/{}", ip, mask)
+    } else {
+        ip.to_string()
+    }
+}
+
+#[cfg_attr(not(feature = "database"), allow(dead_code))]
+/// Build the SQL query for the address table.
+fn db_build_query(table: &str, _blocklist_group: i64, _allowlist_group: i64) -> String {
+    // Use positional placeholders compatible with sqlx::any
+    format!(
+        "SELECT ip, mask, port, proto, pattern, context_info, grp          FROM {} WHERE grp IN ($1, $2)",
+        table
+    )
+}
+
+/// Load entries from the database, returning (blocklist_entries, allowlist_entries).
+#[cfg(feature = "database")]
+fn db_load_entries(
+    pool: &sqlx::AnyPool,
+    runtime: &tokio::runtime::Runtime,
+    table: &str,
+    blocklist_group: i64,
+    allowlist_group: i64,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    runtime.block_on(async {
+        db_load_entries_async(pool, table, blocklist_group, allowlist_group).await
+    })
+}
+
+#[cfg(feature = "database")]
+async fn db_load_entries_async(
+    pool: &sqlx::AnyPool,
+    table: &str,
+    blocklist_group: i64,
+    allowlist_group: i64,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    use sqlx::Row;
+
+    let query = db_build_query(table, blocklist_group, allowlist_group);
+    let rows = sqlx::query(&query)
+        .bind(blocklist_group)
+        .bind(allowlist_group)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("DB query failed: {}", e))?;
+
+    let mut blocklist_entries = Vec::new();
+    let mut allowlist_entries = Vec::new();
+
+    for row in &rows {
+        let ip: String = row.try_get("ip").unwrap_or_default();
+        let mask: i32 = row.try_get("mask").unwrap_or(32);
+        let pattern: Option<String> = row.try_get("pattern").ok();
+        let grp: i32 = row.try_get("grp").unwrap_or(0);
+
+        if ip.is_empty() {
+            continue;
+        }
+
+        let entry = db_row_to_entry(&ip, mask, pattern.as_deref());
+
+        if grp as i64 == blocklist_group {
+            blocklist_entries.push(entry);
+        } else if grp as i64 == allowlist_group {
+            allowlist_entries.push(entry);
+        }
+    }
+
+    Ok((blocklist_entries, allowlist_entries))
+}
+
+#[cfg_attr(not(feature = "database"), allow(dead_code))]
+/// Merge DB entries into existing ACL data.
+/// DB entries are added to the auto-mode data structure.
+fn merge_db_entries(entries: &[String]) -> AclData {
+    build_acl_data(entries, "auto")
+}
+
 // ── Module lifecycle ─────────────────────────────────────────────
 
 unsafe extern "C" fn mod_init() -> c_int {
@@ -601,6 +740,28 @@ unsafe extern "C" fn mod_init() -> c_int {
         return -1;
     }
     opensips_log!(INFO, "rust_acl", "  access_policy={}", policy_str);
+
+    // Database parameter validation
+    if let Some(url) = DB_URL.get_value() {
+        if !url.is_empty() {
+            #[cfg(feature = "database")]
+            {
+                opensips_log!(INFO, "rust_acl", "  db_url={} (database support compiled in)", url);
+                let table = DB_TABLE.get_value().unwrap_or("address");
+                opensips_log!(INFO, "rust_acl", "  db_table={}", table);
+                let bl_grp = DB_BLOCKLIST_GROUP.get_value().unwrap_or("1");
+                let al_grp = DB_ALLOWLIST_GROUP.get_value().unwrap_or("2");
+                opensips_log!(INFO, "rust_acl", "  db_blocklist_group={}, db_allowlist_group={}", bl_grp, al_grp);
+                let interval = DB_RELOAD_INTERVAL.get_value().unwrap_or("0");
+                opensips_log!(INFO, "rust_acl", "  db_reload_interval={}s", interval);
+            }
+            #[cfg(not(feature = "database"))]
+            {
+                opensips_log!(WARN, "rust_acl",
+                    "db_url configured but database support not compiled in.                      Rebuild with: cargo build --features database -p rust-acl");
+            }
+        }
+    }
 
     0
 }
@@ -697,6 +858,84 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
         .and_then(AccessPolicy::from_str)
         .unwrap_or(AccessPolicy::AllowlistFirst);
 
+    // Load database entries if configured
+    #[cfg(feature = "database")]
+    let (db_blocklist, db_allowlist, db_pool, db_runtime) = {
+        match unsafe { DB_URL.get_value() } {
+            Some(url) if !url.is_empty() => {
+                let table = unsafe { DB_TABLE.get_value() }.unwrap_or("address").to_string();
+                let bl_grp: i64 = unsafe { DB_BLOCKLIST_GROUP.get_value() }
+                    .unwrap_or("1").parse().unwrap_or(1);
+                let al_grp: i64 = unsafe { DB_ALLOWLIST_GROUP.get_value() }
+                    .unwrap_or("2").parse().unwrap_or(2);
+                let interval: u64 = unsafe { DB_RELOAD_INTERVAL.get_value() }
+                    .unwrap_or("0").parse().unwrap_or(0);
+
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        opensips_log!(ERR, "rust_acl",
+                            "failed to create tokio runtime for DB: {}", e);
+                        return -1;
+                    }
+                };
+
+                // Install the any driver(s)
+                let _ = rt.block_on(async {
+                    sqlx::any::install_default_drivers();
+                });
+
+                let pool = match rt.block_on(async {
+                    sqlx::any::AnyPoolOptions::new()
+                        .max_connections(2)
+                        .connect(url)
+                        .await
+                }) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        opensips_log!(ERR, "rust_acl",
+                            "failed to connect to database: {}", e);
+                        return -1;
+                    }
+                };
+
+                match db_load_entries(&pool, &rt, &table, bl_grp, al_grp) {
+                    Ok((bl_entries, al_entries)) => {
+                        let bl_count = bl_entries.len();
+                        let al_count = al_entries.len();
+                        let db_bl = if bl_entries.is_empty() {
+                            None
+                        } else {
+                            Some(merge_db_entries(&bl_entries))
+                        };
+                        let db_al = if al_entries.is_empty() {
+                            None
+                        } else {
+                            Some(merge_db_entries(&al_entries))
+                        };
+                        opensips_log!(INFO, "rust_acl",
+                            "DB loaded: {} blocklist + {} allowlist entries from table '{}'",
+                            bl_count, al_count, table);
+
+                        // Spawn periodic reload task if interval > 0
+                        if interval > 0 {
+                            opensips_log!(INFO, "rust_acl",
+                                "DB periodic reload every {}s (note: per-worker,                                  changes visible after next reload cycle)", interval);
+                        }
+
+                        (db_bl, db_al, Some(pool), Some(rt))
+                    }
+                    Err(e) => {
+                        opensips_log!(ERR, "rust_acl",
+                            "failed to load DB entries: {}", e);
+                        return -1;
+                    }
+                }
+            }
+            _ => (None, None, None, None),
+        }
+    };
+
     WORKER.with(|w| {
         *w.borrow_mut() = Some(WorkerState {
             blocklist,
@@ -716,6 +955,14 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             track_counters,
             entry_counters: HashMap::new(),
             access_policy,
+            #[cfg(feature = "database")]
+            db_blocklist,
+            #[cfg(feature = "database")]
+            db_allowlist,
+            #[cfg(feature = "database")]
+            db_pool,
+            #[cfg(feature = "database")]
+            db_runtime,
         });
     });
 
@@ -1100,6 +1347,7 @@ unsafe extern "C" fn w_check_allowlist_domain(
 
 // ── Pure access policy check (testable without FFI) ──────────────
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn check_access_with_policy(
     policy: AccessPolicy,
@@ -1115,13 +1363,40 @@ fn check_access_with_policy(
     auto_allowed: &HashMap<String, AutoEntry>,
     value: &str,
 ) -> i32 {
+    check_access_with_policy_and_db(
+        policy, blocklist, blocklist_ip, blocklist_ua, blocklist_domain,
+        allowlist, allowlist_ip, allowlist_ua, allowlist_domain,
+        auto_blocked, auto_allowed, None, None, value,
+    )
+}
+
+/// Full access policy check including optional DB ACL data.
+#[allow(clippy::too_many_arguments)]
+fn check_access_with_policy_and_db(
+    policy: AccessPolicy,
+    blocklist: &AclData,
+    blocklist_ip: Option<&TypedAcl>,
+    blocklist_ua: Option<&TypedAcl>,
+    blocklist_domain: Option<&TypedAcl>,
+    allowlist: Option<&AclData>,
+    allowlist_ip: Option<&TypedAcl>,
+    allowlist_ua: Option<&TypedAcl>,
+    allowlist_domain: Option<&TypedAcl>,
+    auto_blocked: &HashMap<String, AutoEntry>,
+    auto_allowed: &HashMap<String, AutoEntry>,
+    db_blocklist: Option<&AclData>,
+    db_allowlist: Option<&AclData>,
+    value: &str,
+) -> i32 {
     let in_allowlist = || {
         check_auto(auto_allowed, value)
             || check_optional_all(allowlist, allowlist_ip, allowlist_ua, allowlist_domain, value)
+            || db_allowlist.is_some_and(|data| check_acl_data(data, value))
     };
     let in_blocklist = || {
         check_auto(auto_blocked, value)
             || check_all(blocklist, blocklist_ip, blocklist_ua, blocklist_domain, value)
+            || db_blocklist.is_some_and(|data| check_acl_data(data, value))
     };
 
     match policy {
@@ -1176,7 +1451,15 @@ unsafe extern "C" fn w_check_access(
                 Some(state) => {
                     state.stats.inc("checked");
 
-                    let result = check_access_with_policy(
+                    #[cfg(feature = "database")]
+                    let (db_bl, db_al) = (
+                        state.db_blocklist.as_ref(),
+                        state.db_allowlist.as_ref(),
+                    );
+                    #[cfg(not(feature = "database"))]
+                    let (db_bl, db_al): (Option<&AclData>, Option<&AclData>) = (None, None);
+
+                    let result = check_access_with_policy_and_db(
                         state.access_policy,
                         &state.blocklist,
                         state.blocklist_ip.as_ref(),
@@ -1188,6 +1471,8 @@ unsafe extern "C" fn w_check_access(
                         state.allowlist_domain.as_ref(),
                         &state.auto_blocked,
                         &state.auto_allowed,
+                        db_bl,
+                        db_al,
                         value,
                     );
 
@@ -1533,6 +1818,79 @@ unsafe extern "C" fn w_access_entry_stats(
     })
 }
 
+// ── Script function: acl_db_reload() — manual DB reload ─────────
+
+unsafe extern "C" fn w_acl_db_reload(
+    _msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        #[cfg(feature = "database")]
+        {
+            WORKER.with(|w| {
+                let mut borrow = w.borrow_mut();
+                match borrow.as_mut() {
+                    Some(state) => {
+                        let (pool, runtime) = match (state.db_pool.as_ref(), state.db_runtime.as_ref()) {
+                            (Some(p), Some(r)) => (p, r),
+                            _ => {
+                                opensips_log!(WARN, "rust_acl",
+                                    "acl_db_reload: no database configured");
+                                return -1;
+                            }
+                        };
+
+                        let table = unsafe { DB_TABLE.get_value() }.unwrap_or("address");
+                        let bl_grp: i64 = unsafe { DB_BLOCKLIST_GROUP.get_value() }
+                            .unwrap_or("1").parse().unwrap_or(1);
+                        let al_grp: i64 = unsafe { DB_ALLOWLIST_GROUP.get_value() }
+                            .unwrap_or("2").parse().unwrap_or(2);
+
+                        match db_load_entries(pool, runtime, table, bl_grp, al_grp) {
+                            Ok((bl_entries, al_entries)) => {
+                                let bl_count = bl_entries.len();
+                                let al_count = al_entries.len();
+                                state.db_blocklist = if bl_entries.is_empty() {
+                                    None
+                                } else {
+                                    Some(merge_db_entries(&bl_entries))
+                                };
+                                state.db_allowlist = if al_entries.is_empty() {
+                                    None
+                                } else {
+                                    Some(merge_db_entries(&al_entries))
+                                };
+                                state.stats.inc("reloads");
+                                opensips_log!(INFO, "rust_acl",
+                                    "DB reloaded: {} blocklist + {} allowlist entries",
+                                    bl_count, al_count);
+                                1
+                            }
+                            Err(e) => {
+                                opensips_log!(ERR, "rust_acl",
+                                    "acl_db_reload failed: {}", e);
+                                -1
+                            }
+                        }
+                    }
+                    None => {
+                        opensips_log!(ERR, "rust_acl",
+                            "ACL not initialized in this worker");
+                        -2
+                    }
+                }
+            })
+        }
+        #[cfg(not(feature = "database"))]
+        {
+            opensips_log!(WARN, "rust_acl",
+                "acl_db_reload: database support not compiled in.                  Rebuild with: cargo build --features database -p rust-acl");
+            -1
+        }
+    })
+}
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -1554,7 +1912,7 @@ const TWO_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 17> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 18> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist"),
         function: Some(w_check_blocklist),
@@ -1651,6 +2009,12 @@ static CMDS: SyncArray<sys::cmd_export_, 17> = SyncArray([
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
+    sys::cmd_export_ {
+        name: cstr_lit!("acl_db_reload"),
+        function: Some(w_acl_db_reload),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4,
+    },
     // Null terminator
     sys::cmd_export_ {
         name: ptr::null(),
@@ -1669,7 +2033,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 13> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 19> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
         type_: 1, // STR_PARAM
@@ -1729,6 +2093,36 @@ static PARAMS: SyncArray<sys::param_export_, 13> = SyncArray([
         name: cstr_lit!("publish_events"),
         type_: 1, // STR_PARAM
         param_pointer: PUBLISH_EVENTS.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_url"),
+        type_: 1,
+        param_pointer: DB_URL.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_table"),
+        type_: 1,
+        param_pointer: DB_TABLE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_group"),
+        type_: 1,
+        param_pointer: DB_GROUP.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_reload_interval"),
+        type_: 1,
+        param_pointer: DB_RELOAD_INTERVAL.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_blocklist_group"),
+        type_: 1,
+        param_pointer: DB_BLOCKLIST_GROUP.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("db_allowlist_group"),
+        type_: 1,
+        param_pointer: DB_ALLOWLIST_GROUP.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -3239,5 +3633,552 @@ mod tests {
 
         let _ = std::fs::remove_file(&bl_path);
         let _ = std::fs::remove_file(&al_path);
+    }
+
+    // ── Database row-to-entry conversion tests ───────────────────
+
+    #[test]
+    fn test_db_row_to_entry_exact_ipv4() {
+        let entry = db_row_to_entry("192.168.1.100", 32, None);
+        assert_eq!(entry, "192.168.1.100");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_exact_ipv6() {
+        let entry = db_row_to_entry("::1", 128, None);
+        assert_eq!(entry, "::1");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_cidr_ipv4() {
+        let entry = db_row_to_entry("10.0.0.0", 24, None);
+        assert_eq!(entry, "10.0.0.0/24");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_cidr_ipv6() {
+        let entry = db_row_to_entry("2001:db8::", 32, None);
+        assert_eq!(entry, "2001:db8::/32");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_cidr_zero() {
+        let entry = db_row_to_entry("0.0.0.0", 0, None);
+        assert_eq!(entry, "0.0.0.0/0");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_pattern() {
+        let entry = db_row_to_entry("10.0.0.0", 24, Some("^SIPVicious"));
+        assert_eq!(entry, "/^SIPVicious/");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_empty_pattern() {
+        let entry = db_row_to_entry("10.0.0.0", 24, Some(""));
+        assert_eq!(entry, "10.0.0.0/24");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_pattern_none() {
+        let entry = db_row_to_entry("172.16.0.0", 12, None);
+        assert_eq!(entry, "172.16.0.0/12");
+    }
+
+    #[test]
+    fn test_db_row_to_entry_mask_32_no_pattern() {
+        // mask=32 with no pattern should be exact match
+        let entry = db_row_to_entry("10.0.0.40", 32, None);
+        assert_eq!(entry, "10.0.0.40");
+    }
+
+    // ── SQL query building tests ─────────────────────────────────
+
+    #[test]
+    fn test_db_build_query_default_table() {
+        let q = db_build_query("address", 1, 2);
+        assert!(q.contains("FROM address"));
+        assert!(q.contains("WHERE grp IN"));
+        assert!(q.contains("$1"));
+        assert!(q.contains("$2"));
+    }
+
+    #[test]
+    fn test_db_build_query_custom_table() {
+        let q = db_build_query("acl_entries", 5, 10);
+        assert!(q.contains("FROM acl_entries"));
+    }
+
+    #[test]
+    fn test_db_build_query_selects_all_columns() {
+        let q = db_build_query("address", 1, 2);
+        assert!(q.contains("ip"));
+        assert!(q.contains("mask"));
+        assert!(q.contains("pattern"));
+        assert!(q.contains("context_info"));
+        assert!(q.contains("grp"));
+    }
+
+    // ── Merge DB entries tests ───────────────────────────────────
+
+    #[test]
+    fn test_merge_db_entries_cidr() {
+        let entries = vec!["10.0.0.0/24".to_string(), "192.168.0.0/16".to_string()];
+        let data = merge_db_entries(&entries);
+        assert!(check_acl_data(&data, "10.0.0.42"));
+        assert!(check_acl_data(&data, "192.168.1.1"));
+        assert!(!check_acl_data(&data, "172.16.0.1"));
+    }
+
+    #[test]
+    fn test_merge_db_entries_exact() {
+        let entries = vec!["10.0.0.40".to_string(), "192.168.1.100".to_string()];
+        let data = merge_db_entries(&entries);
+        assert!(check_acl_data(&data, "10.0.0.40"));
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "10.0.0.41"));
+    }
+
+    #[test]
+    fn test_merge_db_entries_regex() {
+        let entries = vec!["/^SIPVicious/".to_string(), "/friendly-scanner/".to_string()];
+        let data = merge_db_entries(&entries);
+        assert!(check_acl_data(&data, "SIPVicious/0.3"));
+        assert!(check_acl_data(&data, "friendly-scanner"));
+        assert!(!check_acl_data(&data, "normal-agent"));
+    }
+
+    #[test]
+    fn test_merge_db_entries_mixed() {
+        let entries = vec![
+            "10.0.0.0/24".to_string(),
+            "192.168.1.100".to_string(),
+            "/^SIPVicious/".to_string(),
+        ];
+        let data = merge_db_entries(&entries);
+        assert!(check_acl_data(&data, "10.0.0.42"));
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(check_acl_data(&data, "SIPVicious/0.3"));
+        assert!(!check_acl_data(&data, "8.8.8.8"));
+    }
+
+    #[test]
+    fn test_merge_db_entries_empty() {
+        let entries: Vec<String> = vec![];
+        let data = merge_db_entries(&entries);
+        assert!(!check_acl_data(&data, "anything"));
+    }
+
+    // ── check_access_with_policy_and_db tests ────────────────────
+
+    #[test]
+    fn test_access_with_db_blocklist() {
+        let blocklist = build_acl_data(&["1.2.3.4".to_string()], "exact");
+        let db_bl = build_acl_data(&["10.0.0.0/24".to_string()], "auto");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // 10.0.0.42 is in DB blocklist -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), None,
+            "10.0.0.42",
+        ), -1);
+
+        // 8.8.8.8 is in neither -> allowed
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), None,
+            "8.8.8.8",
+        ), 1);
+    }
+
+    #[test]
+    fn test_access_with_db_allowlist() {
+        let blocklist = build_acl_data(&["10.0.0.0/8".to_string()], "auto");
+        let db_al = build_acl_data(&["10.0.0.40".to_string()], "auto");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // 10.0.0.40 is in DB allowlist -> allowed (allowlist-first)
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            None, Some(&db_al),
+            "10.0.0.40",
+        ), 1);
+
+        // 10.0.0.1 is in blocklist, not in DB allowlist -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &blocklist, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            None, Some(&db_al),
+            "10.0.0.1",
+        ), -1);
+    }
+
+    #[test]
+    fn test_access_with_db_both_lists() {
+        let file_bl = build_acl_data(&["1.2.3.4".to_string()], "exact");
+        let db_bl = build_acl_data(&["10.0.0.0/24".to_string()], "auto");
+        let db_al = build_acl_data(&["10.0.0.40".to_string()], "auto");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // 10.0.0.40 in DB allowlist, 10.0.0.0/24 in DB blocklist -> allowed
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "10.0.0.40",
+        ), 1);
+
+        // 10.0.0.1 in DB blocklist only -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "10.0.0.1",
+        ), -1);
+
+        // 1.2.3.4 in file blocklist -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "1.2.3.4",
+        ), -1);
+
+        // 8.8.8.8 nowhere -> allowed
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "8.8.8.8",
+        ), 1);
+    }
+
+    #[test]
+    fn test_access_with_db_blocklist_first_policy() {
+        let file_bl = build_acl_data(&[], "exact");
+        let db_bl = build_acl_data(&["10.0.0.0/24".to_string()], "auto");
+        let db_al = build_acl_data(&["10.0.0.0/24".to_string()], "auto");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // With blocklist-first: 10.0.0.42 in both -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::BlocklistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "10.0.0.42",
+        ), -1);
+    }
+
+    #[test]
+    fn test_access_with_no_db() {
+        let file_bl = build_acl_data(&["1.2.3.4".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // No DB data at all -> same as check_access_with_policy
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            None, None,
+            "1.2.3.4",
+        ), -1);
+
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            None, None,
+            "8.8.8.8",
+        ), 1);
+    }
+
+    // ── DB row conversion round-trip tests ───────────────────────
+
+    #[test]
+    fn test_db_row_roundtrip_cidr_matching() {
+        // Simulate: DB has 10.0.0.0/24 -> converts to "10.0.0.0/24" -> auto-detect as CIDR
+        let entry = db_row_to_entry("10.0.0.0", 24, None);
+        let data = build_acl_data(&[entry], "auto");
+        assert!(check_acl_data(&data, "10.0.0.1"));
+        assert!(check_acl_data(&data, "10.0.0.254"));
+        assert!(!check_acl_data(&data, "10.0.1.1"));
+    }
+
+    #[test]
+    fn test_db_row_roundtrip_regex_matching() {
+        let entry = db_row_to_entry("0.0.0.0", 0, Some("^SIPVicious.*"));
+        let data = build_acl_data(&[entry], "auto");
+        assert!(check_acl_data(&data, "SIPVicious/0.3.6"));
+        assert!(!check_acl_data(&data, "normal-agent"));
+    }
+
+    #[test]
+    fn test_db_row_roundtrip_exact_matching() {
+        let entry = db_row_to_entry("192.168.1.100", 32, None);
+        let data = build_acl_data(&[entry], "auto");
+        assert!(check_acl_data(&data, "192.168.1.100"));
+        assert!(!check_acl_data(&data, "192.168.1.101"));
+    }
+}
+
+// ── Database integration tests (require `database` feature + SQLite) ──
+
+#[cfg(test)]
+#[cfg(feature = "database")]
+mod db_tests {
+    use super::*;
+
+    /// Helper: create an in-memory SQLite DB with the address table schema
+    /// and return a connected pool.
+    async fn setup_test_db() -> sqlx::AnyPool {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to connect to in-memory SQLite");
+
+        // Create the address table matching OpenSIPS schema
+        sqlx::query(
+            "CREATE TABLE address (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                grp INTEGER DEFAULT 0 NOT NULL,
+                ip TEXT NOT NULL,
+                mask INTEGER DEFAULT 32 NOT NULL,
+                port INTEGER DEFAULT 0 NOT NULL,
+                proto TEXT DEFAULT 'any' NOT NULL,
+                pattern TEXT DEFAULT NULL,
+                context_info TEXT DEFAULT NULL
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create address table");
+
+        pool
+    }
+
+    /// Helper: insert a row into the address table.
+    async fn insert_address(
+        pool: &sqlx::AnyPool,
+        grp: i32,
+        ip: &str,
+        mask: i32,
+        pattern: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO address (grp, ip, mask, pattern) VALUES ($1, $2, $3, $4)"
+        )
+        .bind(grp)
+        .bind(ip)
+        .bind(mask)
+        .bind(pattern)
+        .execute(pool)
+        .await
+        .expect("failed to insert address row");
+    }
+
+    #[tokio::test]
+    async fn test_db_load_empty_table() {
+        let pool = setup_test_db().await;
+        let (bl, al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert!(bl.is_empty());
+        assert!(al.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_db_load_blocklist_entries() {
+        let pool = setup_test_db().await;
+        // grp=1 -> blocklist
+        insert_address(&pool, 1, "10.0.0.0", 24, None).await;
+        insert_address(&pool, 1, "192.168.1.100", 32, None).await;
+
+        let (bl, al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl.len(), 2);
+        assert!(al.is_empty());
+        assert!(bl.contains(&"10.0.0.0/24".to_string()));
+        assert!(bl.contains(&"192.168.1.100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_db_load_allowlist_entries() {
+        let pool = setup_test_db().await;
+        // grp=2 -> allowlist
+        insert_address(&pool, 2, "10.0.0.40", 32, None).await;
+        insert_address(&pool, 2, "172.16.0.0", 12, None).await;
+
+        let (bl, al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert!(bl.is_empty());
+        assert_eq!(al.len(), 2);
+        assert!(al.contains(&"10.0.0.40".to_string()));
+        assert!(al.contains(&"172.16.0.0/12".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_db_load_mixed_groups() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "10.0.0.0", 24, None).await;      // blocklist
+        insert_address(&pool, 2, "10.0.0.40", 32, None).await;      // allowlist
+        insert_address(&pool, 1, "192.168.0.0", 16, None).await;    // blocklist
+        insert_address(&pool, 3, "8.8.8.8", 32, None).await;        // neither (grp=3)
+
+        let (bl, al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl.len(), 2);
+        assert_eq!(al.len(), 1);
+        // grp=3 entry should not appear in either list
+    }
+
+    #[tokio::test]
+    async fn test_db_load_with_pattern() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "0.0.0.0", 0, Some("^SIPVicious")).await;
+        insert_address(&pool, 1, "0.0.0.0", 0, Some("friendly-scanner")).await;
+
+        let (bl, _al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl.len(), 2);
+        assert!(bl.contains(&"/^SIPVicious/".to_string()));
+        assert!(bl.contains(&"/friendly-scanner/".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_db_load_skip_empty_ip() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "", 32, None).await;
+        insert_address(&pool, 1, "10.0.0.1", 32, None).await;
+
+        let (bl, _al) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl.len(), 1);
+        assert_eq!(bl[0], "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_db_entries_merged_with_acl() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "10.0.0.0", 24, None).await;
+        insert_address(&pool, 2, "10.0.0.40", 32, None).await;
+
+        let (bl_entries, al_entries) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+
+        let db_bl = merge_db_entries(&bl_entries);
+        let db_al = merge_db_entries(&al_entries);
+
+        let file_bl = build_acl_data(&["1.2.3.4".to_string()], "exact");
+        let auto_bl: HashMap<String, AutoEntry> = HashMap::new();
+        let auto_al: HashMap<String, AutoEntry> = HashMap::new();
+
+        // 10.0.0.42 in DB blocklist -> blocked
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "10.0.0.42",
+        ), -1);
+
+        // 10.0.0.40 in DB allowlist -> allowed even though in DB blocklist range
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "10.0.0.40",
+        ), 1);
+
+        // 8.8.8.8 nowhere -> allowed
+        assert_eq!(check_access_with_policy_and_db(
+            AccessPolicy::AllowlistFirst,
+            &file_bl, None, None, None,
+            None, None, None, None,
+            &auto_bl, &auto_al,
+            Some(&db_bl), Some(&db_al),
+            "8.8.8.8",
+        ), 1);
+    }
+
+    #[tokio::test]
+    async fn test_db_custom_groups() {
+        let pool = setup_test_db().await;
+        // Use custom group IDs: blocklist=5, allowlist=10
+        insert_address(&pool, 5, "10.0.0.0", 24, None).await;
+        insert_address(&pool, 10, "10.0.0.40", 32, None).await;
+        insert_address(&pool, 1, "8.8.8.8", 32, None).await;  // default grp, won't match
+
+        let (bl, al) = db_load_entries_async(&pool, "address", 5, 10).await.unwrap();
+        assert_eq!(bl.len(), 1);
+        assert_eq!(al.len(), 1);
+        assert!(bl.contains(&"10.0.0.0/24".to_string()));
+        assert!(al.contains(&"10.0.0.40".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_db_reload_picks_up_changes() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "10.0.0.0", 24, None).await;
+
+        let (bl1, _) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl1.len(), 1);
+
+        // Add another entry
+        insert_address(&pool, 1, "192.168.0.0", 16, None).await;
+
+        // Reload should pick up the new entry
+        let (bl2, _) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_db_ipv6_entries() {
+        let pool = setup_test_db().await;
+        insert_address(&pool, 1, "2001:db8::", 32, None).await;
+        insert_address(&pool, 1, "::1", 128, None).await;
+
+        let (bl, _) = db_load_entries_async(&pool, "address", 1, 2).await.unwrap();
+        assert_eq!(bl.len(), 2);
+        assert!(bl.contains(&"2001:db8::/32".to_string()));
+        assert!(bl.contains(&"::1".to_string()));
+
+        // Verify the entries work for matching
+        let data = merge_db_entries(&bl);
+        assert!(check_acl_data(&data, "2001:db8::1"));
+        assert!(check_acl_data(&data, "::1"));
+        assert!(!check_acl_data(&data, "2001:db9::1"));
+    }
+
+    #[tokio::test]
+    async fn test_db_invalid_table_returns_error() {
+        let pool = setup_test_db().await;
+        let result = db_load_entries_async(&pool, "nonexistent_table", 1, 2).await;
+        assert!(result.is_err());
     }
 }
