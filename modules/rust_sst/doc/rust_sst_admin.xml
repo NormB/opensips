@@ -631,6 +631,23 @@ route[reload] {
 		modified by the module (automatic mode only).
 		</para>
 	</section>
+	<section>
+		<title><varname>sessions_uac_refresher</varname></title>
+		<para>
+		Number of sessions where the UAC was negotiated as the
+		refresher (responsible for sending re-INVITEs or UPDATEs).
+		Incremented at dialog creation based on the initial
+		negotiation result.
+		</para>
+	</section>
+	<section>
+		<title><varname>sessions_uas_refresher</varname></title>
+		<para>
+		Number of sessions where the UAS was negotiated as the
+		refresher. Incremented at dialog creation based on the
+		initial negotiation result.
+		</para>
+	</section>
 	</section>
 
 </chapter>
