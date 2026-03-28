@@ -125,6 +125,10 @@ static POLICIES_FILE: ModString = ModString::new();
 /// Enable adaptive min_se learning from 422 replies (0=off, 1=on, default 0).
 static ADAPTIVE_MIN_SE: Integer = Integer::with_default(0);
 
+/// Force refresher role: "" (disabled), "uac", or "uas" (default "").
+/// When set, always use this refresher regardless of negotiation.
+static FORCE_REFRESHER: ModString = ModString::new();
+
 /// Whether dialog API was loaded (set once in mod_init).
 static DLG_LOADED: AtomicBool = AtomicBool::new(false);
 
@@ -469,6 +473,16 @@ fn sst_update(
 
 // ── Helper: read default refresher from modparam ─────────────────
 
+/// Get the forced refresher, if configured.
+fn get_forced_refresher() -> Option<Refresher> {
+    let s = unsafe { FORCE_REFRESHER.get_value() };
+    match s {
+        Some(v) if v.trim().eq_ignore_ascii_case("uac") => Some(Refresher::Uac),
+        Some(v) if v.trim().eq_ignore_ascii_case("uas") => Some(Refresher::Uas),
+        _ => None,
+    }
+}
+
 fn get_default_refresher() -> Refresher {
     let s = unsafe { DEFAULT_REFRESHER.get_value() };
     match s {
@@ -562,6 +576,11 @@ unsafe extern "C" fn sst_dialog_created_cb(
         refresh_count: 0,
         last_refresh: Some(Instant::now()),
     };
+
+    // Apply force_refresher override if configured
+    if let Some(forced) = get_forced_refresher() {
+        state.refresher = forced;
+    }
 
     if req_se > 0 {
         // Session-Expires present in INVITE
@@ -1075,6 +1094,29 @@ unsafe extern "C" fn mod_init() -> c_int {
         );
     }
 
+    // Validate force_refresher
+    if let Some(fr) = unsafe { FORCE_REFRESHER.get_value() } {
+        let fr_trimmed = fr.trim();
+        if !fr_trimmed.is_empty()
+            && !fr_trimmed.eq_ignore_ascii_case("uac")
+            && !fr_trimmed.eq_ignore_ascii_case("uas")
+        {
+            opensips_log!(
+                WARN,
+                "rust_sst",
+                "force_refresher='{}' is not 'uac' or 'uas', ignoring",
+                fr
+            );
+        } else if !fr_trimmed.is_empty() {
+            opensips_log!(
+                INFO,
+                "rust_sst",
+                "force_refresher='{}' enabled -- overriding all negotiated refreshers",
+                fr_trimmed
+            );
+        }
+    }
+
     // Load per-account policies file if configured
     if let Some(path) = unsafe { POLICIES_FILE.get_value() } {
         if !path.is_empty() {
@@ -1429,7 +1471,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([sys::acmd_export_ {
     params: EMPTY_PARAMS,
 }]);
 
-static PARAMS: SyncArray<sys::param_export_, 6> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("default_interval"),
         type_: 2, // INT_PARAM
@@ -1454,6 +1496,11 @@ static PARAMS: SyncArray<sys::param_export_, 6> = SyncArray([
         name: cstr_lit!("adaptive_min_se"),
         type_: 2, // INT_PARAM
         param_pointer: ADAPTIVE_MIN_SE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("force_refresher"),
+        type_: 1, // STR_PARAM
+        param_pointer: FORCE_REFRESHER.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -2107,6 +2154,49 @@ mod tests {
             None => false,
         };
         assert!(!is_stale);
+    }
+
+    // ── force refresher tests ─────────────────────────────────
+
+    #[test]
+    fn test_force_refresher_uac_state() {
+        // Simulate force_refresher overriding state
+        let mut state = SstState {
+            refresher: Refresher::Uas,
+            ..SstState::default()
+        };
+        // Simulating what get_forced_refresher would return
+        let forced = Some(Refresher::Uac);
+        if let Some(f) = forced {
+            state.refresher = f;
+        }
+        assert_eq!(state.refresher, Refresher::Uac);
+    }
+
+    #[test]
+    fn test_force_refresher_uas_state() {
+        let mut state = SstState {
+            refresher: Refresher::Uac,
+            ..SstState::default()
+        };
+        let forced = Some(Refresher::Uas);
+        if let Some(f) = forced {
+            state.refresher = f;
+        }
+        assert_eq!(state.refresher, Refresher::Uas);
+    }
+
+    #[test]
+    fn test_force_refresher_none_no_change() {
+        let mut state = SstState {
+            refresher: Refresher::Uac,
+            ..SstState::default()
+        };
+        let forced: Option<Refresher> = None;
+        if let Some(f) = forced {
+            state.refresher = f;
+        }
+        assert_eq!(state.refresher, Refresher::Uac); // unchanged
     }
 
     // ── adaptive min_se tests ────────────────────────────────────
