@@ -366,6 +366,34 @@ trunk-1,100,50
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_cooldown_secs" xreflabel="cooldown_secs">
+		<title><varname>cooldown_secs</varname> (integer)</title>
+		<para>
+		Cooldown period in seconds after a limit rejection. When an
+		account hits its concurrent call limit, all subsequent calls
+		from the same account are rejected for this duration without
+		checking the counter.
+		</para>
+		<para>
+		When set to 0 (default), no cooldown is applied. Each call
+		is checked against the counter individually.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cooldown_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Reject all calls for 30 seconds after a limit hit
+modparam("rust_concurrent_calls", "cooldown_secs", 30)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -908,6 +936,14 @@ route {
 		<para>
 		Number of dialogs automatically tracked via dialog callbacks
 		(only incremented when <varname>auto_track</varname> is enabled).
+		</para>
+	</section>
+	<section>
+		<title><varname>cooldown_blocked</varname></title>
+		<para>
+		Number of calls rejected due to an active cooldown period
+		(only incremented when <varname>cooldown_secs</varname> is
+		greater than 0).
 		</para>
 	</section>
 	</section>

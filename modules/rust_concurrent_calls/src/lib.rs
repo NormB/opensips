@@ -109,6 +109,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
+use std::time::Instant;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -132,6 +133,9 @@ static PROFILE_NAME: ModString = ModString::new();
 
 /// Enable per-direction (inbound/outbound) limits (0 = single limit, 1 = direction-aware).
 static DIRECTION_AWARE: Integer = Integer::with_default(0);
+
+/// Cooldown period in seconds after a limit rejection (0 = disabled).
+static COOLDOWN_SECS: Integer = Integer::with_default(0);
 
 // ── Pure logic (testable without FFI) ────────────────────────────
 
@@ -232,6 +236,25 @@ fn check_limit(
     (count < limit, count, limit)
 }
 
+/// Check if an account is in cooldown. Returns true if still cooling down.
+fn is_in_cooldown(cooldowns: &HashMap<String, Instant>, account: &str, cooldown_secs: u64) -> bool {
+    if cooldown_secs == 0 {
+        return false;
+    }
+    match cooldowns.get(account) {
+        Some(expiry) => {
+            let duration = std::time::Duration::from_secs(cooldown_secs);
+            expiry.elapsed() < duration
+        }
+        None => false,
+    }
+}
+
+/// Record a cooldown for an account (called when a limit rejection happens).
+fn set_cooldown(cooldowns: &mut HashMap<String, Instant>, account: &str) {
+    cooldowns.insert(account.to_string(), Instant::now());
+}
+
 /// Resolve the effective limit for an account, considering live overrides.
 fn effective_limit(
     limits: &HashMap<String, u32>,
@@ -309,6 +332,8 @@ struct WorkerState {
     direction_loader: Option<FileLoader<HashMap<String, DirectionLimits>>>,
     // Live limit overrides (Task 42) — persist until reload or restart
     limit_overrides: HashMap<String, u32>,
+    // Cooldown tracking (Task 43) — per-account cooldown expiry
+    cooldowns: HashMap<String, Instant>,
 }
 
 thread_local! {
@@ -487,7 +512,9 @@ unsafe extern "C" fn mod_init() -> c_int {
     opensips_log!(INFO, "rust_concurrent_calls", "  account_var={}", account_var);
 
     let direction_aware = DIRECTION_AWARE.get();
+    let cooldown = COOLDOWN_SECS.get();
     opensips_log!(INFO, "rust_concurrent_calls", "  direction_aware={}", direction_aware);
+    opensips_log!(INFO, "rust_concurrent_calls", "  cooldown_secs={}", cooldown);
 
     let use_profiles = USE_DIALOG_PROFILES.get();
     let profile_name = unsafe { PROFILE_NAME.get_value() }
@@ -521,7 +548,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
 
     let stats = Stats::new("rust_concurrent_calls",
         &["checked", "allowed", "blocked", "incremented", "decremented",
-          "accounts", "reloads", "auto_tracked"]);
+          "accounts", "reloads", "auto_tracked", "cooldown_blocked"]);
     stats.set("accounts", entry_count as u64);
 
     // Load direction-aware limits if enabled
@@ -549,6 +576,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             outbound_counts: HashMap::with_capacity(256),
             direction_loader,
             limit_overrides: HashMap::new(),
+            cooldowns: HashMap::new(),
         });
     });
 
@@ -590,6 +618,21 @@ unsafe extern "C" fn w_check_concurrent(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+
+                    // Check cooldown first (Task 43)
+                    let cooldown_secs = COOLDOWN_SECS.get();
+                    if cooldown_secs > 0 && is_in_cooldown(&state.cooldowns, account, cooldown_secs as u64) {
+                        state.stats.inc("blocked");
+                        state.stats.inc("cooldown_blocked");
+                        opensips_log!(DBG, "rust_concurrent_calls",
+                            "account {} in cooldown period", account);
+                        let mut sip_msg = unsafe {
+                            opensips_rs::SipMessage::from_raw(msg)
+                        };
+                        let _ = sip_msg.set_pv_int("$var(concurrent_count)", -1);
+                        let _ = sip_msg.set_pv_int("$var(concurrent_limit)", 0);
+                        return -1;
+                    }
 
                     let limits = state.loader.get();
                     let default = DEFAULT_LIMIT.get() as u32;
@@ -1089,7 +1132,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
     },
 ]);
 
-static PARAMS: SyncArray<sys::param_export_, 8> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 9> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("limits_file"),
         type_: 1, // STR_PARAM
@@ -1124,6 +1167,11 @@ static PARAMS: SyncArray<sys::param_export_, 8> = SyncArray([
         name: cstr_lit!("direction_aware"),
         type_: 2, // INT_PARAM
         param_pointer: DIRECTION_AWARE.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("cooldown_secs"),
+        type_: 2, // INT_PARAM
+        param_pointer: COOLDOWN_SECS.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1732,6 +1780,78 @@ mod tests {
         // Profile check says blocked (5 >= 5)
         let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
         assert!(!profile_allowed);
+    }
+
+    // ── Cooldown tests (Task 43) ─────────────────────────────────
+
+    #[test]
+    fn test_cooldown_disabled() {
+        let cooldowns = HashMap::new();
+        assert!(!is_in_cooldown(&cooldowns, "alice", 0));
+    }
+
+    #[test]
+    fn test_cooldown_not_set() {
+        let cooldowns = HashMap::new();
+        assert!(!is_in_cooldown(&cooldowns, "alice", 30));
+    }
+
+    #[test]
+    fn test_cooldown_active() {
+        let mut cooldowns = HashMap::new();
+        set_cooldown(&mut cooldowns, "alice");
+        // Just set, should still be in cooldown
+        assert!(is_in_cooldown(&cooldowns, "alice", 30));
+    }
+
+    #[test]
+    fn test_cooldown_expired() {
+        let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+        // Insert a cooldown that started 2 seconds ago
+        cooldowns.insert("alice".to_string(), Instant::now() - std::time::Duration::from_secs(2));
+        // With 1-second cooldown, it should be expired
+        assert!(!is_in_cooldown(&cooldowns, "alice", 1));
+    }
+
+    #[test]
+    fn test_cooldown_per_account() {
+        let mut cooldowns = HashMap::new();
+        set_cooldown(&mut cooldowns, "alice");
+        assert!(is_in_cooldown(&cooldowns, "alice", 30));
+        assert!(!is_in_cooldown(&cooldowns, "bob", 30));
+    }
+
+    #[test]
+    fn test_cooldown_set_overwrites() {
+        let mut cooldowns = HashMap::new();
+        set_cooldown(&mut cooldowns, "alice");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        set_cooldown(&mut cooldowns, "alice"); // reset
+        // Should still be in cooldown
+        assert!(is_in_cooldown(&cooldowns, "alice", 30));
+    }
+
+    #[test]
+    fn test_cooldown_integration_with_limits() {
+        let mut counts = HashMap::new();
+        let mut limits = HashMap::new();
+        limits.insert("alice".to_string(), 2);
+        let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+
+        // First two calls allowed
+        increment(&mut counts, "alice");
+        increment(&mut counts, "alice");
+
+        // Third blocked (at limit)
+        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
+        assert!(!allowed);
+
+        // Set cooldown
+        set_cooldown(&mut cooldowns, "alice");
+
+        // Even after decrement, cooldown blocks
+        decrement(&mut counts, "alice");
+        assert!(is_in_cooldown(&cooldowns, "alice", 30));
     }
 
     // ── MI status and limit override tests (Task 42) ────────────
