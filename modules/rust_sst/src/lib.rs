@@ -105,6 +105,7 @@ use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ impl Refresher {
 }
 
 /// Per-dialog SST state, stored in the DialogTracker.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct SstState {
     requester: SstRequester,
     supported: SstSupported,
@@ -174,6 +175,22 @@ struct SstState {
     min_se: u32,
     refresher: Refresher,
     refresh_count: u32,
+    /// Timestamp of last refresh (re-INVITE/UPDATE), or dialog creation if none.
+    last_refresh: Option<Instant>,
+}
+
+impl Default for SstState {
+    fn default() -> Self {
+        SstState {
+            requester: SstRequester::default(),
+            supported: SstSupported::default(),
+            interval: 0,
+            min_se: 0,
+            refresher: Refresher::default(),
+            refresh_count: 0,
+            last_refresh: None,
+        }
+    }
 }
 
 // ── Thread-local state ───────────────────────────────────────────
@@ -270,6 +287,7 @@ thread_local! {
         "sessions_expired",
         "422_sent",
         "headers_inserted",
+        "stale_sessions",
     ]);
     static POLICIES: RefCell<Option<FileLoader<HashMap<String, AccountPolicy>>>> = RefCell::new(None);
 }
@@ -467,6 +485,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
         min_se: std::cmp::max(req_min_se, our_min_se),
         refresher: req_refresher.unwrap_or_else(get_default_refresher),
         refresh_count: 0,
+        last_refresh: Some(Instant::now()),
     };
 
     if req_se > 0 {
@@ -808,6 +827,7 @@ unsafe extern "C" fn sst_dialog_request_within_cb(
                         s.interval = new_interval;
                         s.supported = if has_timer { SstSupported::Uac } else { SstSupported::Undefined };
                         s.refresh_count += 1;
+                        s.last_refresh = Some(Instant::now());
                     });
                 });
 
@@ -861,6 +881,39 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
 
     let was_expired = type_ as u32 == dialog::DLGCB_EXPIRED;
 
+    // Check for stale session before removing state
+    let is_stale = TRACKER.with(|t| {
+        t.with_state_ref(&callid, |s| {
+            if let Some(last) = s.last_refresh {
+                let since_refresh = last.elapsed().as_secs() as u32;
+                // Stale if the session should have been refreshed but wasn't
+                since_refresh > s.interval && s.interval > 0
+            } else {
+                false
+            }
+        }).unwrap_or(false)
+    });
+
+    if is_stale || was_expired {
+        let (interval, since_refresh) = TRACKER.with(|t| {
+            t.with_state_ref(&callid, |s| {
+                let since = s.last_refresh.map_or(0, |t| t.elapsed().as_secs() as u32);
+                (s.interval, since)
+            }).unwrap_or((0, 0))
+        });
+        if is_stale {
+            opensips_log!(
+                WARN,
+                "rust_sst",
+                "stale session detected: callid={}, interval={}, since_last_refresh={}s",
+                callid,
+                interval,
+                since_refresh
+            );
+            SST_STATS.with(|s| s.inc("stale_sessions"));
+        }
+    }
+
     TRACKER.with(|t| {
         t.on_terminated(&callid);
     });
@@ -876,9 +929,10 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
     opensips_log!(
         DBG,
         "rust_sst",
-        "TERMINATED: callid={}, expired={}",
+        "TERMINATED: callid={}, expired={}, stale={}",
         callid,
-        was_expired
+        was_expired,
+        is_stale
     );
 }
 
@@ -1910,6 +1964,66 @@ mod tests {
         let json = build_sst_status_json();
         assert!(json.starts_with('['));
         assert!(json.ends_with(']'));
+    }
+
+    // ── stale session detection tests ───────────────────────────
+
+    #[test]
+    fn test_sst_state_last_refresh_default() {
+        let state = SstState::default();
+        assert!(state.last_refresh.is_none());
+    }
+
+    #[test]
+    fn test_stale_detection_not_stale() {
+        // Session refreshed recently, interval=1800 => not stale
+        let state = SstState {
+            interval: 1800,
+            last_refresh: Some(Instant::now()),
+            ..SstState::default()
+        };
+        let since = state.last_refresh.unwrap().elapsed().as_secs() as u32;
+        let is_stale = since > state.interval && state.interval > 0;
+        assert!(!is_stale);
+    }
+
+    #[test]
+    fn test_stale_detection_stale() {
+        // Session with interval=0 => not stale (interval=0 means no timer)
+        let state = SstState {
+            interval: 0,
+            last_refresh: Some(Instant::now() - std::time::Duration::from_secs(100)),
+            ..SstState::default()
+        };
+        let since = state.last_refresh.unwrap().elapsed().as_secs() as u32;
+        let is_stale = since > state.interval && state.interval > 0;
+        assert!(!is_stale);
+    }
+
+    #[test]
+    fn test_stale_detection_no_refresh() {
+        let state = SstState::default();
+        let is_stale = match state.last_refresh {
+            Some(t) => t.elapsed().as_secs() as u32 > state.interval && state.interval > 0,
+            None => false,
+        };
+        assert!(!is_stale);
+    }
+
+    #[test]
+    fn test_stale_sessions_stat() {
+        let stats = Stats::new("test_stale", &[
+            "sessions_active",
+            "sessions_expired",
+            "422_sent",
+            "headers_inserted",
+            "stale_sessions",
+        ]);
+        stats.inc("stale_sessions");
+        stats.inc("stale_sessions");
+        assert_eq!(stats.get("stale_sessions"), 2);
+        let json = stats.to_json();
+        assert!(json.contains(r#""stale_sessions":2"#));
     }
 
     #[test]
