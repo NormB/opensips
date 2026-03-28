@@ -613,6 +613,17 @@ route[reload] {
 		(script mode).
 		</para>
 	</section>
+
+	<section>
+		<title><varname>stale_sessions</varname></title>
+		<para>
+		Number of sessions detected as stale at termination time.
+		A session is considered stale when the time since the last
+		refresh (re-INVITE or UPDATE) exceeds the negotiated
+		Session-Expires interval, indicating the refreshing endpoint
+		failed to send timely refreshes.
+		</para>
+	</section>
 	<section>
 		<title><varname>headers_inserted</varname></title>
 		<para>
