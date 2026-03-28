@@ -72,6 +72,7 @@ use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
+use rust_common::glob;
 use rust_common::mi::Stats;
 
 use std::cell::RefCell;
@@ -192,49 +193,11 @@ fn check_transfer_target(refer_to: &str, allowed_patterns: &[String]) -> bool {
         return true; // No restrictions
     }
     for pattern in allowed_patterns {
-        if glob_match(pattern, refer_to) {
+        if glob::glob_match(pattern, refer_to) {
             return true;
         }
     }
     false
-}
-
-/// Simple glob matching: '*' matches zero or more characters.
-/// Case-insensitive for SIP URIs.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let text = text.to_ascii_lowercase();
-    glob_match_inner(pattern.as_bytes(), text.as_bytes())
-}
-
-fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if pi < pattern.len() && (pattern[pi] == text[ti] || pattern[pi] == b'?') {
-            pi += 1;
-            ti += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
 }
 
 /// Parse comma-separated allowed target patterns.
@@ -1283,6 +1246,28 @@ unsafe extern "C" fn w_rust_refer_stats(
     })
 }
 
+// ── Script function: refer_handler_prometheus() ──
+
+unsafe extern "C" fn w_rust_refer_prometheus(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let prom = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_prometheus(),
+                None => String::new(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(refer_prom)", &prom);
+        1
+    })
+}
+
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -1304,7 +1289,7 @@ const TWO_PARAMS_STR_STR: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 8> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 9> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("handle_refer"),
         function: Some(w_rust_handle_refer),
@@ -1344,6 +1329,12 @@ static CMDS: SyncArray<sys::cmd_export_, 8> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("refer_stats"),
         function: Some(w_rust_refer_stats),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("refer_prometheus"),
+        function: Some(w_rust_refer_prometheus),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
@@ -1628,7 +1619,6 @@ mod tests {
 
     #[test]
     fn test_refer_stats_json() {
-        use rust_common::mi::Stats;
         let stats = Stats::new("rust_refer_handler",
             &["active_transfers", "completed", "failed", "expired", "unknown_notify"]);
         stats.set("active_transfers", 5);
@@ -1847,37 +1837,37 @@ mod tests {
 
     #[test]
     fn test_glob_match_exact() {
-        assert!(glob_match("sip:bob@example.com", "sip:bob@example.com"));
-        assert!(!glob_match("sip:bob@example.com", "sip:alice@example.com"));
+        assert!(glob::glob_match("sip:bob@example.com", "sip:bob@example.com"));
+        assert!(!glob::glob_match("sip:bob@example.com", "sip:alice@example.com"));
     }
 
     #[test]
     fn test_glob_match_wildcard() {
-        assert!(glob_match("sip:*@example.com", "sip:bob@example.com"));
-        assert!(glob_match("sip:*@example.com", "sip:alice@example.com"));
-        assert!(!glob_match("sip:*@example.com", "sip:bob@other.com"));
+        assert!(glob::glob_match("sip:*@example.com", "sip:bob@example.com"));
+        assert!(glob::glob_match("sip:*@example.com", "sip:alice@example.com"));
+        assert!(!glob::glob_match("sip:*@example.com", "sip:bob@other.com"));
     }
 
     #[test]
     fn test_glob_match_prefix_wildcard() {
-        assert!(glob_match("sip:+1*@pbx.local", "sip:+12125551234@pbx.local"));
-        assert!(!glob_match("sip:+1*@pbx.local", "sip:+442071234567@pbx.local"));
+        assert!(glob::glob_match("sip:+1*@pbx.local", "sip:+12125551234@pbx.local"));
+        assert!(!glob::glob_match("sip:+1*@pbx.local", "sip:+442071234567@pbx.local"));
     }
 
     #[test]
     fn test_glob_match_case_insensitive() {
-        assert!(glob_match("SIP:*@EXAMPLE.COM", "sip:bob@example.com"));
+        assert!(glob::glob_match("SIP:*@EXAMPLE.COM", "sip:bob@example.com"));
     }
 
     #[test]
     fn test_glob_match_question_mark() {
-        assert!(glob_match("sip:bo?@example.com", "sip:bob@example.com"));
-        assert!(!glob_match("sip:bo?@example.com", "sip:bobby@example.com"));
+        assert!(glob::glob_match("sip:bo?@example.com", "sip:bob@example.com"));
+        assert!(!glob::glob_match("sip:bo?@example.com", "sip:bobby@example.com"));
     }
 
     #[test]
     fn test_glob_match_star_matches_empty() {
-        assert!(glob_match("sip:*@example.com", "sip:@example.com"));
+        assert!(glob::glob_match("sip:*@example.com", "sip:@example.com"));
     }
 
     #[test]

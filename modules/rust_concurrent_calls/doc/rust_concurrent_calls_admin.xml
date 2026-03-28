@@ -969,6 +969,38 @@ route {
 </programlisting>
 		</example>
 	</section>
+
+	<section id="func_concurrent_prometheus" xreflabel="concurrent_prometheus()">
+		<title>
+		<function moreinfo="none">concurrent_prometheus()</function>
+		</title>
+		<para>
+		Retrieve module statistics in Prometheus text exposition format.
+		Sets <literal>$var(concurrent_prom)</literal> with a multi-line string
+		containing all counters formatted with <literal># HELP</literal>,
+		<literal># TYPE</literal>, and metric value lines suitable for
+		scraping by a Prometheus server.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_prometheus</function> usage</title>
+		<programlisting format="linespecific">
+...
+concurrent_prometheus();
+# $var(concurrent_prom) now contains Prometheus text format
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
@@ -1015,6 +1047,13 @@ route {
 		JSON string containing the module statistics for the current
 		worker process. Set by
 		<function>concurrent_stats()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_prom)</title>
+		<para>
+		Prometheus text exposition format string containing all module
+		statistics. Set by <function>concurrent_prometheus()</function>.
 		</para>
 	</section>
 	</section>

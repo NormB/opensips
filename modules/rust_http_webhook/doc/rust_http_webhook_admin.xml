@@ -618,6 +618,40 @@ route {
 </programlisting>
 		</example>
 	</section>
+
+	<section id="func_webhook_prometheus" xreflabel="webhook_prometheus()">
+		<title>
+		<function moreinfo="none">webhook_prometheus()</function>
+		</title>
+		<para>
+		Retrieve module statistics in Prometheus text exposition format.
+		Sets <literal>$var(webhook_prom)</literal> with a multi-line
+		string containing all counters formatted with
+		<literal># HELP</literal>, <literal># TYPE</literal>, and
+		metric value lines suitable for scraping by a Prometheus server.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>webhook_prometheus</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    webhook_prometheus();
+    # $var(webhook_prom) now contains Prometheus text format
+}
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
@@ -628,6 +662,14 @@ route {
 		JSON string containing the module statistics for the current
 		worker process. Set by
 		<function>webhook_stats()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(webhook_prom)</title>
+		<para>
+		Prometheus text exposition format string containing all module
+		statistics. Set by
+		<function>webhook_prometheus()</function>.
 		</para>
 	</section>
 	</section>

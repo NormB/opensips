@@ -1211,6 +1211,28 @@ unsafe extern "C" fn w_rust_credit_stats(
     })
 }
 
+// ── Script function: credit_check_prometheus() ──
+
+unsafe extern "C" fn w_rust_credit_prometheus(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let prom = WORKER.with(|w| {
+            let borrow = w.borrow();
+            match borrow.as_ref() {
+                Some(state) => state.stats.to_prometheus(),
+                None => String::new(),
+            }
+        });
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+        let _ = sip_msg.set_pv("$var(credit_prom)", &prom);
+        1
+    })
+}
+
+
 // ── Static arrays for module registration ────────────────────────
 
 const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
@@ -1239,7 +1261,7 @@ const STR_INT_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 10> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 11> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("credit_check"),
         function: Some(w_rust_credit_check),
@@ -1287,6 +1309,12 @@ static CMDS: SyncArray<sys::cmd_export_, 10> = SyncArray([
         function: Some(w_rust_credit_stats),
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4,
+    },
+    sys::cmd_export_ {
+        name: cstr_lit!("credit_prometheus"),
+        function: Some(w_rust_credit_prometheus),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
     // Null terminator
     sys::cmd_export_ {
@@ -1921,8 +1949,6 @@ mod tests {
 
     #[test]
     fn test_credit_stats_json() {
-        use rust_common::event;
-use rust_common::mi::Stats;
         let stats = Stats::new("rust_credit_check",
             &["checked", "allowed", "denied", "errors", "cache_hits", "cache_misses"]);
         stats.inc("checked");
