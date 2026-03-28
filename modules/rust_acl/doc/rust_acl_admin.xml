@@ -82,6 +82,109 @@
 	</para>
 	</section>
 
+	<section id="database_integration" xreflabel="Database Integration">
+	<title>Database Integration</title>
+	<para>
+		The module optionally supports loading ACL entries directly
+		from a database, using the same <literal>address</literal>
+		table schema as the OpenSIPS <emphasis>permissions</emphasis>
+		module. This allows sharing a single address table between
+		<emphasis>permissions</emphasis> and
+		<emphasis>rust_acl</emphasis>, or managing blocklist/allowlist
+		entries via SQL instead of flat files.
+	</para>
+	<para>
+		Database support requires the <literal>database</literal>
+		Cargo feature flag at compile time:
+	</para>
+	<programlisting format="linespecific">
+# Without database support (default, smaller binary ~300KB .so):
+cargo build --release -p rust-acl
+
+# With database support (PostgreSQL, MySQL, SQLite ~3MB .so):
+cargo build --release -p rust-acl --features database
+</programlisting>
+	<para>
+		When compiled without the <literal>database</literal> feature,
+		the <varname>db_url</varname> parameter is still accepted in
+		the configuration (so configs are portable) but a warning is
+		logged and no database connection is made.
+	</para>
+	<para>
+		Database entries are loaded at worker startup and merged with
+		file-based entries. Both sources contribute to the same
+		in-memory ACL that <function>check_access()</function> and
+		other check functions query. The
+		<varname>db_blocklist_group</varname> and
+		<varname>db_allowlist_group</varname> parameters control
+		which <literal>grp</literal> column values map to blocklist
+		and allowlist entries, respectively.
+	</para>
+	<section>
+		<title>Address Table Schema</title>
+		<para>
+		The expected table schema (compatible with
+		<emphasis>permissions</emphasis> module):
+		</para>
+		<programlisting format="linespecific">
+CREATE TABLE address (
+    id INTEGER PRIMARY KEY,
+    grp INTEGER DEFAULT 0 NOT NULL,
+    ip VARCHAR(50) NOT NULL,
+    mask INTEGER DEFAULT 32 NOT NULL,
+    port INTEGER DEFAULT 0 NOT NULL,
+    proto VARCHAR(4) DEFAULT 'any' NOT NULL,
+    pattern VARCHAR(64) DEFAULT NULL,
+    context_info VARCHAR(32) DEFAULT NULL
+);
+</programlisting>
+		<para>
+		Entry type is auto-detected from the row data:
+		<itemizedlist>
+		<listitem><para>
+			<literal>mask &lt; 32</literal> (IPv4) or
+			<literal>mask &lt; 128</literal> (IPv6): CIDR range entry
+		</para></listitem>
+		<listitem><para>
+			<literal>pattern</literal> is set: regex entry
+			(the pattern column value is compiled as a regex)
+		</para></listitem>
+		<listitem><para>
+			<literal>mask = 32/128</literal> and no pattern: exact IP match
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>Example Configuration</title>
+		<example>
+		<title>Database integration with PostgreSQL</title>
+		<programlisting format="linespecific">
+loadmodule "rust_acl.so"
+
+# File-based blocklist (always required)
+modparam("rust_acl", "blocklist_file", "/etc/opensips/blocklist.txt")
+modparam("rust_acl", "match_mode", "auto")
+
+# Database integration
+modparam("rust_acl", "db_url", "postgres://opensips:pass@localhost/opensips")
+modparam("rust_acl", "db_table", "address")
+modparam("rust_acl", "db_blocklist_group", 1)
+modparam("rust_acl", "db_allowlist_group", 2)
+modparam("rust_acl", "db_reload_interval", 60)
+
+route {
+    if (check_access("$si") == -1) {
+        sl_send_reply(403, "Forbidden");
+        exit;
+    }
+    ...
+}
+</programlisting>
+		</example>
+	</section>
+	</section>
+
 	<section id="dependencies" xreflabel="Dependencies">
 	<title>Dependencies</title>
 	<section>
@@ -460,6 +563,154 @@ modparam("rust_acl", "access_policy", "blocklist-first")
 		<programlisting format="linespecific">
 ...
 modparam("rust_acl", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_db_url" xreflabel="db_url">
+		<title><varname>db_url</varname> (string)</title>
+		<para>
+		Database connection URL for loading ACL entries from the
+		OpenSIPS <literal>address</literal> table. The driver is
+		auto-detected from the URL scheme:
+		<literal>postgres://</literal>,
+		<literal>mysql://</literal>, or
+		<literal>sqlite://</literal>.
+		</para>
+		<para>
+		Requires the module to be compiled with the
+		<literal>database</literal> Cargo feature. Without it, this
+		parameter is accepted but ignored with a warning.
+		</para>
+		<para>
+		When set, database entries are loaded at worker startup and
+		merged with file-based entries. Both sources contribute to
+		the same in-memory ACL. Database entries use auto-detection
+		mode (CIDR, regex, or exact) regardless of the
+		<varname>match_mode</varname> setting.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (disabled, file-only mode).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>db_url</varname> parameter (PostgreSQL)</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_url", "postgres://opensips:password@localhost/opensips")
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Set <varname>db_url</varname> parameter (MySQL)</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_url", "mysql://opensips:password@localhost/opensips")
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Set <varname>db_url</varname> parameter (SQLite)</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_url", "sqlite:///etc/opensips/acl.db")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_db_table" xreflabel="db_table">
+		<title><varname>db_table</varname> (string)</title>
+		<para>
+		Name of the database table to query. Must have the same
+		schema as the OpenSIPS <literal>address</literal> table
+		(columns: <literal>grp</literal>, <literal>ip</literal>,
+		<literal>mask</literal>, <literal>port</literal>,
+		<literal>proto</literal>, <literal>pattern</literal>,
+		<literal>context_info</literal>).
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>address</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>db_table</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_table", "acl_entries")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_db_reload_interval" xreflabel="db_reload_interval">
+		<title><varname>db_reload_interval</varname> (integer)</title>
+		<para>
+		Seconds between automatic database reloads. When set to a
+		value greater than 0, each worker process periodically
+		re-queries the database and atomically swaps the in-memory
+		ACL data. Set to 0 to load once at startup with no periodic
+		refresh (use <function>acl_db_reload()</function> for manual
+		refresh).
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (load once, no periodic refresh).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>db_reload_interval</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Reload from database every 60 seconds
+modparam("rust_acl", "db_reload_interval", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_db_blocklist_group" xreflabel="db_blocklist_group">
+		<title><varname>db_blocklist_group</varname> (integer)</title>
+		<para>
+		The <literal>grp</literal> column value that identifies
+		blocklist entries in the address table. Rows with this group
+		ID are loaded into the blocklist.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>db_blocklist_group</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_blocklist_group", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_db_allowlist_group" xreflabel="db_allowlist_group">
+		<title><varname>db_allowlist_group</varname> (integer)</title>
+		<para>
+		The <literal>grp</literal> column value that identifies
+		allowlist entries in the address table. Rows with this group
+		ID are loaded into the allowlist.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>2</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>db_allowlist_group</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_acl", "db_allowlist_group", 10)
 ...
 </programlisting>
 		</example>
@@ -869,6 +1120,34 @@ access_prometheus();
 # # TYPE rust_acl_checked counter
 # rust_acl_checked 12345
 # ...
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_acl_db_reload" xreflabel="acl_db_reload()">
+		<title>
+		<function moreinfo="none">acl_db_reload()</function>
+		</title>
+		<para>
+		Manually trigger a reload of ACL entries from the database.
+		Re-queries the address table and atomically swaps the
+		in-memory database ACL data. File-based entries are not
+		affected. Requires <varname>db_url</varname> to be configured
+		and the <literal>database</literal> feature to be compiled in.
+		</para>
+		<para>
+		This is useful for on-demand refresh after modifying the
+		address table, without waiting for the periodic reload
+		interval.
+		</para>
+		<example>
+		<title><function>acl_db_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (acl_db_reload()) {
+    xlog("L_INFO", "Database ACL reloaded\n");
+}
 ...
 </programlisting>
 		</example>
