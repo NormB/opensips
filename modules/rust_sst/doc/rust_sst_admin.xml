@@ -238,6 +238,50 @@ modparam("rust_sst", "default_refresher", "uac")
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_policies_file" xreflabel="policies_file">
+		<title><varname>policies_file</varname> (string)</title>
+		<para>
+		Path to a CSV file containing per-account timer policy
+		overrides. When set, <function>sst_check()</function> looks up
+		the account from <literal>$fU</literal> and uses the
+		per-account interval, min_se, and refresher instead of the
+		module defaults.
+		</para>
+		<para>
+		The file format is one entry per line:
+		<literal>account,interval,min_se,refresher</literal>.
+		Lines starting with <literal>#</literal> are comments.
+		Blank lines are ignored. The interval and min_se are clamped
+		to a minimum of 90 per RFC 4028.
+		</para>
+		<para>
+		The file is loaded at startup and can be reloaded at runtime
+		using <function>sst_reload()</function>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote></quote> (not set, disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>policies_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_sst", "policies_file", "/etc/opensips/sst_policies.csv")
+...
+</programlisting>
+		</example>
+		<example>
+		<title>policies_file format</title>
+		<programlisting format="linespecific">
+# account,interval,min_se,refresher
+alice,1800,90,uac
+bob,3600,120,uas
+sip_trunk_1,900,90,uac
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -396,6 +440,49 @@ route {
 </programlisting>
 		</example>
 	</section>
+
+	<section id="func_sst_reload" xreflabel="sst_reload()">
+		<title>
+		<function moreinfo="none">sst_reload()</function>
+		</title>
+		<para>
+		Reload the per-account timer policies from the file specified
+		by <varname>policies_file</varname>. The reload is atomic:
+		readers see either the old or the new data, never a partial
+		state.
+		</para>
+		<para>
+		On success, sets <literal>$var(sst_reload_count)</literal> to
+		the number of policy entries loaded.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis> -- reload succeeded.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis> -- reload failed (file
+			read error or no policies_file configured).
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>sst_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[reload] {
+    if (sst_reload()) {
+        xlog("L_INFO", "SST policies reloaded: $var(sst_reload_count) entries\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	</section>
 
 	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
@@ -441,6 +528,14 @@ route {
 		<para>
 		JSON string containing the module statistics for the current
 		worker process. Set by <function>sst_stats()</function>.
+		</para>
+	</section>
+
+	<section>
+		<title>$var(sst_reload_count)</title>
+		<para>
+		The number of per-account policy entries loaded after a
+		successful <function>sst_reload()</function> call.
 		</para>
 	</section>
 	</section>

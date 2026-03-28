@@ -98,8 +98,10 @@ use opensips_rs::{cstr_lit, opensips_log};
 
 use rust_common::dialog::{self, DialogTracker};
 use rust_common::mi::Stats;
+use rust_common::reload::FileLoader;
 
-
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,6 +116,10 @@ static DEFAULT_MIN_SE: Integer = Integer::with_default(90);
 
 /// Default refresher role: "uac" or "uas" (default "uas").
 static DEFAULT_REFRESHER: ModString = ModString::new();
+
+/// Path to per-account timer policies file (optional, CSV).
+/// Format: account,interval,min_se,refresher
+static POLICIES_FILE: ModString = ModString::new();
 
 /// Whether dialog API was loaded (set once in mod_init).
 static DLG_LOADED: AtomicBool = AtomicBool::new(false);
@@ -171,6 +177,62 @@ struct SstState {
 
 // ── Thread-local state ───────────────────────────────────────────
 
+/// Per-account timer policy override.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct AccountPolicy {
+    interval: u32,
+    min_se: u32,
+    refresher: Refresher,
+}
+
+/// Parse a policies CSV line: "account,interval,min_se,refresher"
+fn parse_policy_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(',').collect();
+    if parts.len() >= 4 {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+/// Build a HashMap<String, AccountPolicy> from parsed CSV lines.
+fn build_policies(entries: Vec<String>) -> HashMap<String, AccountPolicy> {
+    let mut map = HashMap::new();
+    for line in &entries {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 4 {
+            let account = parts[0].trim().to_string();
+            let interval = parts[1].trim().parse::<u32>().unwrap_or(0);
+            let min_se = parts[2].trim().parse::<u32>().unwrap_or(0);
+            let refresher = parse_refresher(parts[3].trim());
+            if !account.is_empty() && interval > 0 {
+                map.insert(account, AccountPolicy {
+                    interval: std::cmp::max(interval, 90),
+                    min_se: std::cmp::max(min_se, 90),
+                    refresher,
+                });
+            }
+        }
+    }
+    map
+}
+
+/// Look up per-account policy by account name.
+fn lookup_policy(account: &str) -> Option<AccountPolicy> {
+    POLICIES.with(|p| {
+        let loader = p.borrow();
+        loader.as_ref().and_then(|l| {
+            let data = l.get();
+            data.get(account).cloned()
+        })
+    })
+}
+
 thread_local! {
     static TRACKER: DialogTracker<SstState> = DialogTracker::new(7200);
     static SST_STATS: Stats = Stats::new("rust_sst", &[
@@ -179,6 +241,7 @@ thread_local! {
         "422_sent",
         "headers_inserted",
     ]);
+    static POLICIES: RefCell<Option<FileLoader<HashMap<String, AccountPolicy>>>> = RefCell::new(None);
 }
 
 // ── Pure logic (testable without FFI) ────────────────────────────
@@ -832,6 +895,25 @@ unsafe extern "C" fn mod_init() -> c_int {
         );
     }
 
+    // Load per-account policies file if configured
+    if let Some(path) = unsafe { POLICIES_FILE.get_value() } {
+        if !path.is_empty() {
+            match FileLoader::new(path, parse_policy_line, build_policies) {
+                Ok(loader) => {
+                    let count = loader.get().len();
+                    POLICIES.with(|p| {
+                        *p.borrow_mut() = Some(loader);
+                    });
+                    opensips_log!(INFO, "rust_sst", "loaded {} per-account policies from {}", count, path);
+                }
+                Err(e) => {
+                    opensips_log!(ERR, "rust_sst", "failed to load policies_file '{}': {}", path, e);
+                    return -1;
+                }
+            }
+        }
+    }
+
     // Try to load dialog API for automatic mode
     match dialog::load_api() {
         Ok(()) => {
@@ -906,19 +988,27 @@ unsafe extern "C" fn w_rust_sst_check(
             None => 0,
         };
 
+        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+
+        // Look up per-account policy from $fU
+        let account = sip_msg.pv("$fU").unwrap_or_default();
+        let policy = if !account.is_empty() { lookup_policy(&account) } else { None };
+
         let our_min_se = if param_min_se > 0 {
             param_min_se
+        } else if let Some(ref pol) = policy {
+            pol.min_se
         } else {
             get_our_min_se()
         };
 
         let requested_interval = if param_interval > 0 {
             param_interval
+        } else if let Some(ref pol) = policy {
+            pol.interval
         } else {
             0
         };
-
-        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
         let se_header = sip_msg.header("Session-Expires");
         let (req_interval, req_min_se, req_refresher) = match &se_header {
             Some(hval) => match parse_session_expires(hval) {
@@ -1027,6 +1117,39 @@ unsafe extern "C" fn w_rust_sst_update(
 }
 
 
+// ── Script function: sst_reload() ────────────────────────────
+
+unsafe extern "C" fn w_rust_sst_reload(
+    msg: *mut sys::sip_msg,
+    _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
+        let result = POLICIES.with(|p| {
+            let loader = p.borrow();
+            match loader.as_ref() {
+                Some(l) => match l.reload() {
+                    Ok(count) => {
+                        opensips_log!(INFO, "rust_sst", "reloaded {} per-account policies", count);
+                        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
+                        let _ = sip_msg.set_pv("$var(sst_reload_count)", &count.to_string());
+                        1
+                    }
+                    Err(e) => {
+                        opensips_log!(ERR, "rust_sst", "policies reload failed: {}", e);
+                        -1
+                    }
+                },
+                None => {
+                    opensips_log!(WARN, "rust_sst", "no policies_file configured, nothing to reload");
+                    -1
+                }
+            }
+        });
+        result
+    })
+}
+
 // ── Script function: sst_stats() ────────────────────────────
 
 unsafe extern "C" fn w_rust_sst_stats(
@@ -1065,7 +1188,7 @@ const THREE_STR_PARAMS: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
-static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 5> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("sst_check"),
         function: Some(w_rust_sst_check),
@@ -1084,6 +1207,12 @@ static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
         params: EMPTY_PARAMS,
         flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
     },
+    sys::cmd_export_ {
+        name: cstr_lit!("sst_reload"),
+        function: Some(w_rust_sst_reload),
+        params: EMPTY_PARAMS,
+        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+    },
     // Null terminator
     sys::cmd_export_ {
         name: ptr::null(),
@@ -1099,7 +1228,7 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([sys::acmd_export_ {
     params: EMPTY_PARAMS,
 }]);
 
-static PARAMS: SyncArray<sys::param_export_, 4> = SyncArray([
+static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("default_interval"),
         type_: 2, // INT_PARAM
@@ -1114,6 +1243,11 @@ static PARAMS: SyncArray<sys::param_export_, 4> = SyncArray([
         name: cstr_lit!("default_refresher"),
         type_: 1, // STR_PARAM
         param_pointer: DEFAULT_REFRESHER.as_ptr(),
+    },
+    sys::param_export_ {
+        name: cstr_lit!("policies_file"),
+        type_: 1, // STR_PARAM
+        param_pointer: POLICIES_FILE.as_ptr(),
     },
     // Null terminator
     sys::param_export_ {
@@ -1588,6 +1722,102 @@ mod tests {
         let (se, min) = sst_update(0, 0, &Refresher::Uas, 1800, 90);
         assert_eq!(se, "1800;refresher=uas");
         assert_eq!(min, "90");
+    }
+
+    // ── per-account policy tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_policy_line_valid() {
+        let result = parse_policy_line("alice,1800,90,uac");
+        assert_eq!(result, Some("alice,1800,90,uac".to_string()));
+    }
+
+    #[test]
+    fn test_parse_policy_line_comment() {
+        assert_eq!(parse_policy_line("# comment"), None);
+    }
+
+    #[test]
+    fn test_parse_policy_line_empty() {
+        assert_eq!(parse_policy_line(""), None);
+    }
+
+    #[test]
+    fn test_parse_policy_line_too_few_fields() {
+        assert_eq!(parse_policy_line("alice,1800"), None);
+    }
+
+    #[test]
+    fn test_parse_policy_line_whitespace() {
+        let result = parse_policy_line("  bob , 3600 , 120 , uas  ");
+        assert_eq!(result, Some("bob , 3600 , 120 , uas".to_string()));
+    }
+
+    #[test]
+    fn test_build_policies_basic() {
+        let entries = vec![
+            "alice,1800,90,uac".to_string(),
+            "bob,3600,120,uas".to_string(),
+        ];
+        let map = build_policies(entries);
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("alice"));
+        assert!(map.contains_key("bob"));
+        let alice = &map["alice"];
+        assert_eq!(alice.interval, 1800);
+        assert_eq!(alice.min_se, 90);
+        assert_eq!(alice.refresher, Refresher::Uac);
+        let bob = &map["bob"];
+        assert_eq!(bob.interval, 3600);
+        assert_eq!(bob.min_se, 120);
+        assert_eq!(bob.refresher, Refresher::Uas);
+    }
+
+    #[test]
+    fn test_build_policies_clamps_min() {
+        let entries = vec!["alice,50,30,uac".to_string()];
+        let map = build_policies(entries);
+        let alice = &map["alice"];
+        assert_eq!(alice.interval, 90); // clamped from 50
+        assert_eq!(alice.min_se, 90);   // clamped from 30
+    }
+
+    #[test]
+    fn test_build_policies_empty() {
+        let map = build_policies(vec![]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_build_policies_skips_bad_interval() {
+        let entries = vec!["alice,0,90,uac".to_string()];
+        let map = build_policies(entries);
+        assert!(map.is_empty()); // interval=0 is skipped
+    }
+
+    #[test]
+    fn test_build_policies_skips_empty_account() {
+        let entries = vec![",1800,90,uac".to_string()];
+        let map = build_policies(entries);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_build_policies_with_whitespace() {
+        let entries = vec!["  bob , 3600 , 120 , uas  ".to_string()];
+        let map = build_policies(entries);
+        assert!(map.contains_key("bob"));
+        let bob = &map["bob"];
+        assert_eq!(bob.interval, 3600);
+        assert_eq!(bob.min_se, 120);
+        assert_eq!(bob.refresher, Refresher::Uas);
+    }
+
+    #[test]
+    fn test_build_policies_invalid_numbers() {
+        let entries = vec!["alice,abc,xyz,uac".to_string()];
+        let map = build_policies(entries);
+        assert!(map.is_empty()); // interval=0 (parse fail) => skipped
     }
 
 }
