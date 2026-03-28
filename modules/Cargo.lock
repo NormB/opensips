@@ -1084,6 +1084,7 @@ dependencies = [
  "cc",
  "opensips-build",
  "opensips-rs",
+ "regex",
  "rust-common",
 ]
 
