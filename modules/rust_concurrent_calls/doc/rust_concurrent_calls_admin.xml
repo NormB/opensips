@@ -394,6 +394,51 @@ modparam("rust_concurrent_calls", "cooldown_secs", 30)
 </programlisting>
 		</example>
 	</section>
+
+	<section id="param_burst_threshold" xreflabel="burst_threshold">
+		<title><varname>burst_threshold</varname> (integer)</title>
+		<para>
+		Burst detection threshold. When an account's concurrent call
+		count increases by this many within
+		<varname>burst_window_secs</varname>, flag it as a burst.
+		Set to 0 to disable burst detection.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>burst_threshold</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "burst_threshold", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_burst_window_secs" xreflabel="burst_window_secs">
+		<title><varname>burst_window_secs</varname> (integer)</title>
+		<para>
+		Time window in seconds for burst detection. The module tracks
+		concurrent call count snapshots within this window and compares
+		the current count to the oldest snapshot.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>10</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>burst_window_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "burst_window_secs", 10)
+...
+</programlisting>
+		</example>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -649,6 +694,62 @@ route {
 		</example>
 	</section>
 
+	<section id="func_check_burst" xreflabel="check_burst()">
+		<title>
+		<function moreinfo="none">check_burst(account)</function>
+		</title>
+		<para>
+		Check if the given account is experiencing a burst of concurrent
+		calls. Returns 1 if a burst is detected (the count increased by
+		at least <varname>burst_threshold</varname> within
+		<varname>burst_window_secs</varname>), or -1 if normal.
+		Sets <literal>$var(burst_delta)</literal> with the rate of
+		change (delta) in concurrent calls.
+		</para>
+		<para>
+		Requires <varname>burst_threshold</varname> to be set to a
+		value greater than 0. If burst detection is disabled, always
+		returns -1.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - burst detected.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - normal (no burst).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_burst</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (check_burst("$fU")) {
+            xlog("L_WARN", "Burst detected for $fU: delta=$var(burst_delta)\n");
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
 	<section id="func_concurrent_status" xreflabel="concurrent_status()">
 		<title>
 		<function moreinfo="none">concurrent_status(account)</function>
@@ -863,6 +964,15 @@ route {
 		</para>
 	</section>
 	<section>
+		<title>$var(burst_delta)</title>
+		<para>
+		The rate of change in concurrent calls for the checked account
+		within the burst detection window. Set as an integer by
+		<function>check_burst()</function>. Positive values indicate
+		increasing calls, negative values indicate decreasing calls.
+		</para>
+	</section>
+	<section>
 		<title>$var(concurrent_status)</title>
 		<para>
 		JSON string containing detailed status for a specific account.
@@ -936,6 +1046,13 @@ route {
 		<para>
 		Number of dialogs automatically tracked via dialog callbacks
 		(only incremented when <varname>auto_track</varname> is enabled).
+		</para>
+	</section>
+	<section>
+		<title><varname>burst_detected</varname></title>
+		<para>
+		Number of burst detections triggered (only incremented when
+		<varname>burst_threshold</varname> is greater than 0).
 		</para>
 	</section>
 	<section>
