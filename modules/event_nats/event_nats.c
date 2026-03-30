@@ -19,9 +19,41 @@
  *
  */
 
+/*
+ * event_nats.c -- EVI transport module for NATS messaging
+ *
+ * This module registers a "nats" EVI (Event Virtual Interface) transport
+ * with OpenSIPS, allowing any OpenSIPS event to be published to a NATS
+ * subject.  It also exports a script function nats_publish() for direct
+ * NATS publishing from opensips.cfg routing scripts.
+ *
+ * Transport registration:
+ *   mod_init() registers the transport callbacks (parse, raise, match,
+ *   free, print) with the EVI subsystem via register_event_mod().  Once
+ *   registered, scripts can subscribe events to NATS destinations using
+ *   the "nats:<subject>" socket syntax.
+ *
+ * Connection management:
+ *   child_init() obtains a NATS connection (and optional JetStream context)
+ *   from the shared nats_pool.  Connections are per-process; the pool
+ *   handles reconnection automatically.
+ *
+ * Rank filtering:
+ *   Only SIP UDP workers (rank 1..udp_workers_no) and the HTTPD/MI
+ *   process (PROC_MODULE) initialize NATS.  TCP/WSS receivers are
+ *   excluded because nats.c's internal I/O threads cause heap corruption
+ *   in processes that also run OpenSSL for WSS.
+ *
+ * MI commands:
+ *   nats_status  -- connection state and server info
+ *   nats_stats   -- publish/fail counters
+ *   nats_reconnect -- informational (auto-reconnect is always active)
+ */
+
 #include <string.h>
 
 #include "../../sr_module.h"
+#include "../../globals.h"
 #include "../../evi/evi_transport.h"
 #include "../../mem/mem.h"
 #include "../../mem/shm_mem.h"
@@ -63,7 +95,7 @@ char *nats_tls_cert = NULL;       /* client certificate file (mutual TLS) */
 char *nats_tls_key = NULL;        /* client private key file (mutual TLS) */
 char *nats_tls_hostname = NULL;   /* expected server cert hostname (overrides URL host) */
 
-/* OpenSSL lifecycle — when 1, nats.c skips OpenSSL init/cleanup
+/* OpenSSL lifecycle -- when 1, nats.c skips OpenSSL init/cleanup
  * (the host application manages it). Set to 0 only if no other
  * OpenSIPS module loads OpenSSL (unusual). */
 int nats_skip_openssl_init = 1;
@@ -122,7 +154,7 @@ struct module_exports exports = {
 	mi_cmds,                    /* exported MI functions */
 	0,                          /* exported pseudo-variables */
 	0,                          /* exported transformations */
-	0,                          /* extra processes — no dedicated publisher */
+	0,                          /* extra processes -- no dedicated publisher */
 	0,                          /* module pre-initialization function */
 	mod_init,                   /* module initialization function */
 	0,                          /* response handling function */
@@ -131,7 +163,8 @@ struct module_exports exports = {
 	0                           /* reload confirm function */
 };
 
-/* EVI transport export */
+/* EVI transport export -- registers the callback table with the EVI
+ * subsystem so that "nats:<subject>" sockets are recognized. */
 static const evi_export_t trans_export_nats = {
 	NATS_STR,                   /* transport module name */
 	nats_evi_raise,             /* raise function */
@@ -142,8 +175,16 @@ static const evi_export_t trans_export_nats = {
 	NATS_FLAG                   /* flags */
 };
 
-/*
- * Module initialization
+/**
+ * mod_init() -- Module initialization (pre-fork).
+ *
+ * Initializes publish statistics, registers the NATS EVI transport with
+ * the OpenSIPS event subsystem, and registers this module with the
+ * shared NATS connection pool (including TLS configuration).
+ *
+ * Called once in the main (attendant) process before forking workers.
+ *
+ * @return  0 on success, -1 on error (aborts module loading).
  */
 static int mod_init(void)
 {
@@ -156,6 +197,8 @@ static int mod_init(void)
 		return -1;
 	}
 
+	/* Register the NATS transport callback table with EVI so that
+	 * event subscriptions using "nats:<subject>" are handled by us */
 	if (register_event_mod(&trans_export_nats)) {
 		LM_ERR("cannot register transport functions for NATS\n");
 		return -1;
@@ -186,17 +229,31 @@ static int mod_init(void)
 	return 0;
 }
 
+/**
+ * child_init() -- Per-child process initialization (post-fork).
+ *
+ * Obtains a NATS connection from the shared pool and optionally a
+ * JetStream context, then registers them with the producer module.
+ *
+ * Rank filtering: only SIP UDP workers (rank 1..udp_workers_no) and the
+ * HTTPD/MI process (PROC_MODULE) initialize NATS.  TCP/WSS receivers
+ * (ranks above udp_workers_no) are excluded because nats.c's internal
+ * I/O threads cause heap corruption in processes that also handle
+ * OpenSSL for WSS.
+ *
+ * @param rank  OpenSIPS process rank (1-based for SIP workers).
+ * @return      0 on success, -1 on error (kills the child process).
+ */
 static int child_init(int rank)
 {
 	natsConnection *nc;
 	jsCtx *js;
 
-	/* Only init NATS in SIP worker processes — NOT in TCP/WSS handlers,
-	 * timer, or main process. nats.c's OpenSSL threads conflict with
-	 * OpenSIPS tls_openssl in TCP handler processes, causing SIGABRT
-	 * (free(): invalid pointer) during WSS TLS handshake. */
-	if (rank < 1) {
-		LM_DBG("skipping NATS init for non-worker process (rank=%d)\n", rank);
+	/* Rank filtering: skip TCP/WSS receivers and other non-SIP processes.
+	 * Only UDP workers and the MI/HTTPD process need NATS access. */
+	if (rank != PROC_MODULE &&
+	    (rank < 1 || rank > udp_workers_no)) {
+		LM_DBG("skipping NATS init for process rank=%d\n", rank);
 		return 0;
 	}
 
@@ -219,6 +276,11 @@ static int child_init(int rank)
 	return 0;
 }
 
+/**
+ * mod_destroy() -- Module cleanup on OpenSIPS shutdown.
+ *
+ * Frees publish statistics and tears down the NATS connection pool.
+ */
 static void mod_destroy(void)
 {
 	LM_NOTICE("destroying event_nats module ...\n");
@@ -226,11 +288,16 @@ static void mod_destroy(void)
 	nats_pool_destroy();
 }
 
-/*
- * EVI transport: parse
+/**
+ * nats_evi_parse() -- Parse a NATS EVI socket string.
  *
- * Socket format: "nats:subject_prefix"
- * The subject_prefix is stored in sock->address.
+ * Accepts a socket in the format "nats:<subject_prefix>" and allocates
+ * an evi_reply_sock with the subject prefix stored in sock->address.
+ * The socket is allocated in shared memory so it persists across
+ * process boundaries.
+ *
+ * @param socket  The socket string (subject prefix) to parse.
+ * @return        Allocated evi_reply_sock on success, NULL on error.
  */
 static evi_reply_sock *nats_evi_parse(str socket)
 {
@@ -260,10 +327,23 @@ static evi_reply_sock *nats_evi_parse(str socket)
 	return sock;
 }
 
-/*
- * EVI transport: raise
+/**
+ * nats_evi_raise() -- Publish an EVI event to a NATS subject.
  *
- * Build JSON payload from EVI params, publish directly via pool connection.
+ * Builds a JSON payload from the EVI parameters, copies the subject
+ * into a null-terminated stack buffer, and publishes via the pool
+ * connection.  If the subject exceeds the 511-byte buffer, the publish
+ * is rejected with an error (not silently truncated).
+ *
+ * Supports both core NATS publish and JetStream async publish depending
+ * on the nats_jetstream module parameter.
+ *
+ * @param msg        Current SIP message (unused by NATS transport).
+ * @param ev_name    Event name (included in the JSON payload).
+ * @param sock       EVI socket containing the NATS subject prefix.
+ * @param params     EVI parameter list to serialize as JSON.
+ * @param async_ctx  Async status callback context (may be NULL).
+ * @return           0 on success, -1 on error.
  */
 static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	evi_reply_sock *sock, evi_params_t *params, evi_async_ctx_t *async_ctx)
@@ -286,11 +366,12 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	}
 	payload_len = strlen(payload);
 
-	/* null-terminate subject in a stack buffer */
+	/* null-terminate subject in a stack buffer; reject if too long */
 	subj_len = sock->address.len;
 	if (subj_len >= (int)sizeof(subj_buf)) {
-		LM_ERR("NATS subject too long (%d >= %zu)\n",
-			subj_len, sizeof(subj_buf));
+		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
+			subj_len, (int)sizeof(subj_buf) - 1,
+			sock->address.len, sock->address.s);
 		evi_free_payload(payload);
 		return -1;
 	}
@@ -307,9 +388,9 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 
 	/* update per-type stats on success */
 	if (rc == 0 && nats_stats)
-		NATS_STAT_INC(evi_published);
+		nats_stats->evi_published++;
 
-	/* report async status — non-blocking publish, report immediately */
+	/* report async status -- non-blocking publish, report immediately */
 	if (async_ctx && async_ctx->status_cb) {
 		async_ctx->status_cb(async_ctx->cb_param,
 			rc == 0 ? EVI_STATUS_SUCCESS : EVI_STATUS_FAIL);
@@ -318,10 +399,15 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	return rc;
 }
 
-/*
- * EVI transport: match
+/**
+ * nats_evi_match() -- Compare two NATS EVI sockets for equality.
  *
- * Two sockets match if they have the same subject prefix.
+ * Two sockets match if they have the same subject prefix (byte-exact
+ * comparison).  Used by the EVI subsystem to deduplicate subscriptions.
+ *
+ * @param sock1  First socket to compare.
+ * @param sock2  Second socket to compare.
+ * @return       1 if sockets match, 0 otherwise.
  */
 static int nats_evi_match(evi_reply_sock *sock1, evi_reply_sock *sock2)
 {
@@ -340,8 +426,14 @@ static int nats_evi_match(evi_reply_sock *sock1, evi_reply_sock *sock2)
 	return 1;
 }
 
-/*
- * EVI transport: free
+/**
+ * nats_evi_free() -- Free a NATS EVI socket.
+ *
+ * Releases the shared-memory allocation for the socket.  The address
+ * string is embedded in the same allocation, so a single shm_free
+ * releases everything.
+ *
+ * @param sock  Socket to free (may be NULL).
  */
 static void nats_evi_free(evi_reply_sock *sock)
 {
@@ -354,8 +446,14 @@ static void nats_evi_free(evi_reply_sock *sock)
 	shm_free(sock);
 }
 
-/*
- * EVI transport: print
+/**
+ * nats_evi_print() -- Return a printable representation of a NATS EVI socket.
+ *
+ * Returns the subject prefix stored in sock->address.  Used by the EVI
+ * subsystem for logging and MI output.
+ *
+ * @param sock  Socket to print.
+ * @return      str containing the subject prefix.
  */
 static str nats_evi_print(evi_reply_sock *sock)
 {
@@ -363,10 +461,21 @@ static str nats_evi_print(evi_reply_sock *sock)
 	return sock->address;
 }
 
-/*
- * Script function: nats_publish(subject, payload)
+/**
+ * w_nats_publish() -- Script function: nats_publish(subject, payload).
  *
- * Publishes directly via the shared pool connection.
+ * Publishes a message to a NATS subject directly from an opensips.cfg
+ * routing script.  The subject is copied into a null-terminated stack
+ * buffer; if it exceeds the 511-byte limit, the publish is rejected
+ * with an error (not silently truncated).
+ *
+ * Uses JetStream async publish when the jetstream module parameter is
+ * enabled, otherwise uses core NATS publish.
+ *
+ * @param msg      Current SIP message context.
+ * @param subject  NATS subject to publish to.
+ * @param payload  Message payload (typically JSON).
+ * @return         1 on success, -1 on error (OpenSIPS script convention).
  */
 static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 {
@@ -383,11 +492,12 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 		return -1;
 	}
 
-	/* null-terminate subject in a stack buffer */
+	/* null-terminate subject in a stack buffer; reject if too long */
 	subj_len = subject->len;
 	if (subj_len >= (int)sizeof(subj_buf)) {
-		LM_ERR("NATS subject too long (%d >= %zu)\n",
-			subj_len, sizeof(subj_buf));
+		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
+			subj_len, (int)sizeof(subj_buf) - 1,
+			subject->len, subject->s);
 		return -1;
 	}
 	memcpy(subj_buf, subject->s, subj_len);
@@ -401,7 +511,7 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 
 	/* update per-type stats on success */
 	if (rc == 0 && nats_stats)
-		NATS_STAT_INC(script_published);
+		nats_stats->script_published++;
 
 	return rc == 0 ? 1 : -1;
 }
