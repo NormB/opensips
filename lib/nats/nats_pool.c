@@ -528,19 +528,11 @@ natsConnection *nats_pool_get(void)
 	}
 
 	/* Initialize nats.c library — once per process.
-	 * LockSpinCount=-1 lets nats.c pick defaults.
-	 * SkipOpenSSLInit prevents nats.c from calling OPENSSL_init_ssl()
-	 * which conflicts with OpenSIPS's tls_openssl module that routes
-	 * OpenSSL allocations through SHM. */
+	 * -1 lets nats.c pick default lock spin count. */
 	if (!_lib_initialized) {
-		natsClientConfig cfg;
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.LockSpinCount = -1;
-		cfg.SkipOpenSSLInit =
-			pool_cfg->tls.skip_openssl_init ? true : false;
-		s = nats_OpenWithConfig(&cfg);
+		s = nats_Open(-1);
 		if (s != NATS_OK) {
-			LM_ERR("NATS pool: nats_OpenWithConfig failed: %s\n",
+			LM_ERR("NATS pool: nats_Open failed: %s\n",
 				natsStatus_GetText(s));
 			return NULL;
 		}
