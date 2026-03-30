@@ -19,62 +19,44 @@
  *
  */
 
-/**
- * @file nats_pool.c
- * @brief Shared NATS connection pool for OpenSIPS modules.
- *
- * This library provides a single shared NATS connection per OpenSIPS worker
- * process, used by both event_nats.so and cachedb_nats.so.  It is compiled
- * as libnats_pool.a and statically linked into each module via misclibs=.
- *
- * ## Thread model
- *
- * OpenSIPS is a multi-process server.  All public API functions in this file
- * (nats_pool_register, nats_pool_get, nats_pool_get_js, nats_pool_get_kv,
- * nats_pool_destroy, etc.) are called from OpenSIPS process context — either
- * the main attendant (pre-fork, during mod_init) or a worker/timer process
- * (post-fork, during child_init or normal request processing).
- *
- * However, the nats.c library internally creates its own I/O threads for
- * connection management.  The disconnect/reconnect callbacks
- * (_pool_disconnected_cb, _pool_reconnected_cb) and the JetStream async
- * publish ack handler (_js_pub_ack_handler) run on these nats.c-internal
- * threads, NOT on an OpenSIPS process.  This is critical because OpenSIPS
- * APIs (LM_*, pkg_malloc, shm_malloc) depend on per-process state
- * (process_no, pkg memory pool) that does not exist in nats.c threads.
- * Calling them causes SIGABRT.  Only atomic ops, write(), and nats.c APIs
- * are safe in callbacks.
- *
- * ## Design
- *
- * - **Configuration** (pool_cfg) lives in SHM, set pre-fork by
- *   nats_pool_register().  Multiple modules can register; configs are merged.
- * - **Connection state** (_nc, _js, _kv_cache) is process-local, created
- *   post-fork on first access via nats_pool_get().
- * - **KV lazy invalidation**: On reconnect, the _kv_stale atomic flag is set
- *   by the reconnect callback.  The next call to nats_pool_get_kv() detects
- *   this and clears the KV cache, forcing fresh handle creation.  This avoids
- *   calling any OpenSIPS APIs from the callback thread.
- * - **Connection lifetime**: _nc is never destroyed or replaced after
- *   creation (except in nats_pool_destroy at shutdown).  nats.c handles
- *   reconnection internally; all derived objects (_js, kvStore, kvWatcher)
- *   remain valid across reconnects.
- */
-
 #include <string.h>
 #include <stdatomic.h>
-#include <unistd.h>
 
 #include <nats/nats.h>
 
 #include "../../dprint.h"
 #include "../../mem/shm_mem.h"
-#include "../../ut.h"
-#include "nats_pool.h"
+#include "../../sr_module.h"
+#include "nats_connection.h"
 
-/* This is a shared library (lib/nats), not a loadable module.
- * Compiled as libnats_pool.a and linked into event_nats.so
- * and cachedb_nats.so via misclibs= in their Makefiles. */
+/*
+ * Minimal OpenSIPS module exports — nats_connection is a shared library
+ * module with no script functions, no params, no MI commands. It exists
+ * solely to be dlopen'd with RTLD_GLOBAL so event_nats and cachedb_nats
+ * can link against its symbols at runtime.
+ */
+struct module_exports exports = {
+	"nats_connection",       /* module name */
+	MOD_TYPE_DEFAULT,        /* class */
+	MODULE_VERSION,          /* version */
+	RTLD_NOW | RTLD_GLOBAL,  /* dlopen flags — MUST be GLOBAL for symbol sharing */
+	0,                       /* load function */
+	NULL,                    /* module deps */
+	0,                       /* exported functions */
+	0,                       /* async functions */
+	0,                       /* module parameters */
+	0,                       /* statistics */
+	0,                       /* MI commands */
+	0,                       /* pseudo-variables */
+	0,                       /* transformations */
+	0,                       /* extra processes */
+	0,                       /* pre_init */
+	0,                       /* mod_init */
+	0,                       /* response handler */
+	0,                       /* destroy */
+	0,                       /* child_init */
+	0                        /* reload confirm */
+};
 
 /* ----------------------------------------------------------------
  * Shared pool configuration (shm, set pre-fork in mod_init)
@@ -84,12 +66,6 @@
 #define NATS_POOL_DEFAULT_RECONNECT_WAIT 2000
 #define NATS_POOL_DEFAULT_MAX_RECONNECT  60
 
-/**
- * Pool configuration structure, allocated in shared memory.
- * Set during mod_init (pre-fork) and read-only after fork.
- * The only exception is the TLS probe in nats_pool_get() which may
- * rewrite tls:// URLs to nats:// — guarded by a static flag.
- */
 typedef struct nats_pool_cfg {
 	char *servers[NATS_POOL_MAX_SERVERS]; /* shm-allocated URL strings */
 	int   server_cnt;
@@ -105,17 +81,36 @@ typedef struct nats_pool_cfg {
 static nats_pool_cfg *pool_cfg = NULL;
 
 /* ----------------------------------------------------------------
+ * Callback registry (process-local, registered pre-fork but
+ * invoked post-fork on the nats.c internal thread)
+ * ---------------------------------------------------------------- */
+
+typedef struct {
+	nats_reconnected_cb  cb;
+	void                *closure;
+} reconnect_entry;
+
+typedef struct {
+	nats_disconnected_cb cb;
+	void                *closure;
+} disconnect_entry;
+
+static reconnect_entry  _reconnect_cbs[NATS_POOL_MAX_CALLBACKS];
+static int              _reconnect_cb_cnt = 0;
+
+static disconnect_entry _disconnect_cbs[NATS_POOL_MAX_CALLBACKS];
+static int              _disconnect_cb_cnt = 0;
+
+/* ----------------------------------------------------------------
  * Process-local connection state (set post-fork)
  * ---------------------------------------------------------------- */
 
-static int              _lib_initialized = 0;   /* nats_Open called? */
-static natsConnection  *_nc = NULL;              /* NATS connection handle */
-static jsCtx           *_js = NULL;              /* JetStream context */
-static atomic_int       _connected = 0;          /* 1 if connected */
-static atomic_int       _reconnect_epoch = 0;    /* bumped on each reconnect */
+static int              _lib_initialized = 0;
+static natsConnection  *_nc = NULL;
+static jsCtx           *_js = NULL;
+static atomic_int       _connected = 0;
 
-/* KV handle cache — maps bucket names to kvStore pointers.
- * Process-local; invalidated on reconnection via _kv_stale. */
+/* KV handle cache */
 typedef struct {
 	char     bucket[128];
 	kvStore *kv;
@@ -124,23 +119,34 @@ typedef struct {
 static kv_cache_entry _kv_cache[NATS_POOL_MAX_KV_BUCKETS];
 static int            _kv_cache_cnt = 0;
 
+/* Server info string (process-local) */
+static char _server_info[512];
+
 /* ----------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------- */
 
-/* shm_strdup provided by ../../ut.h — no local copy needed */
+/* Deep-copy a C string into shared memory. Returns NULL on failure. */
+static char *shm_strdup(const char *s)
+{
+	size_t len;
+	char *p;
 
-/**
- * Parse comma-separated URL string into pool_cfg->servers[].
- *
- * Each token is trimmed of surrounding whitespace and commas, then
- * shm-allocated.  Sets pool_cfg->use_tls if any URL starts with "tls://".
- *
- * @param url  Comma-separated URL string (e.g. "nats://h1:4222,nats://h2:4222").
- * @return     0 on success, -1 on error (empty string, too many servers, OOM).
- *
- * Thread safety: Called only during mod_init (single-threaded, pre-fork).
- */
+	if (!s)
+		return NULL;
+	len = strlen(s) + 1;
+	p = shm_malloc(len);
+	if (!p) {
+		LM_ERR("shm_malloc(%zu) failed\n", len);
+		return NULL;
+	}
+	memcpy(p, s, len);
+	return p;
+}
+
+/* Parse comma-separated URL string into pool_cfg->servers[].
+ * Each token is shm-allocated. Sets pool_cfg->use_tls if any URL
+ * starts with "tls://". */
 static int parse_urls(const char *url)
 {
 	const char *p, *tok;
@@ -202,131 +208,65 @@ static int parse_urls(const char *url)
 }
 
 /* ----------------------------------------------------------------
- * nats.c callbacks (run on nats.c internal I/O thread)
- *
- * CRITICAL: These callbacks run on a thread created by nats.c, NOT
- * an OpenSIPS process.  OpenSIPS APIs (LM_*, pkg_malloc, shm_malloc)
- * must NOT be called here — they rely on per-process state (process_no,
- * pkg memory pool) that doesn't exist in nats.c's threads.  Calling
- * them causes SIGABRT (free(): invalid pointer).
- *
- * Safe operations in these callbacks:
- *   - C11 atomic ops (atomic_store, atomic_exchange, atomic_fetch_add)
- *   - POSIX write() for logging to stderr
- *   - nats.c API calls (natsConnection_GetConnectedUrl, etc.)
- *
- * Unsafe operations (will crash):
- *   - LM_ERR, LM_INFO, LM_DBG, etc.
- *   - pkg_malloc, pkg_free
- *   - shm_malloc, shm_free
- *   - Any OpenSIPS API that accesses process_no or pkg memory
- *
- * The pattern used here is "lazy invalidation": callbacks set atomic
- * flags, and the main process thread checks them on the next API call
- * to perform the actual work (cache clearing, logging, etc.) in a
- * safe context.
+ * nats.c callbacks (run on nats.c internal thread)
  * ---------------------------------------------------------------- */
 
-/**
- * KV stale flag — lazy invalidation for the KV handle cache.
- *
- * This flag implements a producer-consumer pattern across thread boundaries:
- *
- * - Producer (nats.c I/O thread): The disconnect and reconnect callbacks
- *   set this flag to 1 via atomic_store() when the connection state changes.
- *   KV handles may reference stale server-side state (streams, consumers)
- *   after a reconnection, so they must be recreated.
- *
- * - Consumer (OpenSIPS process thread): nats_pool_get_kv() checks this flag
- *   using atomic_exchange(&_kv_stale, 0), which atomically reads the value
- *   and clears it in one operation.  This prevents the TOCTOU race that
- *   existed with the prior volatile read-then-write pattern, where a
- *   reconnect callback could set the flag between the read and the clear.
- *
- * Using atomic_int (C11) instead of volatile int because volatile only
- * prevents compiler reordering — it does not guarantee atomicity of
- * read-modify-write sequences or provide memory ordering between threads.
- */
-static atomic_int _kv_stale = 0;
-
-/**
- * Disconnect callback — called by nats.c I/O thread when the connection drops.
- *
- * Sets _connected to 0 and marks KV handles as stale.  Only uses atomic ops
- * and write() — no OpenSIPS APIs are safe here (see callback header comment).
- *
- * @param nc       The NATS connection (provided by nats.c, unused).
- * @param closure  User closure (NULL, unused).
- */
 static void _pool_disconnected_cb(natsConnection *nc, void *closure)
 {
-	/* safe: atomic op + raw write() — no OpenSIPS APIs */
+	int i;
+
+	LM_WARN("NATS pool: connection disconnected\n");
 	atomic_store(&_connected, 0);
-	atomic_store(&_kv_stale, 1);  /* mark KV handles stale immediately on disconnect */
-	(void)write(STDERR_FILENO,
-		"NATS pool: disconnected\n", 24);
+
+	for (i = 0; i < _disconnect_cb_cnt; i++) {
+		if (_disconnect_cbs[i].cb)
+			_disconnect_cbs[i].cb(_disconnect_cbs[i].closure);
+	}
 }
 
-/**
- * Reconnect callback — called by nats.c I/O thread after a successful reconnect.
- *
- * Restores _connected, bumps the reconnect epoch (so modules can detect
- * reconnection), and marks KV handles as stale.  Logs the new server URL
- * via write() to stderr.
- *
- * Only atomic ops, nats.c APIs, and write() are used here — no OpenSIPS APIs.
- * See the callback section header comment for the full rationale.
- *
- * @param nc       The NATS connection (used to query the new server URL).
- * @param closure  User closure (NULL, unused).
- */
 static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 {
-	char buf[300];
 	char url[256];
-	int len;
+	int i;
 
 	natsConnection_GetConnectedUrl(nc, url, sizeof(url));
+	LM_NOTICE("NATS pool: reconnected to %s\n", url);
 	atomic_store(&_connected, 1);
-	atomic_fetch_add(&_reconnect_epoch, 1);
-	atomic_store(&_kv_stale, 1);
 
-	len = snprintf(buf, sizeof(buf),
-		"NATS pool: reconnected to %s\n", url);
-	if (len > 0)
-		(void)write(STDERR_FILENO, buf, len);
+	/*
+	 * Invalidate cached KV handles. Do NOT call kvStore_Destroy() here —
+	 * SIP worker threads may hold pointers to these handles and be
+	 * mid-operation (kvStore_Get, kvStore_PutString, etc.). Destroying
+	 * from this callback thread would be a use-after-free.
+	 *
+	 * Instead, NULL out the cache entries. The old handles are
+	 * intentionally leaked; nats.c cleans them up at nats_Close() time.
+	 * Fresh handles are created on the next nats_pool_get_kv() call.
+	 */
+	for (i = 0; i < _kv_cache_cnt; i++)
+		_kv_cache[i].kv = NULL;
+	_kv_cache_cnt = 0;
+
+	/* notify registered modules */
+	for (i = 0; i < _reconnect_cb_cnt; i++) {
+		if (_reconnect_cbs[i].cb)
+			_reconnect_cbs[i].cb(_reconnect_cbs[i].closure);
+	}
 }
 
-/**
- * JetStream async publish ack handler — runs on nats.c internal thread.
- *
- * Called by nats.c when an async JetStream publish completes (success or
- * failure).  Signature must match jsPubAckHandler typedef:
+/* JetStream async publish ack handler — runs on nats.c internal thread.
+ * Signature must match jsPubAckHandler typedef:
  *   void (*)(jsCtx*, natsMsg*, jsPubAck*, jsPubAckErr*, void*)
- *
- * Memory ownership rules (set by nats.c js.c:_handleAsyncReply):
- * - pa and pae are STACK-ALLOCATED by nats.c — do NOT call jsPubAck_Destroy().
- *   nats.c calls _freePubAck() after this callback returns.
- * - msg (the original published message) IS our responsibility to destroy.
- *   nats.c sets pmsg=NULL after calling us (js.c:719).
- *
- * @param js       JetStream context (unused).
- * @param msg      Original published message — MUST be destroyed by us.
- * @param pa       Publish ack (stack-allocated by nats.c — do NOT destroy).
- * @param pae      Publish ack error, or NULL on success (stack-allocated).
- * @param closure  User closure (NULL, unused).
  */
 static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
                                  jsPubAckErr *pae, void *closure)
 {
-	if (pae && pae->ErrText) {
-		char buf[256];
-		int len = snprintf(buf, sizeof(buf),
-			"NATS JetStream async publish error: %s\n",
-			pae->ErrText);
-		if (len > 0)
-			(void)write(STDERR_FILENO, buf, len);
+	if (pae) {
+		LM_ERR("NATS JetStream async publish error: %s\n",
+			pae->ErrText ? pae->ErrText : "unknown");
 	}
+	if (pa)
+		jsPubAck_Destroy(pa);
 	if (msg)
 		natsMsg_Destroy(msg);
 }
@@ -335,28 +275,6 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
  * Public API
  * ---------------------------------------------------------------- */
 
-/**
- * Register interest in the shared NATS connection pool.
- *
- * Called from mod_init (pre-fork, single-threaded).  Multiple modules
- * (event_nats, cachedb_nats) may call this; configurations are merged:
- * - Server URLs are de-duplicated and added to the pool.
- * - TLS config uses the first registration's values; conflicts are warned.
- * - Reconnect parameters use the largest values across registrations.
- *
- * The first call allocates pool_cfg in shared memory.  Subsequent calls
- * merge additional servers into the existing config.
- *
- * @param url             Comma-separated server URLs
- *                        (e.g., "tls://h1:4222,tls://h2:4223").
- * @param tls             TLS options (NULL for no TLS).
- * @param module          Module name string for log messages.
- * @param reconnect_wait  Reconnect wait in ms (0 = use default 2000ms).
- * @param max_reconnect   Max reconnect attempts (0 = use default 60).
- * @return                0 on success, -1 on error.
- *
- * Thread safety: Must only be called from mod_init (single-threaded).
- */
 int nats_pool_register(const char *url, nats_tls_opts *tls,
                        const char *module, int reconnect_wait,
                        int max_reconnect)
@@ -382,7 +300,7 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 			return -1;
 		}
 
-		/* deep-copy TLS config into shared memory */
+		/* copy TLS config */
 		if (tls) {
 			pool_cfg->tls.ca = shm_strdup(tls->ca);
 			pool_cfg->tls.cert = shm_strdup(tls->cert);
@@ -483,42 +401,12 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 	return 0;
 }
 
-/**
- * Get the shared NATS connection for this worker process.
- *
- * On first call (post-fork), initializes the nats.c library, probes TLS
- * availability, creates connection options, and connects in a retry loop.
- * Subsequent calls return the cached connection handle.
- *
- * The connection is NEVER destroyed or replaced after creation (except
- * at shutdown in nats_pool_destroy).  Multiple components (watcher threads,
- * producers, nats.c I/O threads) cache pointers to _nc and objects derived
- * from it (_js, kvStore, kvWatcher).  Destroying _nc would invalidate all
- * of them.  nats.c's built-in reconnection handles failover transparently.
- *
- * @return  natsConnection pointer on success, NULL on error (no config,
- *          library init failure, or options creation failure).
- *
- * Thread safety: Called from OpenSIPS process context only.  The first-call
- * initialization is not thread-safe, but OpenSIPS processes are forked
- * (not threaded), so each process has its own _nc.
- */
 natsConnection *nats_pool_get(void)
 {
 	natsOptions *opts = NULL;
 	natsStatus s;
 
-	/* Return existing connection — let nats.c handle reconnection.
-	 *
-	 * IMPORTANT: Never destroy or replace _nc after creation.
-	 * Multiple threads (watcher, producer, nats.c I/O) cache pointers
-	 * to _nc and objects derived from it (_js, kvStore, kvWatcher).
-	 * Destroying _nc invalidates all of them → use-after-free.
-	 *
-	 * nats.c's built-in reconnection handles failover transparently.
-	 * Operations during the disconnected window return NATS errors,
-	 * which callers handle gracefully. The reconnect callback bumps
-	 * _reconnect_epoch so modules know to refresh KV handles. */
+	/* return cached connection */
 	if (_nc)
 		return _nc;
 
@@ -527,84 +415,18 @@ natsConnection *nats_pool_get(void)
 		return NULL;
 	}
 
-	/* Initialize nats.c library — once per process.
-	 * LockSpinCount=-1 lets nats.c pick defaults.
-	 * SkipOpenSSLInit prevents nats.c from calling OPENSSL_init_ssl()
-	 * which conflicts with OpenSIPS's tls_openssl module that routes
-	 * OpenSSL allocations through SHM. */
+	/* initialize nats.c library — once per process */
 	if (!_lib_initialized) {
-		natsClientConfig cfg;
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.LockSpinCount = -1;
-		cfg.SkipOpenSSLInit =
-			pool_cfg->tls.skip_openssl_init ? true : false;
-		s = nats_OpenWithConfig(&cfg);
+		s = nats_Open(-1);
 		if (s != NATS_OK) {
-			LM_ERR("NATS pool: nats_OpenWithConfig failed: %s\n",
+			LM_ERR("NATS pool: nats_Open failed: %s\n",
 				natsStatus_GetText(s));
 			return NULL;
 		}
 		_lib_initialized = 1;
 	}
 
-	/* TLS probe: If tls:// URLs were configured, check whether nats.c
-	 * was built with TLS support.  nats.c parses the URL scheme —
-	 * tls:// triggers TLS internally.  If nats.c lacks TLS,
-	 * SetServers with tls:// URLs returns NATS_ILLEGAL_STATE.
-	 *
-	 * The URL rewrite modifies pool_cfg (SHM), so it must run exactly
-	 * once.  The static _tls_probed flag ensures the first child process
-	 * to reach here does the probe; others see use_tls already cleared.
-	 * This is safe because child processes are forked sequentially. */
-	if (pool_cfg->use_tls) {
-		static int _tls_probed = 0;
-		if (!_tls_probed) {
-			natsOptions *probe = NULL;
-			int tls_ok = 0;
-
-			_tls_probed = 1;
-
-			if (natsOptions_Create(&probe) == NATS_OK) {
-				if (natsOptions_SetServers(probe,
-				    (const char **)pool_cfg->servers,
-				    pool_cfg->server_cnt) == NATS_OK)
-					tls_ok = 1;
-				natsOptions_Destroy(probe);
-			}
-
-			if (!tls_ok) {
-				int i;
-				LM_WARN("NATS pool: TLS requested (tls:// URLs) "
-					"but not available in nats.c library. "
-					"Downgrading to plain nats:// "
-					"connections.\n");
-				pool_cfg->use_tls = 0;
-
-				/* Rewrite tls:// URLs to nats:// in-place */
-				for (i = 0; i < pool_cfg->server_cnt; i++) {
-					if (strncmp(pool_cfg->servers[i],
-					    "tls://", 6) == 0) {
-						char *old =
-							pool_cfg->servers[i];
-						int hlen = strlen(old + 6);
-						char *p = shm_malloc(
-							7 + hlen + 1);
-						if (p) {
-							snprintf(p,
-								7 + hlen + 1,
-								"nats://%s",
-								old + 6);
-							shm_free(old);
-							pool_cfg->servers[i]
-								= p;
-						}
-					}
-				}
-			}
-		}
-	}
-
-	/* Create connection options */
+	/* create options */
 	s = natsOptions_Create(&opts);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_Create failed: %s\n",
@@ -612,7 +434,7 @@ natsConnection *nats_pool_get(void)
 		return NULL;
 	}
 
-	/* Set server list (URLs now guaranteed compatible with nats.c) */
+	/* set server list */
 	s = natsOptions_SetServers(opts,
 		(const char **)pool_cfg->servers, pool_cfg->server_cnt);
 	if (s != NATS_OK) {
@@ -621,46 +443,65 @@ natsConnection *nats_pool_get(void)
 		goto error;
 	}
 
-	/* Configure reconnection behavior and register callbacks */
 	/*
-	 * Set nats.c internal reconnect to UNLIMITED (-1). nats.c permanently
-	 * removes a server from its pool after max_reconnect failures
-	 * (natsSrvPool_GetNextServer calls _freeSrv). With a finite limit,
-	 * a long partition empties the pool and kills the connection forever.
+	 * Set nats.c internal reconnect to UNLIMITED (-1). This is critical
+	 * for cluster resilience: nats.c permanently removes a server from
+	 * its pool after max_reconnect failures (natsSrvPool_GetNextServer
+	 * calls _freeSrv). With a finite limit, a long network partition
+	 * can empty the pool and kill the connection forever.
 	 *
-	 * pool_cfg->max_reconnect only gates the startup loop below.
-	 * Once connected, nats.c reconnect is unlimited so cluster gossip
-	 * (INFO connect_urls) keeps working through any partition length.
+	 * The bounded retry in our startup loop (pool_cfg->max_reconnect)
+	 * is separate — it only gates the initial connection in child_init.
+	 * Once connected, nats.c's reconnect thread takes over and should
+	 * never give up. Cluster gossip (INFO connect_urls) dynamically
+	 * adds new servers; unlimited reconnect ensures they stay in the
+	 * pool even if temporarily unreachable.
 	 */
 	natsOptions_SetMaxReconnect(opts, -1);
 	natsOptions_SetReconnectWait(opts, pool_cfg->reconnect_wait);
 	natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
 	natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
-	/* TLS configuration — only if URLs weren't downgraded to nats:// */
+	/* TLS configuration — only applied when URLs use tls:// */
 	if (pool_cfg->use_tls) {
 		natsOptions_SetSecure(opts, true);
 
-		if (pool_cfg->tls.ca && *pool_cfg->tls.ca)
-			natsOptions_LoadCATrustedCertificates(opts,
+		/* CA certificate for server verification */
+		if (pool_cfg->tls.ca && *pool_cfg->tls.ca) {
+			s = natsOptions_LoadCATrustedCertificates(opts,
 				pool_cfg->tls.ca);
+			if (s != NATS_OK)
+				LM_WARN("NATS pool: failed to load CA cert '%s': %s\n",
+					pool_cfg->tls.ca, natsStatus_GetText(s));
+		}
 
-		if (pool_cfg->tls.cert && *pool_cfg->tls.cert)
-			natsOptions_LoadCertificatesChain(opts,
+		/* client certificate + key for mutual TLS */
+		if (pool_cfg->tls.cert && *pool_cfg->tls.cert) {
+			s = natsOptions_LoadCertificatesChain(opts,
 				pool_cfg->tls.cert,
 				(pool_cfg->tls.key && *pool_cfg->tls.key) ?
 					pool_cfg->tls.key : NULL);
+			if (s != NATS_OK)
+				LM_WARN("NATS pool: failed to load client cert '%s': %s\n",
+					pool_cfg->tls.cert, natsStatus_GetText(s));
+		}
 
-		if (pool_cfg->tls.hostname && *pool_cfg->tls.hostname)
-			natsOptions_SetExpectedHostname(opts,
+		/* expected hostname for cert verification */
+		if (pool_cfg->tls.hostname && *pool_cfg->tls.hostname) {
+			s = natsOptions_SetExpectedHostname(opts,
 				pool_cfg->tls.hostname);
+			if (s != NATS_OK)
+				LM_WARN("NATS pool: failed to set expected hostname "
+					"'%s': %s\n",
+					pool_cfg->tls.hostname, natsStatus_GetText(s));
+		}
 
+		/* skip server certificate verification if configured */
 		if (pool_cfg->tls.skip_verify)
 			natsOptions_SkipServerVerification(opts, true);
 	}
 
-	/* Retry connection with bounded attempts. pool_cfg->max_reconnect
-	 * gates startup only; runtime reconnection is unlimited (set above). */
+	/* retry connection with bounded attempts */
 	{
 		int attempts = 0;
 		for (;;) {
@@ -692,7 +533,6 @@ natsConnection *nats_pool_get(void)
 	natsOptions_Destroy(opts);
 	atomic_store(&_connected, 1);
 
-	/* Log connected URL */
 	{
 		char url[256];
 		natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
@@ -708,33 +548,19 @@ error:
 	return NULL;
 }
 
-/**
- * Get the shared JetStream context for this worker process.
- *
- * Creates the jsCtx on first call using the shared connection.
- * The async publish ack handler (_js_pub_ack_handler) is registered
- * at creation time to handle JetStream publish acknowledgments.
- *
- * @return  jsCtx pointer on success, NULL on error (no connection,
- *          or JetStream context creation failure).
- *
- * Thread safety: Called from OpenSIPS process context only.
- * The jsCtx is process-local and never shared across processes.
- */
 jsCtx *nats_pool_get_js(void)
 {
 	natsStatus s;
 	jsOptions jsOpts;
 
-	/* Return cached JetStream context */
+	/* return cached context */
 	if (_js)
 		return _js;
 
-	/* Ensure we have a connection first */
+	/* ensure we have a connection */
 	if (!_nc && !nats_pool_get())
 		return NULL;
 
-	/* Initialize JetStream options with async publish ack handler */
 	jsOptions_Init(&jsOpts);
 	jsOpts.PublishAsync.AckHandler = _js_pub_ack_handler;
 
@@ -749,28 +575,6 @@ jsCtx *nats_pool_get_js(void)
 	return _js;
 }
 
-/**
- * Get a KV store handle for a named bucket.
- *
- * Checks a process-local cache first.  If the bucket handle is not cached,
- * attempts to bind to an existing bucket on the server; if that fails,
- * creates a new bucket with the specified parameters.
- *
- * The cache is invalidated on reconnection via the _kv_stale atomic flag.
- * When a reconnect occurs, stale kvStore handles may reference outdated
- * server-side state (streams, consumers), so the cache is cleared and
- * fresh handles are obtained.
- *
- * @param bucket    KV bucket name (must be a valid NATS subject token).
- * @param replicas  Replication factor (used only when creating a new bucket).
- * @param history   History depth (used only when creating a new bucket).
- * @param ttl_secs  Bucket TTL in seconds (0 = no TTL; creation only).
- * @return          kvStore pointer on success, NULL on error.
- *
- * Thread safety: Called from OpenSIPS process context only.
- * The KV cache is process-local.  The _kv_stale flag is set by the
- * reconnect callback (nats.c thread) and consumed here via atomic_exchange.
- */
 kvStore *nats_pool_get_kv(const char *bucket, int replicas,
                           int history, int64_t ttl_secs)
 {
@@ -784,42 +588,21 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		return NULL;
 	}
 
-	/* Ensure we have a JetStream context */
+	/* ensure we have a JetStream context */
 	if (!_js && !nats_pool_get_js())
 		return NULL;
 
-	/* Check if reconnection invalidated KV handles.
-	 *
-	 * atomic_exchange atomically reads the current value of _kv_stale
-	 * and sets it to 0 in a single operation.  This eliminates the
-	 * TOCTOU race that would exist with separate read-then-write:
-	 * a reconnect callback could set _kv_stale=1 between our read
-	 * and our clear, causing us to lose the invalidation signal.
-	 *
-	 * We do NOT destroy old kvStore handles here.  They are derived
-	 * from _nc and _js which remain valid across reconnects (nats.c
-	 * reconnects the underlying socket transparently).  We simply
-	 * discard our cached pointers and let nats.c's refcounting
-	 * clean them up.  Creating fresh handles ensures we pick up
-	 * any server-side state changes (new stream leaders, etc.). */
-	if (atomic_exchange(&_kv_stale, 0)) {
-		for (i = 0; i < _kv_cache_cnt; i++)
-			_kv_cache[i].kv = NULL;
-		_kv_cache_cnt = 0;
-		LM_NOTICE("NATS pool: KV cache cleared after reconnect\n");
-	}
-
-	/* Check cache for an existing handle for this bucket */
+	/* check cache first */
 	for (i = 0; i < _kv_cache_cnt; i++) {
 		if (_kv_cache[i].kv &&
 		    strcmp(_kv_cache[i].bucket, bucket) == 0)
 			return _kv_cache[i].kv;
 	}
 
-	/* Try to bind to existing bucket on the server first */
+	/* try to bind to existing bucket first */
 	s = js_KeyValue(&kv, _js, bucket);
 	if (s != NATS_OK) {
-		/* Bucket does not exist on server — create it */
+		/* bucket does not exist — create it */
 		LM_DBG("NATS pool: KV bucket '%s' not found, creating\n",
 			bucket);
 
@@ -844,7 +627,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		LM_DBG("NATS pool: bound to existing KV bucket '%s'\n", bucket);
 	}
 
-	/* Cache the handle for future lookups */
+	/* cache the handle */
 	if (_kv_cache_cnt < NATS_POOL_MAX_KV_BUCKETS) {
 		snprintf(_kv_cache[_kv_cache_cnt].bucket,
 			sizeof(_kv_cache[_kv_cache_cnt].bucket), "%s", bucket);
@@ -859,41 +642,48 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 	return kv;
 }
 
-/**
- * Destroy the connection pool and free all resources.
- *
- * Called from mod_destroy during OpenSIPS shutdown.
- *
- * ## Shutdown ordering
- *
- * The destruction sequence is critical because nats.c's internal I/O
- * threads may still be running when we enter this function:
- *
- * 1. KV handles destroyed first — they depend on _js.
- * 2. JetStream context destroyed — it depends on _nc.
- * 3. Connection drained THEN destroyed — natsConnection_Drain() flushes
- *    pending messages and waits for in-flight operations to complete
- *    before closing.  This ensures the I/O threads finish their work
- *    before we destroy the connection.  Without draining first,
- *    natsConnection_Destroy() would tear down the socket while I/O
- *    threads may still be reading/writing, causing races.
- * 4. Shared config freed last — it's SHM, no thread dependency.
- *
- * Note: Even with this ordering, there is a small window where
- * callbacks could fire between the drain completing and the destroy
- * call.  In practice this is harmless because the callbacks only
- * set atomic flags and call write(), which are idempotent.
- *
- * Thread safety: Must only be called from OpenSIPS process context
- * during shutdown (mod_destroy).
- */
+int nats_pool_on_reconnect(nats_reconnected_cb cb, void *closure)
+{
+	if (_reconnect_cb_cnt >= NATS_POOL_MAX_CALLBACKS) {
+		LM_ERR("NATS pool: max reconnect callbacks reached (%d)\n",
+			NATS_POOL_MAX_CALLBACKS);
+		return -1;
+	}
+
+	_reconnect_cbs[_reconnect_cb_cnt].cb = cb;
+	_reconnect_cbs[_reconnect_cb_cnt].closure = closure;
+	_reconnect_cb_cnt++;
+	return 0;
+}
+
+int nats_pool_on_disconnect(nats_disconnected_cb cb, void *closure)
+{
+	if (_disconnect_cb_cnt >= NATS_POOL_MAX_CALLBACKS) {
+		LM_ERR("NATS pool: max disconnect callbacks reached (%d)\n",
+			NATS_POOL_MAX_CALLBACKS);
+		return -1;
+	}
+
+	_disconnect_cbs[_disconnect_cb_cnt].cb = cb;
+	_disconnect_cbs[_disconnect_cb_cnt].closure = closure;
+	_disconnect_cb_cnt++;
+	return 0;
+}
+
 void nats_pool_destroy(void)
 {
+	static int _pool_destroyed = 0;
 	int i;
+
+	if (_pool_destroyed) {
+		LM_DBG("NATS pool: already destroyed, skipping\n");
+		return;
+	}
+	_pool_destroyed = 1;
 
 	LM_INFO("NATS pool: destroying\n");
 
-	/* Step 1: Destroy KV handles (depend on _js) */
+	/* destroy KV handles */
 	for (i = 0; i < _kv_cache_cnt; i++) {
 		if (_kv_cache[i].kv) {
 			kvStore_Destroy(_kv_cache[i].kv);
@@ -902,15 +692,13 @@ void nats_pool_destroy(void)
 	}
 	_kv_cache_cnt = 0;
 
-	/* Step 2: Destroy JetStream context (depends on _nc) */
+	/* destroy JetStream context */
 	if (_js) {
 		jsCtx_Destroy(_js);
 		_js = NULL;
 	}
 
-	/* Step 3: Drain then destroy connection.
-	 * Drain flushes pending publishes, waits for acks, then closes.
-	 * This ensures nats.c I/O threads complete before we destroy. */
+	/* drain and destroy connection */
 	if (_nc) {
 		natsConnection_Drain(_nc);
 		natsConnection_Destroy(_nc);
@@ -919,7 +707,13 @@ void nats_pool_destroy(void)
 
 	atomic_store(&_connected, 0);
 
-	/* Step 4: Free shared config (SHM) */
+	/* shut down nats.c library (thread pool, timers, etc.) */
+	if (_lib_initialized) {
+		nats_Close();
+		_lib_initialized = 0;
+	}
+
+	/* free shared config */
 	if (pool_cfg) {
 		for (i = 0; i < pool_cfg->server_cnt; i++) {
 			if (pool_cfg->servers[i])
@@ -936,64 +730,24 @@ void nats_pool_destroy(void)
 		shm_free(pool_cfg);
 		pool_cfg = NULL;
 	}
+
+	_reconnect_cb_cnt = 0;
+	_disconnect_cb_cnt = 0;
 }
 
-/**
- * Check if the pool is currently connected.
- *
- * @return  1 if connected, 0 if disconnected.
- *
- * Thread safety: Safe to call from any context.  Uses atomic_load
- * on _connected which is set by callbacks on the nats.c I/O thread.
- */
 int nats_pool_is_connected(void)
 {
 	return atomic_load(&_connected) ? 1 : 0;
 }
 
-/**
- * Get the currently connected server URL for status reporting.
- *
- * Queries natsConnection_GetConnectedUrl() directly on each call to
- * avoid returning a stale pointer.  The result is written into a
- * process-local static buffer and is valid until the next call.
- *
- * @return  Server URL string (process-local, do not free), or
- *          "not connected" if no active connection.
- *
- * Thread safety: Called from OpenSIPS process context only.
- * The static buffer is process-local (each forked process has its own).
- * We call natsConnection_GetConnectedUrl() which is thread-safe in
- * nats.c (it locks internally), so this is safe even if the reconnect
- * callback fires concurrently — we always get a consistent snapshot.
- */
 const char *nats_pool_get_server_info(void)
 {
-	static char _server_info_buf[512];
-
 	if (!_nc)
 		return "not connected";
 
-	if (natsConnection_GetConnectedUrl(_nc, _server_info_buf,
-	    sizeof(_server_info_buf)) != NATS_OK)
+	if (natsConnection_GetConnectedUrl(_nc, _server_info,
+	    sizeof(_server_info)) != NATS_OK)
 		return "not connected";
 
-	return _server_info_buf;
-}
-
-/**
- * Get the current reconnect epoch counter.
- *
- * Incremented atomically each time nats.c reports a successful
- * reconnection.  Modules can save the value and compare later to
- * detect that a reconnection occurred (e.g., to re-establish
- * watchers or rebuild indexes).
- *
- * @return  Current epoch counter value.
- *
- * Thread safety: Safe to call from any context.  Uses atomic_load.
- */
-int nats_pool_get_reconnect_epoch(void)
-{
-	return atomic_load(&_reconnect_epoch);
+	return _server_info;
 }
