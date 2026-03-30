@@ -1,10 +1,5 @@
 //! build.rs — Extract `OPENSIPS_FULL_VERSION`, `OPENSIPS_COMPILE_FLAGS`,
 //! and SCM info from the `OpenSIPS` source tree.
-//!
-//! Also compiles test_stubs.c with weak symbols to allow `cargo test`
-//! to link successfully without the actual OpenSIPS binary. The weak
-//! symbols are overridden by the real OpenSIPS core at dlopen time
-//! for the cdylib production build.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -21,17 +16,6 @@ fn main() {
 
     let dflags = opensips_build::extract_dflags(src_path);
     opensips_build::emit_scm_env(&dflags);
-
-    // Compile test stubs with weak symbols to satisfy linker for test targets.
-    // Weak symbols do not affect the cdylib build (resolved at dlopen).
-    let stubs_src = manifest_dir.join("../rust/sdk/test_stubs.c");
-    if stubs_src.exists() {
-        println!("cargo:rerun-if-changed={}", stubs_src.display());
-        cc::Build::new()
-            .file(&stubs_src)
-            .warnings(false)
-            .compile("opensips_test_stubs");
-    }
 
     // version_probe.c lives in the SDK directory
     let probe_src = manifest_dir.join("../rust/sdk/version_probe.c");
