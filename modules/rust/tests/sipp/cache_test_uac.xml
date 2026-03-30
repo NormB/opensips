@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  SIPp UAC scenario: Cache Test
+
+  Sends two identical INVITE requests to the same R-URI user.
+  The first should be a cache miss, the second a cache hit.
+  Check OpenSIPS logs for "cache hit" / "cache miss" messages.
+
+  Usage:
+    sipp -sf cache_test_uac.xml 127.0.0.1:5060 -m 2 -r 1
+
+  Parameters:
+    -m 2  : Send exactly 2 messages
+    -r 1  : 1 message per second (so both hit same cache window)
+-->
+<scenario name="Cache Test">
+
+  <!-- Send INVITE to a fixed user (same $rU triggers cache) -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:cachetestuser@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Cache Test" <sip:cachetest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:cachetestuser@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:cachetest@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1 1 IN IP4 [local_ip]
+      s=Cache Test
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 6000 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <!-- Expect any final response -->
+  <recv response="." optional="false" timeout="5000">
+  </recv>
+
+  <!-- Send ACK for non-2xx responses -->
+  <send>
+    <![CDATA[
+      ACK sip:cachetestuser@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Cache Test" <sip:cachetest@[local_ip]>;tag=[pid][call_number]
+      To: <sip:cachetestuser@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Small pause between requests -->
+  <pause milliseconds="500"/>
+
+</scenario>

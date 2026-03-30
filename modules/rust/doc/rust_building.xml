@@ -1,0 +1,738 @@
+<!-- Building Guide -->
+
+<chapter id="building" xreflabel="Building">
+
+	<title>Building the &osips; Rust Module</title>
+
+	<para>
+	This guide covers building the Rust module from scratch, whether starting
+	from a bare Debian system, an &osips; Docker container, or an existing
+	&osips; installation.
+	</para>
+
+	<!-- ============ SECTION 1: ARCHITECTURE OVERVIEW ============ -->
+	<section id="architecture_overview" xreflabel="Architecture Overview">
+	<title>Architecture Overview</title>
+	<para>
+	The module ships as a Cargo workspace with two crates:
+	</para>
+	<programlisting format="linespecific">
+opensips-rust/
+  modules/
+    rust/
+      opensips-rs/         # Reusable SDK (generates FFI bindings, C shim)
+      src/                 # Module (rate limiter, cache, HTTP pool)
+</programlisting>
+	<para>
+	<emphasis role='bold'>Why Cargo, not Make?</emphasis> &osips;'s build
+	system compiles C modules using <emphasis>make -C modules/&lt;name&gt;</emphasis>.
+	It discovers <emphasis>.c</emphasis> files, compiles them to
+	<emphasis>.o</emphasis>, and links into a <emphasis>.so</emphasis>. A Rust
+	module cannot use this directly because:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		Rust code is compiled by <emphasis>rustc</emphasis> via Cargo, not
+		<emphasis>cc</emphasis>.
+	</para></listitem>
+	<listitem><para>
+		The SDK uses <emphasis>bindgen</emphasis> to generate FFI bindings at
+		build time.
+	</para></listitem>
+	<listitem><para>
+		Dependencies (e.g., <emphasis>reqwest</emphasis> for &http;) are
+		managed by Cargo.
+	</para></listitem>
+	</itemizedlist>
+	<para>
+	Two build approaches are supported:
+	</para>
+	<informaltable>
+	<tgroup cols="3">
+	<thead>
+	<row>
+		<entry>Approach</entry>
+		<entry>How</entry>
+		<entry>Best for</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry><emphasis role='bold'>Standalone Cargo</emphasis></entry>
+		<entry><emphasis>cargo build --release</emphasis> produces the
+		<emphasis>.so</emphasis> directly</entry>
+		<entry>Development, CI, Docker</entry>
+	</row>
+	<row>
+		<entry><emphasis role='bold'>In-tree Make</emphasis></entry>
+		<entry>Symlink into <emphasis>modules/</emphasis>,
+		<emphasis>make modules module=rust</emphasis></entry>
+		<entry>Production integration</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</informaltable>
+	<para>
+	Both produce an identical <emphasis>rust.so</emphasis>.
+	</para>
+	</section>
+
+	<!-- ============ SECTION 2: PREREQUISITES ============ -->
+	<section id="build_prerequisites" xreflabel="Prerequisites">
+	<title>Prerequisites</title>
+
+	<section id="prereq_source_tree" xreflabel="OpenSIPS Source Tree">
+		<title>&osips; Source Tree</title>
+		<para>
+		The Rust module compiles against the &osips; C headers. You need the
+		<emphasis role='bold'>source tree</emphasis> of the same &osips;
+		version you are running. A package install
+		(<emphasis>apt install opensips</emphasis>) is not sufficient &mdash;
+		the headers and Makefile infrastructure are not included in binary
+		packages.
+		</para>
+	</section>
+
+	<section id="prereq_build_deps" xreflabel="Build Dependencies">
+		<title>Build Dependencies</title>
+		<informaltable>
+		<tgroup cols="2">
+		<thead>
+		<row>
+			<entry>Package</entry>
+			<entry>Why</entry>
+		</row>
+		</thead>
+		<tbody>
+		<row>
+			<entry><emphasis>build-essential</emphasis></entry>
+			<entry>C compiler, make, linker</entry>
+		</row>
+		<row>
+			<entry><emphasis>pkg-config</emphasis></entry>
+			<entry>Detect system libraries</entry>
+		</row>
+		<row>
+			<entry><emphasis>libssl-dev</emphasis></entry>
+			<entry>Required by reqwest (&http; client)</entry>
+		</row>
+		<row>
+			<entry><emphasis>clang</emphasis></entry>
+			<entry>Required by bindgen for parsing C headers</entry>
+		</row>
+		<row>
+			<entry><emphasis>llvm-dev</emphasis></entry>
+			<entry>LLVM libraries for bindgen</entry>
+		</row>
+		<row>
+			<entry><emphasis>libclang-dev</emphasis></entry>
+			<entry>libclang for bindgen</entry>
+		</row>
+		<row>
+			<entry><emphasis>bison</emphasis>, <emphasis>flex</emphasis></entry>
+			<entry>&osips; parser generators (if building &osips;)</entry>
+		</row>
+		<row>
+			<entry><emphasis>libxml2-dev</emphasis></entry>
+			<entry>&osips; core dependency</entry>
+		</row>
+		<row>
+			<entry><emphasis>libpcre2-dev</emphasis></entry>
+			<entry>&osips; regex support</entry>
+		</row>
+		</tbody>
+		</tgroup>
+		</informaltable>
+	</section>
+
+	<section id="prereq_rust" xreflabel="Rust Toolchain">
+		<title>Rust Toolchain</title>
+		<para>
+		Minimum Rust version: <emphasis role='bold'>1.70</emphasis> (for
+		OnceLock stabilization). Recommended: latest stable via
+		<emphasis>rustup</emphasis>.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 3: DOCKER BUILD ============ -->
+	<section id="docker_build" xreflabel="Docker: Build from Scratch">
+	<title>Docker: Build from Scratch</title>
+	<para>
+	The official <emphasis>opensips/opensips</emphasis> Docker image installs
+	from <emphasis>.deb</emphasis> packages and does
+	<emphasis role='bold'>not</emphasis> include headers or source. For a Rust
+	module, use a custom multi-stage Dockerfile that builds everything from
+	source.
+	</para>
+
+	<section id="docker_provided" xreflabel="Using the Provided Dockerfile">
+		<title>Using the Provided Dockerfile</title>
+		<programlisting format="linespecific">
+# Build the image (includes OpenSIPS + Rust module)
+docker build -t opensips-rust .
+
+# Run with a custom config
+docker run -v ./modules/rust/doc/opensips.cfg.example:/etc/opensips/opensips.cfg \
+    -p 5060:5060/udp opensips-rust
+</programlisting>
+	</section>
+
+	<section id="docker_walkthrough" xreflabel="Dockerfile Walkthrough">
+		<title>Dockerfile Walkthrough</title>
+		<para>
+		The provided <emphasis>Dockerfile</emphasis> has three stages:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis role='bold'>builder-opensips</emphasis> &mdash; Clones
+			and builds &osips; from source. This produces the binary, module
+			<emphasis>.so</emphasis> files, and leaves the source tree intact
+			for the Rust module's <emphasis>bindgen</emphasis> to use.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role='bold'>builder-rust</emphasis> &mdash; Installs
+			the Rust toolchain, copies the module source, and runs
+			<emphasis>cargo build --release</emphasis>. The
+			<emphasis>build.rs</emphasis> scripts automatically detect the
+			&osips; version from the source tree.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role='bold'>runtime</emphasis> &mdash; Minimal Debian
+			image with only the &osips; binary, core modules, the Rust
+			module, and runtime libraries. No compilers, no source code, no
+			Rust toolchain.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="docker_existing" xreflabel="Adding Rust to an Existing Image">
+		<title>Adding Rust to an Existing &osips; Docker Image</title>
+		<para>
+		If you already have a Docker image with &osips; built from source,
+		add these layers:
+		</para>
+		<programlisting format="linespecific">
+# Install Rust build dependencies
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang llvm-dev libclang-dev curl ca-certificates
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Build the module
+# OPENSIPS_SRC_DIR must point to the OpenSIPS source tree
+COPY opensips-rust/ /build/opensips-rust/
+RUN cd /build/opensips-rust \
+    &amp;&amp; OPENSIPS_SRC_DIR=/usr/local/src/opensips cargo build --release
+
+# Deploy
+RUN cp /build/opensips-rust/target/release/libopensips_mod_rust.so \
+    /usr/local/lib64/opensips/modules/rust.so
+</programlisting>
+		<para>
+		Key requirement: <emphasis>OPENSIPS_SRC_DIR</emphasis> must point to
+		the same source tree that produced the running &osips; binary. Version
+		mismatch = module will not load.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 4: BARE METAL ============ -->
+	<section id="bare_metal" xreflabel="Bare Metal: Step by Step">
+	<title>Bare Metal: Step by Step</title>
+
+	<section id="bare_step1" xreflabel="Build OpenSIPS from Source">
+		<title>Step 1: Build &osips; from Source</title>
+		<para>
+		Skip this if &osips; is already built and the source tree exists.
+		</para>
+		<programlisting format="linespecific">
+# Install OpenSIPS build dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential bison flex \
+    libxml2-dev libpcre2-dev pkg-config
+
+# Get the source (use the version matching your deployment)
+cd /usr/local/src
+git clone https://github.com/OpenSIPS/opensips.git
+cd opensips
+git checkout 3.5  # or master for 4.0-dev
+
+# Build and install
+make all
+sudo make install
+
+# Verify
+/usr/local/sbin/opensips -V
+</programlisting>
+		<para>
+		The source tree at <emphasis>/usr/local/src/opensips/</emphasis> must
+		remain intact &mdash; the Rust module's build system reads
+		<emphasis>Makefile.defs</emphasis> and runs
+		<emphasis>make -n -B</emphasis> against it to extract compiler flags.
+		</para>
+	</section>
+
+	<section id="bare_step2" xreflabel="Install Rust Toolchain">
+		<title>Step 2: Install Rust Toolchain</title>
+		<programlisting format="linespecific">
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+rustc --version  # should print 1.70.0 or higher
+</programlisting>
+	</section>
+
+	<section id="bare_step3" xreflabel="Install Rust Module Build Dependencies">
+		<title>Step 3: Install Rust Module Build Dependencies</title>
+		<programlisting format="linespecific">
+sudo apt-get install -y pkg-config libssl-dev clang llvm-dev libclang-dev
+</programlisting>
+		<para>
+		These are needed by:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>bindgen</emphasis> (clang, llvm-dev, libclang-dev)
+			&mdash; parses &osips; C headers.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>reqwest</emphasis> (libssl-dev, pkg-config) &mdash;
+			&http; client with TLS support.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="bare_step4" xreflabel="Clone and Build the Module">
+		<title>Step 4: Clone and Build the Module</title>
+		<programlisting format="linespecific">
+git clone &lt;your-repo-url&gt;/opensips-rust.git
+cd opensips-rust
+
+# Set the OpenSIPS source path (default: /usr/local/src/opensips)
+export OPENSIPS_SRC_DIR=/usr/local/src/opensips
+
+# Build
+cargo build --release
+</programlisting>
+		<para>
+		The build takes approximately 2&ndash;4 minutes on first run
+		(downloads and compiles dependencies). Subsequent builds take
+		approximately 10&ndash;30 seconds.
+		</para>
+	</section>
+
+	<section id="bare_step5" xreflabel="Deploy">
+		<title>Step 5: Deploy</title>
+		<programlisting format="linespecific">
+# Find your modules directory
+MODDIR=$(/usr/local/sbin/opensips -V 2>&amp;1 \
+    | grep -oP 'modules.*?/' \
+    || echo "/usr/local/lib64/opensips/modules/")
+sudo cp target/release/libopensips_mod_rust.so ${MODDIR}rust.so
+</programlisting>
+		<para>
+		Or use the provided script:
+		</para>
+		<programlisting format="linespecific">
+./scripts/build.sh  # builds and copies to /usr/local/lib64/opensips/modules/
+</programlisting>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 5: OPENSIPS MAKE SYSTEM ============ -->
+	<section id="make_integration" xreflabel="OpenSIPS Make System Integration">
+	<title>&osips; Make System Integration</title>
+	<para>
+	For production deployments, the module can be integrated into &osips;'s
+	<emphasis>make modules</emphasis> system. This follows the same pattern
+	used by <emphasis>tls_wolfssl</emphasis>, which builds an external C
+	library (wolfSSL via autotools) as a Make dependency.
+	</para>
+
+	<section id="make_how" xreflabel="How It Works">
+		<title>How It Works</title>
+		<itemizedlist>
+		<listitem><para>
+			Create <emphasis>modules/rust/</emphasis> in the &osips; source
+			tree.
+		</para></listitem>
+		<listitem><para>
+			A <emphasis>Makefile</emphasis> there declares the Cargo-built
+			static library as a <emphasis>DEPS</emphasis>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>make modules module=rust</emphasis> invokes Cargo, then
+			links the result.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="make_setup" xreflabel="Setup">
+		<title>Setup</title>
+		<programlisting format="linespecific">
+./scripts/intree-install.sh /usr/local/src/opensips
+</programlisting>
+		<para>
+		This creates <emphasis>modules/rust/</emphasis> in the &osips; source
+		tree with:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>Makefile</emphasis> &mdash; build rules that invoke
+			Cargo.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>rust.c</emphasis> &mdash; minimal C stub (required by
+			Makefile.sources).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>workspace</emphasis> &mdash; symlink to the Cargo
+			workspace root.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="make_building" xreflabel="Building via Make">
+		<title>Building via Make</title>
+		<programlisting format="linespecific">
+cd /usr/local/src/opensips
+make modules module=rust
+</programlisting>
+		<para>
+		This will:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			Run <emphasis>cargo build --release</emphasis> in the Rust
+			workspace.
+		</para></listitem>
+		<listitem><para>
+			Compile <emphasis>rust.c</emphasis> (thin C entry point) with
+			&osips;'s flags.
+		</para></listitem>
+		<listitem><para>
+			Link both into <emphasis>modules/rust/rust.so</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="make_installing" xreflabel="Installing via Make">
+		<title>Installing via Make</title>
+		<programlisting format="linespecific">
+sudo make install-modules module=rust
+</programlisting>
+	</section>
+
+	<section id="make_explained" xreflabel="The In-Tree Makefile Explained">
+		<title>The In-Tree Makefile Explained</title>
+		<programlisting format="linespecific">
+include ../../Makefile.defs
+auto_gen=
+NAME=rust.so
+
+RUST_DIR=$(shell pwd)/rust
+RUST_TARGET=$(RUST_DIR)/target/release
+RUST_LIB=$(RUST_TARGET)/libopensips_mod_rust.a
+
+# --whole-archive forces the linker to include all symbols from the
+# Rust static library, even though nothing in rust.c references
+# them. Without this, the `exports` symbol (defined in Rust) would be
+# discarded and OpenSIPS could not load the module.
+LIBS += -Wl,--whole-archive $(RUST_LIB) -Wl,--no-whole-archive \
+    -lpthread -ldl -lm -lssl -lcrypto -lgcc_s
+DEPS += $(RUST_LIB)
+
+# CRITICAL: include Makefile.modules BEFORE defining custom targets.
+# Makefile.modules includes Makefile.rules which sets `all` as the
+# default target. Custom rules defined above the include would become
+# the default goal, causing make to build only the .a (not the .so).
+include ../../Makefile.modules
+
+$(RUST_LIB): $(wildcard $(RUST_DIR)/modules/rust/opensips-rs/src/*.rs)
+	cd $(RUST_DIR) &amp;&amp; OPENSIPS_SRC_DIR=$(shell cd ../.. &amp;&amp; pwd) \
+		cargo build --release --lib -p opensips-mod-rust
+
+clean: clean-rust
+
+.PHONY: clean-rust
+clean-rust:
+	-@cd $(RUST_DIR) &amp;&amp; cargo clean 2&gt;/dev/null
+</programlisting>
+	</section>
+
+	<section id="make_c_entry" xreflabel="The C Entry Point">
+		<title>The C Entry Point</title>
+		<para>
+		<emphasis>rust.c</emphasis> is a minimal file that exists only so
+		&osips;'s <emphasis>Makefile.sources</emphasis> (which does
+		<emphasis>$(wildcard *.c)</emphasis>) finds at least one C file. The
+		actual module exports are defined in Rust:
+		</para>
+		<programlisting format="linespecific">
+/* rust.c -- Stub for OpenSIPS make system integration.
+ *
+ * The real module_exports struct is defined in Rust (lib.rs) and
+ * exported as a #[no_mangle] static. This file exists so that
+ * Makefile.sources finds a .c file to compile, satisfying the
+ * build system's expectations.
+ *
+ * It compiles to an empty .o that gets linked with the Rust
+ * static library into the final rust.so.
+ */
+
+/* intentionally empty -- all logic lives in Rust */
+</programlisting>
+		<para>
+		<emphasis role='bold'>Note:</emphasis> The
+		<emphasis>Cargo.toml</emphasis> for
+		<emphasis>opensips-mod-rust</emphasis> must set
+		<emphasis>crate-type = ["staticlib"]</emphasis> instead of
+		<emphasis>["cdylib"]</emphasis>. The provided
+		<emphasis>modules/rust/</emphasis> directory shows this change.
+		</para>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 6: DEPLOYING ============ -->
+	<section id="deploying" xreflabel="Deploying the Module">
+	<title>Deploying the Module</title>
+
+	<section id="deploy_path" xreflabel="Module Path">
+		<title>Module Path</title>
+		<para>
+		&osips; looks for modules in its configured
+		<emphasis>mpath</emphasis>. Common locations:
+		</para>
+		<informaltable>
+		<tgroup cols="2">
+		<thead>
+		<row>
+			<entry>Install method</entry>
+			<entry>Module path</entry>
+		</row>
+		</thead>
+		<tbody>
+		<row>
+			<entry>Source (<emphasis>make install</emphasis>)</entry>
+			<entry><emphasis>/usr/local/lib64/opensips/modules/</emphasis></entry>
+		</row>
+		<row>
+			<entry>Debian packages</entry>
+			<entry><emphasis>/usr/lib/x86_64-linux-gnu/opensips/modules/</emphasis></entry>
+		</row>
+		<row>
+			<entry>Docker (official)</entry>
+			<entry><emphasis>/usr/lib/x86_64-linux-gnu/opensips/modules/</emphasis></entry>
+		</row>
+		<row>
+			<entry>Custom</entry>
+			<entry>Set via <emphasis>mpath</emphasis> in opensips.cfg</entry>
+		</row>
+		</tbody>
+		</tgroup>
+		</informaltable>
+	</section>
+
+	<section id="deploy_naming" xreflabel="File Naming">
+		<title>File Naming</title>
+		<itemizedlist>
+		<listitem><para>
+			Cargo produces: <emphasis>libopensips_mod_rust.so</emphasis>
+			(cdylib) or <emphasis>libopensips_mod_rust.a</emphasis>
+			(staticlib).
+		</para></listitem>
+		<listitem><para>
+			&osips; expects: <emphasis>rust.so</emphasis>.
+		</para></listitem>
+		<listitem><para>
+			The <emphasis>build.sh</emphasis> script handles the rename
+			automatically.
+		</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section id="deploy_permissions" xreflabel="Permissions">
+		<title>Permissions</title>
+		<para>
+		The <emphasis>.so</emphasis> file needs to be readable by the &osips;
+		process:
+		</para>
+		<programlisting format="linespecific">
+sudo chmod 644 /usr/local/lib64/opensips/modules/rust.so
+</programlisting>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 7: CONFIGURATION ============ -->
+	<section id="build_configuration" xreflabel="Configuration">
+	<title>Configuration</title>
+	<para>
+	Add to your <emphasis>opensips.cfg</emphasis>:
+	</para>
+	<programlisting format="linespecific">
+# Module path (adjust for your installation)
+mpath="/usr/local/lib64/opensips/modules/"
+
+# Load required protocol and signaling modules
+loadmodule "proto_udp.so"
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+
+# Load the Rust module
+loadmodule "rust.so"
+
+# Configure parameters (all optional, shown with defaults)
+modparam("rust", "max_rate", 100)        # requests per window
+modparam("rust", "window_seconds", 60)   # rate limit window
+modparam("rust", "cache_ttl", 300)       # cache entry lifetime
+modparam("rust", "http_timeout", 2)      # HTTP timeout in seconds
+modparam("rust", "pool_size", 4)         # HTTP connection pool size
+</programlisting>
+	<para>
+	See <emphasis>modules/rust/doc/opensips.cfg.example</emphasis> for a
+	complete working configuration.
+	</para>
+	</section>
+
+	<!-- ============ SECTION 8: VERIFICATION ============ -->
+	<section id="verification" xreflabel="Verification">
+	<title>Verification</title>
+
+	<section id="verify_config" xreflabel="Config Check">
+		<title>Config Check</title>
+		<programlisting format="linespecific">
+# Syntax check -- verifies the module loads and all functions resolve
+/usr/local/sbin/opensips -c -f /path/to/opensips.cfg
+</programlisting>
+		<para>
+		A successful check prints
+		<emphasis>config file ok, exiting...</emphasis>.
+		</para>
+	</section>
+
+	<section id="verify_runtime" xreflabel="Runtime Check">
+		<title>Runtime Check</title>
+		<programlisting format="linespecific">
+# Start OpenSIPS
+/usr/local/sbin/opensips -f /path/to/opensips.cfg
+
+# Send a test SIP message
+sipsak -s sip:test@127.0.0.1:5060
+
+# Check logs for module output
+grep "rust" /var/log/syslog
+</programlisting>
+		<para>
+		You should see:
+		</para>
+		<programlisting format="linespecific">
+rust: module initialized (v4.0)
+rust: child_init called for rank ...
+rust: HTTP connection pool initialized (timeout=2s, pool=4)
+</programlisting>
+	</section>
+
+	<section id="verify_testsuite" xreflabel="Run the Test Suite">
+		<title>Run the Test Suite</title>
+		<programlisting format="linespecific">
+./scripts/test.sh  # builds, deploys, runs opensips -c
+</programlisting>
+	</section>
+
+	</section>
+
+	<!-- ============ SECTION 9: TROUBLESHOOTING ============ -->
+	<section id="troubleshooting" xreflabel="Troubleshooting">
+	<title>Troubleshooting</title>
+
+	<section id="trouble_version" xreflabel="module version mismatch">
+		<title>"module version mismatch"</title>
+		<para>
+		The module's compiled version strings do not match the running &osips;
+		binary. This happens when:
+		</para>
+		<itemizedlist>
+		<listitem><para>
+			You built the module against a different source tree than the
+			binary.
+		</para></listitem>
+		<listitem><para>
+			The source tree was updated but the module was not rebuilt.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		Fix: rebuild the module against the correct source tree:
+		</para>
+		<programlisting format="linespecific">
+export OPENSIPS_SRC_DIR=/path/to/correct/opensips/source
+cargo clean &amp;&amp; cargo build --release
+</programlisting>
+	</section>
+
+	<section id="trouble_notfound" xreflabel="cannot open shared object file">
+		<title>"cannot open shared object file"</title>
+		<para>
+		The <emphasis>.so</emphasis> is not in the <emphasis>mpath</emphasis>
+		directory. Check:
+		</para>
+		<programlisting format="linespecific">
+# What mpath is configured?
+grep mpath /path/to/opensips.cfg
+
+# Is the file there?
+ls -la /usr/local/lib64/opensips/modules/rust.so
+</programlisting>
+	</section>
+
+	<section id="trouble_clang" xreflabel="bindgen fails with clang not found">
+		<title>bindgen fails with "clang not found"</title>
+		<programlisting format="linespecific">
+sudo apt-get install clang llvm-dev libclang-dev
+</programlisting>
+	</section>
+
+	<section id="trouble_srcnotfound" xreflabel="OpenSIPS source not found">
+		<title>"&osips; source not found"</title>
+		<para>
+		Set <emphasis>OPENSIPS_SRC_DIR</emphasis> to point to the &osips;
+		source tree:
+		</para>
+		<programlisting format="linespecific">
+export OPENSIPS_SRC_DIR=/usr/local/src/opensips
+</programlisting>
+		<para>
+		The directory must contain <emphasis>Makefile.defs</emphasis>.
+		</para>
+	</section>
+
+	<section id="trouble_ssl" xreflabel="Cargo build fails with SSL errors">
+		<title>Cargo build fails with SSL errors</title>
+		<programlisting format="linespecific">
+sudo apt-get install pkg-config libssl-dev
+</programlisting>
+	</section>
+
+	<section id="trouble_make" xreflabel="make -n -B produces no output">
+		<title>"make -n -B" produces no output</title>
+		<para>
+		The &osips; source tree needs to have been configured. Run
+		<emphasis>make</emphasis> once (even if it fails) to generate
+		<emphasis>Makefile.conf</emphasis>:
+		</para>
+		<programlisting format="linespecific">
+cd /usr/local/src/opensips &amp;&amp; make menuconfig
+# or just: cp Makefile.conf.template Makefile.conf
+</programlisting>
+	</section>
+
+	</section>
+
+</chapter>

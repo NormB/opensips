@@ -1,0 +1,16 @@
+[package]
+name = "rust-sst"
+version = "0.1.0"
+edition = "2021"
+description = "SIP Session Timers (RFC 4028) rewrite for OpenSIPS"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opensips-rs = { path = "../rust/sdk" }
+rust-common = { path = "../rust/common" }
+
+[build-dependencies]
+opensips-build = { path = "../rust/build-utils" }
+cc = "1"
