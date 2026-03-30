@@ -1,0 +1,16 @@
+<para><emphasis role='bold'>Return Codes</emphasis></para>
+<itemizedlist>
+<listitem>
+	<para><emphasis role='bold'>1</emphasis> - Success.
+	The operation completed successfully.
+	</para>
+</listitem>
+<listitem>
+	<para><emphasis role='bold'>-1</emphasis> - Failure.
+	The operation failed. See function-specific error conditions for details.
+	When called via <emphasis>rust_exec()</emphasis>, this may indicate:
+	no script loaded, function not found, empty function name, or a Rust
+	panic caught at the FFI boundary (logged at ERR level with the panic message).
+	</para>
+</listitem>
+</itemizedlist>

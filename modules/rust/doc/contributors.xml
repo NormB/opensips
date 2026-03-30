@@ -1,0 +1,59 @@
+<!-- THIS IS AN AUTO-GENERATED FILE -->
+<chapter id="contributors" xreflabel="contributors">
+	<title>&contributors;</title>
+
+<section id="contrib_commit_statistics" xreflabel="contrib_commit_statistics">
+	<title>By Commit Statistics</title>
+
+	<table frame='all'><title>Top contributors by DevScore<superscript>(1)</superscript>, commits, and lines added/removed</title>
+	<tgroup cols='6' align='left' colsep='1' rowsep='1'>
+	<thead>
+	<row>
+		<entry align="center"></entry>
+		<entry align="center">Name</entry>
+		<entry align="center">DevScore</entry>
+		<entry align="center">Commits</entry>
+		<entry align="center">Lines ++</entry>
+		<entry align="center">Lines --</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry>1. </entry>
+		<entry>gator</entry>
+		<entry align="center">10</entry>
+		<entry align="center">5</entry>
+		<entry align="center">3000</entry>
+		<entry align="center">200</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</table>
+
+</section>
+
+<section id="contrib_commit_activity" xreflabel="contrib_commit_activity">
+	<title>By Commit Activity</title>
+
+	<table frame='all'><title>Most recent commits</title>
+	<tgroup cols='3' align='left' colsep='1' rowsep='1'>
+	<thead>
+	<row>
+		<entry align="center"></entry>
+		<entry align="center">Name</entry>
+		<entry align="center">Latest commit</entry>
+	</row>
+	</thead>
+	<tbody>
+	<row>
+		<entry>1. </entry>
+		<entry>gator</entry>
+		<entry align="center">Mar 2, 2026</entry>
+	</row>
+	</tbody>
+	</tgroup>
+	</table>
+
+</section>
+
+</chapter>

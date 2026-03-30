@@ -1,0 +1,264 @@
+<!-- Architecture & Design Decisions -->
+
+<chapter id="architecture" xreflabel="Architecture">
+
+	<title>Architecture &amp; Design Decisions</title>
+
+	<para>
+	This document explains the key design decisions behind the opensips-rust
+	workspace.
+	</para>
+
+	<!-- ============ SECTION 1: WHY TWO CRATES ============ -->
+	<section id="arch_two_crates" xreflabel="Why Two Crates">
+	<title>Why Two Crates</title>
+	<para>
+	The workspace is split into two crates:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		<emphasis role='bold'>opensips-rs</emphasis> &mdash; A reusable SDK
+		that any Rust module can depend on. It owns the build system
+		integration, FFI bindings, the C shim, and panic-safe wrappers.
+		Keeping this separate means a new module author can
+		<emphasis>cargo add opensips-rs</emphasis> and immediately get a
+		working build against their &osips; installation without reinventing
+		the plumbing.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>opensips-mod-rust</emphasis> &mdash; A concrete
+		module that depends on the SDK. It contains only application logic
+		(rate limiting, caching, &http; pooling) and the
+		<emphasis>mod_export</emphasis> table. This separation enforces a
+		clean boundary: SDK concerns never leak into module code, and
+		module-specific logic never pollutes the SDK.
+	</para></listitem>
+	</itemizedlist>
+	<para>
+	This mirrors the pattern used by mature plugin ecosystems (e.g., Nginx
+	modules, PostgreSQL extensions) where a stable C API layer sits beneath
+	per-module logic.
+	</para>
+	</section>
+
+	<!-- ============ SECTION 2: BUILD SYSTEM ============ -->
+	<section id="arch_build_system" xreflabel="Build System">
+	<title>Build System: Flag Extraction via make -n -B</title>
+	<para>
+	&osips; does not provide a <emphasis>pkg-config</emphasis> file or a
+	stable set of compiler flags for out-of-tree modules. Rather than
+	hard-coding paths that break across versions and distros,
+	<emphasis>build.rs</emphasis> runs:
+	</para>
+	<programlisting format="linespecific">
+make -n -B modules modules=modules/httpd 2>/dev/null
+</programlisting>
+	<para>
+	The <emphasis>-n</emphasis> (dry-run) and <emphasis>-B</emphasis>
+	(unconditional rebuild) flags cause <emphasis>make</emphasis> to print
+	every command it <emphasis>would</emphasis> execute without actually
+	compiling anything. <emphasis>build.rs</emphasis> then parses the output
+	for <emphasis>-I</emphasis>, <emphasis>-L</emphasis>,
+	<emphasis>-D</emphasis>, and other flags, and forwards them to
+	<emphasis>bindgen</emphasis> and <emphasis>rustc</emphasis>. This
+	approach:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		Works on any system where &osips; compiles successfully.
+	</para></listitem>
+	<listitem><para>
+		Automatically picks up version-specific defines
+		(<emphasis>-DOPENSIPS_VER</emphasis>, etc.).
+	</para></listitem>
+	<listitem><para>
+		Requires no manual configuration beyond setting the &osips; source
+		path.
+	</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<!-- ============ SECTION 3: C SHIM STRATEGY ============ -->
+	<section id="arch_c_shim" xreflabel="C Shim Strategy">
+	<title>The C Shim Strategy</title>
+	<para>
+	Several parts of the &osips; API cannot be called directly from Rust via
+	bindgen:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		<emphasis role='bold'>Variadic macros</emphasis> &mdash; Logging
+		macros like <emphasis>LM_ERR(fmt, ...)</emphasis> expand to variadic
+		function calls through multiple layers of preprocessor indirection.
+		Bindgen cannot generate Rust bindings for C macros, let alone
+		variadic ones. The shim provides thin C wrapper functions
+		(<emphasis>shim_log_err</emphasis>, etc.) that accept a single
+		<emphasis>const char *</emphasis> and call the real macro internally.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>Static inline functions</emphasis> &mdash;
+		Functions like <emphasis>pkg_malloc</emphasis> and
+		<emphasis>pkg_free</emphasis> are often defined as
+		<emphasis>static inline</emphasis> in headers. Bindgen emits
+		declarations for them, but no symbol exists in any
+		<emphasis>.so</emphasis> for the linker to resolve. The shim wraps
+		these in real (non-inline) C functions that the Rust side can link
+		against.
+	</para></listitem>
+	<listitem><para>
+		<emphasis role='bold'>Complex preprocessor macros</emphasis> &mdash;
+		<emphasis>pkg_malloc</emphasis> and <emphasis>shm_malloc</emphasis>
+		may be macros that expand differently depending on debug/profiling
+		flags. Wrapping them in the shim provides a stable ABI regardless of
+		how &osips; was compiled.
+	</para></listitem>
+	</itemizedlist>
+	<para>
+	The shim is compiled by <emphasis>build.rs</emphasis> using the
+	<emphasis>cc</emphasis> crate with the exact flags extracted from
+	&osips;'s build system.
+	</para>
+	</section>
+
+	<!-- ============ SECTION 4: SIP_MSG AS OPAQUE ============ -->
+	<section id="arch_sip_msg_opaque" xreflabel="sip_msg as Opaque">
+	<title>sip_msg as Opaque</title>
+	<para>
+	The <emphasis>struct sip_msg</emphasis> in &osips; is large, heavily
+	nested, and changes between versions. Replicating it as a Rust struct
+	would be fragile, hard to maintain, and would break on every &osips;
+	release.
+	</para>
+	<para>
+	Instead, the SDK treats <emphasis>sip_msg</emphasis> as an opaque pointer
+	(<emphasis>*mut c_void</emphasis>) and accesses its fields through C
+	accessor functions in the shim:
+	</para>
+	<programlisting format="linespecific">
+const char *shim_get_method(struct sip_msg *msg);
+const char *shim_get_ruri(struct sip_msg *msg);
+</programlisting>
+	<para>
+	This means:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		The Rust side never needs to know the layout of
+		<emphasis>sip_msg</emphasis>.
+	</para></listitem>
+	<listitem><para>
+		Adding a new accessor is a one-line C function plus a one-line Rust
+		extern declaration.
+	</para></listitem>
+	<listitem><para>
+		Version compatibility is handled entirely in C, where it is natural.
+	</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<!-- ============ SECTION 5: PANIC SAFETY ============ -->
+	<section id="arch_panic_safety" xreflabel="Panic Safety">
+	<title>catch_unwind_ffi for Panic Safety</title>
+	<para>
+	A Rust panic that unwinds across an FFI boundary into C is undefined
+	behavior. Every Rust function exported to &osips; is wrapped with
+	<emphasis>std::panic::catch_unwind</emphasis>, which catches panics at
+	the FFI boundary and converts them into a safe error return (-1).
+	</para>
+	<para>
+	The SDK provides a helper:
+	</para>
+	<programlisting format="linespecific">
+pub fn catch_unwind_ffi&lt;F: FnOnce() -> c_int>(f: F) -> c_int {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(rc) => rc,
+        Err(_) => {
+            // Log the panic via the shim, return error
+            shim_log_err("Rust panic caught at FFI boundary");
+            -1
+        }
+    }
+}
+</programlisting>
+	<para>
+	This ensures that even if module code has a bug, &osips; continues
+	running rather than crashing with a SIGABRT.
+	</para>
+	</section>
+
+	<!-- ============ SECTION 6: THREAD_LOCAL ============ -->
+	<section id="arch_thread_local" xreflabel="Per-Worker State">
+	<title>thread_local! for Per-Worker State</title>
+	<para>
+	&osips; uses a pre-fork worker model: the main process forks N children,
+	and each child handles &sip; traffic independently. After
+	<emphasis>fork()</emphasis>, each worker has its own copy of the address
+	space, and workers never share memory (aside from explicit SHM regions).
+	</para>
+	<para>
+	This maps perfectly to <emphasis>thread_local!</emphasis> storage in
+	Rust:
+	</para>
+	<programlisting format="linespecific">
+thread_local! {
+    static RATE_LIMITER: RefCell&lt;RateLimiter> = RefCell::new(RateLimiter::new());
+    static CACHE: RefCell&lt;LruCache&lt;String, CacheEntry>> = ...;
+    static HTTP_POOL: RefCell&lt;HttpPool> = ...;
+}
+</programlisting>
+	<para>
+	Why this is safe:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		Each &osips; worker is a separate process (not a thread), so there is
+		no concurrent access.
+	</para></listitem>
+	<listitem><para>
+		<emphasis>thread_local!</emphasis> gives each worker its own instance,
+		initialized lazily on first use after fork.
+	</para></listitem>
+	<listitem><para>
+		No <emphasis>Mutex</emphasis>, no <emphasis>Arc</emphasis>, no
+		synchronization overhead &mdash; just a <emphasis>RefCell</emphasis>
+		for interior mutability.
+	</para></listitem>
+	<listitem><para>
+		Worker-local state means the rate limiter, cache, and &http; pool are
+		isolated per worker, which is the correct semantic for &osips;'s
+		architecture.
+	</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<!-- ============ SECTION 7: VERSION PROBE ============ -->
+	<section id="arch_version_probe" xreflabel="Version Probe Strategy">
+	<title>Version Probe Strategy</title>
+	<para>
+	The SDK needs to know the &osips; version at build time for conditional
+	compilation (e.g., API changes between 3.x and 4.x). Rather than asking
+	the user to specify this manually, <emphasis>build.rs</emphasis> extracts
+	the version from the build flags:
+	</para>
+	<itemizedlist>
+	<listitem><para>
+		Parse <emphasis>-DOPENSIPS_VER=0x0400</emphasis> from the
+		<emphasis>make -n -B</emphasis> output.
+	</para></listitem>
+	<listitem><para>
+		Convert to a semantic version and emit
+		<emphasis>cargo:rustc-cfg=opensips_ver="4.0"</emphasis>.
+	</para></listitem>
+	<listitem><para>
+		Module code can then use
+		<emphasis>#[cfg(opensips_ver = "4.0")]</emphasis> for
+		version-specific logic.
+	</para></listitem>
+	</itemizedlist>
+	<para>
+	This keeps version detection fully automatic and tied to the actual source
+	tree being compiled against.
+	</para>
+	</section>
+
+</chapter>

@@ -1,0 +1,1135 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_concurrent_calls</emphasis> module provides
+		per-account concurrent call limiting for &osips;. It tracks
+		active calls per account (typically identified by From-&uri;
+		username) and enforces configurable per-account limits loaded
+		from a CSV file.
+	</para>
+	<para>
+		Accounts not listed in the limits file are subject to a
+		configurable default limit. An account with a limit of 0 is
+		effectively blocked from making any calls.
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+	<para>
+		The module supports two operating modes:
+	</para>
+	<para>
+		<emphasis>Automatic mode</emphasis> (default): When
+		<varname>dialog.so</varname> is loaded and
+		<varname>auto_track</varname> is enabled, the module
+		automatically increments the counter when a dialog is
+		created (DLGCB_CREATED) and decrements it when the dialog
+		terminates or expires (DLGCB_TERMINATED/DLGCB_EXPIRED).
+		The account is extracted from the SIP message using the
+		configurable <varname>account_var</varname> pseudo-variable
+		(default: <literal>$fU</literal>). In this mode, you only
+		need to call <function>check_concurrent()</function> in
+		the script; increment and decrement are handled automatically.
+	</para>
+	<para>
+		<emphasis>Manual mode</emphasis>: When
+		<varname>auto_track</varname> is disabled (set to 0) or
+		<varname>dialog.so</varname> is not loaded, the module uses
+		explicit <function>concurrent_inc()</function> and
+		<function>concurrent_dec()</function> calls from the script.
+		This gives the script author full control over when counts
+		are adjusted.
+	</para>
+	<para>
+		The manual functions (<function>concurrent_inc()</function>
+		and <function>concurrent_dec()</function>) remain available
+		regardless of the <varname>auto_track</varname> setting,
+		allowing mixed usage if needed.
+	</para>
+	<para>
+		Typical usage (automatic mode):
+		<orderedlist>
+		<listitem><para>
+			Load <emphasis>dialog.so</emphasis> before this module.
+		</para></listitem>
+		<listitem><para>
+			On initial INVITE (no to-tag): call
+			<function>check_concurrent()</function> to verify the
+			account is under its limit. The counter is automatically
+			incremented when the dialog is created.
+		</para></listitem>
+		<listitem><para>
+			No need to handle BYE or failure responses for counter
+			management — the dialog callbacks handle decrement
+			automatically.
+		</para></listitem>
+		</orderedlist>
+	</para>
+	<para>
+		Typical usage (manual mode):
+		<orderedlist>
+		<listitem><para>
+			On initial INVITE (no to-tag): call
+			<function>check_concurrent()</function> to verify the
+			account is under its limit. If allowed, call
+			<function>concurrent_inc()</function> to increment the
+			counter.
+		</para></listitem>
+		<listitem><para>
+			On failure responses (3xx-6xx to INVITE): call
+			<function>concurrent_dec()</function> to release the
+			slot.
+		</para></listitem>
+		<listitem><para>
+			On BYE: call <function>concurrent_dec()</function> to
+			release the slot.
+		</para></listitem>
+		</orderedlist>
+	</para>
+	<para>
+		Per-account limits are loaded from a CSV file at worker startup.
+		Each worker maintains its own independent set of counters, so
+		the effective limit is per-worker. For precise global limiting,
+		consider using an external data store.
+	</para>
+	<para>
+		The <function>check_concurrent()</function> function sets
+		<literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> pseudo-variables for
+		use in script logging or response messages.
+	</para>
+	<para>
+		Limits can be reloaded at runtime using
+		<function>concurrent_reload()</function> without restarting
+		&osips;. Active call counters are preserved across reloads;
+		only the per-account limits are updated.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>dialog</emphasis> — Required for automatic
+			tracking mode (<varname>auto_track=1</varname>). If
+			dialog.so is not loaded and auto_track is enabled, the
+			module falls back to manual mode with a warning.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_limits_file" xreflabel="limits_file">
+		<title><varname>limits_file</varname> (string)</title>
+		<para>
+		Path to a CSV file defining per-account concurrent call limits.
+		Format: one line per account as
+		<quote>account,max_calls</quote>. Lines starting with
+		<literal>#</literal> are treated as comments. Blank lines are
+		ignored. This parameter is required. The module will fail to
+		load if this parameter is not set or the file does not exist.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (must be set).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>limits_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "limits_file", "/etc/opensips/call_limits.csv")
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Limits file format</title>
+		<programlisting format="linespecific">
+# /etc/opensips/call_limits.csv
+# account,max_calls
+alice,5
+bob,20
+sip_trunk_1,100
+blocked_user,0
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_default_limit" xreflabel="default_limit">
+		<title><varname>default_limit</varname> (integer)</title>
+		<para>
+		Default concurrent call limit applied to accounts not listed
+		in the limits file. Must be at least 0; a value of 0 blocks
+		all unlisted accounts.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>10</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>default_limit</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "default_limit", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_auto_track" xreflabel="auto_track">
+		<title><varname>auto_track</varname> (integer)</title>
+		<para>
+		Enable automatic dialog callback tracking. When set to 1 and
+		dialog.so is loaded, the module automatically increments the
+		concurrent call counter when a dialog is created and decrements
+		it when the dialog terminates or expires. This eliminates the
+		need for explicit <function>concurrent_inc()</function> and
+		<function>concurrent_dec()</function> calls in the script.
+		</para>
+		<para>
+		When set to 0, the module operates in manual mode where the
+		script must explicitly manage counters.
+		</para>
+		<para>
+		If auto_track is enabled but dialog.so is not loaded, the
+		module logs a warning and falls back to manual mode.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>auto_track</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Enable automatic tracking (default)
+modparam("rust_concurrent_calls", "auto_track", 1)
+
+# Disable automatic tracking (manual mode)
+modparam("rust_concurrent_calls", "auto_track", 0)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_account_var" xreflabel="account_var">
+		<title><varname>account_var</varname> (string)</title>
+		<para>
+		The pseudo-variable expression used to extract the account
+		identifier from the SIP message during automatic dialog
+		tracking. This is evaluated in the DLGCB_CREATED callback.
+		</para>
+		<para>
+		Common values include <literal>$fU</literal> (From-URI
+		username), <literal>$rU</literal> (Request-URI username),
+		or any other PV expression that identifies the account.
+		</para>
+		<para>
+		This parameter is only used when
+		<varname>auto_track</varname> is enabled.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>$fU</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>account_var</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Use From-URI username (default)
+modparam("rust_concurrent_calls", "account_var", "$fU")
+
+# Use Request-URI username
+modparam("rust_concurrent_calls", "account_var", "$rU")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_use_dialog_profiles" xreflabel="use_dialog_profiles">
+		<title><varname>use_dialog_profiles</varname> (integer)</title>
+		<para>
+		When set to 1, use dialog profiles (via
+		<function>get_profile_size()</function> and
+		<function>set_dlg_profile()</function>) for cross-worker
+		accurate concurrent call counts. This requires dialog.so
+		to be loaded.
+		</para>
+		<para>
+		When set to 0, the module uses a per-worker HashMap for
+		counting, which is faster but only sees calls handled by
+		the same worker process.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>use_dialog_profiles</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "use_dialog_profiles", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_profile_name" xreflabel="profile_name">
+		<title><varname>profile_name</varname> (string)</title>
+		<para>
+		The dialog profile name used for cross-worker counting when
+		<varname>use_dialog_profiles</varname> is enabled. This
+		profile must be configured in the dialog module.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>concurrent_calls</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>profile_name</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "profile_name", "concurrent_calls")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_direction_aware" xreflabel="direction_aware">
+		<title><varname>direction_aware</varname> (integer)</title>
+		<para>
+		When set to 1, enable per-direction (inbound/outbound) limits.
+		The limits file must have three columns:
+		<literal>account,max_inbound,max_outbound</literal>. The
+		direction-specific functions
+		<function>check_concurrent_inbound()</function> and
+		<function>check_concurrent_outbound()</function> become
+		available.
+		</para>
+		<para>
+		When set to 0 (default), the module uses a single limit per
+		account with the two-column format
+		<literal>account,max_calls</literal>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>direction_aware</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "direction_aware", 1)
+...
+</programlisting>
+		</example>
+		<example>
+		<title>Direction-aware limits file format</title>
+		<programlisting format="linespecific">
+# /etc/opensips/call_limits.csv
+# account,max_inbound,max_outbound
+alice,5,3
+trunk-1,100,50
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cooldown_secs" xreflabel="cooldown_secs">
+		<title><varname>cooldown_secs</varname> (integer)</title>
+		<para>
+		Cooldown period in seconds after a limit rejection. When an
+		account hits its concurrent call limit, all subsequent calls
+		from the same account are rejected for this duration without
+		checking the counter.
+		</para>
+		<para>
+		When set to 0 (default), no cooldown is applied. Each call
+		is checked against the counter individually.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cooldown_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+# Reject all calls for 30 seconds after a limit hit
+modparam("rust_concurrent_calls", "cooldown_secs", 30)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_burst_threshold" xreflabel="burst_threshold">
+		<title><varname>burst_threshold</varname> (integer)</title>
+		<para>
+		Burst detection threshold. When an account's concurrent call
+		count increases by this many within
+		<varname>burst_window_secs</varname>, flag it as a burst.
+		Set to 0 to disable burst detection.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>burst_threshold</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "burst_threshold", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_burst_window_secs" xreflabel="burst_window_secs">
+		<title><varname>burst_window_secs</varname> (integer)</title>
+		<para>
+		Time window in seconds for burst detection. The module tracks
+		concurrent call count snapshots within this window and compares
+		the current count to the oldest snapshot.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>10</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>burst_window_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "burst_window_secs", 10)
+...
+</programlisting>
+		</example>
+	</section>
+	
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		Enable event publishing. When set to 1, the module publishes
+		significant events as NOTICE-level structured log messages
+		that operators can consume via syslog or log aggregation.
+		If the NATS module is loaded, events are also published to
+		NATS subjects under <literal>opensips.events.*</literal>.
+		</para>
+		<para>
+		Events published by this module: E_CONCURRENT_LIMIT (when a call is rejected at limit) and E_CONCURRENT_BURST (when burst detection triggers).
+		Each event includes a JSON payload with relevant details.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_concurrent_calls", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_check_concurrent" xreflabel="check_concurrent()">
+		<title>
+		<function moreinfo="none">check_concurrent(account)</function>
+		</title>
+		<para>
+		Check whether the given account is under its concurrent call
+		limit. On return, the pseudo-variables
+		<literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> are set to the
+		current count and the effective limit for the account.
+		</para>
+		<para>
+		This function does NOT increment the counter. In automatic
+		mode (<varname>auto_track=1</varname>), the counter is
+		incremented by the dialog callback. In manual mode, use
+		<function>concurrent_inc()</function> separately after a
+		successful check.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. Typically <literal>$fU</literal>
+			(From-&uri; username) or <literal>$rU</literal>
+			(Request-&uri; username). This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - account is under its limit
+			(allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - account is at or
+			over its limit (blocked).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - internal error
+			(missing parameter or uninitialized worker).
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_concurrent</function> usage (automatic mode)</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!check_concurrent("$fU")) {
+            xlog("L_WARN", "$fU over limit: $var(concurrent_count)/$var(concurrent_limit)\n");
+            sl_send_reply(486, "Too Many Calls");
+            exit;
+        }
+        # auto_track handles inc/dec via dialog callbacks
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_inc" xreflabel="concurrent_inc()">
+		<title>
+		<function moreinfo="none">concurrent_inc(account)</function>
+		</title>
+		<para>
+		Increment the concurrent call counter for the given account.
+		In manual mode, call this after a successful
+		<function>check_concurrent()</function> when the INVITE
+		is being forwarded. In automatic mode, this is handled by
+		the dialog callback, but the function remains available for
+		mixed usage.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. Must match the value used in
+			<function>check_concurrent()</function>. This
+			parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - counter incremented
+			successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - internal error
+			(missing parameter or uninitialized worker).
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_inc</function> usage (manual mode)</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (check_concurrent("$fU")) {
+            concurrent_inc("$fU");
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_dec" xreflabel="concurrent_dec()">
+		<title>
+		<function moreinfo="none">concurrent_dec(account)</function>
+		</title>
+		<para>
+		Decrement the concurrent call counter for the given account.
+		The counter floors at zero and will never go negative.
+		</para>
+		<para>
+		In manual mode, call this when a call ends (BYE) or when an
+		INVITE receives a failure response and the counter was
+		previously incremented. In automatic mode, this is handled
+		by the dialog callback, but the function remains available
+		for mixed usage.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. Must match the value used in
+			<function>concurrent_inc()</function>. This parameter
+			is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - counter decremented
+			successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - internal error
+			(missing parameter or uninitialized worker).
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_dec</function> usage (manual mode)</title>
+		<programlisting format="linespecific">
+...
+route[handle_bye] {
+    concurrent_dec("$fU");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_reload" xreflabel="concurrent_reload()">
+		<title>
+		<function moreinfo="none">concurrent_reload()</function>
+		</title>
+		<para>
+		Re-read the limits CSV file from disk and atomically swap the
+		per-account limits. Active call counters are preserved; only
+		the limit values are updated. This allows changing account
+		limits without restarting &osips;.
+		</para>
+		<para>
+		The reload affects only the worker process that executes the
+		function. To reload all workers, trigger this function from a
+		route that is processed by each worker (e.g., via an
+		MI-triggered OPTIONS ping or timer route).
+		</para>
+		<para>
+		On success, the <varname>accounts</varname> and
+		<varname>reloads</varname> statistics are updated.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - reload succeeded.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - file read error or
+			worker not initialized.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_reload</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[reload_limits] {
+    if (concurrent_reload()) {
+        xlog("L_INFO", "Call limits reloaded successfully\n");
+    } else {
+        xlog("L_ERR", "Call limits reload failed\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_stats" xreflabel="concurrent_stats()">
+		<title>
+		<function moreinfo="none">concurrent_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(concurrent_stats)</literal> with a JSON object
+		containing all tracked counters for the current worker process.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    concurrent_stats();
+    xlog("L_INFO", "Concurrent stats: $var(concurrent_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_burst" xreflabel="check_burst()">
+		<title>
+		<function moreinfo="none">check_burst(account)</function>
+		</title>
+		<para>
+		Check if the given account is experiencing a burst of concurrent
+		calls. Returns 1 if a burst is detected (the count increased by
+		at least <varname>burst_threshold</varname> within
+		<varname>burst_window_secs</varname>), or -1 if normal.
+		Sets <literal>$var(burst_delta)</literal> with the rate of
+		change (delta) in concurrent calls.
+		</para>
+		<para>
+		Requires <varname>burst_threshold</varname> to be set to a
+		value greater than 0. If burst detection is disabled, always
+		returns -1.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - burst detected.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - normal (no burst).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_burst</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (check_burst("$fU")) {
+            xlog("L_WARN", "Burst detected for $fU: delta=$var(burst_delta)\n");
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_status" xreflabel="concurrent_status()">
+		<title>
+		<function moreinfo="none">concurrent_status(account)</function>
+		</title>
+		<para>
+		Retrieve detailed status for a specific account as a JSON
+		string. Sets <literal>$var(concurrent_status)</literal> with
+		a JSON object containing the account name, current count,
+		effective limit, and per-direction breakdown.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to query. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_status</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    concurrent_status("$fU");
+    xlog("L_INFO", "Status: $var(concurrent_status)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_set_limit" xreflabel="concurrent_set_limit()">
+		<title>
+		<function moreinfo="none">concurrent_set_limit(account, limit)</function>
+		</title>
+		<para>
+		Live override of an account's concurrent call limit. The
+		override persists until the next
+		<function>concurrent_reload()</function> or process restart.
+		This allows dynamic limit adjustment without editing the
+		limits file.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>limit</emphasis> (string)  - The new limit
+			value as a string (will be parsed as unsigned integer).
+			This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - override applied successfully.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - invalid parameters or
+			uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_set_limit</function> usage</title>
+		<programlisting format="linespecific">
+...
+route[set_limit] {
+    concurrent_set_limit("alice", "20");
+    xlog("L_INFO", "alice limit overridden to 20\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_concurrent_inbound" xreflabel="check_concurrent_inbound()">
+		<title>
+		<function moreinfo="none">check_concurrent_inbound(account)</function>
+		</title>
+		<para>
+		Check whether the given account is under its inbound concurrent
+		call limit. Requires <varname>direction_aware=1</varname>.
+		Sets <literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> to the inbound count
+		and limit.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - under inbound limit (allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - at or over inbound limit (blocked).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_concurrent_inbound</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!check_concurrent_inbound("$fU")) {
+            sl_send_reply(486, "Too Many Inbound Calls");
+            exit;
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_check_concurrent_outbound" xreflabel="check_concurrent_outbound()">
+		<title>
+		<function moreinfo="none">check_concurrent_outbound(account)</function>
+		</title>
+		<para>
+		Check whether the given account is under its outbound concurrent
+		call limit. Requires <varname>direction_aware=1</varname>.
+		Sets <literal>$var(concurrent_count)</literal> and
+		<literal>$var(concurrent_limit)</literal> to the outbound count
+		and limit.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - under outbound limit (allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - at or over outbound limit (blocked).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2</emphasis>  - internal error.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>check_concurrent_outbound</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!check_concurrent_outbound("$rU")) {
+            sl_send_reply(486, "Too Many Outbound Calls");
+            exit;
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_concurrent_prometheus" xreflabel="concurrent_prometheus()">
+		<title>
+		<function moreinfo="none">concurrent_prometheus()</function>
+		</title>
+		<para>
+		Retrieve module statistics in Prometheus text exposition format.
+		Sets <literal>$var(concurrent_prom)</literal> with a multi-line string
+		containing all counters formatted with <literal># HELP</literal>,
+		<literal># TYPE</literal>, and metric value lines suitable for
+		scraping by a Prometheus server.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>concurrent_prometheus</function> usage</title>
+		<programlisting format="linespecific">
+...
+concurrent_prometheus();
+# $var(concurrent_prom) now contains Prometheus text format
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<section>
+		<title>$var(concurrent_count)</title>
+		<para>
+		The current number of active calls for the checked account.
+		Set as an integer by
+		<function>check_concurrent()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_limit)</title>
+		<para>
+		The effective concurrent call limit for the checked account.
+		Set as an integer by
+		<function>check_concurrent()</function>. This is either
+		the per-account limit from the limits file or the
+		<varname>default_limit</varname> if the account is not listed.
+		</para>
+	</section>
+	<section>
+		<title>$var(burst_delta)</title>
+		<para>
+		The rate of change in concurrent calls for the checked account
+		within the burst detection window. Set as an integer by
+		<function>check_burst()</function>. Positive values indicate
+		increasing calls, negative values indicate decreasing calls.
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_status)</title>
+		<para>
+		JSON string containing detailed status for a specific account.
+		Set by <function>concurrent_status()</function>. Includes
+		account name, current count, effective limit, and per-direction
+		breakdown (inbound/outbound).
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by
+		<function>concurrent_stats()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(concurrent_prom)</title>
+		<para>
+		Prometheus text exposition format string containing all module
+		statistics. Set by <function>concurrent_prometheus()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>checked</varname></title>
+		<para>
+		Total number of concurrent call checks performed.
+		</para>
+	</section>
+	<section>
+		<title><varname>allowed</varname></title>
+		<para>
+		Number of checks where the account was under its limit.
+		</para>
+	</section>
+	<section>
+		<title><varname>blocked</varname></title>
+		<para>
+		Number of checks where the account was at or over its limit.
+		</para>
+	</section>
+	<section>
+		<title><varname>incremented</varname></title>
+		<para>
+		Total number of counter increments
+		(<function>concurrent_inc()</function> calls and automatic
+		dialog-created events).
+		</para>
+	</section>
+	<section>
+		<title><varname>decremented</varname></title>
+		<para>
+		Total number of counter decrements
+		(<function>concurrent_dec()</function> calls and automatic
+		dialog-terminated/expired events).
+		</para>
+	</section>
+	<section>
+		<title><varname>accounts</varname></title>
+		<para>
+		Number of accounts loaded from the limits file. Updated on
+		reload.
+		</para>
+	</section>
+	<section>
+		<title><varname>reloads</varname></title>
+		<para>
+		Number of successful hot reloads performed via
+		<function>concurrent_reload()</function>.
+		</para>
+	</section>
+	<section>
+		<title><varname>auto_tracked</varname></title>
+		<para>
+		Number of dialogs automatically tracked via dialog callbacks
+		(only incremented when <varname>auto_track</varname> is enabled).
+		</para>
+	</section>
+	<section>
+		<title><varname>burst_detected</varname></title>
+		<para>
+		Number of burst detections triggered (only incremented when
+		<varname>burst_threshold</varname> is greater than 0).
+		</para>
+	</section>
+	<section>
+		<title><varname>cooldown_blocked</varname></title>
+		<para>
+		Number of calls rejected due to an active cooldown period
+		(only incremented when <varname>cooldown_secs</varname> is
+		greater than 0).
+		</para>
+	</section>
+	</section>
+
+</chapter>
