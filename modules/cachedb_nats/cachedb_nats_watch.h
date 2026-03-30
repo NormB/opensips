@@ -23,37 +23,28 @@
 
 #include <nats/nats.h>
 
-/**
- * nats_watch_start() -- Start the self-healing KV watcher thread.
+/*
+ * Start the KV watcher thread. Called from child_init.
+ * Creates a pthread that polls kvWatcher_Next() and:
+ *   1. Updates the in-process search index
+ *   2. Raises E_NATS_KV_CHANGE events via EVI (if event_nats loaded)
  *
- * Called from child_init() on the first SIP worker process.  Spawns a
- * pthread that monitors the KV bucket for changes and keeps the JSON
- * full-text search index in sync.  The thread is fully self-healing:
- * it detects disconnects and reconnects, rebuilds the index from
- * scratch on each new connection, and raises E_NATS_KV_CHANGE EVI
- * events for every mutation.
- *
- * Only one watcher per OpenSIPS instance is needed (rank == 1) to
- * minimize JetStream ordered consumer count.
- *
- * @param kv            KV store handle (used for initial validation only;
- *                      the thread obtains fresh handles after reconnect).
- * @param patterns      Array of key patterns to watch (e.g., "usrloc.>").
- *                      Use ">" to watch all keys.  Must have at least one.
- * @param num_patterns  Number of entries in the patterns array (must be > 0).
- * @return              0 on success, -1 on error.
+ * @param kv       KV store handle
+ * @param pattern  Key pattern to watch (e.g., "usrloc.>" for wildcard)
+ *                 NULL or empty string means watch all keys
+ * @return 0 on success, -1 on error
  */
-int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns);
+int nats_watch_start(kvStore *kv, const char *pattern);
 
-/**
- * nats_watch_stop() -- Stop the KV watcher thread and clean up.
- *
- * Called from mod_destroy() during OpenSIPS shutdown.  Signals the
- * watcher thread to exit, unblocks kvWatcher_Next() by stopping the
- * kvWatcher, then joins the thread and destroys the handle.
- *
- * Safe to call multiple times or when the watcher was never started.
+/*
+ * Stop the watcher thread. Called from mod_destroy.
  */
 void nats_watch_stop(void);
+
+/*
+ * Reconnection handler -- stops old watcher, rebuilds index,
+ * starts new watcher. Registered via nats_pool_on_reconnect().
+ */
+void nats_watch_reconnect_handler(void *closure);
 
 #endif /* CACHEDB_NATS_WATCH_H */

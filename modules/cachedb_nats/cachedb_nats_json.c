@@ -18,37 +18,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
-/*
- * cachedb_nats_json.c — Process-local JSON full-text search index
- *
- * This file implements an in-process search index for JSON documents stored
- * in NATS JetStream KV buckets.  Documents are parsed and indexed by their
- * top-level field:value pairs so that cachedb query() and update() operations
- * can locate documents without scanning the entire KV store.
- *
- * Index structure:
- *   - Hash table with NATS_IDX_BUCKETS (256) buckets and separate chaining.
- *   - Each entry maps a "field:value" string to a dynamic array of document
- *     keys that contain that pair.
- *
- * Thread safety:
- *   - A pthread mutex (g_idx->lock) protects every read and write to the
- *     index.  The mutex is acquired in the public API functions and must also
- *     be held by callers of the internal _find_entry / _get_or_create_entry
- *     helpers.
- *
- * Usage:
- *   - nats_json_index_init()   — allocate the global index (once per process)
- *   - nats_json_index_build()  — bulk-load from NATS KV
- *   - nats_cache_query()       — cachedb query callback (AND-filter search)
- *   - nats_cache_update()      — cachedb update callback (CAS JSON update)
- *   - nats_json_index_destroy()— teardown
- */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <pthread.h>
 
 #include "../../dprint.h"
@@ -69,13 +41,6 @@ extern int   fts_max_results;
 
 static nats_search_idx *g_idx = NULL;
 
-/**
- * nats_json_get_index() — Return the global search index pointer.
- *
- * Other modules (e.g. MI commands, watchers) use this to inspect index
- * state such as document counts.  Returns NULL if the index has not been
- * initialised yet.
- */
 nats_search_idx *nats_json_get_index(void)
 {
 	return g_idx;
@@ -85,20 +50,10 @@ nats_search_idx *nats_json_get_index(void)
 /*                       djb2 hash function                           */
 /* ------------------------------------------------------------------ */
 
-/**
- * _hash() — Compute a bucket index using the djb2 hash algorithm.
- *
- * Takes a byte string of length @len and produces a value in
- * [0, NATS_IDX_BUCKETS).  djb2 is a fast, well-distributed hash suitable
- * for short strings such as "field:value" index keys.  The magic constant
- * 5381 and the shift-add recurrence (h * 33 + c) are from Dan Bernstein's
- * original comp.lang.c posting.
- */
 static unsigned int _hash(const char *s, int len)
 {
 	unsigned int h = 5381;
 	int i;
-	/* djb2: h = h * 33 + c, expressed as ((h << 5) + h) + c */
 	for (i = 0; i < len; i++)
 		h = ((h << 5) + h) + (unsigned char)s[i];
 	return h % NATS_IDX_BUCKETS;
@@ -109,12 +64,7 @@ static unsigned int _hash(const char *s, int len)
 /* ------------------------------------------------------------------ */
 
 /**
- * _skip_ws() — Advance past JSON whitespace characters.
- *
- * Skips spaces, tabs, newlines, and carriage returns.  All JSON parser
- * entry points call this before inspecting the next token.  Returns a
- * pointer to the first non-whitespace character, or @end if the buffer
- * is exhausted.
+ * Skip whitespace in a JSON string.
  */
 static const char *_skip_ws(const char *p, const char *end)
 {
@@ -124,16 +74,9 @@ static const char *_skip_ws(const char *p, const char *end)
 }
 
 /**
- * _parse_json_string() — Parse a JSON quoted string with escape handling.
- *
- * Expects @p to point at the opening double-quote.  Scans forward,
- * honouring backslash-escaped characters (\\, \", \n, etc.) so that
- * embedded quotes do not terminate the string early.  On success, sets
- * *out to the first character after the opening quote and *out_len to
- * the raw byte length (escape sequences are NOT decoded — the returned
- * slice points directly into the original buffer).
- *
- * Returns a pointer past the closing quote, or NULL on malformed input.
+ * Parse a JSON quoted string. Returns pointer past closing quote.
+ * Writes the unescaped string start into *out and length into *out_len.
+ * The string is NOT null-terminated (points into the original buffer).
  */
 static const char *_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
@@ -163,16 +106,8 @@ static const char *_parse_json_string(const char *p, const char *end,
 }
 
 /**
- * _skip_json_value() — Skip over any JSON value without extracting it.
- *
- * Handles all six JSON value types via a simple state machine:
- *   - Strings:  scan to closing quote, respecting backslash escapes.
- *   - Objects / Arrays: track brace/bracket depth, skipping over nested
- *     strings (to avoid miscounting braces inside string literals).
- *   - Primitives (number, bool, null): advance until the next structural
- *     character or whitespace.
- *
- * Returns a pointer past the value, or NULL on malformed input.
+ * Skip a JSON value (string, number, object, array, bool, null).
+ * Returns pointer past the value.
  */
 static const char *_skip_json_value(const char *p, const char *end)
 {
@@ -182,16 +117,12 @@ static const char *_skip_json_value(const char *p, const char *end)
 	if (p >= end)
 		return NULL;
 
-	/*
-	 * JSON parser state machine — dispatch on the first character to
-	 * determine the value type, then advance past the entire value.
-	 */
 	switch (*p) {
-	case '"': /* string — scan to unescaped closing quote */
+	case '"': /* string */
 		p++;
 		while (p < end && *p != '"') {
 			if (*p == '\\') {
-				p++; /* skip the escaped character */
+				p++;
 				if (p >= end) return NULL;
 			}
 			p++;
@@ -199,16 +130,13 @@ static const char *_skip_json_value(const char *p, const char *end)
 		return (p < end) ? p + 1 : NULL;
 
 	case '{': /* object */
-	case '[': /* array  */
-		/* depth-tracking: increment on open, decrement on close */
+	case '[': /* array */
 		depth = 1;
 		p++;
 		while (p < end && depth > 0) {
 			if (*p == '{' || *p == '[') depth++;
 			else if (*p == '}' || *p == ']') depth--;
 			else if (*p == '"') {
-				/* skip embedded strings so their content cannot
-				 * be mistaken for structural characters */
 				p++;
 				while (p < end && *p != '"') {
 					if (*p == '\\') { p++; if (p >= end) return NULL; }
@@ -220,7 +148,7 @@ static const char *_skip_json_value(const char *p, const char *end)
 		}
 		return p;
 
-	default: /* number, bool, null — consume until delimiter */
+	default: /* number, bool, null */
 		while (p < end && *p != ',' && *p != '}' && *p != ']'
 				&& *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
 			p++;
@@ -229,22 +157,9 @@ static const char *_skip_json_value(const char *p, const char *end)
 }
 
 /**
- * _parse_json_fields() — Extract top-level string fields from a JSON object.
- *
- * Iterates over the top-level key/value pairs of a JSON object.  For every
- * pair whose value is a JSON string, the user-supplied @callback is invoked
- * with the field name, field length, value, value length, and the opaque
- * @ctx pointer.  Non-string values (numbers, bools, nested objects/arrays)
- * are silently skipped.
- *
- * Callback mechanism:
- *   The callback signature is:
- *     void cb(const char *field, int flen, const char *val, int vlen, void *ctx)
- *   It is called synchronously for each string field while the JSON buffer
- *   is still valid.  The field/val pointers reference the original @json
- *   buffer and must not be stored beyond the callback's lifetime.
- *
- * Returns the number of string fields processed, or -1 on parse error.
+ * Parse top-level string fields from a JSON object.
+ * Calls callback for each "field":"value" pair found at the top level.
+ * Only processes string values; non-string values are skipped.
  */
 static int _parse_json_fields(const char *json, int len,
 	void (*callback)(const char *field, int flen,
@@ -294,15 +209,14 @@ static int _parse_json_fields(const char *json, int len,
 			return -1;
 
 		if (*p == '"') {
-			/* string value — parse and invoke the caller's callback
-			 * with field name + value slices from the original buffer */
+			/* string value — parse and invoke callback */
 			p = _parse_json_string(p, end, &val, &vlen);
 			if (!p)
 				return -1;
 			callback(field, flen, val, vlen, ctx);
 			count++;
 		} else {
-			/* non-string value — skip without invoking callback */
+			/* non-string value — skip */
 			p = _skip_json_value(p, end);
 			if (!p)
 				return -1;
@@ -317,20 +231,14 @@ static int _parse_json_fields(const char *json, int len,
 /* ------------------------------------------------------------------ */
 
 /**
- * _find_entry() — Look up an index entry by its "field:value" key.
- *
- * Hashes @fv to select a bucket, then walks the singly-linked chain of
- * entries in that bucket comparing both length and content.  Returns the
- * matching entry or NULL.  Must be called with g_idx->lock held.
+ * Find an index entry for a given field:value string.
+ * Must be called with the lock held.
  */
 static nats_idx_entry *_find_entry(const char *fv, int fv_len)
 {
 	unsigned int bucket = _hash(fv, fv_len);
 	nats_idx_entry *e;
 
-	/* Walk the separate-chaining linked list for this bucket.
-	 * Each bucket head is g_idx->buckets[bucket]; collisions are
-	 * linked via e->next (LIFO insertion order). */
 	for (e = g_idx->buckets[bucket]; e; e = e->next) {
 		if (e->fv_len == (unsigned int)fv_len
 				&& memcmp(e->field_value, fv, fv_len) == 0)
@@ -340,14 +248,8 @@ static nats_idx_entry *_find_entry(const char *fv, int fv_len)
 }
 
 /**
- * _get_or_create_entry() — Find or create an index entry for a field:value.
- *
- * First tries _find_entry(); if the entry does not exist, allocates a new
- * nats_idx_entry, copies the "field:value" string, pre-allocates the key
- * array (initial capacity 8), and inserts the entry at the head of the
- * bucket's chain.  Must be called with g_idx->lock held.
- *
- * Returns the entry pointer, or NULL on allocation failure.
+ * Create or find an index entry for a field:value string.
+ * Must be called with the lock held.
  */
 static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
 {
@@ -385,9 +287,6 @@ static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
 	}
 	e->num_keys = 0;
 
-	/* Insert at head of this bucket's chain (LIFO order).
-	 * The new entry's next pointer takes the current head, then
-	 * the bucket head is updated to point to the new entry. */
 	bucket = _hash(fv, fv_len);
 	e->next = g_idx->buckets[bucket];
 	g_idx->buckets[bucket] = e;
@@ -396,14 +295,8 @@ static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
 }
 
 /**
- * _entry_add_key() — Append a document key to an entry's key list.
- *
- * The key list is a dynamic array of strdup'd strings.  Duplicates are
- * detected by a linear scan and silently ignored.  When the array is full
- * it is doubled in size via realloc (geometric growth: 8 -> 16 -> 32 ...).
- * Must be called with g_idx->lock held.
- *
- * Returns 0 on success, -1 on allocation failure.
+ * Add a key to an index entry's key list.
+ * Must be called with the lock held. Skips duplicates.
  */
 static int _entry_add_key(nats_idx_entry *e, const char *key)
 {
@@ -416,9 +309,7 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 			return 0;
 	}
 
-	/* Geometric growth (double) when the key array is full.
-	 * This gives amortised O(1) appends and keeps realloc calls
-	 * logarithmic in the total number of keys. */
+	/* grow array if needed */
 	if (e->num_keys >= e->alloc_keys) {
 		int new_alloc = e->alloc_keys * 2;
 		char **new_keys = realloc(e->keys, sizeof(char *) * new_alloc);
@@ -440,12 +331,8 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 }
 
 /**
- * _entry_remove_key() — Remove a document key from an entry's key list.
- *
- * Performs a linear scan for @key.  When found, frees the string and fills
- * the gap by moving the last element into the vacated slot (swap-remove).
- * This is O(n) in the key count but avoids a memmove and keeps the array
- * compact.  Must be called with g_idx->lock held.
+ * Remove a key from an index entry's key list.
+ * Must be called with the lock held.
  */
 static void _entry_remove_key(nats_idx_entry *e, const char *key)
 {
@@ -453,7 +340,7 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 	for (i = 0; i < e->num_keys; i++) {
 		if (strcmp(e->keys[i], key) == 0) {
 			free(e->keys[i]);
-			/* swap-remove: move the last element into this slot */
+			/* shift remaining keys down */
 			e->num_keys--;
 			if (i < e->num_keys)
 				e->keys[i] = e->keys[e->num_keys];
@@ -463,11 +350,7 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 }
 
 /**
- * _free_entry() — Free a single index entry and all its owned memory.
- *
- * Releases the field_value string, every strdup'd key in the key array,
- * the key array itself, and finally the entry struct.  Safe to call with
- * a NULL pointer (no-op).
+ * Free a single index entry and all its data.
  */
 static void _free_entry(nats_idx_entry *e)
 {
@@ -493,13 +376,7 @@ typedef struct _idx_add_ctx {
 } idx_add_ctx;
 
 /**
- * _index_field_cb() — Callback used during JSON parsing to index fields.
- *
- * Invoked by _parse_json_fields() for every top-level string field in a
- * JSON document.  Builds the composite "field:value" lookup key into a
- * stack buffer, then calls _get_or_create_entry() + _entry_add_key() to
- * record the association between this field:value pair and the document's
- * KV key (carried in ctx->doc_key).
+ * Callback from _parse_json_fields — add field:value to the index.
  */
 static void _index_field_cb(const char *field, int flen,
 	const char *val, int vlen, void *ctx)
@@ -508,11 +385,6 @@ static void _index_field_cb(const char *field, int flen,
 	char fv_buf[1024];
 	int fv_len;
 	nats_idx_entry *e;
-
-	/* guard against negative lengths that could cause integer underflow
-	 * and subsequent out-of-bounds memcpy */
-	if (flen < 0 || vlen < 0)
-		return;
 
 	/* build "field:value" string */
 	fv_len = flen + 1 + vlen;
@@ -536,16 +408,6 @@ static void _index_field_cb(const char *field, int flen,
 /*                      Public API functions                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * nats_json_index_init() — Allocate and initialise the global search index.
- *
- * Allocates the nats_search_idx struct (heap, not SHM — the index is
- * process-local), zeroes the bucket array, and initialises the protecting
- * mutex.  Must be called once per OpenSIPS worker process before any
- * index_add / query / update operations.
- *
- * Returns 0 on success, -1 on failure.
- */
 int nats_json_index_init(void)
 {
 	if (g_idx) {
@@ -571,17 +433,6 @@ int nats_json_index_init(void)
 	return 0;
 }
 
-/**
- * nats_json_index_build() — Bulk-load the index from a NATS KV store.
- *
- * Enumerates all keys in @kv, optionally filtering by @prefix.  For each
- * key whose value starts with '{' (heuristic JSON detection), calls
- * nats_json_index_add() to parse and index every top-level string field.
- * This performs a full KV scan and is intended to be called once at
- * startup to warm the index.
- *
- * Returns the number of documents indexed, or -1 on error.
- */
 int nats_json_index_build(kvStore *kv, const char *prefix)
 {
 	kvKeysList keys;
@@ -650,16 +501,6 @@ int nats_json_index_build(kvStore *kv, const char *prefix)
 	return count;
 }
 
-/**
- * nats_json_index_add() — Parse a JSON document and add it to the index.
- *
- * Acquires the index mutex, invokes _parse_json_fields() with the
- * _index_field_cb callback to extract every top-level string field, and
- * creates or updates "field:value" -> key mappings in the hash table.
- * Increments the global document counter on success.
- *
- * Returns 0 on success, -1 if parsing fails or parameters are NULL.
- */
 int nats_json_index_add(const char *key, const char *json_str, int json_len)
 {
 	idx_add_ctx ctx;
@@ -685,16 +526,6 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 	return 0;
 }
 
-/**
- * nats_json_index_remove() — Remove a document from the index by its KV key.
- *
- * Acquires the mutex and walks every bucket/entry in the hash table,
- * calling _entry_remove_key() to strip the document key from each entry's
- * key list.  This is O(entries * keys_per_entry) but is acceptable because
- * remove is infrequent compared to queries.  Decrements the document count.
- *
- * Returns 0 on success, -1 if parameters are NULL or index is uninitialised.
- */
 int nats_json_index_remove(const char *key)
 {
 	unsigned int b;
@@ -705,11 +536,19 @@ int nats_json_index_remove(const char *key)
 
 	pthread_mutex_lock(&g_idx->lock);
 
-	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
-		for (e = g_idx->buckets[b]; e; e = e->next)
-			_entry_remove_key(e, key);
+	{
+		int found = 0;
+		for (b = 0; b < NATS_IDX_BUCKETS; b++) {
+			for (e = g_idx->buckets[b]; e; e = e->next) {
+				int old_cnt = e->num_keys;
+				_entry_remove_key(e, key);
+				if (e->num_keys < old_cnt)
+					found = 1;
+			}
+		}
+		if (found && g_idx->num_documents > 0)
+			g_idx->num_documents--;
 	}
-	g_idx->num_documents--;
 
 	pthread_mutex_unlock(&g_idx->lock);
 
@@ -717,17 +556,6 @@ int nats_json_index_remove(const char *key)
 	return 0;
 }
 
-/**
- * nats_json_index_rebuild() — Clear the index and rebuild from KV data.
- *
- * Acquires the mutex, walks every bucket and frees all entries (clearing
- * the entire hash table), resets the document counter, then releases the
- * lock and calls nats_json_index_build() to re-scan the KV store.  Used
- * when the index may have drifted from the KV contents (e.g. after a
- * NATS reconnect or an MI rebuild command).
- *
- * Returns the number of documents re-indexed, or -1 on error.
- */
 int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 {
 	unsigned int b;
@@ -758,14 +586,6 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	return nats_json_index_build(kv, prefix);
 }
 
-/**
- * nats_json_index_destroy() — Tear down the global index and free all memory.
- *
- * Acquires the mutex, walks every bucket, frees all entries and their key
- * lists, then destroys the mutex and frees the nats_search_idx struct.
- * Sets g_idx to NULL so subsequent calls are safe no-ops.  Called during
- * OpenSIPS worker shutdown.
- */
 void nats_json_index_destroy(void)
 {
 	unsigned int b;
@@ -801,12 +621,8 @@ void nats_json_index_destroy(void)
 /* ------------------------------------------------------------------ */
 
 /**
- * _lookup() — Look up the index entry for a field + value pair.
- *
- * Builds the composite "field:value" string in a stack buffer, then calls
- * _find_entry() to locate the hash table entry.  Returns the entry (whose
- * ->keys / ->num_keys describe the matching document set) or NULL if no
- * documents contain this field:value pair.  Caller must hold g_idx->lock.
+ * Look up matching document keys for a field:value combination.
+ * Returns the index entry (or NULL). Caller must hold the lock.
  */
 static nats_idx_entry *_lookup(const char *field, int flen,
 	const char *val, int vlen)
@@ -827,18 +643,9 @@ static nats_idx_entry *_lookup(const char *field, int flen,
 }
 
 /**
- * _intersect_keys() — Compute the set intersection of two key arrays.
- *
- * Produces a new array containing only the keys present in both @a and @b.
- * The result array is allocated with min(a_count, b_count) slots (the
- * maximum possible intersection size).  String pointers in the result
- * reference @a's entries — the caller must free the result array but NOT
- * the strings within it.
- *
- * Algorithm: nested-loop O(n*m) comparison.  This is acceptable because
- * typical per-field key counts are small (tens to low hundreds).
- *
- * Returns 0 on success, -1 on allocation failure.
+ * Intersect two sorted-ish key arrays. Puts the intersection result
+ * into out_keys/out_count. out_keys points into existing entry data.
+ * Caller must free out_keys array (but not the strings in it).
  */
 static int _intersect_keys(char **a, int a_count,
 	char **b, int b_count,
@@ -858,9 +665,7 @@ static int _intersect_keys(char **a, int a_count,
 	if (!result)
 		return -1;
 
-	/* Set intersection via nested loop: for each key in A, scan B for a
-	 * match.  On match, copy the pointer into the result and break to
-	 * avoid duplicates.  O(n*m) but n and m are typically small. */
+	/* simple O(n*m) intersection — fine for typical document counts */
 	for (i = 0; i < a_count; i++) {
 		for (j = 0; j < b_count; j++) {
 			if (strcmp(a[i], b[j]) == 0) {
@@ -879,22 +684,6 @@ static int _intersect_keys(char **a, int a_count,
 /*                   cachedb query() callback                         */
 /* ------------------------------------------------------------------ */
 
-/**
- * nats_cache_query() — cachedb query callback: multi-filter AND search.
- *
- * Iterates the linked list of cdb_filter_t filters.  For each filter
- * (field == value), looks up matching document keys via _lookup().  The
- * first filter's key set is copied; subsequent filters are intersected
- * with the running result using _intersect_keys(), implementing AND
- * semantics.  After all filters are applied, the matched documents are
- * fetched from the NATS KV store, parsed into cdb_row_t structs via
- * cdb_json_to_dict(), and appended to @res.
- *
- * Only CDB_OP_EQ with string values is supported.  Results may be capped
- * by the fts_max_results module parameter.
- *
- * Returns 0 on success (even if zero rows match), -1 on error.
- */
 int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	cdb_res_t *res)
 {
@@ -955,6 +744,8 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (!e || e->num_keys == 0) {
 			/* no match for this filter — intersection is empty */
 			if (match_keys) {
+				for (i = 0; i < match_count; i++)
+					free(match_keys[i]);
 				free(match_keys);
 				match_keys = NULL;
 			}
@@ -963,14 +754,26 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		}
 
 		if (first) {
-			/* first filter — copy the key list */
+			/* first filter — strdup each key so we can safely
+			 * use them after releasing the index lock */
 			match_keys = malloc(sizeof(char *) * e->num_keys);
 			if (!match_keys) {
 				LM_ERR("no memory for match keys\n");
 				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
 			}
-			memcpy(match_keys, e->keys, sizeof(char *) * e->num_keys);
+			for (i = 0; i < e->num_keys; i++) {
+				match_keys[i] = strdup(e->keys[i]);
+				if (!match_keys[i]) {
+					int k;
+					for (k = 0; k < i; k++)
+						free(match_keys[k]);
+					free(match_keys);
+					LM_ERR("no memory for key strdup\n");
+					pthread_mutex_unlock(&g_idx->lock);
+					return -1;
+				}
+			}
 			match_count = e->num_keys;
 			first = 0;
 		} else {
@@ -982,9 +785,23 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 					e->keys, e->num_keys,
 					&new_keys, &new_count) < 0) {
 				LM_ERR("intersection failed\n");
+				for (i = 0; i < match_count; i++)
+					free(match_keys[i]);
 				free(match_keys);
 				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
+			}
+			/* free non-matching strdup'd keys from previous set */
+			for (i = 0; i < match_count; i++) {
+				int found = 0, k;
+				for (k = 0; k < new_count; k++) {
+					if (new_keys[k] == match_keys[i]) {
+						found = 1;
+						break;
+					}
+				}
+				if (!found)
+					free(match_keys[i]);
 			}
 			free(match_keys);
 			match_keys = new_keys;
@@ -996,8 +813,12 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 
 	if (match_count == 0) {
 		LM_DBG("no documents match the filter\n");
-		if (match_keys)
+		if (match_keys) {
+			/* match_keys may still have strdup'd strings if break
+			 * was hit on a subsequent filter (count was set to 0
+			 * but the array was already freed above). Safe no-op. */
 			free(match_keys);
+		}
 		return 0;
 	}
 
@@ -1050,10 +871,14 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	}
 
 	LM_DBG("query returned %d rows\n", res->count);
+	for (i = 0; i < match_count; i++)
+		free(match_keys[i]);
 	free(match_keys);
 	return 0;
 
 error:
+	for (i = 0; i < match_count; i++)
+		free(match_keys[i]);
 	free(match_keys);
 	cdb_free_rows(res);
 	return -1;
@@ -1064,17 +889,52 @@ error:
 /* ------------------------------------------------------------------ */
 
 /**
- * _json_set_field() — Update (or append) a string field in a JSON document.
+ * Compute the length of a JSON-escaped version of a string.
+ * Escapes: " \ and control chars (< 0x20).
+ */
+static int _json_escaped_len(const char *s, int len)
+{
+	int i, elen = 0;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c == '"' || c == '\\')
+			elen += 2;
+		else if (c < 0x20)
+			elen += 6; /* \uXXXX */
+		else
+			elen += 1;
+	}
+	return elen;
+}
+
+/**
+ * Write JSON-escaped string into dst. Returns number of bytes written.
+ * Caller must ensure dst has at least _json_escaped_len(s, len) bytes.
+ */
+static int _json_escape(char *dst, const char *s, int len)
+{
+	int i, pos = 0;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c == '"' || c == '\\') {
+			dst[pos++] = '\\';
+			dst[pos++] = (char)c;
+		} else if (c < 0x20) {
+			pos += snprintf(dst + pos, 7, "\\u%04x", c);
+		} else {
+			dst[pos++] = (char)c;
+		}
+	}
+	return pos;
+}
+
+/**
+ * Simple JSON field updater.
+ * Given a JSON string and a field name + new value, produce a new JSON
+ * string with that field replaced (or appended). Values are properly
+ * JSON-escaped.
  *
- * Scans the top-level fields of the JSON object at @json for a field whose
- * name matches @field / @flen.  If found, the existing value is replaced
- * in-place with the new string @val / @vlen (wrapped in double quotes).
- * If the field does not exist, a new ,"field":"value" pair is appended
- * just before the closing brace.
- *
- * Returns a malloc'd string containing the modified JSON, or NULL on
- * parse/allocation failure.  The caller must free() the returned buffer.
- * The original @json buffer is never modified.
+ * Returns a malloc'd string or NULL on failure. Caller must free().
  */
 static char *_json_set_field(const char *json, int json_len,
 	const char *field, int flen,
@@ -1125,80 +985,68 @@ static char *_json_set_field(const char *json, int json_len,
 		}
 	}
 
-	if (found) {
-		/* replace the value in-place: [json..fstart] + "new_val" + [fend..end] */
-		int prefix_len = (int)(fstart - json);
-		int suffix_len = (int)(end - fend);
+	{
+		int escaped_vlen = _json_escaped_len(val, vlen);
 
-		/* guard against integer overflow in the length computation */
-		if (prefix_len < 0 || suffix_len < 0 ||
-				vlen > INT_MAX - prefix_len - suffix_len - 2)
-			return NULL;
+		if (found) {
+			/* replace the value: [json..fstart] + "escaped_val" + [fend..end] */
+			int prefix_len = (int)(fstart - json);
+			int suffix_len = (int)(end - fend);
+			int new_len = prefix_len + 1 + escaped_vlen + 1 + suffix_len;
+			int pos;
 
-		int new_len = prefix_len + 1 + vlen + 1 + suffix_len;
+			result = malloc(new_len + 1);
+			if (!result) return NULL;
 
-		result = malloc(new_len + 1);
-		if (!result) return NULL;
+			memcpy(result, json, prefix_len);
+			pos = prefix_len;
+			result[pos++] = '"';
+			pos += _json_escape(result + pos, val, vlen);
+			result[pos++] = '"';
+			memcpy(result + pos, fend, suffix_len);
+			pos += suffix_len;
+			result[pos] = '\0';
 
-		memcpy(result, json, prefix_len);
-		result[prefix_len] = '"';
-		memcpy(result + prefix_len + 1, val, vlen);
-		result[prefix_len + 1 + vlen] = '"';
-		memcpy(result + prefix_len + 1 + vlen + 1, fend, suffix_len);
-		result[new_len] = '\0';
+			return result;
+		} else {
+			/* field not found — append before closing brace */
+			const char *close_brace = end;
+			int prefix_len;
+			int new_len;
+			int pos;
 
-		return result;
-	} else {
-		/* field not found — append before closing brace */
-		const char *close_brace = end;
-		int prefix_len;
-		int new_len;
+			/* find the closing brace */
+			while (close_brace > json && *(close_brace - 1) != '}')
+				close_brace--;
+			if (close_brace <= json) return NULL;
+			close_brace--; /* point at '}' */
 
-		/* find the closing brace */
-		while (close_brace > json && *(close_brace - 1) != '}')
-			close_brace--;
-		if (close_brace <= json) return NULL;
-		close_brace--; /* point at '}' */
+			prefix_len = (int)(close_brace - json);
 
-		prefix_len = (int)(close_brace - json);
+			/* ,"field":"escaped_value"} */
+			new_len = prefix_len + 2 + flen + 3 + escaped_vlen + 2;
+			result = malloc(new_len + 1);
+			if (!result) return NULL;
 
-		/* ,"field":"value"} */
-		new_len = prefix_len + 2 + flen + 3 + vlen + 2;
-		result = malloc(new_len + 1);
-		if (!result) return NULL;
+			memcpy(result, json, prefix_len);
+			pos = prefix_len;
+			result[pos++] = ',';
+			result[pos++] = '"';
+			memcpy(result + pos, field, flen);
+			pos += flen;
+			result[pos++] = '"';
+			result[pos++] = ':';
+			result[pos++] = '"';
+			pos += _json_escape(result + pos, val, vlen);
+			result[pos++] = '"';
+			result[pos++] = '}';
+			result[pos] = '\0';
 
-		memcpy(result, json, prefix_len);
-		result[prefix_len] = ',';
-		result[prefix_len + 1] = '"';
-		memcpy(result + prefix_len + 2, field, flen);
-		result[prefix_len + 2 + flen] = '"';
-		result[prefix_len + 2 + flen + 1] = ':';
-		result[prefix_len + 2 + flen + 2] = '"';
-		memcpy(result + prefix_len + 2 + flen + 3, val, vlen);
-		result[prefix_len + 2 + flen + 3 + vlen] = '"';
-		result[prefix_len + 2 + flen + 3 + vlen + 1] = '}';
-		result[new_len] = '\0';
-
-		return result;
+			return result;
+		}
 	}
 }
 
-/**
- * nats_cache_update() — cachedb update callback: modify matched documents.
- *
- * Identifies the target document either by primary key (is_pk flag on the
- * filter) or by index lookup (same mechanism as nats_cache_query, but only
- * the first match is used).  Fetches the document from NATS KV, applies
- * each field update from @pairs via _json_set_field(), and writes the
- * modified JSON back using a compare-and-swap (CAS) loop to handle
- * concurrent modifications.  After a successful CAS, the index is updated
- * by removing and re-adding the document.
- *
- * Only string-valued pairs are applied; non-string pairs are skipped.
- * Retries up to NATS_CAS_RETRIES times on CAS conflict.
- *
- * Returns 0 on success, -1 on error or CAS exhaustion.
- */
 int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	const cdb_dict_t *pairs)
 {
