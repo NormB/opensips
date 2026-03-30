@@ -32,7 +32,7 @@ lib/wolfssl/Makefile: lib/wolfssl/configure
 		--prefix=$(MOD_DIR)/lib \
 		--exec-prefix=$(MOD_DIR)/lib \
 		C_EXTRA_FLAGS="-fPIC" \
-		CFLAGS="-DWOLFSSL_STATIC_RSA -DOPENSSL_EXTRA $(WOLFSSL_EXTRA_CFLAGS)"
+		CFLAGS="-DWOLFSSL_STATIC_RSA -DOPENSSL_EXTRA -Wno-error=stringop-overflow $(WOLFSSL_EXTRA_CFLAGS)"
 
 PATCHED_FILES = #lib/wolfssl/src/internal.c lib/wolfssl/src/ssl.c
 
