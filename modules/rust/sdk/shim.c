@@ -255,3 +255,41 @@ int opensips_rs_dlg_create(void *msg, int flags)
         return -1;
     return __dlg_api.create_dlg((struct sip_msg *)msg, flags);
 }
+
+/* ── Statistics macro wrappers ────────────────────────────────────── */
+
+#include "statistics.h"
+
+void opensips_rs_update_stat(stat_var *var, int n)
+{
+    if (var)
+        update_stat(var, n);
+}
+
+void opensips_rs_reset_stat(stat_var *var)
+{
+    if (var)
+        reset_stat(var);
+}
+
+unsigned long opensips_rs_get_stat_val(stat_var *var)
+{
+    if (!var)
+        return 0;
+    return get_stat_val(var);
+}
+
+/* ── MI response helpers (macros and static inlines) ──────────────── */
+
+#include "mi/mi.h"
+#include "mi/item.h"
+
+mi_response_t *opensips_rs_init_mi_result_ok(void)
+{
+    return init_mi_result_ok();
+}
+
+mi_response_t *opensips_rs_init_mi_error(int code, const char *msg, int msg_len)
+{
+    return init_mi_error(code, msg, msg_len);
+}
