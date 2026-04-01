@@ -596,6 +596,8 @@ unsafe extern "C" fn dlg_req_within_cb(
                     } else {
                         state.tracker.handle_refer(&call_id, &refer_to);
                     }
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
                     state.stats.set("active_transfers",
                         state.tracker.active_count() as u64);
                     opensips_log!(DBG, "rust_refer_handler",
@@ -639,8 +641,16 @@ unsafe extern "C" fn dlg_req_within_cb(
                     if state.tracker.handle_notify(&call_id, status_code) {
                         if let Some(status_str) = state.tracker.get_status(&call_id) {
                             match status_str {
-                                "success" => state.stats.inc("completed"),
-                                "failed" => state.stats.inc("failed"),
+                                "success" => {
+                                    state.stats.inc("completed");
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_SUCCEEDED }) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                }
+                                "failed" => {
+                                    state.stats.inc("failed");
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_FAILED }) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                }
                                 _ => {}
                             }
                         }
@@ -765,6 +775,12 @@ unsafe extern "C" fn w_rust_handle_refer(
                             "expired",
                             state.stats.get("expired") + expired as u64,
                         );
+                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_EXPIRED }) {
+                            for _ in 0..expired { sv.inc(); }
+                        }
+                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) {
+                            for _ in 0..expired { sv.update(-1); }
+                        }
                     }
 
                     // Task 54: Check allowed targets
@@ -779,6 +795,8 @@ unsafe extern "C" fn w_rust_handle_refer(
                     }
 
                     state.tracker.handle_refer(call_id, refer_to);
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
                     state
                         .stats
                         .set("active_transfers", state.tracker.active_count() as u64);
@@ -877,6 +895,12 @@ unsafe extern "C" fn w_rust_handle_attended_refer(
                             "expired",
                             state.stats.get("expired") + expired as u64,
                         );
+                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_EXPIRED }) {
+                            for _ in 0..expired { sv.inc(); }
+                        }
+                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) {
+                            for _ in 0..expired { sv.update(-1); }
+                        }
                     }
 
                     // Task 54: Check allowed targets
@@ -891,6 +915,8 @@ unsafe extern "C" fn w_rust_handle_attended_refer(
                     }
 
                     let valid = state.tracker.handle_attended_refer(&call_id, refer_to, replaces);
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
                     state
                         .stats
                         .set("active_transfers", state.tracker.active_count() as u64);
@@ -986,6 +1012,8 @@ unsafe extern "C" fn w_rust_handle_notify(
                             match status_str {
                                 "success" => {
                                     state.stats.inc("completed");
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_SUCCEEDED }) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
                                     // Task 55: Publish success event
                                     if state.publish_events {
                                         if let Some(refer_to) = state.tracker.get_refer_to(call_id) {
@@ -996,6 +1024,8 @@ unsafe extern "C" fn w_rust_handle_notify(
                                 }
                                 "failed" => {
                                     state.stats.inc("failed");
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_FAILED }) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
                                     // Task 55: Publish failure event
                                     if state.publish_events {
                                         if let Some(refer_to) = state.tracker.get_refer_to(call_id) {
