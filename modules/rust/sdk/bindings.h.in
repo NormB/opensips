@@ -29,6 +29,7 @@
 #include "@@OPENSIPS_SRC_DIR@@/version.h"
 #include "@@OPENSIPS_SRC_DIR@@/route_struct.h"
 #include "@@OPENSIPS_SRC_DIR@@/mi/mi.h"
+#include "@@OPENSIPS_SRC_DIR@@/statistics.h"
 #include "@@OPENSIPS_SRC_DIR@@/async.h"
 
 /* Dialog module callback types (minimal include — no dlg_load.h) */
