@@ -99,6 +99,8 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::dialog::{self, DialogTracker};
 use rust_common::event;
 use rust_common::mi::Stats;
+use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::reload::FileLoader;
 
 use std::cell::RefCell;
@@ -107,6 +109,17 @@ use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ACCEPTED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_REJECTED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ACTIVE_TIMERS: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_REFRESHES: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_REFRESH_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
+
+/// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
+const STAT_NO_RESET: u16 = 1;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -1450,6 +1463,73 @@ const THREE_STR_PARAMS: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
+// ── Native statistics array ────────────────────────────────────────
+
+static MOD_STATS: SyncArray<sys::stat_export_, 7> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("checked"),        flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("accepted"),       flags: 0,             stat_pointer: unsafe { &STAT_ACCEPTED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("rejected"),       flags: 0,             stat_pointer: unsafe { &STAT_REJECTED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("active_timers"),  flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_TIMERS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("refreshes"),      flags: 0,             stat_pointer: unsafe { &STAT_REFRESHES as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("refresh_failed"), flags: 0,             stat_pointer: unsafe { &STAT_REFRESH_FAILED as *const _ as *mut _ } },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
+// ── MI command handlers ────────────────────────────────────────────
+
+/// MI handler: rust_sst:sst_show
+unsafe extern "C" fn mi_sst_show(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    let Some(resp) = MiObject::new() else {
+        return mi_error(-32000, "Failed to create MI response");
+    };
+    let Some(arr) = resp.add_array("sessions") else {
+        return mi_error(-32000, "Failed to create sessions array");
+    };
+    let mut count = 0u32;
+    TRACKER.with(|t| {
+        t.for_each_ref(|callid, entry| {
+            let s = &entry.state;
+            let age = entry.created.elapsed().as_secs();
+            let time_remaining = (s.interval as u64).saturating_sub(age);
+            if let Some(obj) = arr.add_object("") {
+                obj.add_str("call_id", callid);
+                obj.add_num("interval", s.interval as f64);
+                obj.add_str("refresher", s.refresher.as_str());
+                obj.add_num("age_secs", age as f64);
+                obj.add_num("time_remaining", time_remaining as f64);
+                obj.add_num("refresh_count", s.refresh_count as f64);
+                count += 1;
+            }
+        });
+    });
+    resp.add_num("count", count as f64);
+    resp.into_raw()
+}
+
+// ── MI command export array ────────────────────────────────────────
+
+static MI_CMDS: SyncArray<sys::mi_export_, 2> = SyncArray([
+    sys::mi_export_ {
+        name: cstr_lit!("sst_show"),
+        help: cstr_lit!("Show active SST sessions with timer details"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_sst_show),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
 static CMDS: SyncArray<sys::cmd_export_, 7> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("sst_check"),
@@ -1570,8 +1650,8 @@ pub static exports: sys::module_exports = sys::module_exports {
     cmds: CMDS.0.as_ptr(),
     acmds: ACMDS.0.as_ptr(),
     params: PARAMS.0.as_ptr(),
-    stats: ptr::null(),
-    mi_cmds: ptr::null(),
+    stats: MOD_STATS.0.as_ptr() as *const _,
+    mi_cmds: MI_CMDS.0.as_ptr(),
     items: ptr::null(),
     trans: ptr::null(),
     procs: ptr::null(),

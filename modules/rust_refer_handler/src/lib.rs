@@ -74,12 +74,24 @@ use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::glob;
 use rust_common::mi::Stats;
+use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::stat::{StatVar, StatVarOpaque};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::time::Instant;
+
+// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+static mut STAT_HANDLED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_SUCCEEDED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_EXPIRED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_PENDING: *mut StatVarOpaque = std::ptr::null_mut();
+
+/// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
+const STAT_NO_RESET: u16 = 1;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -1289,6 +1301,75 @@ const TWO_PARAMS_STR_STR: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
+// ── Native statistics array ────────────────────────────────────────
+
+static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("handled"),   flags: 0,             stat_pointer: unsafe { &STAT_HANDLED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("succeeded"), flags: 0,             stat_pointer: unsafe { &STAT_SUCCEEDED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("failed"),    flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("expired"),   flags: 0,             stat_pointer: unsafe { &STAT_EXPIRED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("pending"),   flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_PENDING as *const _ as *mut _ } },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
+// ── MI command handlers ────────────────────────────────────────────
+
+/// MI handler: rust_refer_handler:refer_show
+unsafe extern "C" fn mi_refer_show(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    WORKER.with(|w| {
+        let w = w.borrow();
+        let Some(state) = w.as_ref() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        let Some(resp) = MiObject::new() else {
+            return mi_error(-32000, "Failed to create MI response");
+        };
+        let Some(arr) = resp.add_array("transfers") else {
+            return mi_error(-32000, "Failed to create transfers array");
+        };
+        let mut count = 0u32;
+        for (call_id, refer_state) in state.tracker.states.iter() {
+            if let Some(obj) = arr.add_object("") {
+                obj.add_str("call_id", call_id);
+                obj.add_str("refer_to", &refer_state.refer_to);
+                obj.add_str("status", refer_state.status.as_str());
+                obj.add_num("age_secs", refer_state.created.elapsed().as_secs() as f64);
+                obj.add_num("notify_count", refer_state.notify_count as f64);
+                if let Some(ref replaces) = refer_state.replaces {
+                    obj.add_str("replaces", replaces);
+                }
+                count += 1;
+            }
+        }
+        resp.add_num("count", count as f64);
+        resp.into_raw()
+    })
+}
+
+// ── MI command export array ────────────────────────────────────────
+
+static MI_CMDS: SyncArray<sys::mi_export_, 2> = SyncArray([
+    sys::mi_export_ {
+        name: cstr_lit!("refer_show"),
+        help: cstr_lit!("Show pending REFER transfers"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_refer_show),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
 static CMDS: SyncArray<sys::cmd_export_, 9> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("handle_refer"),
@@ -1423,8 +1504,8 @@ pub static exports: sys::module_exports = sys::module_exports {
     cmds: CMDS.0.as_ptr(),
     acmds: ACMDS.0.as_ptr(),
     params: PARAMS.0.as_ptr(),
-    stats: ptr::null(),
-    mi_cmds: ptr::null(),
+    stats: MOD_STATS.0.as_ptr() as *const _,
+    mi_cmds: MI_CMDS.0.as_ptr(),
     items: ptr::null(),
     trans: ptr::null(),
     procs: ptr::null(),
