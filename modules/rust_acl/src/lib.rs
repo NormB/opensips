@@ -97,6 +97,8 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::cidr::CidrRange;
 use rust_common::event;
 use rust_common::mi::Stats;
+use rust_common::mi_resp::{self, MiObject, MiResponsePtr, mi_ok, mi_error, mi_params_t};
+use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::glob;
 use rust_common::reload::{default_line_parser, FileLoader};
 
@@ -105,6 +107,18 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::time::Instant;
+
+// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ALLOWED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_RELOADS: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_AUTO_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ENTRIES_BLOCKLIST: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ENTRIES_ALLOWLIST: *mut StatVarOpaque = std::ptr::null_mut();
+
+/// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
+const STAT_NO_RESET: u16 = 1;
 
 use regex::Regex;
 
@@ -998,6 +1012,7 @@ unsafe extern "C" fn w_check_blocklist(
             match borrow.as_mut() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
 
                     let blocked = check_all(
                         &state.blocklist,
@@ -1014,6 +1029,7 @@ unsafe extern "C" fn w_check_blocklist(
                             }
                         }
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         // Publish E_ACL_BLOCKED event
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
@@ -1025,6 +1041,7 @@ unsafe extern "C" fn w_check_blocklist(
                         -1
                     } else {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     }
                 }
@@ -1060,6 +1077,7 @@ unsafe extern "C" fn w_check_blocklist_ip(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_ip.as_ref(),
@@ -1068,9 +1086,11 @@ unsafe extern "C" fn w_check_blocklist_ip(
 
                     if blocked {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     }
                 }
@@ -1106,6 +1126,7 @@ unsafe extern "C" fn w_check_blocklist_ua(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_ua.as_ref(),
@@ -1114,9 +1135,11 @@ unsafe extern "C" fn w_check_blocklist_ua(
 
                     if blocked {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     }
                 }
@@ -1152,6 +1175,7 @@ unsafe extern "C" fn w_check_blocklist_domain(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_domain.as_ref(),
@@ -1160,9 +1184,11 @@ unsafe extern "C" fn w_check_blocklist_domain(
 
                     if blocked {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     }
                 }
@@ -1450,6 +1476,7 @@ unsafe extern "C" fn w_check_access(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
 
                     #[cfg(feature = "database")]
                     let (db_bl, db_al) = (
@@ -1478,6 +1505,7 @@ unsafe extern "C" fn w_check_access(
 
                     if result == 1 {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
                                 ("value", &event::json_str(value)),
@@ -1487,6 +1515,7 @@ unsafe extern "C" fn w_check_access(
                         }
                     } else {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
                                 ("value", &event::json_str(value)),
@@ -1527,6 +1556,7 @@ unsafe extern "C" fn w_blocklist_reload(
                             drop(entries);
                             state.stats.set("entries_blocklist", count as u64);
                             state.stats.inc("reloads");
+                            if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
                             opensips_log!(INFO, "rust_acl",
                                 "blocklist reloaded: {} entries", count);
                         }
@@ -1591,6 +1621,7 @@ unsafe extern "C" fn w_allowlist_reload(
                                     drop(entries);
                                     state.stats.set("entries_allowlist", count as u64);
                                     state.stats.inc("reloads");
+                                    if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
                                     opensips_log!(INFO, "rust_acl",
                                         "allowlist reloaded: {} entries", count);
                                 }
@@ -1678,6 +1709,7 @@ unsafe extern "C" fn w_auto_block(
                 Some(state) => {
                     auto_insert(&mut state.auto_blocked, value, ttl);
                     state.stats.inc("auto_blocked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_AUTO_BLOCKED }) { s.inc(); }
                     // Periodic purge of expired entries
                     purge_expired(&mut state.auto_blocked);
                     opensips_log!(DBG, "rust_acl",
@@ -1862,6 +1894,7 @@ unsafe extern "C" fn w_acl_db_reload(
                                     Some(merge_db_entries(&al_entries))
                                 };
                                 state.stats.inc("reloads");
+                                if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
                                 opensips_log!(INFO, "rust_acl",
                                     "DB reloaded: {} blocklist + {} allowlist entries",
                                     bl_count, al_count);
@@ -1911,6 +1944,221 @@ const TWO_STR_PARAM: [sys::cmd_param; 9] = {
 #[repr(transparent)]
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
+
+// ── Native statistics array ────────────────────────────────────────
+
+static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("checked"),           flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("allowed"),           flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("blocked"),           flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("reloads"),           flags: 0,             stat_pointer: unsafe { &STAT_RELOADS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("auto_blocked"),      flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_AUTO_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("entries_blocklist"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_BLOCKLIST as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("entries_allowlist"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_ALLOWLIST as *const _ as *mut _ } },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
+// ── MI command handlers ────────────────────────────────────────────
+
+/// MI handler: rust_acl:blocklist_show
+unsafe extern "C" fn mi_blocklist_show(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    WORKER.with(|w| {
+        let w = w.borrow();
+        let Some(state) = w.as_ref() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        let Some(resp) = MiObject::new() else {
+            return mi_error(-32000, "Failed to create MI response");
+        };
+        let Some(arr) = resp.add_array("entries") else {
+            return mi_error(-32000, "Failed to create entries array");
+        };
+        let entries = state.blocklist_loader.get();
+        let mut count = 0u32;
+        for entry in entries.iter() {
+            if let Some(obj) = arr.add_object("") {
+                obj.add_str("pattern", entry);
+                obj.add_str("type", &state.mode);
+                if state.track_counters {
+                    let hits = state.entry_counters.get(entry).copied().unwrap_or(0);
+                    obj.add_num("hits", hits as f64);
+                }
+                count += 1;
+            }
+        }
+        resp.add_num("count", count as f64);
+        resp.into_raw()
+    })
+}
+
+/// MI handler: rust_acl:allowlist_show
+unsafe extern "C" fn mi_allowlist_show(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    WORKER.with(|w| {
+        let w = w.borrow();
+        let Some(state) = w.as_ref() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        let Some(ref loader) = state.allowlist_loader else {
+            return mi_error(-32000, "No allowlist configured");
+        };
+        let Some(resp) = MiObject::new() else {
+            return mi_error(-32000, "Failed to create MI response");
+        };
+        let Some(arr) = resp.add_array("entries") else {
+            return mi_error(-32000, "Failed to create entries array");
+        };
+        let entries = loader.get();
+        let mut count = 0u32;
+        for entry in entries.iter() {
+            if let Some(obj) = arr.add_object("") {
+                obj.add_str("pattern", entry);
+                obj.add_str("type", &state.mode);
+                count += 1;
+            }
+        }
+        resp.add_num("count", count as f64);
+        resp.into_raw()
+    })
+}
+
+/// MI handler: rust_acl:blocklist_reload
+unsafe extern "C" fn mi_blocklist_reload(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    WORKER.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(state) = w.as_mut() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        match state.blocklist_loader.reload() {
+            Ok(count) => {
+                let entries = state.blocklist_loader.get();
+                state.blocklist = build_acl_data(&entries, &state.mode);
+                drop(entries);
+                state.stats.set("entries_blocklist", count as u64);
+                state.stats.inc("reloads");
+                if let Some(s) = StatVar::from_raw(STAT_RELOADS) { s.inc(); }
+                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_BLOCKLIST) {
+                    s.update(count as i32);
+                }
+                let Some(resp) = MiObject::new() else {
+                    return mi_error(-32000, "Failed to create MI response");
+                };
+                resp.add_str("status", "OK");
+                resp.add_num("entries", count as f64);
+                resp.into_raw()
+            }
+            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")),
+        }
+    })
+}
+
+/// MI handler: rust_acl:allowlist_reload
+unsafe extern "C" fn mi_allowlist_reload(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    WORKER.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(state) = w.as_mut() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        let Some(ref loader) = state.allowlist_loader else {
+            return mi_error(-32000, "No allowlist configured");
+        };
+        match loader.reload() {
+            Ok(count) => {
+                let entries = loader.get();
+                state.allowlist = Some(build_acl_data(&entries, &state.mode));
+                drop(entries);
+                state.stats.set("entries_allowlist", count as u64);
+                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_ALLOWLIST) {
+                    s.update(count as i32);
+                }
+                let Some(resp) = MiObject::new() else {
+                    return mi_error(-32000, "Failed to create MI response");
+                };
+                resp.add_str("status", "OK");
+                resp.add_num("entries", count as f64);
+                resp.into_raw()
+            }
+            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")),
+        }
+    })
+}
+
+// ── MI command export array ────────────────────────────────────────
+
+static MI_CMDS: SyncArray<sys::mi_export_, 5> = SyncArray([
+    sys::mi_export_ {
+        name: cstr_lit!("blocklist_show"),
+        help: cstr_lit!("Show blocklist entries with hit counters"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_blocklist_show),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    sys::mi_export_ {
+        name: cstr_lit!("allowlist_show"),
+        help: cstr_lit!("Show allowlist entries with hit counters"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_allowlist_show),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    sys::mi_export_ {
+        name: cstr_lit!("blocklist_reload"),
+        help: cstr_lit!("Reload blocklist from file"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_blocklist_reload),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    sys::mi_export_ {
+        name: cstr_lit!("allowlist_reload"),
+        help: cstr_lit!("Reload allowlist from file"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_allowlist_reload),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
 
 static CMDS: SyncArray<sys::cmd_export_, 18> = SyncArray([
     sys::cmd_export_ {
@@ -2157,8 +2405,8 @@ pub static exports: sys::module_exports = sys::module_exports {
     cmds: CMDS.0.as_ptr(),
     acmds: ACMDS.0.as_ptr(),
     params: PARAMS.0.as_ptr(),
-    stats: ptr::null(),
-    mi_cmds: ptr::null(),
+    stats: MOD_STATS.0.as_ptr() as *const _,
+    mi_cmds: MI_CMDS.0.as_ptr(),
     items: ptr::null(),
     trans: ptr::null(),
     procs: ptr::null(),
