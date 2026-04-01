@@ -533,6 +533,9 @@ unsafe extern "C" fn sst_dialog_created_cb(
         None => return,
     };
 
+    // Increment native STAT_CHECKED for every dialog SST processes
+    if let Some(sv) = StatVar::from_raw(unsafe { STAT_CHECKED }) { sv.inc(); }
+
     let our_min_se = get_our_min_se();
     let our_interval = get_our_interval();
 
@@ -594,6 +597,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
                 let hdr = format!("Min-SE: {}\r\n", state.interval);
                 let _ = msg.call("append_hf", &[&hdr]);
                 SST_STATS.with(|s| s.inc("headers_inserted"));
+                if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
             }
             // If UAC supports timer, the response_fwded callback will
             // handle rejection or negotiation in the response path.
@@ -615,12 +619,14 @@ unsafe extern "C" fn sst_dialog_created_cb(
             let min_hdr = format!("Min-SE: {}\r\n", state.min_se);
             let _ = msg.call("append_hf", &[&min_hdr]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
+            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
         }
 
         // Insert Session-Expires header
         let se_hdr_val = format!("Session-Expires: {}\r\n", state.interval);
         let _ = msg.call("append_hf", &[&se_hdr_val]);
         SST_STATS.with(|s| s.inc("headers_inserted"));
+        if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
     }
 
     // Store state in tracker
@@ -628,6 +634,8 @@ unsafe extern "C" fn sst_dialog_created_cb(
         t.on_created(&callid);
         t.with_state(&callid, |s| *s = state);
     });
+    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACCEPTED }) { sv.inc(); }
+    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACTIVE_TIMERS }) { sv.update(1); }
     SST_STATS.with(|s| {
         let count = TRACKER.with(|t| t.active_count()) as u64;
         s.set("sessions_active", count);
@@ -738,6 +746,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
                 });
             });
             SST_STATS.with(|s| s.inc("422_sent"));
+            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REJECTED }) { sv.inc(); }
 
             // Adaptive min_se: learn from 422 reply
             let ruri = msg.pv("$ru").unwrap_or_default();
@@ -846,6 +855,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
             let _ = msg.call("append_hf", &[&se_hdr_val]);
             let _ = msg.call("append_hf", &["Require: timer\r\n"]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
+            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
 
             let _ = msg.set_pv("$DLG_timeout", &interval.to_string());
 
@@ -1023,6 +1033,7 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
                 since_refresh
             );
             SST_STATS.with(|s| s.inc("stale_sessions"));
+            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESH_FAILED }) { sv.inc(); }
 
             // Publish E_SST_STALE event
             if event::is_enabled() {
@@ -1039,12 +1050,14 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
     TRACKER.with(|t| {
         t.on_terminated(&callid);
     });
+    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACTIVE_TIMERS }) { sv.update(-1); }
 
     SST_STATS.with(|s| {
         let count = TRACKER.with(|t| t.active_count()) as u64;
         s.set("sessions_active", count);
         if was_expired {
             s.inc("sessions_expired");
+            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESH_FAILED }) { sv.inc(); }
             // Publish E_SST_EXPIRED event
             if event::is_enabled() {
                 let payload = event::format_payload(&[
@@ -1497,6 +1510,7 @@ unsafe extern "C" fn mi_sst_show(
             if let Some(obj) = arr.add_object("") {
                 obj.add_str("call_id", callid);
                 obj.add_num("interval", s.interval as f64);
+                obj.add_num("min_se", s.min_se as f64);
                 obj.add_str("refresher", s.refresher.as_str());
                 obj.add_num("age_secs", age as f64);
                 obj.add_num("time_remaining", time_remaining as f64);

@@ -334,6 +334,12 @@ unsafe extern "C" fn w_rust_webhook(
                         opensips_log!(WARN, "rust_http_webhook",
                             "queue full, payload dropped (dropped={})",
                             ff.dropped.get());
+                        // Increment native stat synchronously so
+                        // `statistics:get` reflects drops immediately,
+                        // without waiting for webhook_stats() to sync.
+                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_DROPPED }) {
+                            sv.inc();
+                        }
                     }
                     1
                 }
@@ -449,7 +455,22 @@ unsafe extern "C" fn mi_webhook_status(
     let Some(resp) = MiObject::new() else {
         return mi_error(-32000, "Failed to create MI response");
     };
-    // Report per-worker stats from thread-local
+    // Sync stats from FireAndForget counters first so MI reads fresh data.
+    // Without this, sent/dropped/failed/retried/retry_exhausted are stale
+    // until a script function (webhook_stats or webhook_prometheus) runs.
+    WEBHOOK.with(|w| {
+        let borrow = w.borrow();
+        if let Some(ff) = borrow.as_ref() {
+            WEBHOOK_STATS.with(|s| {
+                s.set("sent", ff.sent.get());
+                s.set("dropped", ff.dropped.get());
+                s.set("failed", ff.failed.get());
+                s.set("retried", ff.retried.get());
+                s.set("retry_exhausted", ff.retry_exhausted.get());
+            });
+        }
+    });
+    // Now report synced stats
     WEBHOOK_STATS.with(|s| {
         resp.add_num("sent", s.get("sent") as f64);
         resp.add_num("failed", s.get("failed") as f64);
