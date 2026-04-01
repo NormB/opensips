@@ -1252,11 +1252,11 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked"),      flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("allowed"),      flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("blocked"),      flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("active_calls"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_CALLS as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("accounts"),     flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACCOUNTS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("active_calls") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_CALLS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("accounts") as *mut _,     flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACCOUNTS as *const _ as *mut _ } },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -1266,18 +1266,18 @@ static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
 /// Without `account` param: all accounts summary.
 /// With `account` param: single account detail.
 unsafe extern "C" fn mi_concurrent_show(
-    params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
-    let filter = mi_try_get_string_param(params, "account\0");
+    params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
+    let filter = mi_try_get_string_param(params as *const mi_params_t, "account\0");
 
     WORKER.with(|w| {
         let w = w.borrow();
         let Some(state) = w.as_ref() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let limits = state.loader.get();
-        let default = unsafe { DEFAULT_LIMIT.value() as u32 };
+        let default = DEFAULT_LIMIT.get() as u32;
 
         if let Some(account) = filter {
             // Single account detail
@@ -1288,7 +1288,7 @@ unsafe extern "C" fn mi_concurrent_show(
             let override_val = state.limit_overrides.get(&account);
 
             let Some(resp) = MiObject::new() else {
-                return mi_error(-32000, "Failed to create MI response");
+                return mi_error(-32000, "Failed to create MI response") as *mut _;
             };
             resp.add_str("account", &account);
             resp.add_num("active", active as f64);
@@ -1300,14 +1300,14 @@ unsafe extern "C" fn mi_concurrent_show(
             } else {
                 resp.add_null("override");
             }
-            resp.into_raw()
+            resp.into_raw() as *mut _
         } else {
             // All accounts
             let Some(resp) = MiObject::new() else {
-                return mi_error(-32000, "Failed to create MI response");
+                return mi_error(-32000, "Failed to create MI response") as *mut _;
             };
             let Some(arr) = resp.add_array("accounts") else {
-                return mi_error(-32000, "Failed to create accounts array");
+                return mi_error(-32000, "Failed to create accounts array") as *mut _;
             };
             let mut total_active = 0u32;
             for (account, &active) in &state.counts {
@@ -1321,45 +1321,45 @@ unsafe extern "C" fn mi_concurrent_show(
                 total_active += active;
             }
             resp.add_num("total_active", total_active as f64);
-            resp.into_raw()
+            resp.into_raw() as *mut _
         }
     })
 }
 
 /// MI handler: rust_concurrent_calls:concurrent_override
 unsafe extern "C" fn mi_concurrent_override(
-    params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
-    let Some(account) = mi_try_get_string_param(params, "account\0") else {
-        return mi_param_error();
+    params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
+    let Some(account) = mi_try_get_string_param(params as *const mi_params_t, "account\0") else {
+        return mi_param_error() as *mut _;
     };
-    let Some(limit_str) = mi_try_get_string_param(params, "limit\0") else {
-        return mi_param_error();
+    let Some(limit_str) = mi_try_get_string_param(params as *const mi_params_t, "limit\0") else {
+        return mi_param_error() as *mut _;
     };
     let Ok(limit) = limit_str.parse::<u32>() else {
-        return mi_error(-32000, "Invalid limit value");
+        return mi_error(-32000, "Invalid limit value") as *mut _;
     };
     WORKER.with(|w| {
         let mut w = w.borrow_mut();
         let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         state.limit_overrides.insert(account.clone(), limit);
-        mi_ok()
+        mi_ok() as *mut _
     })
 }
 
 /// MI handler: rust_concurrent_calls:concurrent_reset
 unsafe extern "C" fn mi_concurrent_reset(
-    params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
-    let filter = mi_try_get_string_param(params, "account\0");
+    params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
+    let filter = mi_try_get_string_param(params as *const mi_params_t, "account\0");
     WORKER.with(|w| {
         let mut w = w.borrow_mut();
         let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         if let Some(account) = filter {
             state.counts.remove(&account);
@@ -1370,7 +1370,7 @@ unsafe extern "C" fn mi_concurrent_reset(
             state.inbound_counts.clear();
             state.outbound_counts.clear();
         }
-        mi_ok()
+        mi_ok() as *mut _
     })
 }
 
@@ -1378,8 +1378,8 @@ unsafe extern "C" fn mi_concurrent_reset(
 
 static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
     sys::mi_export_ {
-        name: cstr_lit!("concurrent_show"),
-        help: cstr_lit!("Show concurrent call accounts and counts"),
+        name: cstr_lit!("concurrent_show") as *mut _,
+        help: cstr_lit!("Show concurrent call accounts and counts") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -1391,8 +1391,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
             r[1] = sys::mi_recipe_ {
                 cmd: Some(mi_concurrent_show),
                 params: {
-                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account");
+                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account") as *mut _;
                     p
                 },
             };
@@ -1401,8 +1401,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
         aliases: [ptr::null(); 4],
     },
     sys::mi_export_ {
-        name: cstr_lit!("concurrent_override"),
-        help: cstr_lit!("Set temporary limit override for an account"),
+        name: cstr_lit!("concurrent_override") as *mut _,
+        help: cstr_lit!("Set temporary limit override for an account") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -1410,9 +1410,9 @@ static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
             r[0] = sys::mi_recipe_ {
                 cmd: Some(mi_concurrent_override),
                 params: {
-                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account");
-                    p[1] = cstr_lit!("limit");
+                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account") as *mut _;
+                    p[1] = cstr_lit!("limit") as *mut _;
                     p
                 },
             };
@@ -1421,8 +1421,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
         aliases: [ptr::null(); 4],
     },
     sys::mi_export_ {
-        name: cstr_lit!("concurrent_reset"),
-        help: cstr_lit!("Reset call counts (all or single account)"),
+        name: cstr_lit!("concurrent_reset") as *mut _,
+        help: cstr_lit!("Reset call counts (all or single account)") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -1434,8 +1434,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
             r[1] = sys::mi_recipe_ {
                 cmd: Some(mi_concurrent_reset),
                 params: {
-                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account");
+                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account") as *mut _;
                     p
                 },
             };
