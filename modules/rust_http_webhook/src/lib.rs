@@ -437,11 +437,11 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("sent"),        flags: 0,             stat_pointer: unsafe { &STAT_SENT as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("failed"),      flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("dropped"),     flags: 0,             stat_pointer: unsafe { &STAT_DROPPED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("retried"),     flags: 0,             stat_pointer: unsafe { &STAT_RETRIED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("queue_depth"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_QUEUE_DEPTH as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("sent") as *mut _,        flags: 0,             stat_pointer: unsafe { &STAT_SENT as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("dropped") as *mut _,     flags: 0,             stat_pointer: unsafe { &STAT_DROPPED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("retried") as *mut _,     flags: 0,             stat_pointer: unsafe { &STAT_RETRIED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("queue_depth") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_QUEUE_DEPTH as *const _ as *mut _ } },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -449,11 +449,11 @@ static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
 
 /// MI handler: rust_http_webhook:webhook_status
 unsafe extern "C" fn mi_webhook_status(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     let Some(resp) = MiObject::new() else {
-        return mi_error(-32000, "Failed to create MI response");
+        return mi_error(-32000, "Failed to create MI response") as *mut _;
     };
     // Sync stats from FireAndForget counters first so MI reads fresh data.
     // Without this, sent/dropped/failed/retried/retry_exhausted are stale
@@ -482,15 +482,15 @@ unsafe extern "C" fn mi_webhook_status(
         resp.add_num("errors_timeout", s.get("errors_timeout") as f64);
         resp.add_num("filtered", s.get("filtered") as f64);
     });
-    resp.into_raw()
+    resp.into_raw() as *mut _
 }
 
 // ── MI command export array ────────────────────────────────────────
 
 static MI_CMDS: SyncArray<sys::mi_export_, 2> = SyncArray([
     sys::mi_export_ {
-        name: cstr_lit!("webhook_status"),
-        help: cstr_lit!("Show webhook delivery statistics"),
+        name: cstr_lit!("webhook_status") as *mut _,
+        help: cstr_lit!("Show webhook delivery statistics") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
