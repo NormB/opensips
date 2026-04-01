@@ -71,12 +71,24 @@ use rust_common::async_dispatch::{
     parse_headers, parse_urls, BatchConfig, FireAndForget, RetryConfig,
 };
 use rust_common::mi::Stats;
+use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::stat::{StatVar, StatVarOpaque};
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::OnceLock;
+
+// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+static mut STAT_SENT: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_DROPPED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_RETRIED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_QUEUE_DEPTH: *mut StatVarOpaque = std::ptr::null_mut();
+
+/// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
+const STAT_NO_RESET: u16 = 1;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -416,6 +428,63 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
+// ── Native statistics array ────────────────────────────────────────
+
+static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("sent"),        flags: 0,             stat_pointer: unsafe { &STAT_SENT as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("failed"),      flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("dropped"),     flags: 0,             stat_pointer: unsafe { &STAT_DROPPED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("retried"),     flags: 0,             stat_pointer: unsafe { &STAT_RETRIED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("queue_depth"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_QUEUE_DEPTH as *const _ as *mut _ } },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
+// ── MI command handlers ────────────────────────────────────────────
+
+/// MI handler: rust_http_webhook:webhook_status
+unsafe extern "C" fn mi_webhook_status(
+    _params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    let Some(resp) = MiObject::new() else {
+        return mi_error(-32000, "Failed to create MI response");
+    };
+    // Report per-worker stats from thread-local
+    WEBHOOK_STATS.with(|s| {
+        resp.add_num("sent", s.get("sent") as f64);
+        resp.add_num("failed", s.get("failed") as f64);
+        resp.add_num("dropped", s.get("dropped") as f64);
+        resp.add_num("retried", s.get("retried") as f64);
+        resp.add_num("retry_exhausted", s.get("retry_exhausted") as f64);
+        resp.add_num("errors_4xx", s.get("errors_4xx") as f64);
+        resp.add_num("errors_5xx", s.get("errors_5xx") as f64);
+        resp.add_num("errors_timeout", s.get("errors_timeout") as f64);
+        resp.add_num("filtered", s.get("filtered") as f64);
+    });
+    resp.into_raw()
+}
+
+// ── MI command export array ────────────────────────────────────────
+
+static MI_CMDS: SyncArray<sys::mi_export_, 2> = SyncArray([
+    sys::mi_export_ {
+        name: cstr_lit!("webhook_status"),
+        help: cstr_lit!("Show webhook delivery statistics"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_webhook_status),
+                params: unsafe { std::mem::zeroed() },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
 static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("webhook"),
@@ -547,8 +616,8 @@ pub static exports: sys::module_exports = sys::module_exports {
     cmds: CMDS.0.as_ptr(),
     acmds: ACMDS.0.as_ptr(),
     params: PARAMS.0.as_ptr(),
-    stats: ptr::null(),
-    mi_cmds: ptr::null(),
+    stats: MOD_STATS.0.as_ptr() as *const _,
+    mi_cmds: MI_CMDS.0.as_ptr(),
     items: ptr::null(),
     trans: ptr::null(),
     procs: ptr::null(),
