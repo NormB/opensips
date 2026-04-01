@@ -1334,11 +1334,11 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("handled"),   flags: 0,             stat_pointer: unsafe { &STAT_HANDLED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("succeeded"), flags: 0,             stat_pointer: unsafe { &STAT_SUCCEEDED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("failed"),    flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("expired"),   flags: 0,             stat_pointer: unsafe { &STAT_EXPIRED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("pending"),   flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_PENDING as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("handled") as *mut _,   flags: 0,             stat_pointer: unsafe { &STAT_HANDLED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("succeeded") as *mut _, flags: 0,             stat_pointer: unsafe { &STAT_SUCCEEDED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,    flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("expired") as *mut _,   flags: 0,             stat_pointer: unsafe { &STAT_EXPIRED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("pending") as *mut _,   flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_PENDING as *const _ as *mut _ } },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -1346,19 +1346,19 @@ static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
 
 /// MI handler: rust_refer_handler:refer_show
 unsafe extern "C" fn mi_refer_show(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     WORKER.with(|w| {
         let w = w.borrow();
         let Some(state) = w.as_ref() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let Some(resp) = MiObject::new() else {
-            return mi_error(-32000, "Failed to create MI response");
+            return mi_error(-32000, "Failed to create MI response") as *mut _;
         };
         let Some(arr) = resp.add_array("transfers") else {
-            return mi_error(-32000, "Failed to create transfers array");
+            return mi_error(-32000, "Failed to create transfers array") as *mut _;
         };
         let mut count = 0u32;
         for (call_id, refer_state) in state.tracker.states.iter() {
@@ -1375,7 +1375,7 @@ unsafe extern "C" fn mi_refer_show(
             }
         }
         resp.add_num("count", count as f64);
-        resp.into_raw()
+        resp.into_raw() as *mut _
     })
 }
 
@@ -1383,8 +1383,8 @@ unsafe extern "C" fn mi_refer_show(
 
 static MI_CMDS: SyncArray<sys::mi_export_, 2> = SyncArray([
     sys::mi_export_ {
-        name: cstr_lit!("refer_show"),
-        help: cstr_lit!("Show pending REFER transfers"),
+        name: cstr_lit!("refer_show") as *mut _,
+        help: cstr_lit!("Show pending REFER transfers") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {

@@ -1948,13 +1948,13 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked"),           flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("allowed"),           flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("blocked"),           flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("reloads"),           flags: 0,             stat_pointer: unsafe { &STAT_RELOADS as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("auto_blocked"),      flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_AUTO_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("entries_blocklist"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_BLOCKLIST as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("entries_allowlist"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_ALLOWLIST as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("reloads") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_RELOADS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("auto_blocked") as *mut _,      flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_AUTO_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("entries_blocklist") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_BLOCKLIST as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("entries_allowlist") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_ALLOWLIST as *const _ as *mut _ } },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -1962,19 +1962,19 @@ static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
 
 /// MI handler: rust_acl:blocklist_show
 unsafe extern "C" fn mi_blocklist_show(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     WORKER.with(|w| {
         let w = w.borrow();
         let Some(state) = w.as_ref() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let Some(resp) = MiObject::new() else {
-            return mi_error(-32000, "Failed to create MI response");
+            return mi_error(-32000, "Failed to create MI response") as *mut _;
         };
         let Some(arr) = resp.add_array("entries") else {
-            return mi_error(-32000, "Failed to create entries array");
+            return mi_error(-32000, "Failed to create entries array") as *mut _;
         };
         let entries = state.blocklist_loader.get();
         let mut count = 0u32;
@@ -1990,28 +1990,28 @@ unsafe extern "C" fn mi_blocklist_show(
             }
         }
         resp.add_num("count", count as f64);
-        resp.into_raw()
+        resp.into_raw() as *mut _
     })
 }
 
 /// MI handler: rust_acl:allowlist_show
 unsafe extern "C" fn mi_allowlist_show(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     WORKER.with(|w| {
         let w = w.borrow();
         let Some(state) = w.as_ref() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let Some(ref loader) = state.allowlist_loader else {
-            return mi_error(-32000, "No allowlist configured");
+            return mi_error(-32000, "No allowlist configured") as *mut _;
         };
         let Some(resp) = MiObject::new() else {
-            return mi_error(-32000, "Failed to create MI response");
+            return mi_error(-32000, "Failed to create MI response") as *mut _;
         };
         let Some(arr) = resp.add_array("entries") else {
-            return mi_error(-32000, "Failed to create entries array");
+            return mi_error(-32000, "Failed to create entries array") as *mut _;
         };
         let entries = loader.get();
         let mut count = 0u32;
@@ -2023,19 +2023,19 @@ unsafe extern "C" fn mi_allowlist_show(
             }
         }
         resp.add_num("count", count as f64);
-        resp.into_raw()
+        resp.into_raw() as *mut _
     })
 }
 
 /// MI handler: rust_acl:blocklist_reload
 unsafe extern "C" fn mi_blocklist_reload(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     WORKER.with(|w| {
         let mut w = w.borrow_mut();
         let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         match state.blocklist_loader.reload() {
             Ok(count) => {
@@ -2049,29 +2049,29 @@ unsafe extern "C" fn mi_blocklist_reload(
                     s.update(count as i32);
                 }
                 let Some(resp) = MiObject::new() else {
-                    return mi_error(-32000, "Failed to create MI response");
+                    return mi_error(-32000, "Failed to create MI response") as *mut _;
                 };
                 resp.add_str("status", "OK");
                 resp.add_num("entries", count as f64);
-                resp.into_raw()
+                resp.into_raw() as *mut _
             }
-            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")),
+            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")) as *mut _,
         }
     })
 }
 
 /// MI handler: rust_acl:allowlist_reload
 unsafe extern "C" fn mi_allowlist_reload(
-    _params: *const mi_params_t,
-    _async_hdl: *mut std::ffi::c_void,
-) -> MiResponsePtr {
+    _params: *const sys::mi_params_,
+    _async_hdl: *mut sys::mi_handler,
+) -> *mut sys::mi_response_t {
     WORKER.with(|w| {
         let mut w = w.borrow_mut();
         let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized");
+            return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let Some(ref loader) = state.allowlist_loader else {
-            return mi_error(-32000, "No allowlist configured");
+            return mi_error(-32000, "No allowlist configured") as *mut _;
         };
         match loader.reload() {
             Ok(count) => {
@@ -2083,13 +2083,13 @@ unsafe extern "C" fn mi_allowlist_reload(
                     s.update(count as i32);
                 }
                 let Some(resp) = MiObject::new() else {
-                    return mi_error(-32000, "Failed to create MI response");
+                    return mi_error(-32000, "Failed to create MI response") as *mut _;
                 };
                 resp.add_str("status", "OK");
                 resp.add_num("entries", count as f64);
-                resp.into_raw()
+                resp.into_raw() as *mut _
             }
-            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")),
+            Err(e) => mi_error(-32000, &format!("Reload failed: {e}")) as *mut _,
         }
     })
 }
@@ -2098,8 +2098,8 @@ unsafe extern "C" fn mi_allowlist_reload(
 
 static MI_CMDS: SyncArray<sys::mi_export_, 5> = SyncArray([
     sys::mi_export_ {
-        name: cstr_lit!("blocklist_show"),
-        help: cstr_lit!("Show blocklist entries with hit counters"),
+        name: cstr_lit!("blocklist_show") as *mut _,
+        help: cstr_lit!("Show blocklist entries with hit counters") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -2113,8 +2113,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 5> = SyncArray([
         aliases: [ptr::null(); 4],
     },
     sys::mi_export_ {
-        name: cstr_lit!("allowlist_show"),
-        help: cstr_lit!("Show allowlist entries with hit counters"),
+        name: cstr_lit!("allowlist_show") as *mut _,
+        help: cstr_lit!("Show allowlist entries with hit counters") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -2128,8 +2128,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 5> = SyncArray([
         aliases: [ptr::null(); 4],
     },
     sys::mi_export_ {
-        name: cstr_lit!("blocklist_reload"),
-        help: cstr_lit!("Reload blocklist from file"),
+        name: cstr_lit!("blocklist_reload") as *mut _,
+        help: cstr_lit!("Reload blocklist from file") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
@@ -2143,8 +2143,8 @@ static MI_CMDS: SyncArray<sys::mi_export_, 5> = SyncArray([
         aliases: [ptr::null(); 4],
     },
     sys::mi_export_ {
-        name: cstr_lit!("allowlist_reload"),
-        help: cstr_lit!("Reload allowlist from file"),
+        name: cstr_lit!("allowlist_reload") as *mut _,
+        help: cstr_lit!("Reload allowlist from file") as *mut _,
         flags: 0,
         init_f: None,
         recipes: {
