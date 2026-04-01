@@ -182,6 +182,17 @@ impl<T: Default> DialogTracker<T> {
             .collect();
         format!("[{}]", entries.join(","))
     }
+
+    /// Iterate over all tracked dialogs with read-only access.
+    pub fn for_each_ref<F>(&self, mut f: F)
+    where
+        F: FnMut(&str, &DialogEntry<T>),
+    {
+        let states = self.states.borrow();
+        for (id, entry) in states.iter() {
+            f(id, entry);
+        }
+    }
 }
 
 // ── Convenience: extract Call-ID from callback parameters ────────────
