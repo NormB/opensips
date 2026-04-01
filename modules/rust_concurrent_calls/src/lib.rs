@@ -104,6 +104,8 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::dialog;
 use rust_common::event;
 use rust_common::mi::Stats;
+use rust_common::mi_resp::{self, MiObject, MiResponsePtr, mi_ok, mi_error, mi_param_error, mi_try_get_string_param, mi_params_t};
+use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::reload::{csv_line_parser, FileLoader};
 
 use std::cell::RefCell;
@@ -111,6 +113,15 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::time::Instant;
+
+// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ALLOWED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ACTIVE_CALLS: *mut StatVarOpaque = std::ptr::null_mut();
+static mut STAT_ACCOUNTS: *mut StatVarOpaque = std::ptr::null_mut();
+
+const STAT_NO_RESET: u16 = 1;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -448,6 +459,7 @@ unsafe extern "C" fn dlg_on_created(
             let new_count = increment(&mut state.counts, &account);
             state.stats.inc("incremented");
             state.stats.inc("auto_tracked");
+            if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.inc(); }
 
             // Store account in dialog tracker
             state.dialog_tracker.on_created(&call_id);
@@ -497,6 +509,7 @@ unsafe extern "C" fn dlg_on_terminated(
                 if !acct.is_empty() {
                     let new_count = decrement(&mut state.counts, &acct);
                     state.stats.inc("decremented");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.dec(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "auto_track dec {}: now {} (dialog {})", acct, new_count, call_id);
                 }
@@ -683,11 +696,13 @@ unsafe extern "C" fn w_check_concurrent(
             match borrow.as_mut() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
 
                     // Check cooldown first (Task 43)
                     let cooldown_secs = COOLDOWN_SECS.get();
                     if cooldown_secs > 0 && is_in_cooldown(&state.cooldowns, account, cooldown_secs as u64) {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         state.stats.inc("cooldown_blocked");
                         opensips_log!(DBG, "rust_concurrent_calls",
                             "account {} in cooldown period", account);
@@ -740,9 +755,11 @@ unsafe extern "C" fn w_check_concurrent(
 
                     if allowed {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         // Set cooldown on rejection (Task 43)
                         let cooldown_secs = COOLDOWN_SECS.get();
                         if cooldown_secs > 0 {
@@ -805,6 +822,7 @@ unsafe extern "C" fn w_concurrent_inc(
                 Some(state) => {
                     let new_count = increment(&mut state.counts, account);
                     state.stats.inc("incremented");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.inc(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "inc {}: now {}", account, new_count);
                     1
@@ -842,6 +860,7 @@ unsafe extern "C" fn w_concurrent_dec(
                 Some(state) => {
                     let new_count = decrement(&mut state.counts, account);
                     state.stats.inc("decremented");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.dec(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "dec {}: now {}", account, new_count);
                     1
@@ -878,6 +897,7 @@ unsafe extern "C" fn w_check_concurrent_inbound(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
 
                     let default = DEFAULT_LIMIT.get() as u32;
                     let (allowed, count, limit) = match &state.direction_loader {
@@ -899,9 +919,11 @@ unsafe extern "C" fn w_check_concurrent_inbound(
 
                     if allowed {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         -1
                     }
                 }
@@ -933,6 +955,7 @@ unsafe extern "C" fn w_check_concurrent_outbound(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
+                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
 
                     let default = DEFAULT_LIMIT.get() as u32;
                     let (allowed, count, limit) = match &state.direction_loader {
@@ -954,9 +977,11 @@ unsafe extern "C" fn w_check_concurrent_outbound(
 
                     if allowed {
                         state.stats.inc("allowed");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
+                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
                         -1
                     }
                 }
@@ -1224,6 +1249,203 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 struct SyncArray<T, const N: usize>([T; N]);
 unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
+// ── Native statistics array ────────────────────────────────────────
+
+static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("checked"),      flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("allowed"),      flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("blocked"),      flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("active_calls"), flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_CALLS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("accounts"),     flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACCOUNTS as *const _ as *mut _ } },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
+// ── MI command handlers ────────────────────────────────────────────
+
+/// MI handler: rust_concurrent_calls:concurrent_show
+/// Without `account` param: all accounts summary.
+/// With `account` param: single account detail.
+unsafe extern "C" fn mi_concurrent_show(
+    params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    let filter = mi_try_get_string_param(params, "account\0");
+
+    WORKER.with(|w| {
+        let w = w.borrow();
+        let Some(state) = w.as_ref() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        let limits = state.loader.get();
+        let default = unsafe { DEFAULT_LIMIT.value() as u32 };
+
+        if let Some(account) = filter {
+            // Single account detail
+            let active = state.counts.get(&account).copied().unwrap_or(0);
+            let limit = effective_limit(&limits, &state.limit_overrides, &account, default);
+            let inbound = state.inbound_counts.get(&account).copied().unwrap_or(0);
+            let outbound = state.outbound_counts.get(&account).copied().unwrap_or(0);
+            let override_val = state.limit_overrides.get(&account);
+
+            let Some(resp) = MiObject::new() else {
+                return mi_error(-32000, "Failed to create MI response");
+            };
+            resp.add_str("account", &account);
+            resp.add_num("active", active as f64);
+            resp.add_num("limit", limit as f64);
+            resp.add_num("inbound", inbound as f64);
+            resp.add_num("outbound", outbound as f64);
+            if let Some(&ov) = override_val {
+                resp.add_num("override", ov as f64);
+            } else {
+                resp.add_null("override");
+            }
+            resp.into_raw()
+        } else {
+            // All accounts
+            let Some(resp) = MiObject::new() else {
+                return mi_error(-32000, "Failed to create MI response");
+            };
+            let Some(arr) = resp.add_array("accounts") else {
+                return mi_error(-32000, "Failed to create accounts array");
+            };
+            let mut total_active = 0u32;
+            for (account, &active) in &state.counts {
+                if active == 0 { continue; }
+                let limit = effective_limit(&limits, &state.limit_overrides, account, default);
+                if let Some(obj) = arr.add_object("") {
+                    obj.add_str("account", account);
+                    obj.add_num("active", active as f64);
+                    obj.add_num("limit", limit as f64);
+                }
+                total_active += active;
+            }
+            resp.add_num("total_active", total_active as f64);
+            resp.into_raw()
+        }
+    })
+}
+
+/// MI handler: rust_concurrent_calls:concurrent_override
+unsafe extern "C" fn mi_concurrent_override(
+    params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    let Some(account) = mi_try_get_string_param(params, "account\0") else {
+        return mi_param_error();
+    };
+    let Some(limit_str) = mi_try_get_string_param(params, "limit\0") else {
+        return mi_param_error();
+    };
+    let Ok(limit) = limit_str.parse::<u32>() else {
+        return mi_error(-32000, "Invalid limit value");
+    };
+    WORKER.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(state) = w.as_mut() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        state.limit_overrides.insert(account.clone(), limit);
+        mi_ok()
+    })
+}
+
+/// MI handler: rust_concurrent_calls:concurrent_reset
+unsafe extern "C" fn mi_concurrent_reset(
+    params: *const mi_params_t,
+    _async_hdl: *mut std::ffi::c_void,
+) -> MiResponsePtr {
+    let filter = mi_try_get_string_param(params, "account\0");
+    WORKER.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(state) = w.as_mut() else {
+            return mi_error(-32000, "Worker not initialized");
+        };
+        if let Some(account) = filter {
+            state.counts.remove(&account);
+            state.inbound_counts.remove(&account);
+            state.outbound_counts.remove(&account);
+        } else {
+            state.counts.clear();
+            state.inbound_counts.clear();
+            state.outbound_counts.clear();
+        }
+        mi_ok()
+    })
+}
+
+// ── MI command export array ────────────────────────────────────────
+
+static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
+    sys::mi_export_ {
+        name: cstr_lit!("concurrent_show"),
+        help: cstr_lit!("Show concurrent call accounts and counts"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_concurrent_show),
+                params: unsafe { std::mem::zeroed() }, // no params (all accounts)
+            };
+            r[1] = sys::mi_recipe_ {
+                cmd: Some(mi_concurrent_show),
+                params: {
+                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account");
+                    p
+                },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    sys::mi_export_ {
+        name: cstr_lit!("concurrent_override"),
+        help: cstr_lit!("Set temporary limit override for an account"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_concurrent_override),
+                params: {
+                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account");
+                    p[1] = cstr_lit!("limit");
+                    p
+                },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    sys::mi_export_ {
+        name: cstr_lit!("concurrent_reset"),
+        help: cstr_lit!("Reset call counts (all or single account)"),
+        flags: 0,
+        init_f: None,
+        recipes: {
+            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
+            r[0] = sys::mi_recipe_ {
+                cmd: Some(mi_concurrent_reset),
+                params: unsafe { std::mem::zeroed() }, // no params (all accounts)
+            };
+            r[1] = sys::mi_recipe_ {
+                cmd: Some(mi_concurrent_reset),
+                params: {
+                    let mut p: [*const std::ffi::c_char; 20] = unsafe { std::mem::zeroed() };
+                    p[0] = cstr_lit!("account");
+                    p
+                },
+            };
+            r
+        },
+        aliases: [ptr::null(); 4],
+    },
+    unsafe { std::mem::zeroed() }, // NULL terminator
+]);
+
 static CMDS: SyncArray<sys::cmd_export_, 12> = SyncArray([
     sys::cmd_export_ {
         name: cstr_lit!("check_concurrent"),
@@ -1396,8 +1618,8 @@ pub static exports: sys::module_exports = sys::module_exports {
     cmds: CMDS.0.as_ptr(),
     acmds: ACMDS.0.as_ptr(),
     params: PARAMS.0.as_ptr(),
-    stats: ptr::null(),
-    mi_cmds: ptr::null(),
+    stats: MOD_STATS.0.as_ptr() as *const _,
+    mi_cmds: MI_CMDS.0.as_ptr(),
     items: ptr::null(),
     trans: ptr::null(),
     procs: ptr::null(),
