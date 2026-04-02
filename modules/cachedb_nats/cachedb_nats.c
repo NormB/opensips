@@ -478,13 +478,14 @@ static int child_init(int rank)
 		int i = 0;
 
 		/* convert linked list to array for kvStore_WatchMulti() */
-		patterns = pkg_malloc(kv_watch_count * sizeof(char *));
+		patterns = pkg_malloc((kv_watch_count + 1) * sizeof(char *));
 		if (!patterns) {
 			LM_ERR("no more pkg memory for watch patterns\n");
 			return -1;
 		}
 		for (e = kv_watch_list; e; e = e->next)
 			patterns[i++] = e->pattern;
+		patterns[i] = NULL;
 
 		if (nats_watch_start(kv, patterns, kv_watch_count) < 0)
 			LM_WARN("KV watcher not started; index will not "

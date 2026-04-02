@@ -7,6 +7,7 @@ use std::ffi::{c_char, c_double, c_int};
 use std::ptr;
 
 // FFI declarations -- these are real C functions (not macros).
+#[allow(dead_code)]
 extern "C" {
     fn init_mi_result_object(obj_out: *mut *mut cJSON) -> *mut cJSON;
     fn init_mi_result_array(arr_out: *mut *mut cJSON) -> *mut cJSON;

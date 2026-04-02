@@ -132,6 +132,17 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		return -1;
 	}
 
+	/* clamp timeout to a sane range */
+	if (*timeout_ms > 30000) {
+		static int warned = 0;
+		if (!warned) {
+			LM_WARN("nats_request timeout %d ms clamped to 30000 ms\n",
+				*timeout_ms);
+			warned = 1;
+		}
+		*timeout_ms = 30000;
+	}
+
 	/* null-terminate subject */
 	if (native_str_to_buf(subject, subj_buf, sizeof(subj_buf)) < 0)
 		return -1;
@@ -376,9 +387,12 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	/* set revision pvar (optional) */
 	if (rev_var) {
 		uint64_t rev = kvEntry_Revision(entry);
+		char rev_buf[24];
+		snprintf(rev_buf, sizeof(rev_buf), "%llu", (unsigned long long)rev);
 		memset(&val, 0, sizeof(val));
-		val.flags = PV_VAL_INT | PV_TYPE_INT;
-		val.ri = (int)rev;
+		val.flags = PV_VAL_STR;
+		val.rs.s = rev_buf;
+		val.rs.len = strlen(rev_buf);
 		pv_set_value(msg, rev_var, 0, &val);
 	}
 
@@ -638,11 +652,14 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	}
 
 	uint64_t rev = kvEntry_Revision(entry);
+	char rev_buf[24];
 	kvEntry_Destroy(entry);
 
+	snprintf(rev_buf, sizeof(rev_buf), "%llu", (unsigned long long)rev);
 	memset(&val, 0, sizeof(val));
-	val.flags = PV_VAL_INT | PV_TYPE_INT;
-	val.ri = (int)rev;
+	val.flags = PV_VAL_STR;
+	val.rs.s = rev_buf;
+	val.rs.len = strlen(rev_buf);
 	pv_set_value(msg, rev_var, 0, &val);
 
 	LM_DBG("nats_kv_revision '%s' = %llu\n",

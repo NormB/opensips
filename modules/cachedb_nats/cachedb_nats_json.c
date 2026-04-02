@@ -287,6 +287,8 @@ static int _parse_json_fields(const char *json, int len,
 		if (p >= end || *p != ':')
 			return -1;
 		p++;
+		if (p >= end)
+			return -1;
 
 		/* check if value is a string */
 		p = _skip_ws(p, end);
@@ -955,6 +957,9 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (!e || e->num_keys == 0) {
 			/* no match for this filter — intersection is empty */
 			if (match_keys) {
+				int k;
+				for (k = 0; k < match_count; k++)
+					free(match_keys[k]);
 				free(match_keys);
 				match_keys = NULL;
 			}
@@ -963,14 +968,26 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		}
 
 		if (first) {
-			/* first filter — copy the key list */
+			/* first filter — strdup the key list so pointers remain
+			 * valid after we release the index mutex */
+			int k;
 			match_keys = malloc(sizeof(char *) * e->num_keys);
 			if (!match_keys) {
 				LM_ERR("no memory for match keys\n");
 				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
 			}
-			memcpy(match_keys, e->keys, sizeof(char *) * e->num_keys);
+			for (k = 0; k < e->num_keys; k++) {
+				match_keys[k] = strdup(e->keys[k]);
+				if (!match_keys[k]) {
+					LM_ERR("no memory for match key strdup\n");
+					while (--k >= 0)
+						free(match_keys[k]);
+					free(match_keys);
+					pthread_mutex_unlock(&g_idx->lock);
+					return -1;
+				}
+			}
 			match_count = e->num_keys;
 			first = 0;
 		} else {
@@ -982,13 +999,40 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 					e->keys, e->num_keys,
 					&new_keys, &new_count) < 0) {
 				LM_ERR("intersection failed\n");
+				{
+					int k;
+					for (k = 0; k < match_count; k++)
+						free(match_keys[k]);
+				}
 				free(match_keys);
 				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
 			}
+			/* free old strdup'd keys not in the intersection */
+			{
+				int k;
+				for (k = 0; k < match_count; k++)
+					free(match_keys[k]);
+			}
 			free(match_keys);
+			/* strdup the intersection results */
 			match_keys = new_keys;
 			match_count = new_count;
+			{
+				int k;
+				for (k = 0; k < match_count; k++) {
+					char *dup = strdup(match_keys[k]);
+					if (!dup) {
+						LM_ERR("no memory for intersect key strdup\n");
+						while (--k >= 0)
+							free(match_keys[k]);
+						free(match_keys);
+						pthread_mutex_unlock(&g_idx->lock);
+						return -1;
+					}
+					match_keys[k] = dup;
+				}
+			}
 		}
 	}
 
@@ -996,8 +1040,12 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 
 	if (match_count == 0) {
 		LM_DBG("no documents match the filter\n");
-		if (match_keys)
+		if (match_keys) {
+			int k;
+			for (k = 0; k < match_count; k++)
+				free(match_keys[k]);
 			free(match_keys);
+		}
 		return 0;
 	}
 
@@ -1023,6 +1071,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 
 		if (!data || data_len <= 0 || data[0] != '{') {
 			kvEntry_Destroy(entry);
+			entry = NULL;
 			continue;
 		}
 
@@ -1032,6 +1081,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (!row) {
 			LM_ERR("no more pkg memory for cdb_row_t\n");
 			kvEntry_Destroy(entry);
+			entry = NULL;
 			goto error;
 		}
 
@@ -1039,6 +1089,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			LM_ERR("failed to parse JSON for key '%s'\n", match_keys[i]);
 			pkg_free(row);
 			kvEntry_Destroy(entry);
+			entry = NULL;
 			continue;
 		}
 
@@ -1050,10 +1101,20 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	}
 
 	LM_DBG("query returned %d rows\n", res->count);
+	{
+		int k;
+		for (k = 0; k < match_count; k++)
+			free(match_keys[k]);
+	}
 	free(match_keys);
 	return 0;
 
 error:
+	{
+		int k;
+		for (k = 0; k < match_count; k++)
+			free(match_keys[k]);
+	}
 	free(match_keys);
 	cdb_free_rows(res);
 	return -1;
@@ -1306,6 +1367,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		if (!data || data_len <= 0) {
 			LM_ERR("empty document for key '%s'\n", target_key);
 			kvEntry_Destroy(entry);
+			entry = NULL;
 			pkg_free(target_key);
 			return -1;
 		}
@@ -1315,6 +1377,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		if (!json_buf) {
 			LM_ERR("oom\n");
 			kvEntry_Destroy(entry);
+			entry = NULL;
 			pkg_free(target_key);
 			return -1;
 		}

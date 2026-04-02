@@ -104,7 +104,7 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::dialog;
 use rust_common::event;
 use rust_common::mi::Stats;
-use rust_common::mi_resp::{self, MiObject, MiResponsePtr, mi_ok, mi_error, mi_param_error, mi_try_get_string_param, mi_params_t};
+use rust_common::mi_resp::{MiObject, mi_ok, mi_error, mi_param_error, mi_try_get_string_param, mi_params_t};
 use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::reload::{csv_line_parser, FileLoader};
 
@@ -112,14 +112,15 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Instant;
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
-static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ALLOWED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ACTIVE_CALLS: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ACCOUNTS: *mut StatVarOpaque = std::ptr::null_mut();
+static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ALLOWED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_BLOCKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ACTIVE_CALLS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ACCOUNTS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 const STAT_NO_RESET: u16 = 1;
 
@@ -313,8 +314,9 @@ fn check_burst_from_history(
         None => return (false, 0),
     };
 
-    let delta = current_count as i32 - oldest_count as i32;
-    let is_burst = delta >= threshold as i32;
+    // gui_dCquvqE1csI3: use saturating arithmetic to prevent overflow
+    let delta = (current_count as i32).saturating_sub(oldest_count as i32);
+    let is_burst = delta >= (threshold as i32);
     (is_burst, delta)
 }
 
@@ -459,7 +461,7 @@ unsafe extern "C" fn dlg_on_created(
             let new_count = increment(&mut state.counts, &account);
             state.stats.inc("incremented");
             state.stats.inc("auto_tracked");
-            if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.inc(); }
+            if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
 
             // Store account in dialog tracker
             state.dialog_tracker.on_created(&call_id);
@@ -509,7 +511,7 @@ unsafe extern "C" fn dlg_on_terminated(
                 if !acct.is_empty() {
                     let new_count = decrement(&mut state.counts, &acct);
                     state.stats.inc("decremented");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.dec(); }
+                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.dec(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "auto_track dec {}: now {} (dialog {})", acct, new_count, call_id);
                 }
@@ -603,7 +605,10 @@ unsafe extern "C" fn mod_init() -> c_int {
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    if rank < 1 {
+    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
+    // handles MI commands via httpd.  Skip all other non-worker processes
+    // (PROC_MAIN=0, TCP=-1, etc.).
+    if rank < 1 && rank != -2 {
         return 0;
     }
 
@@ -696,13 +701,13 @@ unsafe extern "C" fn w_check_concurrent(
             match borrow.as_mut() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
                     // Check cooldown first (Task 43)
                     let cooldown_secs = COOLDOWN_SECS.get();
                     if cooldown_secs > 0 && is_in_cooldown(&state.cooldowns, account, cooldown_secs as u64) {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         state.stats.inc("cooldown_blocked");
                         opensips_log!(DBG, "rust_concurrent_calls",
                             "account {} in cooldown period", account);
@@ -715,7 +720,7 @@ unsafe extern "C" fn w_check_concurrent(
                     }
 
                     let limits = state.loader.get();
-                    let default = DEFAULT_LIMIT.get() as u32;
+                    let default = DEFAULT_LIMIT.get().max(0) as u32;
 
                     // When dialog profiles are enabled, use get_profile_size
                     // for cross-worker accurate counts
@@ -750,16 +755,16 @@ unsafe extern "C" fn w_check_concurrent(
                     let mut sip_msg = unsafe {
                         opensips_rs::SipMessage::from_raw(msg)
                     };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
 
                     if allowed {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         // Set cooldown on rejection (Task 43)
                         let cooldown_secs = COOLDOWN_SECS.get();
                         if cooldown_secs > 0 {
@@ -822,7 +827,7 @@ unsafe extern "C" fn w_concurrent_inc(
                 Some(state) => {
                     let new_count = increment(&mut state.counts, account);
                     state.stats.inc("incremented");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "inc {}: now {}", account, new_count);
                     1
@@ -860,7 +865,7 @@ unsafe extern "C" fn w_concurrent_dec(
                 Some(state) => {
                     let new_count = decrement(&mut state.counts, account);
                     state.stats.inc("decremented");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_ACTIVE_CALLS }) { s.dec(); }
+                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.dec(); }
                     opensips_log!(DBG, "rust_concurrent_calls",
                         "dec {}: now {}", account, new_count);
                     1
@@ -897,9 +902,9 @@ unsafe extern "C" fn w_check_concurrent_inbound(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
-                    let default = DEFAULT_LIMIT.get() as u32;
+                    let default = DEFAULT_LIMIT.get().max(0) as u32;
                     let (allowed, count, limit) = match &state.direction_loader {
                         Some(dl) => {
                             let limits = dl.get();
@@ -914,16 +919,16 @@ unsafe extern "C" fn w_check_concurrent_inbound(
                     };
 
                     let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
 
                     if allowed {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
                     }
                 }
@@ -955,9 +960,9 @@ unsafe extern "C" fn w_check_concurrent_outbound(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
-                    let default = DEFAULT_LIMIT.get() as u32;
+                    let default = DEFAULT_LIMIT.get().max(0) as u32;
                     let (allowed, count, limit) = match &state.direction_loader {
                         Some(dl) => {
                             let limits = dl.get();
@@ -972,16 +977,16 @@ unsafe extern "C" fn w_check_concurrent_outbound(
                     };
 
                     let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
+                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
 
                     if allowed {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     } else {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
                     }
                 }
@@ -1014,7 +1019,7 @@ unsafe extern "C" fn w_concurrent_status(
                 Some(state) => {
                     let count = state.counts.get(account).copied().unwrap_or(0);
                     let limits = state.loader.get();
-                    let default = DEFAULT_LIMIT.get() as u32;
+                    let default = DEFAULT_LIMIT.get().max(0) as u32;
                     let limit = effective_limit(&limits, &state.limit_overrides, account, default);
                     let inbound = state.inbound_counts.get(account).copied().unwrap_or(0);
                     let outbound = state.outbound_counts.get(account).copied().unwrap_or(0);
@@ -1115,7 +1120,7 @@ unsafe extern "C" fn w_check_burst(
             return -1;
         }
 
-        let window_secs = BURST_WINDOW_SECS.get();
+        let window_secs = BURST_WINDOW_SECS.get().max(1);
 
         WORKER.with(|w| {
             let mut borrow = w.borrow_mut();
@@ -1252,11 +1257,11 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("active_calls") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_CALLS as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("accounts") as *mut _,     flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACCOUNTS as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,      flags: 0,             stat_pointer: STAT_CHECKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,      flags: 0,             stat_pointer: STAT_ALLOWED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,      flags: 0,             stat_pointer: STAT_BLOCKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("active_calls") as *mut _, flags: STAT_NO_RESET, stat_pointer: STAT_ACTIVE_CALLS.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("accounts") as *mut _,     flags: STAT_NO_RESET, stat_pointer: STAT_ACCOUNTS.as_ptr() as *mut _ },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -1277,7 +1282,7 @@ unsafe extern "C" fn mi_concurrent_show(
             return mi_error(-32000, "Worker not initialized") as *mut _;
         };
         let limits = state.loader.get();
-        let default = DEFAULT_LIMIT.get() as u32;
+        let default = DEFAULT_LIMIT.get().max(0) as u32;
 
         if let Some(account) = filter {
             // Single account detail
@@ -1321,6 +1326,11 @@ unsafe extern "C" fn mi_concurrent_show(
                 total_active += active;
             }
             resp.add_num("total_active", total_active as f64);
+            // Include global aggregate from shared-memory StatVar
+            // (summed across all workers, unlike per-worker counts above).
+            if let Some(sv) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) {
+                resp.add_num("global_active", sv.get() as f64);
+            }
             resp.into_raw() as *mut _
         }
     })

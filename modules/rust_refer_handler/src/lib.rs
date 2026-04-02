@@ -74,21 +74,22 @@ use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::glob;
 use rust_common::mi::Stats;
-use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::mi_resp::{MiObject, mi_error};
 use rust_common::stat::{StatVar, StatVarOpaque};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Instant;
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
-static mut STAT_HANDLED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_SUCCEEDED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_EXPIRED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_PENDING: *mut StatVarOpaque = std::ptr::null_mut();
+static STAT_HANDLED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_SUCCEEDED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_FAILED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_EXPIRED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_PENDING: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
 const STAT_NO_RESET: u16 = 1;
@@ -596,8 +597,8 @@ unsafe extern "C" fn dlg_req_within_cb(
                     } else {
                         state.tracker.handle_refer(&call_id, &refer_to);
                     }
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
+                    if let Some(sv) = StatVar::from_raw(STAT_HANDLED.load(Ordering::Relaxed)) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(1); }
                     state.stats.set("active_transfers",
                         state.tracker.active_count() as u64);
                     opensips_log!(DBG, "rust_refer_handler",
@@ -643,13 +644,13 @@ unsafe extern "C" fn dlg_req_within_cb(
                             match status_str {
                                 "success" => {
                                     state.stats.inc("completed");
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_SUCCEEDED }) { sv.inc(); }
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_SUCCEEDED.load(Ordering::Relaxed)) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
                                 }
                                 "failed" => {
                                     state.stats.inc("failed");
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_FAILED }) { sv.inc(); }
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
                                 }
                                 _ => {}
                             }
@@ -667,7 +668,9 @@ unsafe extern "C" fn dlg_req_within_cb(
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    if rank < 1 {
+    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
+    // handles MI commands via httpd.
+    if rank < 1 && rank != -2 {
         return 0;
     }
 
@@ -773,12 +776,12 @@ unsafe extern "C" fn w_rust_handle_refer(
                     if expired > 0 {
                         state.stats.set(
                             "expired",
-                            state.stats.get("expired") + expired as u64,
+                            state.stats.get("expired").saturating_add(expired as u64),
                         );
-                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_EXPIRED }) {
+                        if let Some(sv) = StatVar::from_raw(STAT_EXPIRED.load(Ordering::Relaxed)) {
                             for _ in 0..expired { sv.inc(); }
                         }
-                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) {
+                        if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) {
                             for _ in 0..expired { sv.update(-1); }
                         }
                     }
@@ -795,8 +798,8 @@ unsafe extern "C" fn w_rust_handle_refer(
                     }
 
                     state.tracker.handle_refer(call_id, refer_to);
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
+                    if let Some(sv) = StatVar::from_raw(STAT_HANDLED.load(Ordering::Relaxed)) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(1); }
                     state
                         .stats
                         .set("active_transfers", state.tracker.active_count() as u64);
@@ -893,12 +896,12 @@ unsafe extern "C" fn w_rust_handle_attended_refer(
                     if expired > 0 {
                         state.stats.set(
                             "expired",
-                            state.stats.get("expired") + expired as u64,
+                            state.stats.get("expired").saturating_add(expired as u64),
                         );
-                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_EXPIRED }) {
+                        if let Some(sv) = StatVar::from_raw(STAT_EXPIRED.load(Ordering::Relaxed)) {
                             for _ in 0..expired { sv.inc(); }
                         }
-                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) {
+                        if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) {
                             for _ in 0..expired { sv.update(-1); }
                         }
                     }
@@ -915,8 +918,8 @@ unsafe extern "C" fn w_rust_handle_attended_refer(
                     }
 
                     let valid = state.tracker.handle_attended_refer(&call_id, refer_to, replaces);
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_HANDLED }) { sv.inc(); }
-                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(1); }
+                    if let Some(sv) = StatVar::from_raw(STAT_HANDLED.load(Ordering::Relaxed)) { sv.inc(); }
+                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(1); }
                     state
                         .stats
                         .set("active_transfers", state.tracker.active_count() as u64);
@@ -1012,8 +1015,8 @@ unsafe extern "C" fn w_rust_handle_notify(
                             match status_str {
                                 "success" => {
                                     state.stats.inc("completed");
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_SUCCEEDED }) { sv.inc(); }
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_SUCCEEDED.load(Ordering::Relaxed)) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
                                     // Task 55: Publish success event
                                     if state.publish_events {
                                         if let Some(refer_to) = state.tracker.get_refer_to(call_id) {
@@ -1024,8 +1027,8 @@ unsafe extern "C" fn w_rust_handle_notify(
                                 }
                                 "failed" => {
                                     state.stats.inc("failed");
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_FAILED }) { sv.inc(); }
-                                    if let Some(sv) = StatVar::from_raw(unsafe { STAT_PENDING }) { sv.update(-1); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
+                                    if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
                                     // Task 55: Publish failure event
                                     if state.publish_events {
                                         if let Some(refer_to) = state.tracker.get_refer_to(call_id) {
@@ -1334,11 +1337,11 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("handled") as *mut _,   flags: 0,             stat_pointer: unsafe { &STAT_HANDLED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("succeeded") as *mut _, flags: 0,             stat_pointer: unsafe { &STAT_SUCCEEDED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,    flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("expired") as *mut _,   flags: 0,             stat_pointer: unsafe { &STAT_EXPIRED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("pending") as *mut _,   flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_PENDING as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("handled") as *mut _,   flags: 0,             stat_pointer: STAT_HANDLED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("succeeded") as *mut _, flags: 0,             stat_pointer: STAT_SUCCEEDED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,    flags: 0,             stat_pointer: STAT_FAILED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("expired") as *mut _,   flags: 0,             stat_pointer: STAT_EXPIRED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("pending") as *mut _,   flags: STAT_NO_RESET, stat_pointer: STAT_PENDING.as_ptr() as *mut _ },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 

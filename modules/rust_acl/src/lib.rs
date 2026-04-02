@@ -97,7 +97,7 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::cidr::CidrRange;
 use rust_common::event;
 use rust_common::mi::Stats;
-use rust_common::mi_resp::{self, MiObject, MiResponsePtr, mi_ok, mi_error, mi_params_t};
+use rust_common::mi_resp::{MiObject, mi_error};
 use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::glob;
 use rust_common::reload::{default_line_parser, FileLoader};
@@ -106,16 +106,17 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Instant;
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
-static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ALLOWED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_RELOADS: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_AUTO_BLOCKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ENTRIES_BLOCKLIST: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ENTRIES_ALLOWLIST: *mut StatVarOpaque = std::ptr::null_mut();
+static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ALLOWED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_BLOCKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_RELOADS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_AUTO_BLOCKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ENTRIES_BLOCKLIST: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ENTRIES_ALLOWLIST: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
 const STAT_NO_RESET: u16 = 1;
@@ -324,6 +325,7 @@ fn build_acl_data(entries: &[String], mode: &str) -> AclData {
         }
         "glob" => AclData::Glob(entries.to_vec()),
         "regex" => {
+            let total = entries.len();
             let patterns: Vec<Regex> = entries
                 .iter()
                 .filter_map(|pat| {
@@ -341,6 +343,14 @@ fn build_acl_data(entries: &[String], mode: &str) -> AclData {
                     }
                 })
                 .collect();
+            if patterns.is_empty() && total > 0 {
+                #[cfg(not(test))]
+                opensips_log!(ERR, "rust_acl",
+                    "ALL {} regex patterns are invalid — blocklist is empty, \
+                     all traffic will be allowed", total);
+                #[cfg(test)]
+                eprintln!("ERR: ALL {} regex patterns are invalid", total);
+            }
             AclData::Regex(patterns)
         }
         "auto" => {
@@ -463,6 +473,20 @@ fn auto_insert(map: &mut HashMap<String, AutoEntry>, value: &str, ttl_secs: u64)
 fn purge_expired(map: &mut HashMap<String, AutoEntry>) {
     let now = Instant::now();
     map.retain(|_, entry| entry.expires > now);
+}
+
+/// Purge auto maps if they exceed a size threshold, preventing unbounded growth.
+/// Called from ACL check paths to ensure cleanup even when auto_block/auto_allow
+/// are not actively called.
+fn maybe_purge_auto(auto_blocked: &mut HashMap<String, AutoEntry>,
+                    auto_allowed: &mut HashMap<String, AutoEntry>) {
+    const PURGE_THRESHOLD: usize = 1024;
+    if auto_blocked.len() > PURGE_THRESHOLD {
+        purge_expired(auto_blocked);
+    }
+    if auto_allowed.len() > PURGE_THRESHOLD {
+        purge_expired(auto_allowed);
+    }
 }
 
 /// Increment the match counter for a given entry.
@@ -781,7 +805,9 @@ unsafe extern "C" fn mod_init() -> c_int {
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    if rank < 1 {
+    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
+    // handles MI commands via httpd.
+    if rank < 1 && rank != -2 {
         return 0;
     }
 
@@ -1011,8 +1037,9 @@ unsafe extern "C" fn w_check_blocklist(
             let mut borrow = w.borrow_mut();
             match borrow.as_mut() {
                 Some(state) => {
+                    maybe_purge_auto(&mut state.auto_blocked, &mut state.auto_allowed);
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
                     let blocked = check_all(
                         &state.blocklist,
@@ -1029,7 +1056,7 @@ unsafe extern "C" fn w_check_blocklist(
                             }
                         }
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         // Publish E_ACL_BLOCKED event
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
@@ -1041,7 +1068,7 @@ unsafe extern "C" fn w_check_blocklist(
                         -1
                     } else {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     }
                 }
@@ -1077,7 +1104,7 @@ unsafe extern "C" fn w_check_blocklist_ip(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_ip.as_ref(),
@@ -1086,11 +1113,11 @@ unsafe extern "C" fn w_check_blocklist_ip(
 
                     if blocked {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     }
                 }
@@ -1126,7 +1153,7 @@ unsafe extern "C" fn w_check_blocklist_ua(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_ua.as_ref(),
@@ -1135,11 +1162,11 @@ unsafe extern "C" fn w_check_blocklist_ua(
 
                     if blocked {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     }
                 }
@@ -1175,7 +1202,7 @@ unsafe extern "C" fn w_check_blocklist_domain(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
                     let blocked = check_with_typed(
                         &state.blocklist,
                         state.blocklist_domain.as_ref(),
@@ -1184,11 +1211,11 @@ unsafe extern "C" fn w_check_blocklist_domain(
 
                     if blocked {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
                     } else {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         1
                     }
                 }
@@ -1476,7 +1503,7 @@ unsafe extern "C" fn w_check_access(
             match borrow.as_ref() {
                 Some(state) => {
                     state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_CHECKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
                     #[cfg(feature = "database")]
                     let (db_bl, db_al) = (
@@ -1505,7 +1532,7 @@ unsafe extern "C" fn w_check_access(
 
                     if result == 1 {
                         state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_ALLOWED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
                                 ("value", &event::json_str(value)),
@@ -1515,7 +1542,7 @@ unsafe extern "C" fn w_check_access(
                         }
                     } else {
                         state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(unsafe { STAT_BLOCKED }) { s.inc(); }
+                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         if event::is_enabled() {
                             let payload = event::format_payload(&[
                                 ("value", &event::json_str(value)),
@@ -1556,7 +1583,7 @@ unsafe extern "C" fn w_blocklist_reload(
                             drop(entries);
                             state.stats.set("entries_blocklist", count as u64);
                             state.stats.inc("reloads");
-                            if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
+                            if let Some(s) = StatVar::from_raw(STAT_RELOADS.load(Ordering::Relaxed)) { s.inc(); }
                             opensips_log!(INFO, "rust_acl",
                                 "blocklist reloaded: {} entries", count);
                         }
@@ -1621,7 +1648,7 @@ unsafe extern "C" fn w_allowlist_reload(
                                     drop(entries);
                                     state.stats.set("entries_allowlist", count as u64);
                                     state.stats.inc("reloads");
-                                    if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
+                                    if let Some(s) = StatVar::from_raw(STAT_RELOADS.load(Ordering::Relaxed)) { s.inc(); }
                                     opensips_log!(INFO, "rust_acl",
                                         "allowlist reloaded: {} entries", count);
                                 }
@@ -1709,7 +1736,7 @@ unsafe extern "C" fn w_auto_block(
                 Some(state) => {
                     auto_insert(&mut state.auto_blocked, value, ttl);
                     state.stats.inc("auto_blocked");
-                    if let Some(s) = StatVar::from_raw(unsafe { STAT_AUTO_BLOCKED }) { s.inc(); }
+                    if let Some(s) = StatVar::from_raw(STAT_AUTO_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                     // Periodic purge of expired entries
                     purge_expired(&mut state.auto_blocked);
                     opensips_log!(DBG, "rust_acl",
@@ -1894,7 +1921,7 @@ unsafe extern "C" fn w_acl_db_reload(
                                     Some(merge_db_entries(&al_entries))
                                 };
                                 state.stats.inc("reloads");
-                                if let Some(s) = StatVar::from_raw(unsafe { STAT_RELOADS }) { s.inc(); }
+                                if let Some(s) = StatVar::from_raw(STAT_RELOADS.load(Ordering::Relaxed)) { s.inc(); }
                                 opensips_log!(INFO, "rust_acl",
                                     "DB reloaded: {} blocklist + {} allowlist entries",
                                     bl_count, al_count);
@@ -1948,13 +1975,13 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_ALLOWED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("reloads") as *mut _,           flags: 0,             stat_pointer: unsafe { &STAT_RELOADS as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("auto_blocked") as *mut _,      flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_AUTO_BLOCKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("entries_blocklist") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_BLOCKLIST as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("entries_allowlist") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ENTRIES_ALLOWLIST as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,           flags: 0,             stat_pointer: STAT_CHECKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,           flags: 0,             stat_pointer: STAT_ALLOWED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,           flags: 0,             stat_pointer: STAT_BLOCKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("reloads") as *mut _,           flags: 0,             stat_pointer: STAT_RELOADS.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("auto_blocked") as *mut _,      flags: STAT_NO_RESET, stat_pointer: STAT_AUTO_BLOCKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("entries_blocklist") as *mut _, flags: STAT_NO_RESET, stat_pointer: STAT_ENTRIES_BLOCKLIST.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("entries_allowlist") as *mut _, flags: STAT_NO_RESET, stat_pointer: STAT_ENTRIES_ALLOWLIST.as_ptr() as *mut _ },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
@@ -2044,9 +2071,10 @@ unsafe extern "C" fn mi_blocklist_reload(
                 drop(entries);
                 state.stats.set("entries_blocklist", count as u64);
                 state.stats.inc("reloads");
-                if let Some(s) = StatVar::from_raw(STAT_RELOADS) { s.inc(); }
-                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_BLOCKLIST) {
-                    s.update(count as i32);
+                if let Some(s) = StatVar::from_raw(STAT_RELOADS.load(Ordering::Relaxed)) { s.inc(); }
+                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_BLOCKLIST.load(Ordering::Relaxed)) {
+                    // gui_dCquvqE1csI3: clamp to i32::MAX for large entry counts
+                    s.update(count.min(i32::MAX as usize) as i32);
                 }
                 let Some(resp) = MiObject::new() else {
                     return mi_error(-32000, "Failed to create MI response") as *mut _;
@@ -2079,8 +2107,11 @@ unsafe extern "C" fn mi_allowlist_reload(
                 state.allowlist = Some(build_acl_data(&entries, &state.mode));
                 drop(entries);
                 state.stats.set("entries_allowlist", count as u64);
-                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_ALLOWLIST) {
-                    s.update(count as i32);
+                state.stats.inc("reloads");
+                if let Some(s) = StatVar::from_raw(STAT_RELOADS.load(Ordering::Relaxed)) { s.inc(); }
+                if let Some(s) = StatVar::from_raw(STAT_ENTRIES_ALLOWLIST.load(Ordering::Relaxed)) {
+                    // gui_dCquvqE1csI3: clamp to i32::MAX for large entry counts
+                    s.update(count.min(i32::MAX as usize) as i32);
                 }
                 let Some(resp) = MiObject::new() else {
                     return mi_error(-32000, "Failed to create MI response") as *mut _;
