@@ -141,8 +141,10 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	static str pn_rev = str_init("revision");
 
 	/* Only raise if EVI event is subscribed */
-	if (evi_kv_change_id == EVI_ERROR)
+	if (evi_kv_change_id == EVI_ERROR) {
+		LM_DBG("EVI not available for kv_change event\n");
 		return;
+	}
 	if (!evi_probe_event(evi_kv_change_id))
 		return;
 

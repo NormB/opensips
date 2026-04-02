@@ -222,7 +222,9 @@ fn compute_max_duration(balance: f64, rate_per_min: f64) -> i32 {
     if rate_per_min <= 0.0 || balance <= 0.0 {
         return 0;
     }
-    ((balance / rate_per_min) * 60.0) as i32
+    // gui_dCquvqE1csI3: clamp f64 result to i32 range before cast
+    let secs = ((balance / rate_per_min) * 60.0).clamp(0.0, i32::MAX as f64);
+    secs as i32
 }
 
 /// Compute debit cost from duration and rate.
@@ -384,7 +386,8 @@ impl CallTracker {
 
     fn end_call(&mut self, key: &str) -> Option<i32> {
         self.active_calls.remove(key).map(|start| {
-            start.elapsed().as_secs() as i32
+            // gui_dCquvqE1csI3: clamp to i32::MAX for very long calls
+            start.elapsed().as_secs().min(i32::MAX as u64) as i32
         })
     }
 }
@@ -563,7 +566,9 @@ unsafe extern "C" fn mod_init() -> c_int {
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    if rank < 1 {
+    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
+    // handles MI commands via httpd.
+    if rank < 1 && rank != -2 {
         return 0;
     }
 

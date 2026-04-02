@@ -55,6 +55,8 @@
 /* Default NATS server URL used when no "nats_url" module parameter
  * is configured in opensips.cfg.  Connects to localhost on the
  * standard NATS client port (4222) without TLS. */
+#ifndef NATS_DEFAULT_URL
 #define NATS_DEFAULT_URL "nats://127.0.0.1:4222"
+#endif
 
 #endif /* _EV_NATS_H_ */

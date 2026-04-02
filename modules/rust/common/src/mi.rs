@@ -20,7 +20,8 @@ impl Stats {
     pub fn inc(&self, counter: &str) {
         for (name, cell) in &self.counters {
             if *name == counter {
-                cell.set(cell.get() + 1);
+                // gui_dCquvqE1csI3: use saturating_add to prevent overflow
+                cell.set(cell.get().saturating_add(1));
                 return;
             }
         }

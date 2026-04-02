@@ -71,7 +71,7 @@ use rust_common::async_dispatch::{
     parse_headers, parse_urls, BatchConfig, FireAndForget, RetryConfig,
 };
 use rust_common::mi::Stats;
-use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::mi_resp::{MiObject, mi_error};
 use rust_common::stat::{StatVar, StatVarOpaque};
 
 use std::cell::RefCell;
@@ -79,13 +79,16 @@ use std::collections::HashSet;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
-static mut STAT_SENT: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_DROPPED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_RETRIED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_QUEUE_DEPTH: *mut StatVarOpaque = std::ptr::null_mut();
+static STAT_SENT: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_FAILED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_DROPPED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_RETRIED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_RETRY_EXHAUSTED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_FILTERED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_QUEUE_DEPTH: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
 const STAT_NO_RESET: u16 = 1;
@@ -162,6 +165,57 @@ thread_local! {
         "errors_timeout",
         "filtered",
     ]);
+    /// Tracks last-synced values for delta-based StatVar updates.
+    static LAST_SYNCED: std::cell::Cell<StatSyncState> = const { std::cell::Cell::new(StatSyncState::new()) };
+}
+
+/// Snapshot of FireAndForget counters for delta-based StatVar sync.
+#[derive(Clone, Copy)]
+struct StatSyncState {
+    sent: u64,
+    failed: u64,
+    dropped: u64,
+    retried: u64,
+    retry_exhausted: u64,
+}
+
+impl StatSyncState {
+    const fn new() -> Self {
+        Self { sent: 0, failed: 0, dropped: 0, retried: 0, retry_exhausted: 0 }
+    }
+}
+
+/// Sync FireAndForget counters to native StatVars via delta calculation.
+/// Called from webhook() so shared-memory stats stay current.
+fn sync_ff_to_native_stats(ff: &FireAndForget) {
+    LAST_SYNCED.with(|cell| {
+        let prev = cell.get();
+        let now = StatSyncState {
+            sent: ff.sent.get(),
+            failed: ff.failed.get(),
+            dropped: ff.dropped.get(),
+            retried: ff.retried.get(),
+            retry_exhausted: ff.retry_exhausted.get(),
+        };
+        macro_rules! sync_delta {
+            ($field:ident, $stat:ident) => {
+                let delta = now.$field.wrapping_sub(prev.$field);
+                if delta > 0 {
+                    if let Some(sv) = StatVar::from_raw($stat.load(Ordering::Relaxed)) {
+                        // gui_dCquvqE1csI3: clamp to i32::MAX to prevent overflow
+                        let clamped: i32 = delta.min(i32::MAX as u64) as i32;
+                        sv.update(clamped);
+                    }
+                }
+            };
+        }
+        sync_delta!(sent, STAT_SENT);
+        sync_delta!(failed, STAT_FAILED);
+        sync_delta!(dropped, STAT_DROPPED);
+        sync_delta!(retried, STAT_RETRIED);
+        sync_delta!(retry_exhausted, STAT_RETRY_EXHAUSTED);
+        cell.set(now);
+    });
 }
 
 // ── Module lifecycle ─────────────────────────────────────────────
@@ -251,8 +305,9 @@ unsafe extern "C" fn mod_init() -> c_int {
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    // Only initialize for worker processes (rank >= 1).
-    if rank < 1 {
+    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
+    // handles MI commands via httpd.
+    if rank < 1 && rank != -2 {
         return 0;
     }
 
@@ -321,6 +376,9 @@ unsafe extern "C" fn w_rust_webhook(
                 let method = sip_msg.method().unwrap_or("").to_uppercase();
                 if !filter.contains(&method) {
                     WEBHOOK_STATS.with(|s| s.inc("filtered"));
+                    if let Some(sv) = StatVar::from_raw(STAT_FILTERED.load(Ordering::Relaxed)) {
+                        sv.inc();
+                    }
                     return 1; // Silently skip -- not an error
                 }
             }
@@ -334,13 +392,10 @@ unsafe extern "C" fn w_rust_webhook(
                         opensips_log!(WARN, "rust_http_webhook",
                             "queue full, payload dropped (dropped={})",
                             ff.dropped.get());
-                        // Increment native stat synchronously so
-                        // `statistics:get` reflects drops immediately,
-                        // without waiting for webhook_stats() to sync.
-                        if let Some(sv) = StatVar::from_raw(unsafe { STAT_DROPPED }) {
-                            sv.inc();
-                        }
                     }
+                    // Sync FireAndForget counters → shared-memory StatVars
+                    // so MI and `statistics:get` reflect current totals.
+                    sync_ff_to_native_stats(ff);
                     1
                 }
                 None => {
@@ -436,18 +491,24 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 
 // ── Native statistics array ────────────────────────────────────────
 
-static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("sent") as *mut _,        flags: 0,             stat_pointer: unsafe { &STAT_SENT as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_FAILED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("dropped") as *mut _,     flags: 0,             stat_pointer: unsafe { &STAT_DROPPED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("retried") as *mut _,     flags: 0,             stat_pointer: unsafe { &STAT_RETRIED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("queue_depth") as *mut _, flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_QUEUE_DEPTH as *const _ as *mut _ } },
+static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("sent") as *mut _,            flags: 0,             stat_pointer: STAT_SENT.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("failed") as *mut _,          flags: 0,             stat_pointer: STAT_FAILED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("dropped") as *mut _,         flags: 0,             stat_pointer: STAT_DROPPED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("retried") as *mut _,         flags: 0,             stat_pointer: STAT_RETRIED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("retry_exhausted") as *mut _, flags: 0,             stat_pointer: STAT_RETRY_EXHAUSTED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("filtered") as *mut _,        flags: 0,             stat_pointer: STAT_FILTERED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("queue_depth") as *mut _,     flags: STAT_NO_RESET, stat_pointer: STAT_QUEUE_DEPTH.as_ptr() as *mut _ },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 
 // ── MI command handlers ────────────────────────────────────────────
 
 /// MI handler: rust_http_webhook:webhook_status
+///
+/// Reads from native StatVar (shared memory, aggregated across all workers)
+/// so the MI process sees global totals regardless of which process handles
+/// the MI request.
 unsafe extern "C" fn mi_webhook_status(
     _params: *const sys::mi_params_,
     _async_hdl: *mut sys::mi_handler,
@@ -455,33 +516,20 @@ unsafe extern "C" fn mi_webhook_status(
     let Some(resp) = MiObject::new() else {
         return mi_error(-32000, "Failed to create MI response") as *mut _;
     };
-    // Sync stats from FireAndForget counters first so MI reads fresh data.
-    // Without this, sent/dropped/failed/retried/retry_exhausted are stale
-    // until a script function (webhook_stats or webhook_prometheus) runs.
-    WEBHOOK.with(|w| {
-        let borrow = w.borrow();
-        if let Some(ff) = borrow.as_ref() {
-            WEBHOOK_STATS.with(|s| {
-                s.set("sent", ff.sent.get());
-                s.set("dropped", ff.dropped.get());
-                s.set("failed", ff.failed.get());
-                s.set("retried", ff.retried.get());
-                s.set("retry_exhausted", ff.retry_exhausted.get());
-            });
-        }
-    });
-    // Now report synced stats
-    WEBHOOK_STATS.with(|s| {
-        resp.add_num("sent", s.get("sent") as f64);
-        resp.add_num("failed", s.get("failed") as f64);
-        resp.add_num("dropped", s.get("dropped") as f64);
-        resp.add_num("retried", s.get("retried") as f64);
-        resp.add_num("retry_exhausted", s.get("retry_exhausted") as f64);
-        resp.add_num("errors_4xx", s.get("errors_4xx") as f64);
-        resp.add_num("errors_5xx", s.get("errors_5xx") as f64);
-        resp.add_num("errors_timeout", s.get("errors_timeout") as f64);
-        resp.add_num("filtered", s.get("filtered") as f64);
-    });
+
+    // Helper: read a StatVar or return 0 if not yet registered.
+    fn sv_get(ptr: *mut StatVarOpaque) -> u64 {
+        StatVar::from_raw(ptr).map(|s| s.get()).unwrap_or(0)
+    }
+
+    // Read from shared-memory native stats (aggregated across all workers).
+    resp.add_num("sent",            sv_get(STAT_SENT.load(Ordering::Relaxed)) as f64);
+    resp.add_num("failed",          sv_get(STAT_FAILED.load(Ordering::Relaxed)) as f64);
+    resp.add_num("dropped",         sv_get(STAT_DROPPED.load(Ordering::Relaxed)) as f64);
+    resp.add_num("retried",         sv_get(STAT_RETRIED.load(Ordering::Relaxed)) as f64);
+    resp.add_num("retry_exhausted", sv_get(STAT_RETRY_EXHAUSTED.load(Ordering::Relaxed)) as f64);
+    resp.add_num("filtered",        sv_get(STAT_FILTERED.load(Ordering::Relaxed)) as f64);
+
     resp.into_raw() as *mut _
 }
 

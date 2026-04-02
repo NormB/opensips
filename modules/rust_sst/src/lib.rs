@@ -99,7 +99,7 @@ use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::dialog::{self, DialogTracker};
 use rust_common::event;
 use rust_common::mi::Stats;
-use rust_common::mi_resp::{MiObject, MiResponsePtr, mi_error, mi_params_t};
+use rust_common::mi_resp::{MiObject, mi_error};
 use rust_common::stat::{StatVar, StatVarOpaque};
 use rust_common::reload::FileLoader;
 
@@ -107,16 +107,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Instant;
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
-static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ACCEPTED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_REJECTED: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_ACTIVE_TIMERS: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_REFRESHES: *mut StatVarOpaque = std::ptr::null_mut();
-static mut STAT_REFRESH_FAILED: *mut StatVarOpaque = std::ptr::null_mut();
+static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ACCEPTED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_REJECTED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_ACTIVE_TIMERS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_REFRESHES: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
+static STAT_REFRESH_FAILED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
 const STAT_NO_RESET: u16 = 1;
@@ -534,7 +534,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
     };
 
     // Increment native STAT_CHECKED for every dialog SST processes
-    if let Some(sv) = StatVar::from_raw(unsafe { STAT_CHECKED }) { sv.inc(); }
+    if let Some(sv) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { sv.inc(); }
 
     let our_min_se = get_our_min_se();
     let our_interval = get_our_interval();
@@ -597,7 +597,7 @@ unsafe extern "C" fn sst_dialog_created_cb(
                 let hdr = format!("Min-SE: {}\r\n", state.interval);
                 let _ = msg.call("append_hf", &[&hdr]);
                 SST_STATS.with(|s| s.inc("headers_inserted"));
-                if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
+                if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
             }
             // If UAC supports timer, the response_fwded callback will
             // handle rejection or negotiation in the response path.
@@ -619,14 +619,14 @@ unsafe extern "C" fn sst_dialog_created_cb(
             let min_hdr = format!("Min-SE: {}\r\n", state.min_se);
             let _ = msg.call("append_hf", &[&min_hdr]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
-            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
+            if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
         }
 
         // Insert Session-Expires header
         let se_hdr_val = format!("Session-Expires: {}\r\n", state.interval);
         let _ = msg.call("append_hf", &[&se_hdr_val]);
         SST_STATS.with(|s| s.inc("headers_inserted"));
-        if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
+        if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
     }
 
     // Store state in tracker
@@ -634,8 +634,8 @@ unsafe extern "C" fn sst_dialog_created_cb(
         t.on_created(&callid);
         t.with_state(&callid, |s| *s = state);
     });
-    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACCEPTED }) { sv.inc(); }
-    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACTIVE_TIMERS }) { sv.update(1); }
+    if let Some(sv) = StatVar::from_raw(STAT_ACCEPTED.load(Ordering::Relaxed)) { sv.inc(); }
+    if let Some(sv) = StatVar::from_raw(STAT_ACTIVE_TIMERS.load(Ordering::Relaxed)) { sv.update(1); }
     SST_STATS.with(|s| {
         let count = TRACKER.with(|t| t.active_count()) as u64;
         s.set("sessions_active", count);
@@ -746,7 +746,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
                 });
             });
             SST_STATS.with(|s| s.inc("422_sent"));
-            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REJECTED }) { sv.inc(); }
+            if let Some(sv) = StatVar::from_raw(STAT_REJECTED.load(Ordering::Relaxed)) { sv.inc(); }
 
             // Adaptive min_se: learn from 422 reply
             let ruri = msg.pv("$ru").unwrap_or_default();
@@ -855,7 +855,7 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
             let _ = msg.call("append_hf", &[&se_hdr_val]);
             let _ = msg.call("append_hf", &["Require: timer\r\n"]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
-            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESHES }) { sv.inc(); }
+            if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
 
             let _ = msg.set_pv("$DLG_timeout", &interval.to_string());
 
@@ -1033,7 +1033,7 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
                 since_refresh
             );
             SST_STATS.with(|s| s.inc("stale_sessions"));
-            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESH_FAILED }) { sv.inc(); }
+            if let Some(sv) = StatVar::from_raw(STAT_REFRESH_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
 
             // Publish E_SST_STALE event
             if event::is_enabled() {
@@ -1050,14 +1050,14 @@ unsafe extern "C" fn sst_dialog_terminated_cb(
     TRACKER.with(|t| {
         t.on_terminated(&callid);
     });
-    if let Some(sv) = StatVar::from_raw(unsafe { STAT_ACTIVE_TIMERS }) { sv.update(-1); }
+    if let Some(sv) = StatVar::from_raw(STAT_ACTIVE_TIMERS.load(Ordering::Relaxed)) { sv.update(-1); }
 
     SST_STATS.with(|s| {
         let count = TRACKER.with(|t| t.active_count()) as u64;
         s.set("sessions_active", count);
         if was_expired {
             s.inc("sessions_expired");
-            if let Some(sv) = StatVar::from_raw(unsafe { STAT_REFRESH_FAILED }) { sv.inc(); }
+            if let Some(sv) = StatVar::from_raw(STAT_REFRESH_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
             // Publish E_SST_EXPIRED event
             if event::is_enabled() {
                 let payload = event::format_payload(&[
@@ -1479,12 +1479,12 @@ unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
 // ── Native statistics array ────────────────────────────────────────
 
 static MOD_STATS: SyncArray<sys::stat_export_, 7> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,        flags: 0,             stat_pointer: unsafe { &STAT_CHECKED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("accepted") as *mut _,       flags: 0,             stat_pointer: unsafe { &STAT_ACCEPTED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("rejected") as *mut _,       flags: 0,             stat_pointer: unsafe { &STAT_REJECTED as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("active_timers") as *mut _,  flags: STAT_NO_RESET, stat_pointer: unsafe { &STAT_ACTIVE_TIMERS as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("refreshes") as *mut _,      flags: 0,             stat_pointer: unsafe { &STAT_REFRESHES as *const _ as *mut _ } },
-    sys::stat_export_ { name: cstr_lit!("refresh_failed") as *mut _, flags: 0,             stat_pointer: unsafe { &STAT_REFRESH_FAILED as *const _ as *mut _ } },
+    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,        flags: 0,             stat_pointer: STAT_CHECKED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("accepted") as *mut _,       flags: 0,             stat_pointer: STAT_ACCEPTED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("rejected") as *mut _,       flags: 0,             stat_pointer: STAT_REJECTED.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("active_timers") as *mut _,  flags: STAT_NO_RESET, stat_pointer: STAT_ACTIVE_TIMERS.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("refreshes") as *mut _,      flags: 0,             stat_pointer: STAT_REFRESHES.as_ptr() as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("refresh_failed") as *mut _, flags: 0,             stat_pointer: STAT_REFRESH_FAILED.as_ptr() as *mut _ },
     unsafe { std::mem::zeroed() }, // NULL terminator
 ]);
 

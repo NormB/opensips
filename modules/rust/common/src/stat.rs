@@ -25,15 +25,16 @@ pub struct StatVarOpaque {
 ///
 /// # Usage
 ///
-/// Declare a static mutable pointer in your module:
+/// Declare an atomic pointer in your module:
 /// ```ignore
-/// static mut STAT_CHECKED: *mut StatVarOpaque = std::ptr::null_mut();
+/// use std::sync::atomic::{AtomicPtr, Ordering};
+/// static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 /// ```
 ///
 /// Register it in your `MOD_STATS` array (see stat_export_t pattern).
 /// After `mod_init`, OpenSIPS fills in the pointer. Wrap it for safe access:
 /// ```ignore
-/// let checked = StatVar::from_raw(unsafe { STAT_CHECKED });
+/// let checked = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed));
 /// checked.inc();
 /// ```
 pub struct StatVar(*mut StatVarOpaque);
