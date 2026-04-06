@@ -200,21 +200,37 @@ impl MiItem {
     }
 }
 
-/// Return an `"OK"` MI response.
+/// Return an `"OK"` MI response, or a null pointer if allocation fails.
+///
+/// Callers cast this as `*mut _` and return it from MI handlers.
+/// OpenSIPS core tolerates NULL MI returns (logs an error and sends
+/// a generic 500 response), so a NULL return under OOM is safe.
 pub fn mi_ok() -> MiResponsePtr {
-    unsafe { opensips_rs_init_mi_result_ok() }
-}
-
-/// Return an MI error response.
-pub fn mi_error(code: i32, msg: &str) -> MiResponsePtr {
-    unsafe {
-        opensips_rs_init_mi_error(code, msg.as_ptr() as *const c_char, msg.len() as c_int)
+    let ptr = unsafe { opensips_rs_init_mi_result_ok() };
+    if ptr.is_null() {
+        eprintln!("ERROR: [rust] mi_ok: allocation failed (OOM)");
     }
+    ptr
 }
 
-/// Return the standard "invalid params" MI error.
+/// Return an MI error response, or a null pointer if allocation fails.
+pub fn mi_error(code: i32, msg: &str) -> MiResponsePtr {
+    let ptr = unsafe {
+        opensips_rs_init_mi_error(code, msg.as_ptr() as *const c_char, msg.len() as c_int)
+    };
+    if ptr.is_null() {
+        eprintln!("ERROR: [rust] mi_error: allocation failed (OOM)");
+    }
+    ptr
+}
+
+/// Return the standard "invalid params" MI error, or null on OOM.
 pub fn mi_param_error() -> MiResponsePtr {
-    unsafe { init_mi_param_error() }
+    let ptr = unsafe { init_mi_param_error() };
+    if ptr.is_null() {
+        eprintln!("ERROR: [rust] mi_param_error: allocation failed (OOM)");
+    }
+    ptr
 }
 
 /// Try to extract a named string parameter from MI params.

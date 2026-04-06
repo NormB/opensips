@@ -199,8 +199,10 @@ opensips_handler!(log_user_agent, |msg, _param| {
 // PURPOSE: Add a custom header via msg.call() cross-module dispatch.
 //
 // RUST CONCEPTS:
-//   - `msg.call("function", &["arg1", "arg2"])` calls any loaded OpenSIPS
-//     module function by name. Returns `Result<i32, Error>`.
+//   - `msg.call_str("function", &["arg1", "arg2"])` calls any loaded OpenSIPS
+//     module function by name with string args. Returns `Result<i32, Error>`.
+//   - `msg.call("function", &[Int(code), Str("reason")])` for typed args
+//     (needed when the target function expects CMD_PARAM_INT).
 //   - `Result<T, E>` vs `Option<T>`:
 //       Option = value might be absent (like nullable)
 //       Result = operation might fail (like exceptions, but checked)
@@ -224,7 +226,7 @@ opensips_handler!(append_custom_header, |msg, param| {
     // `match` on Result:
     //   Ok(rc)  — the function succeeded; rc is the return code
     //   Err(e)  — the function failed (not found, fixup error, etc.)
-    match msg.call("append_hf", &[&header]) {
+    match msg.call_str("append_hf", &[&header]) {
         Ok(_rc) => {
             opensips_log!(DBG, "rust-script", "appended header: X-Rust-Processed: {}", tag);
             1 // success
@@ -363,7 +365,8 @@ opensips_handler!(caller_screening, |msg, _param| {
 
         // Send 403 Forbidden via the sl (stateless) module.
         // msg.call() dispatches to sl_send_reply.
-        if let Err(e) = msg.call("sl_send_reply", &["403", "Forbidden"]) {
+        use opensips_rs::CallArg::{Int, Str};
+        if let Err(e) = msg.call("sl_send_reply", &[Int(403), Str("Forbidden")]) {
             opensips_log!(ERR, "rust-script", "sl_send_reply(403) failed: {}", e);
         }
         -1 // tell OpenSIPS to stop route processing
@@ -628,7 +631,8 @@ opensips_handler!(rate_limit_by_ua, |msg, param| {
         opensips_log!(WARN, "rust-script", "UA rate limit exceeded for: {}", ua);
 
         // Send 429 reply. `if let Err(e)` handles only the error case.
-        if let Err(e) = msg.call("sl_send_reply", &["429", "Too Many Requests"]) {
+        use opensips_rs::CallArg::{Int, Str};
+        if let Err(e) = msg.call("sl_send_reply", &[Int(429), Str("Too Many Requests")]) {
             opensips_log!(ERR, "rust-script", "sl_send_reply(429) failed: {}", e);
         }
         -1
@@ -981,10 +985,10 @@ opensips_handler!(call_counter, |msg, param| {
 //   increments the shared counter and sets $var(shared_count).
 //
 // RUST CONCEPTS:
-//   - `msg.call("rust_counter_inc", &[])` → calls a compiled-in function
+//   - `msg.call_str("rust_counter_inc", &[])` → calls a compiled-in function
 //     from a user script. The compiled-in function uses AtomicI64 in shm.
 //   - Cross-crate patterns: SDK provides SharedAtomicCounter, the compiled-in
-//     module uses it, user scripts call the function via msg.call().
+//     module uses it, user scripts call the function via msg.call_str().
 //
 // SIP CONCEPTS: cross-worker shared state, atomic counters
 // USAGE:        rust_exec("shared_counter")
@@ -1003,7 +1007,7 @@ opensips_handler!(shared_counter, |msg, _param| {
     // msg.call() dispatches to any loaded module function by name.
     // Since rust_counter_inc is registered in the rust module's CMDS array,
     // it's callable from user scripts just like sl_send_reply or append_hf.
-    match msg.call("rust_counter_inc", &[]) {
+    match msg.call_str("rust_counter_inc", &[]) {
         Ok(_) => {
             opensips_log!(DBG, "rust-script", "shared_counter: incremented (atomic)");
             1
