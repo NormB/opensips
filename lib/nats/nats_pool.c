@@ -384,10 +384,28 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 
 		/* deep-copy TLS config into shared memory */
 		if (tls) {
-			pool_cfg->tls.ca = shm_strdup(tls->ca);
-			pool_cfg->tls.cert = shm_strdup(tls->cert);
-			pool_cfg->tls.key = shm_strdup(tls->key);
-			pool_cfg->tls.hostname = shm_strdup(tls->hostname);
+			pool_cfg->tls.ca = tls->ca ? shm_strdup(tls->ca) : NULL;
+			pool_cfg->tls.cert = tls->cert ? shm_strdup(tls->cert) : NULL;
+			pool_cfg->tls.key = tls->key ? shm_strdup(tls->key) : NULL;
+			pool_cfg->tls.hostname = tls->hostname ?
+				shm_strdup(tls->hostname) : NULL;
+
+			/* Verify required TLS fields were allocated */
+			if ((tls->ca && !pool_cfg->tls.ca) ||
+			    (tls->cert && !pool_cfg->tls.cert) ||
+			    (tls->key && !pool_cfg->tls.key) ||
+			    (tls->hostname && !pool_cfg->tls.hostname)) {
+				LM_ERR("shm_strdup failed for TLS config\n");
+				if (pool_cfg->tls.ca) shm_free(pool_cfg->tls.ca);
+				if (pool_cfg->tls.cert) shm_free(pool_cfg->tls.cert);
+				if (pool_cfg->tls.key) shm_free(pool_cfg->tls.key);
+				if (pool_cfg->tls.hostname)
+					shm_free(pool_cfg->tls.hostname);
+				shm_free(pool_cfg);
+				pool_cfg = NULL;
+				return -1;
+			}
+
 			pool_cfg->tls.skip_verify = tls->skip_verify;
 			pool_cfg->tls.skip_openssl_init = tls->skip_openssl_init;
 		}
@@ -589,6 +607,10 @@ natsConnection *nats_pool_get(void)
 							shm_free(old);
 							pool_cfg->servers[i]
 								= p;
+						} else {
+							LM_ERR("shm_malloc failed"
+								" for TLS URL"
+								" rewrite\n");
 						}
 					}
 				}

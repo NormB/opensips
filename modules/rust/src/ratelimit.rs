@@ -118,7 +118,8 @@ pub fn check_rate(msg: &mut SipMessage, max_rate: c_int, window_seconds: c_int) 
 
         // msg.call() dispatches to another module's function.
         // "sl_send_reply" is from the sl (stateless) module.
-        if let Err(e) = msg.call("sl_send_reply", &["429", "Rate Limited"]) {
+        use opensips_rs::CallArg::{Int, Str};
+        if let Err(e) = msg.call("sl_send_reply", &[Int(429), Str("Rate Limited")]) {
             opensips_log!(ERR, "rust", "failed to send 429 reply: {}", e);
         }
 

@@ -592,10 +592,10 @@ unsafe extern "C" fn sst_dialog_created_cb(
                 state.interval = std::cmp::max(our_min_se, req_min_se);
                 // Insert updated Min-SE header (remove old + append new)
                 if req_min_se > 0 {
-                    let _ = msg.call("remove_hf", &["Min-SE"]);
+                    let _ = msg.call_str("remove_hf", &["Min-SE"]);
                 }
                 let hdr = format!("Min-SE: {}\r\n", state.interval);
-                let _ = msg.call("append_hf", &[&hdr]);
+                let _ = msg.call_str("append_hf", &[&hdr]);
                 SST_STATS.with(|s| s.inc("headers_inserted"));
                 if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
             }
@@ -615,16 +615,16 @@ unsafe extern "C" fn sst_dialog_created_cb(
 
         // Remove old Min-SE if ours is higher
         if req_min_se > 0 && req_min_se < our_min_se {
-            let _ = msg.call("remove_hf", &["Min-SE"]);
+            let _ = msg.call_str("remove_hf", &["Min-SE"]);
             let min_hdr = format!("Min-SE: {}\r\n", state.min_se);
-            let _ = msg.call("append_hf", &[&min_hdr]);
+            let _ = msg.call_str("append_hf", &[&min_hdr]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
             if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
         }
 
         // Insert Session-Expires header
         let se_hdr_val = format!("Session-Expires: {}\r\n", state.interval);
-        let _ = msg.call("append_hf", &[&se_hdr_val]);
+        let _ = msg.call_str("append_hf", &[&se_hdr_val]);
         SST_STATS.with(|s| s.inc("headers_inserted"));
         if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
     }
@@ -852,8 +852,8 @@ unsafe extern "C" fn sst_dialog_response_fwded_cb(
             });
 
             let se_hdr_val = format!("Session-Expires: {interval};refresher=uac\r\n");
-            let _ = msg.call("append_hf", &[&se_hdr_val]);
-            let _ = msg.call("append_hf", &["Require: timer\r\n"]);
+            let _ = msg.call_str("append_hf", &[&se_hdr_val]);
+            let _ = msg.call_str("append_hf", &["Require: timer\r\n"]);
             SST_STATS.with(|s| s.inc("headers_inserted"));
             if let Some(sv) = StatVar::from_raw(STAT_REFRESHES.load(Ordering::Relaxed)) { sv.inc(); }
 

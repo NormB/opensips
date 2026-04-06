@@ -50,6 +50,7 @@ pub mod async_ctx;
 pub mod dlg;
 
 // Re-export key types at crate root
+pub use call::CallArg;
 pub use error::{Error, Result};
 pub use msg::SipMessage;
 pub use param::{Integer, ModString};

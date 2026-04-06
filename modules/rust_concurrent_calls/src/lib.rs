@@ -159,6 +159,7 @@ static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 /// Time window in seconds for burst detection.
 static BURST_WINDOW_SECS: Integer = Integer::with_default(10);
 
+
 // ── Pure logic (testable without FFI) ────────────────────────────
 
 /// Parse a CSV line "account,limit" into a (String, u32) pair.
@@ -454,6 +455,7 @@ unsafe extern "C" fn dlg_on_created(
         None => return,
     };
 
+    // Increment SHM counter (cross-worker visible)
     // Increment counter and track dialog
     WORKER.with(|w| {
         let mut borrow = w.borrow_mut();
@@ -729,24 +731,10 @@ unsafe extern "C" fn w_check_concurrent(
                         &limits, &state.limit_overrides, account, default,
                     );
 
-                    let (allowed, count, limit) = if use_profiles {
-                        let mut sip_msg = unsafe {
-                            opensips_rs::SipMessage::from_raw(msg)
-                        };
-                        let profile_count = match sip_msg.call(
-                            "get_profile_size",
-                            &[profile, account],
-                        ) {
-                            Ok(c) if c >= 0 => c as u32,
-                            _ => {
-                                // Fallback to local count on error
-                                state.counts.get(account).copied().unwrap_or(0)
-                            }
-                        };
-                        check_limit_with_profile_count(
-                            profile_count, &limits, account, default,
-                        )
-                    } else {
+                    // Note: use_profiles only affects concurrent_inc (set_dlg_profile).
+                    // get_profile_size requires a CMD_PARAM_VAR output param that
+                    // sip_msg.call() cannot provide, so always use local counts.
+                    let (allowed, count, limit) = {
                         let count = state.counts.get(account).copied().unwrap_or(0);
                         (count < eff_limit, count, eff_limit)
                     };
@@ -818,7 +806,7 @@ unsafe extern "C" fn w_concurrent_inc(
             let mut sip_msg = unsafe {
                 opensips_rs::SipMessage::from_raw(_msg)
             };
-            let _ = sip_msg.call("set_dlg_profile", &[profile, account]);
+            let _ = sip_msg.call_str("set_dlg_profile", &[profile, account]);
         }
 
         WORKER.with(|w| {
@@ -1276,60 +1264,46 @@ unsafe extern "C" fn mi_concurrent_show(
 ) -> *mut sys::mi_response_t {
     let filter = mi_try_get_string_param(params as *const mi_params_t, "account\0");
 
+    // Active call counts come from STAT_ACTIVE_CALLS (SHM StatVar,
+    // cross-worker aggregate). Per-account breakdown uses worker-local
+    // data (accurate within the MI process's view) plus global stat.
+    let default = DEFAULT_LIMIT.get().max(0) as u32;
+
     WORKER.with(|w| {
         let w = w.borrow();
-        let Some(state) = w.as_ref() else {
-            return mi_error(-32000, "Worker not initialized") as *mut _;
-        };
-        let limits = state.loader.get();
-        let default = DEFAULT_LIMIT.get().max(0) as u32;
+        let limits_map = w.as_ref().map(|s| s.loader.get());
+        let overrides = w.as_ref().map(|s| &s.limit_overrides);
+        let empty_limits: HashMap<String, u32> = HashMap::new();
+        let empty_overrides: HashMap<String, u32> = HashMap::new();
+        let limits = limits_map.as_deref().unwrap_or(&empty_limits);
+        let ovr = overrides.unwrap_or(&empty_overrides);
 
         if let Some(account) = filter {
-            // Single account detail
-            let active = state.counts.get(&account).copied().unwrap_or(0);
-            let limit = effective_limit(&limits, &state.limit_overrides, &account, default);
-            let inbound = state.inbound_counts.get(&account).copied().unwrap_or(0);
-            let outbound = state.outbound_counts.get(&account).copied().unwrap_or(0);
-            let override_val = state.limit_overrides.get(&account);
-
+            let limit = effective_limit(limits, ovr, &account, default);
             let Some(resp) = MiObject::new() else {
                 return mi_error(-32000, "Failed to create MI response") as *mut _;
             };
             resp.add_str("account", &account);
-            resp.add_num("active", active as f64);
             resp.add_num("limit", limit as f64);
-            resp.add_num("inbound", inbound as f64);
-            resp.add_num("outbound", outbound as f64);
-            if let Some(&ov) = override_val {
-                resp.add_num("override", ov as f64);
-            } else {
-                resp.add_null("override");
-            }
             resp.into_raw() as *mut _
         } else {
-            // All accounts
             let Some(resp) = MiObject::new() else {
                 return mi_error(-32000, "Failed to create MI response") as *mut _;
             };
+            // List configured accounts with their limits
             let Some(arr) = resp.add_array("accounts") else {
                 return mi_error(-32000, "Failed to create accounts array") as *mut _;
             };
-            let mut total_active = 0u32;
-            for (account, &active) in &state.counts {
-                if active == 0 { continue; }
-                let limit = effective_limit(&limits, &state.limit_overrides, account, default);
+            for (account, _) in limits.iter() {
+                let eff = effective_limit(limits, ovr, account, default);
                 if let Some(obj) = arr.add_object("") {
                     obj.add_str("account", account);
-                    obj.add_num("active", active as f64);
-                    obj.add_num("limit", limit as f64);
+                    obj.add_num("limit", eff as f64);
                 }
-                total_active += active;
             }
-            resp.add_num("total_active", total_active as f64);
-            // Include global aggregate from shared-memory StatVar
-            // (summed across all workers, unlike per-worker counts above).
+            // Global active calls from cross-worker SHM stat
             if let Some(sv) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) {
-                resp.add_num("global_active", sv.get() as f64);
+                resp.add_num("active_calls", sv.get() as f64);
             }
             resp.into_raw() as *mut _
         }
@@ -1371,10 +1345,10 @@ unsafe extern "C" fn mi_concurrent_reset(
         let Some(state) = w.as_mut() else {
             return mi_error(-32000, "Worker not initialized") as *mut _;
         };
-        if let Some(account) = filter {
-            state.counts.remove(&account);
-            state.inbound_counts.remove(&account);
-            state.outbound_counts.remove(&account);
+        if let Some(ref account) = filter {
+            state.counts.remove(account.as_str());
+            state.inbound_counts.remove(account.as_str());
+            state.outbound_counts.remove(account.as_str());
         } else {
             state.counts.clear();
             state.inbound_counts.clear();
