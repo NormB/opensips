@@ -12,6 +12,10 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     println!("cargo:rerun-if-env-changed=OPENSIPS_SRC_DIR");
+    println!("cargo:rerun-if-changed=src/dlg_profile_helper.c");
+
+    // Compile C helper for dialog profile calls (avoids Rust vtable bug)
+    compile_c_helper(&src_dir);
 
     let dflags = opensips_build::extract_dflags(src_path);
     opensips_build::emit_scm_env(&dflags);
@@ -58,4 +62,17 @@ fn main() {
 
     println!("cargo:rustc-env=OPENSIPS_FULL_VERSION=unknown");
     println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS=unknown");
+}
+
+// Compile the C helper for dialog profile calls.
+// This avoids the Rust compiler generating broken vtable cleanup code.
+#[allow(dead_code)]
+fn compile_c_helper(src_dir: &str) {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    cc::Build::new()
+        .file(manifest.join("src/dlg_profile_helper.c"))
+        .include(src_dir)
+        .warnings(false)
+        .opt_level(2)
+        .compile("dlg_profile_helper");
 }

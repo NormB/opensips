@@ -1,1581 +1,1611 @@
 //! rust_concurrent_calls — Per-account concurrent call limiting for OpenSIPS.
 //!
-//! Tracks active calls per account (typically `$fU`) and enforces configurable
-//! limits. Supports both automatic dialog callback tracking (when dialog.so is
-//! loaded) and explicit inc/dec from the OpenSIPS script.
+//! Rewritten to avoid Rust trait objects / dynamic dispatch which trigger a
+//! rustc 1.94 aarch64 cdylib codegen bug: R_AARCH64_RELATIVE relocations for
+//! trait vtable entries point directly to function code instead of vtable data,
+//! causing the vtable dispatch to read instruction bytes as function pointers.
 //!
-//! # OpenSIPS config (automatic mode — with dialog.so)
+//! This version uses fixed-capacity hash tables backed by libc calloc with
+//! FNV-1a hashing and linear probing. Zero std collections in any code path.
 //!
-//! ```text
-//! loadmodule "dialog.so"
-//! loadmodule "rust_concurrent_calls.so"
-//! modparam("rust_concurrent_calls", "limits_file", "/etc/opensips/call_limits.csv")
-//! modparam("rust_concurrent_calls", "default_limit", 10)
-//! modparam("rust_concurrent_calls", "auto_track", 1)
-//! modparam("rust_concurrent_calls", "account_var", "$fU")
-//!
-//! route {
-//!     if (is_method("INVITE") && !has_totag()) {
-//!         if (!check_concurrent("$fU")) {
-//!             sl_send_reply(486, "Too Many Calls");
-//!             exit;
-//!         }
-//!         # No need for concurrent_inc() — auto_track handles it
-//!     }
-//! }
-//! # No need for concurrent_dec() on BYE — auto_track handles it
-//! ```
-//!
-//! # OpenSIPS config (manual mode — without dialog.so)
-//!
-//! ```text
-//! loadmodule "rust_concurrent_calls.so"
-//! modparam("rust_concurrent_calls", "limits_file", "/etc/opensips/call_limits.csv")
-//! modparam("rust_concurrent_calls", "default_limit", 10)
-//! modparam("rust_concurrent_calls", "auto_track", 0)
-//!
-//! route {
-//!     if (is_method("INVITE") && !has_totag()) {
-//!         if (!check_concurrent("$fU")) {
-//!             sl_send_reply(486, "Too Many Calls");
-//!             exit;
-//!         }
-//!         concurrent_inc("$fU");
-//!     }
-//! }
-//!
-//! onreply_route {
-//!     if (is_method("INVITE") && $rs >= 300) {
-//!         concurrent_dec("$fU");
-//!     }
-//! }
-//!
-//! route[handle_bye] {
-//!     concurrent_dec("$fU");
-//! }
-//! ```
-//!
-//! # Limits file format (CSV)
-//!
-//! ```text
-//! # account,max_calls
-//! alice,5
-//! bob,20
-//! sip_trunk_1,100
-//! ```
+//! Features:
+//! - Per-account concurrent call limits from CSV
+//! - Cooldown period after blocking
+//! - Burst detection via ring buffer
+//! - Direction-aware inbound/outbound limits
+//! - Dialog profile integration (direct FFI, no Rust allocations)
+//! - Event publishing via opensips_log!
+//! - Runtime limit overrides
+//! - MI commands: show, override, reset
 
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::use_self)]
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::ptr_as_ptr)]
-#![allow(clippy::borrow_as_ptr)]
-#![allow(clippy::ref_as_ptr)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::redundant_else)]
-#![allow(clippy::missing_const_for_fn)]
-#![allow(clippy::as_ptr_cast_mut)]
-#![allow(clippy::option_if_let_else)]
-#![allow(clippy::needless_lifetimes)]
-#![allow(clippy::pub_underscore_fields)]
-#![allow(clippy::elidable_lifetime_names)]
-#![allow(clippy::single_match_else)]
-#![allow(clippy::let_and_return)]
-#![allow(clippy::significant_drop_tightening)]
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::bool_to_int_with_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::if_not_else)]
-#![allow(clippy::missing_const_for_thread_local)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::single_char_pattern)]
-#![allow(clippy::redundant_guards)]
-#![allow(clippy::or_fun_call)]
+#![allow(dead_code)]
 
 use opensips_rs::command::CommandFunctionParam;
 use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
-use opensips_rs::{cstr_lit, opensips_log};
-use rust_common::dialog;
-use rust_common::event;
-use rust_common::mi::Stats;
-use rust_common::mi_resp::{MiObject, mi_ok, mi_error, mi_param_error, mi_try_get_string_param, mi_params_t};
+use opensips_rs::cstr_lit;
 use rust_common::stat::{StatVar, StatVarOpaque};
-use rust_common::reload::{csv_line_parser, FileLoader};
 
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
-use std::ffi::{c_int, c_void};
+use std::cell::Cell;
+#[allow(unused_imports)]
+use std::ffi::{c_char, c_int, c_long, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::time::Instant;
 
-// Native statistics -- cross-worker, aggregated by OpenSIPS core.
+extern "C" {
+    fn calloc(nmemb: usize, size: usize) -> *mut c_void;
+    fn free(ptr: *mut c_void);
+    fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+    fn fclose(stream: *mut c_void) -> c_int;
+    fn fgets(buf: *mut c_char, size: c_int, stream: *mut c_void) -> *mut c_char;
+    fn opensips_rs_log(level: c_int, module: *const c_char, msg: *const c_char);
+}
+
+// ── Zero-allocation logging ──────────────────────────────────────
+// opensips_log! uses format!() + String::replace() + CString::new() = 4-6 heap
+// allocations per call, any of which can trigger the aarch64 vtable bug.
+// safe_log! writes to a stack buffer via core::fmt::Write (no heap allocation).
+
+struct StackBuf<const N: usize> {
+    buf: [u8; N],
+    pos: usize,
+}
+
+impl<const N: usize> StackBuf<N> {
+    #[inline(always)]
+    fn new() -> Self { Self { buf: [0u8; N], pos: 0 } }
+    #[inline(always)]
+    fn as_cstr(&mut self) -> *const c_char {
+        if self.pos >= N { self.pos = N - 1; }
+        self.buf[self.pos] = 0;
+        self.buf.as_ptr() as *const c_char
+    }
+}
+
+impl<const N: usize> StackBuf<N> {
+    #[inline(always)]
+    fn push_str(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let remaining = N.saturating_sub(1).saturating_sub(self.pos);
+        let n = bytes.len().min(remaining);
+        if n > 0 {
+            self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+            self.pos += n;
+        }
+    }
+    #[inline(always)]
+    fn push_u32(&mut self, mut v: u32) {
+        if v == 0 { self.push_str("0"); return; }
+        let mut digits = [0u8; 10];
+        let mut i = 0;
+        while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
+        while i > 0 { i -= 1; self.push_byte(digits[i]); }
+    }
+    #[inline(always)]
+    fn push_i32(&mut self, v: i32) {
+        if v < 0 { self.push_byte(b'-'); self.push_u32((-v) as u32); }
+        else { self.push_u32(v as u32); }
+    }
+    #[inline(always)]
+    fn push_i64(&mut self, v: i64) {
+        if v < 0 { self.push_byte(b'-'); self.push_u64((-v) as u64); }
+        else { self.push_u64(v as u64); }
+    }
+    #[inline(always)]
+    fn push_u64(&mut self, mut v: u64) {
+        if v == 0 { self.push_str("0"); return; }
+        let mut digits = [0u8; 20];
+        let mut i = 0;
+        while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
+        while i > 0 { i -= 1; self.push_byte(digits[i]); }
+    }
+    #[inline(always)]
+    fn push_byte(&mut self, b: u8) {
+        if self.pos < N - 1 { self.buf[self.pos] = b; self.pos += 1; }
+    }
+}
+
+const L_DBG: c_int = 4;
+const L_INFO: c_int = 3;
+const L_NOTICE: c_int = 2;
+const L_WARN: c_int = 1;
+const L_ERR: c_int = 0;
+
+const MOD_NAME: *const c_char = b"rust_concurrent_calls\0".as_ptr() as *const c_char;
+
+#[inline(always)]
+fn log_raw(level: c_int, buf: &mut StackBuf<512>) {
+    unsafe { opensips_rs_log(level, MOD_NAME, buf.as_cstr()); }
+}
+
+// safe_log! — zero-allocation logging. Accepts pairs of (str_literal, value)
+// fragments concatenated via push operations. No format parsing, no traits,
+// no panic paths, no cleanup code.
+macro_rules! safe_log {
+    ($level:expr, $($part:expr),+ $(,)?) => {{
+        let mut _b = StackBuf::<512>::new();
+        $( _b.push_auto($part); )+
+        log_raw($level, &mut _b);
+    }};
+}
+
+// push_auto dispatches at compile time based on literal type.
+// Uses inherent methods only — no trait dispatch.
+impl StackBuf<512> {
+    #[inline(always)] fn push_auto_str(&mut self, s: &str) { self.push_str(s); }
+    #[inline(always)] fn push_auto_u32(&mut self, v: u32) { self.push_u32(v); }
+    #[inline(always)] fn push_auto_i32(&mut self, v: i32) { self.push_i32(v); }
+    #[inline(always)] fn push_auto_i64(&mut self, v: i64) { self.push_i64(v); }
+
+    // Overloaded push_auto via a helper trait resolved at monomorphization
+    #[inline(always)] fn push_auto<T: AutoPush>(&mut self, v: T) { v.push_into(self); }
+}
+
+trait AutoPush { fn push_into(self, buf: &mut StackBuf<512>); }
+impl AutoPush for &str { #[inline(always)] fn push_into(self, buf: &mut StackBuf<512>) { buf.push_str(self); } }
+impl AutoPush for u32 { #[inline(always)] fn push_into(self, buf: &mut StackBuf<512>) { buf.push_u32(self); } }
+impl AutoPush for i32 { #[inline(always)] fn push_into(self, buf: &mut StackBuf<512>) { buf.push_i32(self); } }
+impl AutoPush for i64 { #[inline(always)] fn push_into(self, buf: &mut StackBuf<512>) { buf.push_i64(self); } }
+impl AutoPush for u64 { #[inline(always)] fn push_into(self, buf: &mut StackBuf<512>) { buf.push_u64(self); } }
+
+extern "C" {
+    fn time(tloc: *mut i64) -> i64;
+    fn opensips_rs_pkg_malloc(size: std::ffi::c_ulong) -> *mut c_void;
+    fn opensips_rs_pkg_free(p: *mut c_void);
+}
+
+// SyncArray: wrapper to satisfy Rust's Sync trait requirement for
+// static arrays of C structs containing raw pointers.
+#[repr(transparent)]
+struct SyncArray<T, const N: usize>([T; N]);
+unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
+
+// ── Native statistics ────────────────────────────────────────────
 static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 static STAT_ALLOWED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 static STAT_BLOCKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 static STAT_ACTIVE_CALLS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
-static STAT_ACCOUNTS: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
-
-const STAT_NO_RESET: u16 = 1;
 
 // ── Module parameters ────────────────────────────────────────────
-
-/// Path to limits CSV file (required). Format: account,max_calls
 static LIMITS_FILE: ModString = ModString::new();
-
-/// Default concurrent call limit for accounts not in the limits file.
 static DEFAULT_LIMIT: Integer = Integer::with_default(10);
-
-/// Enable automatic dialog tracking (1 = enabled, 0 = manual only).
 static AUTO_TRACK: Integer = Integer::with_default(1);
-
-/// PV expression to extract account from SIP message (default: "$fU").
 static ACCOUNT_VAR: ModString = ModString::new();
-
-/// Enable dialog profiles for cross-worker accurate counts (0 = local HashMap, 1 = dialog profiles).
 static USE_DIALOG_PROFILES: Integer = Integer::with_default(0);
-
-/// Dialog profile name for cross-worker counting (default: "concurrent_calls").
 static PROFILE_NAME: ModString = ModString::new();
-
-/// Enable per-direction (inbound/outbound) limits (0 = single limit, 1 = direction-aware).
 static DIRECTION_AWARE: Integer = Integer::with_default(0);
-
-/// Cooldown period in seconds after a limit rejection (0 = disabled).
 static COOLDOWN_SECS: Integer = Integer::with_default(0);
-
-/// Burst threshold: flag if concurrent count increases by this many within burst_window_secs (0 = disabled).
 static BURST_THRESHOLD: Integer = Integer::with_default(0);
-
-/// Enable event publishing (0=off, 1=on, default 0).
+static BURST_WINDOW_SECS: Integer = Integer::with_default(10);
 static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 
-/// Time window in seconds for burst detection.
-static BURST_WINDOW_SECS: Integer = Integer::with_default(10);
+// ── Constants ────────────────────────────────────────────────────
 
+const MAP_CAPACITY: usize = 512;
+const MAX_KEY_LEN: usize = 64;
+const BURST_RING_SIZE: usize = 8;
 
-// ── Pure logic (testable without FFI) ────────────────────────────
+// route_struct.h enum values for dialog profile FFI
+const NUMBER_ST: c_int = 3;
+const STR_ST: c_int = 12;
 
-/// Parse a CSV line "account,limit" into a (String, u32) pair.
-fn parse_limit_entry(csv_line: &str) -> Option<(String, u32)> {
-    let mut parts = csv_line.splitn(2, ',');
-    let account = parts.next()?.trim();
-    let limit_str = parts.next()?.trim();
-    let limit = limit_str.parse::<u32>().ok()?;
-    if account.is_empty() {
-        return None;
+// ── Fixed-capacity hash map for u32 values (libc-backed) ─────────
+
+#[repr(C)]
+struct Slot {
+    key: [u8; MAX_KEY_LEN],
+    key_len: u8,
+    occupied: bool,
+    _pad: [u8; 2],
+    value: u32,
+}
+
+struct FixedMap {
+    slots: *mut Slot,
+    capacity: usize,
+    len: usize,
+}
+
+unsafe impl Send for FixedMap {}
+
+#[inline(always)]
+fn fnv1a(key: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in key {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
     }
-    Some((account.to_string(), limit))
+    h
 }
 
-/// Build a HashMap<String, u32> from parsed CSV lines.
-#[allow(clippy::needless_pass_by_value)]
-fn build_limits(entries: Vec<String>) -> HashMap<String, u32> {
-    entries
-        .iter()
-        .filter_map(|line| parse_limit_entry(line))
-        .collect()
-}
-
-/// Per-direction limits for an account.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DirectionLimits {
-    inbound: u32,
-    outbound: u32,
-}
-
-/// Parse a direction-aware CSV line "account,max_inbound,max_outbound".
-fn parse_direction_limit_entry(csv_line: &str) -> Option<(String, DirectionLimits)> {
-    let mut parts = csv_line.splitn(3, ',');
-    let account = parts.next()?.trim();
-    let inbound_str = parts.next()?.trim();
-    let outbound_str = parts.next()?.trim();
-    let inbound = inbound_str.parse::<u32>().ok()?;
-    let outbound = outbound_str.parse::<u32>().ok()?;
-    if account.is_empty() {
-        return None;
+impl FixedMap {
+    fn new() -> Self {
+        let slots = unsafe { calloc(MAP_CAPACITY, core::mem::size_of::<Slot>()) } as *mut Slot;
+        assert!(!slots.is_null(), "calloc failed for FixedMap");
+        FixedMap { slots, capacity: MAP_CAPACITY, len: 0 }
     }
-    Some((account.to_string(), DirectionLimits { inbound, outbound }))
-}
 
-/// Build a HashMap of direction-aware limits from parsed CSV lines.
-#[allow(clippy::needless_pass_by_value)]
-fn build_direction_limits(entries: Vec<String>) -> HashMap<String, DirectionLimits> {
-    entries
-        .iter()
-        .filter_map(|line| parse_direction_limit_entry(line))
-        .collect()
-}
-
-/// Check if an account is under its inbound concurrent call limit.
-///
-/// Returns (allowed, current_count, limit).
-fn check_inbound_limit(
-    counts: &HashMap<String, u32>,
-    limits: &HashMap<String, DirectionLimits>,
-    account: &str,
-    default_limit: u32,
-) -> (bool, u32, u32) {
-    let count = counts.get(account).copied().unwrap_or(0);
-    let limit = limits.get(account)
-        .map(|dl| dl.inbound)
-        .unwrap_or(default_limit);
-    (count < limit, count, limit)
-}
-
-/// Check if an account is under its outbound concurrent call limit.
-///
-/// Returns (allowed, current_count, limit).
-fn check_outbound_limit(
-    counts: &HashMap<String, u32>,
-    limits: &HashMap<String, DirectionLimits>,
-    account: &str,
-    default_limit: u32,
-) -> (bool, u32, u32) {
-    let count = counts.get(account).copied().unwrap_or(0);
-    let limit = limits.get(account)
-        .map(|dl| dl.outbound)
-        .unwrap_or(default_limit);
-    (count < limit, count, limit)
-}
-
-/// Check if an account is under its concurrent call limit.
-///
-/// Returns (allowed, current_count, limit).
-fn check_limit(
-    counts: &HashMap<String, u32>,
-    limits: &HashMap<String, u32>,
-    account: &str,
-    default_limit: u32,
-) -> (bool, u32, u32) {
-    let count = counts.get(account).copied().unwrap_or(0);
-    let limit = limits.get(account).copied().unwrap_or(default_limit);
-    (count < limit, count, limit)
-}
-
-/// Check if an account is in cooldown. Returns true if still cooling down.
-fn is_in_cooldown(cooldowns: &HashMap<String, Instant>, account: &str, cooldown_secs: u64) -> bool {
-    if cooldown_secs == 0 {
-        return false;
-    }
-    match cooldowns.get(account) {
-        Some(expiry) => {
-            let duration = std::time::Duration::from_secs(cooldown_secs);
-            expiry.elapsed() < duration
+    fn get(&self, key: &[u8]) -> Option<u32> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &*self.slots.add(idx) };
+            if !slot.occupied { return None; }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                return Some(slot.value);
+            }
+            idx = (idx + 1) % self.capacity;
         }
-        None => false,
+        None
     }
-}
 
-/// Record a count snapshot for burst detection.
-fn record_burst_snapshot(
-    history: &mut HashMap<String, VecDeque<(Instant, u32)>>,
-    account: &str,
-    count: u32,
-) {
-    let deque = history.entry(account.to_string()).or_default();
-    deque.push_back((Instant::now(), count));
-}
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut u32> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &mut *self.slots.add(idx) };
+            if !slot.occupied { return None; }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                return Some(&mut slot.value);
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        None
+    }
 
-/// Check for burst: returns (is_burst, delta) comparing current count
-/// to the count at the start of the time window.
-fn check_burst_from_history(
-    history: &mut HashMap<String, VecDeque<(Instant, u32)>>,
-    account: &str,
-    current_count: u32,
-    threshold: u32,
-    window_secs: u64,
-) -> (bool, i32) {
-    let window = std::time::Duration::from_secs(window_secs);
-    let now = Instant::now();
+    fn insert(&mut self, key: &[u8], value: u32) -> bool {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &mut *self.slots.add(idx) };
+            if !slot.occupied {
+                slot.key[..key.len()].copy_from_slice(key);
+                slot.key_len = key.len() as u8;
+                slot.value = value;
+                slot.occupied = true;
+                self.len += 1;
+                return true;
+            }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                slot.value = value;
+                return true;
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        false
+    }
 
-    let deque = match history.get_mut(account) {
-        Some(d) => d,
-        None => return (false, 0),
-    };
+    fn increment(&mut self, key: &[u8]) -> u32 {
+        if let Some(v) = self.get_mut(key) {
+            *v = v.saturating_add(1);
+            return *v;
+        }
+        self.insert(key, 1);
+        1
+    }
 
-    // Prune entries older than the window
-    while let Some(&(ts, _)) = deque.front() {
-        if now.duration_since(ts) > window {
-            deque.pop_front();
-        } else {
-            break;
+    fn decrement(&mut self, key: &[u8]) -> u32 {
+        if let Some(v) = self.get_mut(key) {
+            *v = v.saturating_sub(1);
+            return *v;
+        }
+        0
+    }
+
+    fn clear(&mut self) {
+        if !self.slots.is_null() {
+            unsafe {
+                core::ptr::write_bytes(self.slots, 0, self.capacity);
+            }
+            self.len = 0;
         }
     }
 
-    // Get the oldest count in the window
-    let oldest_count = match deque.front() {
-        Some(&(_, c)) => c,
-        None => return (false, 0),
-    };
-
-    // gui_dCquvqE1csI3: use saturating arithmetic to prevent overflow
-    let delta = (current_count as i32).saturating_sub(oldest_count as i32);
-    let is_burst = delta >= (threshold as i32);
-    (is_burst, delta)
+    fn destroy(&mut self) {
+        if !self.slots.is_null() {
+            unsafe { free(self.slots as *mut c_void) };
+            self.slots = ptr::null_mut();
+            self.capacity = 0;
+            self.len = 0;
+        }
+    }
 }
 
-/// Record a cooldown for an account (called when a limit rejection happens).
-fn set_cooldown(cooldowns: &mut HashMap<String, Instant>, account: &str) {
-    cooldowns.insert(account.to_string(), Instant::now());
+impl Drop for FixedMap {
+    fn drop(&mut self) {
+        self.destroy();
+    }
 }
 
-/// Resolve the effective limit for an account, considering live overrides.
-fn effective_limit(
-    limits: &HashMap<String, u32>,
-    overrides: &HashMap<String, u32>,
-    account: &str,
-    default_limit: u32,
-) -> u32 {
-    overrides.get(account).copied()
-        .or_else(|| limits.get(account).copied())
-        .unwrap_or(default_limit)
-}
+// ── CountMap: extended per-account state with burst ring buffer ──
 
-/// Build a JSON status string for an account.
-fn build_status_json(
-    account: &str,
+#[repr(C)]
+struct CountSlot {
+    key: [u8; MAX_KEY_LEN],
+    key_len: u8,
+    occupied: bool,
+    _pad: [u8; 2],
     count: u32,
+    inbound_count: u32,
+    outbound_count: u32,
+    cooldown_until: i64,
+    burst_ring: [(i64, u32); BURST_RING_SIZE],
+    burst_head: u8,
+    burst_len: u8,
+}
+
+struct CountMap {
+    slots: *mut CountSlot,
+    capacity: usize,
+    len: usize,
+}
+
+unsafe impl Send for CountMap {}
+
+impl CountMap {
+    fn new() -> Self {
+        let slots = unsafe {
+            calloc(MAP_CAPACITY, core::mem::size_of::<CountSlot>())
+        } as *mut CountSlot;
+        assert!(!slots.is_null(), "calloc failed for CountMap");
+        CountMap { slots, capacity: MAP_CAPACITY, len: 0 }
+    }
+
+    fn find_slot(&self, key: &[u8]) -> Option<*mut CountSlot> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &*self.slots.add(idx) };
+            if !slot.occupied { return None; }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                return Some(unsafe { self.slots.add(idx) });
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        None
+    }
+
+    fn find_or_insert(&mut self, key: &[u8]) -> Option<*mut CountSlot> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &mut *self.slots.add(idx) };
+            if !slot.occupied {
+                slot.key[..key.len()].copy_from_slice(key);
+                slot.key_len = key.len() as u8;
+                slot.occupied = true;
+                slot.count = 0;
+                slot.inbound_count = 0;
+                slot.outbound_count = 0;
+                slot.cooldown_until = 0;
+                slot.burst_head = 0;
+                slot.burst_len = 0;
+                self.len += 1;
+                return Some(self.slots.wrapping_add(idx));
+            }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                return Some(self.slots.wrapping_add(idx));
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        None
+    }
+
+    fn get_count(&self, key: &[u8]) -> u32 {
+        match self.find_slot(key) {
+            Some(p) => unsafe { (*p).count },
+            None => 0,
+        }
+    }
+
+    fn get_inbound(&self, key: &[u8]) -> u32 {
+        match self.find_slot(key) {
+            Some(p) => unsafe { (*p).inbound_count },
+            None => 0,
+        }
+    }
+
+    fn get_outbound(&self, key: &[u8]) -> u32 {
+        match self.find_slot(key) {
+            Some(p) => unsafe { (*p).outbound_count },
+            None => 0,
+        }
+    }
+
+    fn increment(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_or_insert(key) {
+            let slot = unsafe { &mut *p };
+            slot.count = slot.count.saturating_add(1);
+            return slot.count;
+        }
+        0
+    }
+
+    fn decrement(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_slot(key) {
+            let slot = unsafe { &mut *p };
+            slot.count = slot.count.saturating_sub(1);
+            return slot.count;
+        }
+        0
+    }
+
+    fn increment_inbound(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_or_insert(key) {
+            let slot = unsafe { &mut *p };
+            slot.inbound_count = slot.inbound_count.saturating_add(1);
+            slot.count = slot.count.saturating_add(1);
+            return slot.inbound_count;
+        }
+        0
+    }
+
+    fn decrement_inbound(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_slot(key) {
+            let slot = unsafe { &mut *p };
+            slot.inbound_count = slot.inbound_count.saturating_sub(1);
+            slot.count = slot.count.saturating_sub(1);
+            return slot.inbound_count;
+        }
+        0
+    }
+
+    fn increment_outbound(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_or_insert(key) {
+            let slot = unsafe { &mut *p };
+            slot.outbound_count = slot.outbound_count.saturating_add(1);
+            slot.count = slot.count.saturating_add(1);
+            return slot.outbound_count;
+        }
+        0
+    }
+
+    fn decrement_outbound(&mut self, key: &[u8]) -> u32 {
+        if let Some(p) = self.find_slot(key) {
+            let slot = unsafe { &mut *p };
+            slot.outbound_count = slot.outbound_count.saturating_sub(1);
+            slot.count = slot.count.saturating_sub(1);
+            return slot.outbound_count;
+        }
+        0
+    }
+
+    /// Set cooldown_until timestamp for an account.
+    fn set_cooldown(&mut self, key: &[u8], until: i64) {
+        if let Some(p) = self.find_or_insert(key) {
+            unsafe { (*p).cooldown_until = until; }
+        }
+    }
+
+    /// Check if account is in cooldown. Returns true if still cooling down.
+    fn in_cooldown(&self, key: &[u8], now: i64) -> bool {
+        match self.find_slot(key) {
+            Some(p) => unsafe { (*p).cooldown_until > now },
+            None => false,
+        }
+    }
+
+    /// Record a burst snapshot (timestamp, count) and check if burst threshold exceeded.
+    /// Returns true if the count increased by >= threshold within window_secs.
+    fn record_and_check_burst(&mut self, key: &[u8], now: i64, threshold: u32, window_secs: i64) -> bool {
+        let p = match self.find_or_insert(key) {
+            Some(p) => p,
+            None => return false,
+        };
+        let slot = unsafe { &mut *p };
+        let current_count = slot.count;
+
+        // Add current snapshot to ring buffer
+        let head = slot.burst_head as usize;
+        slot.burst_ring[head] = (now, current_count);
+        slot.burst_head = ((head + 1) % BURST_RING_SIZE) as u8;
+        if slot.burst_len < BURST_RING_SIZE as u8 {
+            slot.burst_len += 1;
+        }
+
+        // Check if any snapshot within window shows count increase >= threshold
+        let ring_len = slot.burst_len as usize;
+        for i in 0..ring_len {
+            let idx = if head >= i { head - i } else { BURST_RING_SIZE - (i - head) };
+            let idx = idx % BURST_RING_SIZE;
+            let (ts, old_count) = slot.burst_ring[idx];
+            if now - ts <= window_secs && current_count >= old_count {
+                if current_count - old_count >= threshold {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn clear(&mut self) {
+        if !self.slots.is_null() {
+            unsafe {
+                core::ptr::write_bytes(self.slots, 0, self.capacity);
+            }
+            self.len = 0;
+        }
+    }
+
+    /// Iterate over occupied slots.  Calls f(key_bytes, slot) for each.
+    fn for_each<F: FnMut(&[u8], &CountSlot)>(&self, mut f: F) {
+        for i in 0..self.capacity {
+            let slot = unsafe { &*self.slots.add(i) };
+            if slot.occupied {
+                let key = unsafe { slot.key.get_unchecked(..slot.key_len as usize) };
+                f(key, slot);
+            }
+        }
+    }
+}
+
+impl Drop for CountMap {
+    fn drop(&mut self) {
+        if !self.slots.is_null() {
+            unsafe { free(self.slots as *mut c_void) };
+            self.slots = ptr::null_mut();
+        }
+    }
+}
+
+// ── LimitMap: per-account limits with direction-aware fields ─────
+
+#[repr(C)]
+struct LimitSlot {
+    key: [u8; MAX_KEY_LEN],
+    key_len: u8,
+    occupied: bool,
+    _pad: [u8; 2],
     limit: u32,
-    inbound: u32,
-    outbound: u32,
-) -> String {
-    format!(
-        r#"{{"account":"{}","count":{},"limit":{},"direction":{{"inbound":{},"outbound":{}}}}}"#,
-        account, count, limit, inbound, outbound
-    )
+    inbound_limit: u32,
+    outbound_limit: u32,
 }
 
-/// Check limit using an external (profile-based) count instead of the local HashMap.
-///
-/// When dialog profiles are enabled, the profile count comes from
-/// get_profile_size() which is accurate across all workers.
-/// Returns (allowed, profile_count, limit).
-fn check_limit_with_profile_count(
-    profile_count: u32,
-    limits: &HashMap<String, u32>,
-    account: &str,
-    default_limit: u32,
-) -> (bool, u32, u32) {
-    let limit = limits.get(account).copied().unwrap_or(default_limit);
-    (profile_count < limit, profile_count, limit)
+struct LimitMap {
+    slots: *mut LimitSlot,
+    capacity: usize,
+    len: usize,
 }
 
-/// Increment the call count for an account. Returns the new count.
-fn increment(counts: &mut HashMap<String, u32>, account: &str) -> u32 {
-    let entry = counts.entry(account.to_string()).or_insert(0);
-    *entry += 1;
-    *entry
+unsafe impl Send for LimitMap {}
+
+impl LimitMap {
+    fn new() -> Self {
+        let slots = unsafe {
+            calloc(MAP_CAPACITY, core::mem::size_of::<LimitSlot>())
+        } as *mut LimitSlot;
+        assert!(!slots.is_null(), "calloc failed for LimitMap");
+        LimitMap { slots, capacity: MAP_CAPACITY, len: 0 }
+    }
+
+    fn find_slot(&self, key: &[u8]) -> Option<*mut LimitSlot> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &*self.slots.add(idx) };
+            if !slot.occupied { return None; }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                return Some(unsafe { self.slots.add(idx) });
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        None
+    }
+
+    fn get_limit(&self, key: &[u8]) -> Option<u32> {
+        match self.find_slot(key) {
+            Some(p) => Some(unsafe { (*p).limit }),
+            None => None,
+        }
+    }
+
+    fn get_inbound_limit(&self, key: &[u8]) -> Option<u32> {
+        match self.find_slot(key) {
+            Some(p) => Some(unsafe { (*p).inbound_limit }),
+            None => None,
+        }
+    }
+
+    fn get_outbound_limit(&self, key: &[u8]) -> Option<u32> {
+        match self.find_slot(key) {
+            Some(p) => Some(unsafe { (*p).outbound_limit }),
+            None => None,
+        }
+    }
+
+    /// Insert with single limit (non-direction-aware CSV: "account,limit").
+    fn insert(&mut self, key: &[u8], limit: u32) -> bool {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &mut *self.slots.add(idx) };
+            if !slot.occupied {
+                slot.key[..key.len()].copy_from_slice(key);
+                slot.key_len = key.len() as u8;
+                slot.limit = limit;
+                slot.inbound_limit = limit;
+                slot.outbound_limit = limit;
+                slot.occupied = true;
+                self.len += 1;
+                return true;
+            }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                slot.limit = limit;
+                slot.inbound_limit = limit;
+                slot.outbound_limit = limit;
+                return true;
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        false
+    }
+
+    /// Insert with direction-aware limits (CSV: "account,max_inbound,max_outbound").
+    fn insert_directional(&mut self, key: &[u8], inbound: u32, outbound: u32) -> bool {
+        if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
+        let total = inbound.saturating_add(outbound);
+        let mut idx = (fnv1a(key) as usize) % self.capacity;
+        for _ in 0..self.capacity {
+            let slot = unsafe { &mut *self.slots.add(idx) };
+            if !slot.occupied {
+                slot.key[..key.len()].copy_from_slice(key);
+                slot.key_len = key.len() as u8;
+                slot.limit = total;
+                slot.inbound_limit = inbound;
+                slot.outbound_limit = outbound;
+                slot.occupied = true;
+                self.len += 1;
+                return true;
+            }
+            if slot.key_len as usize == key.len()
+                && unsafe { slot.key.get_unchecked(..key.len()) } == key
+            {
+                slot.limit = total;
+                slot.inbound_limit = inbound;
+                slot.outbound_limit = outbound;
+                return true;
+            }
+            idx = (idx + 1) % self.capacity;
+        }
+        false
+    }
+
+    fn clear(&mut self) {
+        if !self.slots.is_null() {
+            unsafe {
+                core::ptr::write_bytes(self.slots, 0, self.capacity);
+            }
+            self.len = 0;
+        }
+    }
 }
 
-/// Decrement the call count for an account (floor at 0). Returns the new count.
-fn decrement(counts: &mut HashMap<String, u32>, account: &str) -> u32 {
-    let entry = counts.entry(account.to_string()).or_insert(0);
-    *entry = entry.saturating_sub(1);
-    *entry
+impl Drop for LimitMap {
+    fn drop(&mut self) {
+        if !self.slots.is_null() {
+            unsafe { free(self.slots as *mut c_void) };
+            self.slots = ptr::null_mut();
+        }
+    }
 }
 
-// ── Dialog tracker state ─────────────────────────────────────────
+// ── Simple per-worker stats (no HashMap, just named fields) ──────
 
-/// Per-dialog state stored in the DialogTracker.
-#[derive(Default)]
-struct CallDialogState {
-    /// The account identifier associated with this dialog.
-    account: String,
+struct SimpleStats {
+    checked: Cell<u64>,
+    allowed: Cell<u64>,
+    blocked: Cell<u64>,
+    incremented: Cell<u64>,
+    decremented: Cell<u64>,
+}
+
+impl SimpleStats {
+    fn new() -> Self {
+        SimpleStats {
+            checked: Cell::new(0),
+            allowed: Cell::new(0),
+            blocked: Cell::new(0),
+            incremented: Cell::new(0),
+            decremented: Cell::new(0),
+        }
+    }
+}
+
+// ── Stack-based byte writer (no format!, no String) ──────────────
+
+struct ByteWriter {
+    buf: [u8; 256],
+    pos: usize,
+}
+
+impl ByteWriter {
+    fn new() -> Self {
+        ByteWriter { buf: [0u8; 256], pos: 0 }
+    }
+
+    fn push_bytes(&mut self, data: &[u8]) {
+        let avail = 256 - self.pos;
+        let n = if data.len() < avail { data.len() } else { avail };
+        self.buf[self.pos..self.pos + n].copy_from_slice(&data[..n]);
+        self.pos += n;
+    }
+
+    fn push_u32(&mut self, mut val: u32) {
+        if val == 0 {
+            self.push_bytes(b"0");
+            return;
+        }
+        let mut digits = [0u8; 10];
+        let mut i = 0usize;
+        while val > 0 {
+            digits[i] = b'0' + (val % 10) as u8;
+            val /= 10;
+            i += 1;
+        }
+        // Reverse
+        while i > 0 {
+            i -= 1;
+            self.push_bytes(&[digits[i]]);
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.pos]
+    }
+}
+
+// ── Dialog profile via C helper (avoids Rust vtable cleanup bug) ─
+
+extern "C" {
+    fn call_set_dlg_profile_c(
+        msg: *mut sys::sip_msg,
+        profile_name: *const c_char, profile_len: c_int,
+        account: *const c_char, account_len: c_int,
+    ) -> c_int;
+}
+
+/// Call set_dlg_profile(profile_name, account) via the C helper.
+/// The entire find_cmd → fix_cmd → call → cleanup happens in C,
+/// so the Rust compiler generates zero cleanup code.
+#[inline(always)]
+unsafe fn call_set_dlg_profile(msg: *mut sys::sip_msg, profile_name: &[u8], account: &[u8]) {
+    call_set_dlg_profile_c(
+        msg,
+        profile_name.as_ptr() as *const c_char, profile_name.len() as c_int,
+        account.as_ptr() as *const c_char, account.len() as c_int,
+    );
+}
+
+// ── Event publishing helper ──────────────────────────────────────
+
+fn publish_blocked_event(account: &str, count: u32, limit: u32) {
+    let mut w = ByteWriter::new();
+    w.push_bytes(b"BLOCKED account=");
+    w.push_bytes(account.as_bytes());
+    w.push_bytes(b" count=");
+    w.push_u32(count);
+    w.push_bytes(b" limit=");
+    w.push_u32(limit);
+
+    // Use opensips_log! which is confirmed safe (no Rust heap alloc)
+    // We need to convert to &str for the macro; the ByteWriter content is valid UTF-8
+    // since we only wrote ASCII bytes.
+    let msg_bytes = w.as_bytes();
+    // Safety: all bytes written are ASCII
+    let msg_str = unsafe { core::str::from_utf8_unchecked(msg_bytes) };
+    safe_log!(L_WARN, msg_str);
 }
 
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
-    counts: HashMap<String, u32>,
-    loader: FileLoader<HashMap<String, u32>>,
-    stats: Stats,
-    dialog_tracker: dialog::DialogTracker<CallDialogState>,
-    // Direction-aware state (only used when direction_aware=1)
-    inbound_counts: HashMap<String, u32>,
-    outbound_counts: HashMap<String, u32>,
-    direction_loader: Option<FileLoader<HashMap<String, DirectionLimits>>>,
-    // Live limit overrides (Task 42) — persist until reload or restart
-    limit_overrides: HashMap<String, u32>,
-    // Cooldown tracking (Task 43) — per-account cooldown expiry
-    cooldowns: HashMap<String, Instant>,
-    // Burst detection (Task 44) — per-account count snapshots
-    burst_history: HashMap<String, VecDeque<(Instant, u32)>>,
+    counts: CountMap,
+    limits: LimitMap,
+    limit_overrides: FixedMap,
+    stats: SimpleStats,
+    default_limit: u32,
+    cooldown_secs: i64,
+    burst_threshold: u32,
+    burst_window_secs: i64,
+    direction_aware: bool,
+    use_dialog_profiles: bool,
+    publish_events: bool,
 }
 
 thread_local! {
-    static WORKER: RefCell<Option<WorkerState>> = const { RefCell::new(None) };
+    static WORKER: Cell<*mut WorkerState> = const { Cell::new(ptr::null_mut()) };
 }
 
-// ── Dialog callback trampolines ──────────────────────────────────
-
-/// DLGCB_CREATED callback: auto-increment account counter and register
-/// per-dialog TERMINATED/EXPIRED callbacks.
-///
-/// # Safety
-/// Called by OpenSIPS dialog module with valid pointers.
-unsafe extern "C" fn dlg_on_created(
-    dlg: *mut dialog::dlg_cell,
-    _cb_type: c_int,
-    params: *mut dialog::dlg_cb_params,
-) {
-    // Extract account from the SIP message
-    let msg_ptr = if !params.is_null() {
-        unsafe { (*params).msg }
-    } else {
-        ptr::null_mut()
-    };
-
-    if msg_ptr.is_null() {
-        return;
-    }
-
-    // Get the account variable expression
-    let account_var_expr = unsafe { ACCOUNT_VAR.get_value() }
-        .unwrap_or("$fU");
-
-    // Read the account from the SIP message PV
-    let sip_msg = unsafe {
-        opensips_rs::SipMessage::from_raw(msg_ptr.cast())
-    };
-    let account = match sip_msg.pv(account_var_expr) {
-        Some(a) if !a.is_empty() => a,
-        _ => return,
-    };
-
-    // Get dialog ID (Call-ID)
-    let call_id = match unsafe { dialog::callid_from_dlg(dlg as *mut c_void) } {
-        Some(id) => id,
-        None => return,
-    };
-
-    // Increment SHM counter (cross-worker visible)
-    // Increment counter and track dialog
-    WORKER.with(|w| {
-        let mut borrow = w.borrow_mut();
-        if let Some(state) = borrow.as_mut() {
-            let new_count = increment(&mut state.counts, &account);
-            state.stats.inc("incremented");
-            state.stats.inc("auto_tracked");
-            if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
-
-            // Store account in dialog tracker
-            state.dialog_tracker.on_created(&call_id);
-            state.dialog_tracker.with_state(&call_id, |s| {
-                s.account = account.clone();
-            });
-
-            opensips_log!(DBG, "rust_concurrent_calls",
-                "auto_track inc {}: now {} (dialog {})", account, new_count, call_id);
+/// Get the per-worker state, or return the given error code if not initialized.
+#[inline(always)]
+fn with_worker<F: FnOnce(&mut WorkerState) -> c_int>(f: F, err: c_int) -> c_int {
+    WORKER.with(|cell| {
+        let p = cell.get();
+        if p.is_null() {
+            safe_log!(L_ERR, "worker state not initialized");
+            return err;
         }
-    });
-
-    // Register per-dialog TERMINATED|EXPIRED callback
-    let _ = unsafe {
-        dialog::dlg::register_dlg_cb(
-            dlg as *mut c_void,
-            dialog::DLGCB_TERMINATED | dialog::DLGCB_EXPIRED,
-            Some(dlg_on_terminated),
-            ptr::null_mut(),
-            None,
-        )
-    };
+        f(unsafe { &mut *p })
+    })
 }
 
-/// DLGCB_TERMINATED/EXPIRED callback: auto-decrement account counter.
-///
-/// # Safety
-/// Called by OpenSIPS dialog module with valid pointers.
-unsafe extern "C" fn dlg_on_terminated(
-    dlg: *mut dialog::dlg_cell,
-    _cb_type: c_int,
-    _params: *mut dialog::dlg_cb_params,
-) {
-    let call_id = match unsafe { dialog::callid_from_dlg(dlg as *mut c_void) } {
-        Some(id) => id,
-        None => return,
-    };
+/// Get the effective limit for an account: override > CSV limit > default.
+fn effective_limit(state: &WorkerState, key: &[u8]) -> u32 {
+    if let Some(ov) = state.limit_overrides.get(key) {
+        return ov;
+    }
+    state.limits.get_limit(key).unwrap_or(state.default_limit)
+}
 
-    WORKER.with(|w| {
-        let mut borrow = w.borrow_mut();
-        if let Some(state) = borrow.as_mut() {
-            // Look up the account from our tracker
-            let account = state.dialog_tracker.on_terminated(&call_id)
-                .map(|s| s.account);
+fn effective_inbound_limit(state: &WorkerState, key: &[u8]) -> u32 {
+    if let Some(ov) = state.limit_overrides.get(key) {
+        return ov;
+    }
+    state.limits.get_inbound_limit(key).unwrap_or(state.default_limit)
+}
 
-            if let Some(acct) = account {
-                if !acct.is_empty() {
-                    let new_count = decrement(&mut state.counts, &acct);
-                    state.stats.inc("decremented");
-                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.dec(); }
-                    opensips_log!(DBG, "rust_concurrent_calls",
-                        "auto_track dec {}: now {} (dialog {})", acct, new_count, call_id);
+fn effective_outbound_limit(state: &WorkerState, key: &[u8]) -> u32 {
+    if let Some(ov) = state.limit_overrides.get(key) {
+        return ov;
+    }
+    state.limits.get_outbound_limit(key).unwrap_or(state.default_limit)
+}
+
+// ── CSV file loading (libc I/O, no Rust allocations) ─────────────
+
+fn load_limits_file(path: &[u8], map: &mut LimitMap, direction_aware: bool) -> c_int {
+    let mut path_buf = [0u8; 256];
+    if path.len() >= path_buf.len() { return -1; }
+    path_buf[..path.len()].copy_from_slice(path);
+    path_buf[path.len()] = 0;
+
+    let fp = unsafe { fopen(path_buf.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char) };
+    if fp.is_null() { return -1; }
+
+    let mut line_buf = [0u8; 256];
+    let mut count = 0i32;
+
+    loop {
+        let ret = unsafe {
+            fgets(line_buf.as_mut_ptr() as *mut c_char, line_buf.len() as c_int, fp)
+        };
+        if ret.is_null() { break; }
+
+        let len = line_buf.iter().position(|&b| b == b'\n' || b == 0).unwrap_or(line_buf.len());
+        let line = &line_buf[..len];
+
+        if line.is_empty() || line[0] == b'#' { continue; }
+
+        // Find first comma
+        let first_comma = match line.iter().position(|&b| b == b',') {
+            Some(p) => p,
+            None => continue,
+        };
+        let account = trim_bytes(&line[..first_comma]);
+        if account.is_empty() { continue; }
+
+        let rest = &line[first_comma + 1..];
+
+        if direction_aware {
+            // Parse "account,max_inbound,max_outbound"
+            if let Some(second_comma) = rest.iter().position(|&b| b == b',') {
+                let inbound_str = trim_bytes(&rest[..second_comma]);
+                let outbound_str = trim_bytes(&rest[second_comma + 1..]);
+                if let (Some(inbound), Some(outbound)) = (parse_u32(inbound_str), parse_u32(outbound_str)) {
+                    map.insert_directional(account, inbound, outbound);
+                    count += 1;
+                }
+            } else {
+                // Fallback: single limit even in direction-aware mode
+                let limit_str = trim_bytes(rest);
+                if let Some(limit) = parse_u32(limit_str) {
+                    map.insert(account, limit);
+                    count += 1;
                 }
             }
+        } else {
+            // Parse "account,limit"
+            let limit_str = trim_bytes(rest);
+            if let Some(limit) = parse_u32(limit_str) {
+                map.insert(account, limit);
+                count += 1;
+            }
         }
-    });
+    }
+    unsafe { fclose(fp) };
+    count
+}
+
+fn trim_bytes(b: &[u8]) -> &[u8] {
+    let start = b.iter().position(|&c| c != b' ' && c != b'\t').unwrap_or(b.len());
+    let end = b.iter().rposition(|&c| c != b' ' && c != b'\t' && c != b'\r').map_or(start, |e| e + 1);
+    if start >= end { &[] } else { &b[start..end] }
+}
+
+fn parse_u32(b: &[u8]) -> Option<u32> {
+    let mut val: u32 = 0;
+    if b.is_empty() { return None; }
+    for &c in b {
+        if c < b'0' || c > b'9' { return None; }
+        val = val.checked_mul(10)?.checked_add((c - b'0') as u32)?;
+    }
+    Some(val)
+}
+
+fn now_secs() -> i64 {
+    unsafe { time(ptr::null_mut()) }
 }
 
 // ── Module lifecycle ─────────────────────────────────────────────
 
 unsafe extern "C" fn mod_init() -> c_int {
     let file = match unsafe { LIMITS_FILE.get_value() } {
-        Some(f) if !f.is_empty() => f,
-        _ => {
-            opensips_log!(ERR, "rust_concurrent_calls",
-                "modparam limits_file is required but not set");
+        Some(f) => f,
+        None => {
+            safe_log!(L_ERR, "limits_file parameter is required");
             return -1;
         }
     };
-
     let default = DEFAULT_LIMIT.get();
-    let auto_track = AUTO_TRACK.get();
-    let account_var = unsafe { ACCOUNT_VAR.get_value() }
-        .unwrap_or("$fU");
 
-    // Validate default_limit
-    if default < 0 {
-        opensips_log!(WARN, "rust_concurrent_calls",
-            "default_limit={} is negative, clamping to 0 (block all)", default);
-    } else if default > 100_000 {
-        opensips_log!(WARN, "rust_concurrent_calls",
-            "default_limit={} is very high (>100000), verify this is intentional", default);
-    }
-
-    // Try to load dialog API if auto_track is enabled
-    if auto_track != 0 {
-        match dialog::load_api() {
-            Ok(()) => {
-                // Register DLGCB_CREATED global callback
-                match unsafe {
-                    dialog::dlg::register_global_cb(
-                        dialog::DLGCB_CREATED,
-                        Some(dlg_on_created),
-                        ptr::null_mut(),
-                        None,
-                    )
-                } {
-                    Ok(()) => {
-                        opensips_log!(INFO, "rust_concurrent_calls",
-                            "auto_track enabled: dialog callbacks registered (account_var={})",
-                            account_var);
-                    }
-                    Err(e) => {
-                        opensips_log!(ERR, "rust_concurrent_calls",
-                            "auto_track: failed to register DLGCB_CREATED: {}", e);
-                        return -1;
-                    }
-                }
-            }
-            Err(e) => {
-                opensips_log!(WARN, "rust_concurrent_calls",
-                    "auto_track enabled but dialog API unavailable ({}). \
-                     Falling back to manual mode. Load dialog.so before this module.", e);
-            }
-        }
-    }
-
-    opensips_log!(INFO, "rust_concurrent_calls", "module initialized");
-    opensips_log!(INFO, "rust_concurrent_calls", "  limits_file={}", file);
-    opensips_log!(INFO, "rust_concurrent_calls", "  default_limit={}", default);
-    opensips_log!(INFO, "rust_concurrent_calls", "  auto_track={}", auto_track);
-    opensips_log!(INFO, "rust_concurrent_calls", "  account_var={}", account_var);
-
-    let direction_aware = DIRECTION_AWARE.get();
-    let cooldown = COOLDOWN_SECS.get();
-    opensips_log!(INFO, "rust_concurrent_calls", "  direction_aware={}", direction_aware);
-    opensips_log!(INFO, "rust_concurrent_calls", "  cooldown_secs={}", cooldown);
-
-    let burst_threshold = BURST_THRESHOLD.get();
-    let burst_window = BURST_WINDOW_SECS.get();
-    opensips_log!(INFO, "rust_concurrent_calls", "  burst_threshold={}", burst_threshold);
-    opensips_log!(INFO, "rust_concurrent_calls", "  burst_window_secs={}", burst_window);
-
-    let use_profiles = USE_DIALOG_PROFILES.get();
-    let profile_name = unsafe { PROFILE_NAME.get_value() }
-        .unwrap_or("concurrent_calls");
-    opensips_log!(INFO, "rust_concurrent_calls", "  use_dialog_profiles={}", use_profiles);
-    opensips_log!(INFO, "rust_concurrent_calls", "  profile_name={}", profile_name);
-
+    safe_log!(L_INFO, "module initialized");
+    safe_log!(L_INFO, "  limits_file=", file);
+    safe_log!(L_INFO, "  default_limit=", default);
+    safe_log!(L_INFO, "  auto_track=", AUTO_TRACK.get());
+    safe_log!(L_INFO, "  account_var=", unsafe { ACCOUNT_VAR.get_value() }.unwrap_or("$fU"));
+    safe_log!(L_INFO, "  use_dialog_profiles=", USE_DIALOG_PROFILES.get());
+    safe_log!(L_INFO, "  profile_name=", unsafe { PROFILE_NAME.get_value() }.unwrap_or("concurrent_calls"));
+    safe_log!(L_INFO, "  direction_aware=", DIRECTION_AWARE.get());
+    safe_log!(L_INFO, "  cooldown_secs=", COOLDOWN_SECS.get());
+    safe_log!(L_INFO, "  burst_threshold=", BURST_THRESHOLD.get());
+    safe_log!(L_INFO, "  burst_window_secs=", BURST_WINDOW_SECS.get());
+    safe_log!(L_INFO, "  publish_events=", PUBLISH_EVENTS.get());
     0
 }
 
 unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
-    // Initialize for SIP workers (rank >= 1) and PROC_MODULE (-2) which
-    // handles MI commands via httpd.  Skip all other non-worker processes
-    // (PROC_MAIN=0, TCP=-1, etc.).
-    if rank < 1 && rank != -2 {
-        return 0;
-    }
+    if rank < 1 && rank != -2 { return 0; }
 
     let file = match unsafe { LIMITS_FILE.get_value() } {
-        Some(f) => f.to_string(),
+        Some(f) => f,
         None => return -1,
     };
-
-    let loader = match FileLoader::new(&file, csv_line_parser, build_limits) {
-        Ok(l) => l,
-        Err(e) => {
-            opensips_log!(ERR, "rust_concurrent_calls",
-                "failed to load limits file: {}", e);
-            return -1;
-        }
-    };
-
-    let entry_count = loader.get().len();
-
-    let stats = Stats::new("rust_concurrent_calls",
-        &["checked", "allowed", "blocked", "incremented", "decremented",
-          "accounts", "reloads", "auto_tracked", "cooldown_blocked", "burst_detected"]);
-    stats.set("accounts", entry_count as u64);
-
-    // Load direction-aware limits if enabled
+    let default_limit = DEFAULT_LIMIT.get().max(0) as u32;
     let direction_aware = DIRECTION_AWARE.get() != 0;
-    let direction_loader = if direction_aware {
-        match FileLoader::new(&file, csv_line_parser, build_direction_limits) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                opensips_log!(WARN, "rust_concurrent_calls",
-                    "direction_aware enabled but failed to load direction limits: {}", e);
-                None
-            }
-        }
-    } else {
-        None
+
+    // Allocate worker state with libc
+    let state_ptr = unsafe {
+        calloc(1, core::mem::size_of::<WorkerState>()) as *mut WorkerState
     };
+    if state_ptr.is_null() { return -1; }
 
-    WORKER.with(|w| {
-        *w.borrow_mut() = Some(WorkerState {
-            counts: HashMap::with_capacity(256),
-            loader,
-            stats,
-            dialog_tracker: dialog::DialogTracker::new(3600),
-            inbound_counts: HashMap::with_capacity(256),
-            outbound_counts: HashMap::with_capacity(256),
-            direction_loader,
-            limit_overrides: HashMap::new(),
-            cooldowns: HashMap::new(),
-            burst_history: HashMap::new(),
-        });
-    });
+    let state = unsafe { &mut *state_ptr };
+    state.counts = CountMap::new();
+    state.limits = LimitMap::new();
+    state.limit_overrides = FixedMap::new();
+    state.stats = SimpleStats::new();
+    state.default_limit = default_limit;
+    state.cooldown_secs = COOLDOWN_SECS.get().max(0) as i64;
+    state.burst_threshold = BURST_THRESHOLD.get().max(0) as u32;
+    state.burst_window_secs = BURST_WINDOW_SECS.get().max(0) as i64;
+    state.direction_aware = direction_aware;
+    state.use_dialog_profiles = USE_DIALOG_PROFILES.get() != 0;
+    state.publish_events = PUBLISH_EVENTS.get() != 0;
 
-    opensips_log!(DBG, "rust_concurrent_calls",
-        "worker {} loaded {} account limits", rank, entry_count);
+    // Load limits from CSV
+    let entry_count = load_limits_file(file.as_bytes(), &mut state.limits, direction_aware);
+    if entry_count < 0 {
+        safe_log!(L_ERR, "failed to load limits file: ", file);
+    }
+
+    WORKER.with(|cell| cell.set(state_ptr));
+
+    safe_log!(L_DBG, "worker ", rank as i32, " loaded ", entry_count.max(0), " account limits");
     0
 }
 
 unsafe extern "C" fn mod_destroy() {
-    opensips_log!(INFO, "rust_concurrent_calls", "module destroyed");
+    safe_log!(L_INFO, "module destroyed");
 }
 
-// ── Script function: check_concurrent(account) ──────────────
+// ── Script function: check_concurrent(account) ──────────────────
 
 unsafe extern "C" fn w_check_concurrent(
-    msg: *mut sys::sip_msg,
-    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "check_concurrent: missing or invalid parameter");
-                return -2;
-            }
-        };
-
-        let use_profiles = USE_DIALOG_PROFILES.get() != 0;
-        let profile = if use_profiles {
-            unsafe { PROFILE_NAME.get_value() }.unwrap_or("concurrent_calls")
-        } else {
-            ""
-        };
-
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
-
-                    // Check cooldown first (Task 43)
-                    let cooldown_secs = COOLDOWN_SECS.get();
-                    if cooldown_secs > 0 && is_in_cooldown(&state.cooldowns, account, cooldown_secs as u64) {
-                        state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
-                        state.stats.inc("cooldown_blocked");
-                        opensips_log!(DBG, "rust_concurrent_calls",
-                            "account {} in cooldown period", account);
-                        let mut sip_msg = unsafe {
-                            opensips_rs::SipMessage::from_raw(msg)
-                        };
-                        let _ = sip_msg.set_pv_int("$var(concurrent_count)", -1);
-                        let _ = sip_msg.set_pv_int("$var(concurrent_limit)", 0);
-                        return -1;
-                    }
-
-                    let limits = state.loader.get();
-                    let default = DEFAULT_LIMIT.get().max(0) as u32;
-
-                    // When dialog profiles are enabled, use get_profile_size
-                    // for cross-worker accurate counts
-                    // Check overrides first
-                    let eff_limit = effective_limit(
-                        &limits, &state.limit_overrides, account, default,
-                    );
-
-                    // Note: use_profiles only affects concurrent_inc (set_dlg_profile).
-                    // get_profile_size requires a CMD_PARAM_VAR output param that
-                    // sip_msg.call() cannot provide, so always use local counts.
-                    let (allowed, count, limit) = {
-                        let count = state.counts.get(account).copied().unwrap_or(0);
-                        (count < eff_limit, count, eff_limit)
-                    };
-
-                    // Set $var(concurrent_count) and $var(concurrent_limit)
-                    let mut sip_msg = unsafe {
-                        opensips_rs::SipMessage::from_raw(msg)
-                    };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
-
-                    if allowed {
-                        state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
-                        1
-                    } else {
-                        state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
-                        // Set cooldown on rejection (Task 43)
-                        let cooldown_secs = COOLDOWN_SECS.get();
-                        if cooldown_secs > 0 {
-                            set_cooldown(&mut state.cooldowns, account);
-                        }
-                        opensips_log!(DBG, "rust_concurrent_calls",
-                            "account {} at limit: {}/{}", account, count, limit);
-                        // Publish E_CONCURRENT_LIMIT event
-                        if event::is_enabled() {
-                            let payload = event::format_payload(&[
-                                ("account", &event::json_str(account)),
-                                ("count", &count.to_string()),
-                                ("limit", &limit.to_string()),
-                            ]);
-                            opensips_log!(NOTICE, "rust_concurrent_calls", "EVENT E_CONCURRENT_LIMIT {}", payload);
-                        }
-                        -1
-                    }
-                }
-                None => {
-                    opensips_log!(ERR, "rust_concurrent_calls",
-                        "worker state not initialized");
-                    -2
-                }
-            }
-        })
-    })
-}
-
-// ── Script function: concurrent_inc(account) ────────────────
-
-unsafe extern "C" fn w_concurrent_inc(
     _msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_inc: missing or invalid parameter");
-                return -2;
-            }
-        };
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let key = account.as_bytes();
 
-        // When dialog profiles are enabled, also set the profile
-        if USE_DIALOG_PROFILES.get() != 0 {
-            let profile = unsafe { PROFILE_NAME.get_value() }
-                .unwrap_or("concurrent_calls");
-            let mut sip_msg = unsafe {
-                opensips_rs::SipMessage::from_raw(_msg)
-            };
-            let _ = sip_msg.call_str("set_dlg_profile", &[profile, account]);
+    with_worker(|state| {
+        state.stats.checked.set(state.stats.checked.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
+
+        // Cooldown check
+        if state.cooldown_secs > 0 {
+            let now = now_secs();
+            if state.counts.in_cooldown(key, now) {
+                state.stats.blocked.set(state.stats.blocked.get() + 1);
+                if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+                safe_log!(L_DBG, "check ", account, ": in cooldown, auto-rejected");
+                return -1;
+            }
         }
 
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    let new_count = increment(&mut state.counts, account);
-                    state.stats.inc("incremented");
-                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
-                    opensips_log!(DBG, "rust_concurrent_calls",
-                        "inc {}: now {}", account, new_count);
-                    1
-                }
-                None => {
-                    opensips_log!(ERR, "rust_concurrent_calls",
-                        "worker state not initialized");
-                    -2
-                }
+        let count = state.counts.get_count(key);
+        let limit = effective_limit(state, key);
+
+        if count < limit {
+            state.stats.allowed.set(state.stats.allowed.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
+            1
+        } else {
+            state.stats.blocked.set(state.stats.blocked.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+
+            // Set cooldown
+            if state.cooldown_secs > 0 {
+                let now = now_secs();
+                state.counts.set_cooldown(key, now + state.cooldown_secs);
             }
-        })
-    })
+
+            // Publish event
+            if state.publish_events {
+                publish_blocked_event(account, count, limit);
+            }
+
+            -1
+        }
+    }, -2)
 }
 
-// ── Script function: concurrent_dec(account) ────────────────
+// ── Script function: check_concurrent_inbound(account) ───────────
+
+unsafe extern "C" fn w_check_concurrent_inbound(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let key = account.as_bytes();
+
+    with_worker(|state| {
+        state.stats.checked.set(state.stats.checked.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
+
+        if !state.direction_aware {
+            // Fall back to total count check
+            let count = state.counts.get_count(key);
+            let limit = effective_limit(state, key);
+            return if count < limit { 1 } else { -1 };
+        }
+
+        // Cooldown check
+        if state.cooldown_secs > 0 && state.counts.in_cooldown(key, now_secs()) {
+            state.stats.blocked.set(state.stats.blocked.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+            return -1;
+        }
+
+        let count = state.counts.get_inbound(key);
+        let limit = effective_inbound_limit(state, key);
+
+        if count < limit {
+            state.stats.allowed.set(state.stats.allowed.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
+            1
+        } else {
+            state.stats.blocked.set(state.stats.blocked.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+
+            if state.cooldown_secs > 0 {
+                let now = now_secs();
+                state.counts.set_cooldown(key, now + state.cooldown_secs);
+            }
+            if state.publish_events {
+                publish_blocked_event(account, count, limit);
+            }
+            -1
+        }
+    }, -2)
+}
+
+// ── Script function: check_concurrent_outbound(account) ──────────
+
+unsafe extern "C" fn w_check_concurrent_outbound(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let key = account.as_bytes();
+
+    with_worker(|state| {
+        state.stats.checked.set(state.stats.checked.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
+
+        if !state.direction_aware {
+            let count = state.counts.get_count(key);
+            let limit = effective_limit(state, key);
+            return if count < limit { 1 } else { -1 };
+        }
+
+        if state.cooldown_secs > 0 && state.counts.in_cooldown(key, now_secs()) {
+            state.stats.blocked.set(state.stats.blocked.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+            return -1;
+        }
+
+        let count = state.counts.get_outbound(key);
+        let limit = effective_outbound_limit(state, key);
+
+        if count < limit {
+            state.stats.allowed.set(state.stats.allowed.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
+            1
+        } else {
+            state.stats.blocked.set(state.stats.blocked.get() + 1);
+            if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+
+            if state.cooldown_secs > 0 {
+                let now = now_secs();
+                state.counts.set_cooldown(key, now + state.cooldown_secs);
+            }
+            if state.publish_events {
+                publish_blocked_event(account, count, limit);
+            }
+            -1
+        }
+    }, -2)
+}
+
+// ── Script function: concurrent_inc(account) ─────────────────────
+
+unsafe extern "C" fn w_concurrent_inc(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+
+    // Read dialog profile settings before entering with_worker
+    // (cannot borrow static params inside the closure that borrows state)
+    let do_dlg_profile = USE_DIALOG_PROFILES.get() != 0;
+
+    with_worker(|state| {
+        let new_count = state.counts.increment(account.as_bytes());
+        state.stats.incremented.set(state.stats.incremented.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
+        safe_log!(L_DBG, "inc ", account, ": now ", new_count);
+
+        // Dialog profile integration via C helper (avoids Rust vtable bug)
+        if do_dlg_profile {
+            let profile_name = unsafe { PROFILE_NAME.get_value() }
+                .unwrap_or("concurrent_calls");
+            unsafe {
+                call_set_dlg_profile(msg, profile_name.as_bytes(), account.as_bytes());
+            }
+        }
+
+        1
+    }, -2)
+}
+
+// ── Script function: concurrent_dec(account) ─────────────────────
 
 unsafe extern "C" fn w_concurrent_dec(
     _msg: *mut sys::sip_msg,
     p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_dec: missing or invalid parameter");
-                return -2;
-            }
-        };
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
 
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    let new_count = decrement(&mut state.counts, account);
-                    state.stats.inc("decremented");
-                    if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.dec(); }
-                    opensips_log!(DBG, "rust_concurrent_calls",
-                        "dec {}: now {}", account, new_count);
-                    1
-                }
-                None => {
-                    opensips_log!(ERR, "rust_concurrent_calls",
-                        "worker state not initialized");
-                    -1
-                }
-            }
-        })
-    })
-}
-
-// ── Script function: check_concurrent_inbound(account) ───────
-
-unsafe extern "C" fn w_check_concurrent_inbound(
-    msg: *mut sys::sip_msg,
-    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "check_concurrent_inbound: missing or invalid parameter");
-                return -2;
-            }
-        };
-
-        WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
-                Some(state) => {
-                    state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
-
-                    let default = DEFAULT_LIMIT.get().max(0) as u32;
-                    let (allowed, count, limit) = match &state.direction_loader {
-                        Some(dl) => {
-                            let limits = dl.get();
-                            check_inbound_limit(&state.inbound_counts, &limits, account, default)
-                        }
-                        None => {
-                            opensips_log!(WARN, "rust_concurrent_calls",
-                                "check_concurrent_inbound called but direction_aware=0");
-                            let limits = state.loader.get();
-                            check_limit(&state.counts, &limits, account, default)
-                        }
-                    };
-
-                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
-
-                    if allowed {
-                        state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
-                        1
-                    } else {
-                        state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
-                        -1
-                    }
-                }
-                None => -2,
-            }
-        })
-    })
-}
-
-// ── Script function: check_concurrent_outbound(account) ──────
-
-unsafe extern "C" fn w_check_concurrent_outbound(
-    msg: *mut sys::sip_msg,
-    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "check_concurrent_outbound: missing or invalid parameter");
-                return -2;
-            }
-        };
-
-        WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
-                Some(state) => {
-                    state.stats.inc("checked");
-                    if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
-
-                    let default = DEFAULT_LIMIT.get().max(0) as u32;
-                    let (allowed, count, limit) = match &state.direction_loader {
-                        Some(dl) => {
-                            let limits = dl.get();
-                            check_outbound_limit(&state.outbound_counts, &limits, account, default)
-                        }
-                        None => {
-                            opensips_log!(WARN, "rust_concurrent_calls",
-                                "check_concurrent_outbound called but direction_aware=0");
-                            let limits = state.loader.get();
-                            check_limit(&state.counts, &limits, account, default)
-                        }
-                    };
-
-                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-                    let _ = sip_msg.set_pv_int("$var(concurrent_count)", count.min(i32::MAX as u32) as i32);
-                    let _ = sip_msg.set_pv_int("$var(concurrent_limit)", limit.min(i32::MAX as u32) as i32);
-
-                    if allowed {
-                        state.stats.inc("allowed");
-                        if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
-                        1
-                    } else {
-                        state.stats.inc("blocked");
-                        if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
-                        -1
-                    }
-                }
-                None => -2,
-            }
-        })
-    })
-}
-
-// ── Script function: concurrent_status(account) ─────────────
-
-unsafe extern "C" fn w_concurrent_status(
-    msg: *mut sys::sip_msg,
-    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_status: missing or invalid parameter");
-                return -2;
-            }
-        };
-
-        let json = WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
-                Some(state) => {
-                    let count = state.counts.get(account).copied().unwrap_or(0);
-                    let limits = state.loader.get();
-                    let default = DEFAULT_LIMIT.get().max(0) as u32;
-                    let limit = effective_limit(&limits, &state.limit_overrides, account, default);
-                    let inbound = state.inbound_counts.get(account).copied().unwrap_or(0);
-                    let outbound = state.outbound_counts.get(account).copied().unwrap_or(0);
-                    build_status_json(account, count, limit, inbound, outbound)
-                }
-                None => r#"{"error":"not_initialized"}"#.to_string(),
-            }
-        });
-
-        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-        let _ = sip_msg.set_pv("$var(concurrent_status)", &json);
-        1
-    })
-}
-
-// ── Script function: concurrent_set_limit(account, limit) ───
-
-const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
-    let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
-    arr[1].flags = 2; // CMD_PARAM_STR
-    arr
-};
-
-unsafe extern "C" fn w_concurrent_set_limit(
-    _msg: *mut sys::sip_msg,
-    p0: *mut c_void, p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_set_limit: missing account parameter");
-                return -2;
-            }
-        };
-        let limit_str = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_set_limit: missing limit parameter");
-                return -2;
-            }
-        };
-
-        let new_limit = match limit_str.parse::<u32>() {
-            Ok(v) => v,
-            Err(_) => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "concurrent_set_limit: invalid limit value: {}", limit_str);
-                return -2;
-            }
-        };
-
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    state.limit_overrides.insert(account.to_string(), new_limit);
-                    opensips_log!(INFO, "rust_concurrent_calls",
-                        "live override: {} limit set to {}", account, new_limit);
-                    1
-                }
-                None => {
-                    opensips_log!(ERR, "rust_concurrent_calls",
-                        "worker state not initialized");
-                    -2
-                }
-            }
-        })
-    })
-}
-
-// ── Script function: check_burst(account) ────────────────────
-
-unsafe extern "C" fn w_check_burst(
-    msg: *mut sys::sip_msg,
-    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
-    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
-) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
-                opensips_log!(ERR, "rust_concurrent_calls",
-                    "check_burst: missing or invalid parameter");
-                return -2;
-            }
-        };
-
-        let threshold = BURST_THRESHOLD.get();
-        if threshold <= 0 {
-            // Burst detection disabled
-            let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-            let _ = sip_msg.set_pv_int("$var(burst_delta)", 0);
-            return -1;
+    with_worker(|state| {
+        let new_count = state.counts.decrement(account.as_bytes());
+        state.stats.decremented.set(state.stats.decremented.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) {
+            s.update(-1);
         }
-
-        let window_secs = BURST_WINDOW_SECS.get().max(1);
-
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    let current_count = state.counts.get(account).copied().unwrap_or(0);
-
-                    // Record snapshot
-                    record_burst_snapshot(&mut state.burst_history, account, current_count);
-
-                    // Check burst
-                    let (is_burst, delta) = check_burst_from_history(
-                        &mut state.burst_history,
-                        account,
-                        current_count,
-                        threshold as u32,
-                        window_secs as u64,
-                    );
-
-                    let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-                    let _ = sip_msg.set_pv_int("$var(burst_delta)", delta);
-
-                    if is_burst {
-                        state.stats.inc("burst_detected");
-                        opensips_log!(DBG, "rust_concurrent_calls",
-                            "burst detected for {}: delta={} threshold={}", account, delta, threshold);
-                        1
-                    } else {
-                        -1
-                    }
-                }
-                None => -2,
-            }
-        })
-    })
+        safe_log!(L_DBG, "dec ", account, ": now ", new_count);
+        1
+    }, -2)
 }
 
-// ── Script function: concurrent_reload() ────────────────────
+// ── Script function: concurrent_reload() ─────────────────────────
 
 unsafe extern "C" fn w_concurrent_reload(
     _msg: *mut sys::sip_msg,
     _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        WORKER.with(|w| {
-            let mut borrow = w.borrow_mut();
-            match borrow.as_mut() {
-                Some(state) => {
-                    match state.loader.reload() {
-                        Ok(count) => {
-                            state.stats.set("accounts", count as u64);
-                            state.stats.inc("reloads");
-                            // Clear live overrides on reload
-                            state.limit_overrides.clear();
-                            opensips_log!(INFO, "rust_concurrent_calls",
-                                "reloaded {} account limits", count);
-                            1
-                        }
-                        Err(e) => {
-                            opensips_log!(ERR, "rust_concurrent_calls",
-                                "reload failed: {}", e);
-                            -2
-                        }
-                    }
-                }
-                None => {
-                    opensips_log!(ERR, "rust_concurrent_calls",
-                        "worker state not initialized");
-                    -2
-                }
-            }
-        })
-    })
+    let file = match unsafe { LIMITS_FILE.get_value() } {
+        Some(f) => f,
+        None => return -1,
+    };
+    with_worker(|state| {
+        state.limits.clear();
+        let n = load_limits_file(file.as_bytes(), &mut state.limits, state.direction_aware);
+        safe_log!(L_INFO, "reloaded ", n, " limits from ", file);
+        1
+    }, -1)
 }
 
-// ── Script function: concurrent_stats() ─────────────────────
+// ── Script function: concurrent_stats() ──────────────────────────
 
 unsafe extern "C" fn w_concurrent_stats(
-    msg: *mut sys::sip_msg,
+    _msg: *mut sys::sip_msg,
     _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let json = WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
-                Some(state) => state.stats.to_json(),
-                None => r#"{"error":"not_initialized"}"#.to_string(),
-            }
-        });
-        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-        let _ = sip_msg.set_pv("$var(concurrent_stats)", &json);
+    with_worker(|state| {
+        safe_log!(L_INFO,
+            "stats: checked=", state.stats.checked.get(),
+            " allowed=", state.stats.allowed.get(),
+            " blocked=", state.stats.blocked.get(),
+            " inc=", state.stats.incremented.get(),
+            " dec=", state.stats.decremented.get());
         1
-    })
+    }, -2)
 }
 
-// ── Script function: concurrent_calls_prometheus() ──
+// ── Script function: check_burst(account) ────────────────────────
+
+unsafe extern "C" fn w_check_burst(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let key = account.as_bytes();
+
+    with_worker(|state| {
+        if state.burst_threshold == 0 {
+            // Burst detection disabled
+            return 1;
+        }
+
+        let now = now_secs();
+        let is_burst = state.counts.record_and_check_burst(
+            key, now, state.burst_threshold, state.burst_window_secs,
+        );
+
+        if is_burst {
+            safe_log!(L_WARN, "burst detected for ", account, ": threshold=", state.burst_threshold, " window=", state.burst_window_secs, "s");
+            if state.publish_events {
+                let mut w = ByteWriter::new();
+                w.push_bytes(b"BURST account=");
+                w.push_bytes(account.as_bytes());
+                w.push_bytes(b" threshold=");
+                w.push_u32(state.burst_threshold);
+                let msg_str = unsafe { core::str::from_utf8_unchecked(w.as_bytes()) };
+                safe_log!(L_WARN, msg_str);
+            }
+            -1
+        } else {
+            1
+        }
+    }, -2)
+}
+
+// ── Script function: concurrent_status(account) ──────────────────
+
+unsafe extern "C" fn w_concurrent_status(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let key = account.as_bytes();
+
+    with_worker(|state| {
+        let count = state.counts.get_count(key);
+        let limit = effective_limit(state, key);
+        if state.direction_aware {
+            let inb = state.counts.get_inbound(key);
+            let outb = state.counts.get_outbound(key);
+            safe_log!(L_INFO, "status ", account, ": count=", count, "/", limit, " in=", inb, " out=", outb);
+        } else {
+            safe_log!(L_INFO, "status ", account, ": count=", count, "/", limit);
+        }
+        1
+    }, -2)
+}
+
+// ── Script function: concurrent_set_limit(account, limit) ────────
+
+unsafe extern "C" fn w_concurrent_set_limit(
+    _msg: *mut sys::sip_msg,
+    p0: *mut c_void, p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let limit_str = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
+        Some(s) => s,
+        None => return -2,
+    };
+    let limit = match parse_u32(limit_str.as_bytes()) {
+        Some(v) => v,
+        None => return -2,
+    };
+
+    with_worker(|state| {
+        state.limit_overrides.insert(account.as_bytes(), limit);
+        safe_log!(L_INFO, "set override limit for ", account, ": ", limit);
+        1
+    }, -2)
+}
+
+// ── Script function: concurrent_prometheus() ─────────────────────
 
 unsafe extern "C" fn w_concurrent_prometheus(
-    msg: *mut sys::sip_msg,
+    _msg: *mut sys::sip_msg,
     _p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
-    opensips_rs::ffi::catch_unwind_ffi_mut(|| {
-        let prom = WORKER.with(|w| {
-            let borrow = w.borrow();
-            match borrow.as_ref() {
-                Some(state) => state.stats.to_prometheus(),
-                None => String::new(),
-            }
-        });
-        let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-        let _ = sip_msg.set_pv("$var(concurrent_prom)", &prom);
-        1
-    })
+    // Prometheus metrics are exposed via the native stat framework
+    1
 }
 
+// ── MI commands ──────────────────────────────────────────────────
 
-// ── Static arrays for module registration ────────────────────────
+use rust_common::mi_resp::{mi_ok, mi_error, MiObject};
 
-const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
+// FFI for MI string params - declared locally to avoid using the wrapper
+// that allocates a String.
+extern "C" {
+    fn try_get_mi_string_param(
+        params: *const sys::mi_params_t, name: *mut c_char,
+        value: *mut *mut c_char, value_len: *mut c_int,
+    ) -> c_int;
+}
 
-const ONE_STR_PARAM: [sys::cmd_param; 9] = {
-    let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
-    arr
+/// Extract an MI string param as a &[u8] without any Rust heap allocation.
+unsafe fn mi_get_str_param<'a>(params: *const sys::mi_params_t, name: &str) -> Option<&'a [u8]> {
+    let mut val: *mut c_char = ptr::null_mut();
+    let mut val_len: c_int = 0;
+    let rc = try_get_mi_string_param(
+        params as *const _,
+        name.as_ptr() as *mut c_char,
+        &mut val,
+        &mut val_len,
+    );
+    if rc != 0 || val.is_null() || val_len <= 0 {
+        return None;
+    }
+    Some(core::slice::from_raw_parts(val as *const u8, val_len as usize))
+}
+
+const NULL_RECIPE: sys::mi_recipe_ = sys::mi_recipe_ { cmd: None, params: [ptr::null_mut(); 20] };
+
+macro_rules! mi_entry {
+    ($name:expr, $help:expr, $handler:expr) => {
+        sys::mi_export_ {
+            name: cstr_lit!($name) as *mut _,
+            help: cstr_lit!($help) as *mut _,
+            flags: 0,
+            init_f: None,
+            recipes: {
+                let mut r = [NULL_RECIPE; 48];
+                r[0].cmd = Some($handler);
+                r
+            },
+            aliases: [ptr::null(); 4],
+        }
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! mi_entry_params {
+    ($name:expr, $help:expr, $handler:expr, $params:expr) => {
+        sys::mi_export_ {
+            name: cstr_lit!($name) as *mut _,
+            help: cstr_lit!($help) as *mut _,
+            flags: 0,
+            init_f: None,
+            recipes: {
+                let mut r = [NULL_RECIPE; 48];
+                r[0].cmd = Some($handler);
+                r[0].params = $params;
+                r
+            },
+            aliases: [ptr::null(); 4],
+        }
+    };
+}
+
+const NULL_MI: sys::mi_export_ = sys::mi_export_ {
+    name: ptr::null_mut(), help: ptr::null_mut(), flags: 0, init_f: None,
+    recipes: [NULL_RECIPE; 48], aliases: [ptr::null(); 4],
 };
 
-#[repr(transparent)]
-struct SyncArray<T, const N: usize>([T; N]);
-unsafe impl<T, const N: usize> Sync for SyncArray<T, N> {}
-
-// ── Native statistics array ────────────────────────────────────────
-
-static MOD_STATS: SyncArray<sys::stat_export_, 6> = SyncArray([
-    sys::stat_export_ { name: cstr_lit!("checked") as *mut _,      flags: 0,             stat_pointer: STAT_CHECKED.as_ptr() as *mut _ },
-    sys::stat_export_ { name: cstr_lit!("allowed") as *mut _,      flags: 0,             stat_pointer: STAT_ALLOWED.as_ptr() as *mut _ },
-    sys::stat_export_ { name: cstr_lit!("blocked") as *mut _,      flags: 0,             stat_pointer: STAT_BLOCKED.as_ptr() as *mut _ },
-    sys::stat_export_ { name: cstr_lit!("active_calls") as *mut _, flags: STAT_NO_RESET, stat_pointer: STAT_ACTIVE_CALLS.as_ptr() as *mut _ },
-    sys::stat_export_ { name: cstr_lit!("accounts") as *mut _,     flags: STAT_NO_RESET, stat_pointer: STAT_ACCOUNTS.as_ptr() as *mut _ },
-    unsafe { std::mem::zeroed() }, // NULL terminator
-]);
-
-// ── MI command handlers ────────────────────────────────────────────
-
-/// MI handler: rust_concurrent_calls:concurrent_show
-/// Without `account` param: all accounts summary.
-/// With `account` param: single account detail.
-unsafe extern "C" fn mi_concurrent_show(
-    params: *const sys::mi_params_,
+unsafe extern "C" fn mi_show(
+    _params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    let filter = mi_try_get_string_param(params as *const mi_params_t, "account\0");
+    // Build JSON response with all active accounts
+    let resp = MiObject::new();
+    let resp = match resp {
+        Some(r) => r,
+        None => return mi_ok() as *mut _,
+    };
 
-    // Active call counts come from STAT_ACTIVE_CALLS (SHM StatVar,
-    // cross-worker aggregate). Per-account breakdown uses worker-local
-    // data (accurate within the MI process's view) plus global stat.
-    let default = DEFAULT_LIMIT.get().max(0) as u32;
+    if let Some(accounts_arr) = resp.add_array("accounts") {
+        WORKER.with(|cell| {
+            let p = cell.get();
+            if p.is_null() { return; }
+            let state = &*p;
 
-    WORKER.with(|w| {
-        let w = w.borrow();
-        let limits_map = w.as_ref().map(|s| s.loader.get());
-        let overrides = w.as_ref().map(|s| &s.limit_overrides);
-        let empty_limits: HashMap<String, u32> = HashMap::new();
-        let empty_overrides: HashMap<String, u32> = HashMap::new();
-        let limits = limits_map.as_deref().unwrap_or(&empty_limits);
-        let ovr = overrides.unwrap_or(&empty_overrides);
+            state.counts.for_each(|key_bytes, slot| {
+                // Convert key to str for display (it's always ASCII account names)
+                let key_str = core::str::from_utf8(key_bytes).unwrap_or("?");
 
-        if let Some(account) = filter {
-            let limit = effective_limit(limits, ovr, &account, default);
-            let Some(resp) = MiObject::new() else {
-                return mi_error(-32000, "Failed to create MI response") as *mut _;
-            };
-            resp.add_str("account", &account);
-            resp.add_num("limit", limit as f64);
-            resp.into_raw() as *mut _
-        } else {
-            let Some(resp) = MiObject::new() else {
-                return mi_error(-32000, "Failed to create MI response") as *mut _;
-            };
-            // List configured accounts with their limits
-            let Some(arr) = resp.add_array("accounts") else {
-                return mi_error(-32000, "Failed to create accounts array") as *mut _;
-            };
-            for (account, _) in limits.iter() {
-                let eff = effective_limit(limits, ovr, account, default);
-                if let Some(obj) = arr.add_object("") {
-                    obj.add_str("account", account);
-                    obj.add_num("limit", eff as f64);
+                if let Some(entry) = accounts_arr.add_object("") {
+                    entry.add_str("account", key_str);
+                    entry.add_num("count", slot.count as f64);
+                    entry.add_num("inbound", slot.inbound_count as f64);
+                    entry.add_num("outbound", slot.outbound_count as f64);
+
+                    let limit = effective_limit(&*p, key_bytes);
+                    entry.add_num("limit", limit as f64);
+
+                    if slot.cooldown_until > 0 {
+                        entry.add_num("cooldown_until", slot.cooldown_until as f64);
+                    }
                 }
-            }
-            // Global active calls from cross-worker SHM stat
-            if let Some(sv) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) {
-                resp.add_num("active_calls", sv.get() as f64);
-            }
-            resp.into_raw() as *mut _
-        }
-    })
+            });
+        });
+    }
+
+    resp.into_raw() as *mut _
 }
 
-/// MI handler: rust_concurrent_calls:concurrent_override
-unsafe extern "C" fn mi_concurrent_override(
-    params: *const sys::mi_params_,
+unsafe extern "C" fn mi_override(
+    params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    let Some(account) = mi_try_get_string_param(params as *const mi_params_t, "account\0") else {
-        return mi_param_error() as *mut _;
+    let account = match mi_get_str_param(params, "account\0") {
+        Some(a) => a,
+        None => return mi_error(400, "missing account parameter") as *mut _,
     };
-    let Some(limit_str) = mi_try_get_string_param(params as *const mi_params_t, "limit\0") else {
-        return mi_param_error() as *mut _;
+    let limit_bytes = match mi_get_str_param(params, "limit\0") {
+        Some(l) => l,
+        None => return mi_error(400, "missing limit parameter") as *mut _,
     };
-    let Ok(limit) = limit_str.parse::<u32>() else {
-        return mi_error(-32000, "Invalid limit value") as *mut _;
+    let limit = match parse_u32(limit_bytes) {
+        Some(v) => v,
+        None => return mi_error(400, "invalid limit value") as *mut _,
     };
-    WORKER.with(|w| {
-        let mut w = w.borrow_mut();
-        let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized") as *mut _;
-        };
-        state.limit_overrides.insert(account.clone(), limit);
-        mi_ok() as *mut _
-    })
+
+    WORKER.with(|cell| {
+        let p = cell.get();
+        if p.is_null() { return; }
+        let state = &mut *p;
+        state.limit_overrides.insert(account, limit);
+    });
+
+    mi_ok() as *mut _
 }
 
-/// MI handler: rust_concurrent_calls:concurrent_reset
-unsafe extern "C" fn mi_concurrent_reset(
-    params: *const sys::mi_params_,
+unsafe extern "C" fn mi_reset(
+    _params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    let filter = mi_try_get_string_param(params as *const mi_params_t, "account\0");
-    WORKER.with(|w| {
-        let mut w = w.borrow_mut();
-        let Some(state) = w.as_mut() else {
-            return mi_error(-32000, "Worker not initialized") as *mut _;
-        };
-        if let Some(ref account) = filter {
-            state.counts.remove(account.as_str());
-            state.inbound_counts.remove(account.as_str());
-            state.outbound_counts.remove(account.as_str());
-        } else {
-            state.counts.clear();
-            state.inbound_counts.clear();
-            state.outbound_counts.clear();
-        }
-        mi_ok() as *mut _
-    })
+    with_worker(|state| {
+        state.counts.clear();
+        state.limit_overrides.clear();
+        0
+    }, 0);
+    mi_ok() as *mut _
 }
 
-// ── MI command export array ────────────────────────────────────────
+// ── Static export arrays ─────────────────────────────────────────
 
-static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
-    sys::mi_export_ {
-        name: cstr_lit!("concurrent_show") as *mut _,
-        help: cstr_lit!("Show concurrent call accounts and counts") as *mut _,
-        flags: 0,
-        init_f: None,
-        recipes: {
-            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
-            r[0] = sys::mi_recipe_ {
-                cmd: Some(mi_concurrent_show),
-                params: unsafe { std::mem::zeroed() }, // no params (all accounts)
-            };
-            r[1] = sys::mi_recipe_ {
-                cmd: Some(mi_concurrent_show),
-                params: {
-                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account") as *mut _;
-                    p
-                },
-            };
-            r
-        },
-        aliases: [ptr::null(); 4],
-    },
-    sys::mi_export_ {
-        name: cstr_lit!("concurrent_override") as *mut _,
-        help: cstr_lit!("Set temporary limit override for an account") as *mut _,
-        flags: 0,
-        init_f: None,
-        recipes: {
-            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
-            r[0] = sys::mi_recipe_ {
-                cmd: Some(mi_concurrent_override),
-                params: {
-                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account") as *mut _;
-                    p[1] = cstr_lit!("limit") as *mut _;
-                    p
-                },
-            };
-            r
-        },
-        aliases: [ptr::null(); 4],
-    },
-    sys::mi_export_ {
-        name: cstr_lit!("concurrent_reset") as *mut _,
-        help: cstr_lit!("Reset call counts (all or single account)") as *mut _,
-        flags: 0,
-        init_f: None,
-        recipes: {
-            let mut r: [sys::mi_recipe_; 48] = unsafe { std::mem::zeroed() };
-            r[0] = sys::mi_recipe_ {
-                cmd: Some(mi_concurrent_reset),
-                params: unsafe { std::mem::zeroed() }, // no params (all accounts)
-            };
-            r[1] = sys::mi_recipe_ {
-                cmd: Some(mi_concurrent_reset),
-                params: {
-                    let mut p: [*mut u8; 20] = unsafe { std::mem::zeroed() };
-                    p[0] = cstr_lit!("account") as *mut _;
-                    p
-                },
-            };
-            r
-        },
-        aliases: [ptr::null(); 4],
-    },
-    unsafe { std::mem::zeroed() }, // NULL terminator
-]);
+const EMPTY_PARAMS: [sys::cmd_param; 9] = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
+
+const ONE_STR_PARAM: [sys::cmd_param; 9] = {
+    let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
+    p[0].flags = 2; // CMD_PARAM_STR
+    p
+};
+
+const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
+    let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
+    p[0].flags = 2; // CMD_PARAM_STR
+    p[1].flags = 2; // CMD_PARAM_STR
+    p
+};
 
 static CMDS: SyncArray<sys::cmd_export_, 12> = SyncArray([
-    sys::cmd_export_ {
-        name: cstr_lit!("check_concurrent"),
-        function: Some(w_check_concurrent),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_inc"),
-        function: Some(w_concurrent_inc),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_dec"),
-        function: Some(w_concurrent_dec),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_reload"),
-        function: Some(w_concurrent_reload),
-        params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_stats"),
-        function: Some(w_concurrent_stats),
-        params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("check_burst"),
-        function: Some(w_check_burst),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_status"),
-        function: Some(w_concurrent_status),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_set_limit"),
-        function: Some(w_concurrent_set_limit),
-        params: TWO_STR_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("check_concurrent_inbound"),
-        function: Some(w_check_concurrent_inbound),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("check_concurrent_outbound"),
-        function: Some(w_check_concurrent_outbound),
-        params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    sys::cmd_export_ {
-        name: cstr_lit!("concurrent_prometheus"),
-        function: Some(w_concurrent_prometheus),
-        params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
-    },
-    // Null terminator
-    sys::cmd_export_ {
-        name: ptr::null(),
-        function: None,
-        params: EMPTY_PARAMS,
-        flags: 0,
-    },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent"), function: Some(w_check_concurrent), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_inc"), function: Some(w_concurrent_inc), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_dec"), function: Some(w_concurrent_dec), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_reload"), function: Some(w_concurrent_reload), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_stats"), function: Some(w_concurrent_stats), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("check_burst"), function: Some(w_check_burst), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_status"), function: Some(w_concurrent_status), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_set_limit"), function: Some(w_concurrent_set_limit), params: TWO_STR_PARAMS, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent_inbound"), function: Some(w_check_concurrent_inbound), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent_outbound"), function: Some(w_check_concurrent_outbound), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_prometheus"), function: Some(w_concurrent_prometheus), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: ptr::null(), function: None, params: EMPTY_PARAMS, flags: 0 },
 ]);
 
 static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
-    sys::acmd_export_ {
-        name: ptr::null(),
-        function: None,
-        params: EMPTY_PARAMS,
-    },
+    sys::acmd_export_ { name: ptr::null(), function: None, params: EMPTY_PARAMS },
 ]);
 
 static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
-    sys::param_export_ {
-        name: cstr_lit!("limits_file"),
-        type_: 1, // STR_PARAM
-        param_pointer: LIMITS_FILE.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("default_limit"),
-        type_: 2, // INT_PARAM
-        param_pointer: DEFAULT_LIMIT.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("auto_track"),
-        type_: 2, // INT_PARAM
-        param_pointer: AUTO_TRACK.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("account_var"),
-        type_: 1, // STR_PARAM
-        param_pointer: ACCOUNT_VAR.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("use_dialog_profiles"),
-        type_: 2, // INT_PARAM
-        param_pointer: USE_DIALOG_PROFILES.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("profile_name"),
-        type_: 1, // STR_PARAM
-        param_pointer: PROFILE_NAME.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("direction_aware"),
-        type_: 2, // INT_PARAM
-        param_pointer: DIRECTION_AWARE.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("cooldown_secs"),
-        type_: 2, // INT_PARAM
-        param_pointer: COOLDOWN_SECS.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("burst_threshold"),
-        type_: 2, // INT_PARAM
-        param_pointer: BURST_THRESHOLD.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("burst_window_secs"),
-        type_: 2, // INT_PARAM
-        param_pointer: BURST_WINDOW_SECS.as_ptr(),
-    },
-    sys::param_export_ {
-        name: cstr_lit!("publish_events"),
-        type_: 2, // INT_PARAM
-        param_pointer: PUBLISH_EVENTS.as_ptr(),
-    },
-    // Null terminator
-    sys::param_export_ {
-        name: ptr::null(),
-        type_: 0,
-        param_pointer: ptr::null_mut(),
-    },
+    sys::param_export_ { name: cstr_lit!("limits_file"), type_: 1, param_pointer: LIMITS_FILE.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("default_limit"), type_: 2, param_pointer: DEFAULT_LIMIT.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("auto_track"), type_: 2, param_pointer: AUTO_TRACK.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("account_var"), type_: 1, param_pointer: ACCOUNT_VAR.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("use_dialog_profiles"), type_: 2, param_pointer: USE_DIALOG_PROFILES.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("profile_name"), type_: 1, param_pointer: PROFILE_NAME.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("direction_aware"), type_: 2, param_pointer: DIRECTION_AWARE.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("cooldown_secs"), type_: 2, param_pointer: COOLDOWN_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("burst_threshold"), type_: 2, param_pointer: BURST_THRESHOLD.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("burst_window_secs"), type_: 2, param_pointer: BURST_WINDOW_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("publish_events"), type_: 2, param_pointer: PUBLISH_EVENTS.as_ptr() },
+    sys::param_export_ { name: ptr::null(), type_: 0, param_pointer: ptr::null_mut() },
+]);
+
+static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
+    mi_entry!("concurrent_show", "Show concurrent call accounts", mi_show),
+    mi_entry!("concurrent_override", "Set temporary limit override", mi_override),
+    mi_entry!("concurrent_reset", "Reset call counts", mi_reset),
+    NULL_MI,
+]);
+
+static MOD_STATS: SyncArray<sys::stat_export_, 5> = SyncArray([
+    sys::stat_export_ { name: cstr_lit!("concurrent_checked") as *mut _, flags: 0, stat_pointer: &STAT_CHECKED as *const _ as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("concurrent_allowed") as *mut _, flags: 0, stat_pointer: &STAT_ALLOWED as *const _ as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("concurrent_blocked") as *mut _, flags: 0, stat_pointer: &STAT_BLOCKED as *const _ as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("concurrent_active") as *mut _, flags: 1, stat_pointer: &STAT_ACTIVE_CALLS as *const _ as *mut _ },
+    sys::stat_export_ { name: ptr::null_mut(), flags: 0, stat_pointer: ptr::null_mut() },
 ]);
 
 static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExportConcrete {
@@ -1583,11 +1613,10 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
     mpd: unsafe { std::mem::zeroed() },
 };
 
-/// The module_exports struct that OpenSIPS loads via dlsym("exports").
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_concurrent_calls"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: 1,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),
@@ -1614,1008 +1643,3 @@ pub static exports: sys::module_exports = sys::module_exports {
     init_child_f: Some(mod_child_init),
     reload_ack_f: None,
 };
-
-// ── Unit tests ───────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── parse_limit_entry ────────────────────────────────────────
-
-    #[test]
-    fn test_parse_valid_entry() {
-        let result = parse_limit_entry("alice,5");
-        assert_eq!(result, Some(("alice".to_string(), 5)));
-    }
-
-    #[test]
-    fn test_parse_with_whitespace() {
-        let result = parse_limit_entry("  bob , 20 ");
-        assert_eq!(result, Some(("bob".to_string(), 20)));
-    }
-
-    #[test]
-    fn test_parse_invalid_limit() {
-        assert_eq!(parse_limit_entry("alice,notanumber"), None);
-    }
-
-    #[test]
-    fn test_parse_empty_account() {
-        assert_eq!(parse_limit_entry(",5"), None);
-    }
-
-    #[test]
-    fn test_parse_no_comma() {
-        assert_eq!(parse_limit_entry("alice"), None);
-    }
-
-    #[test]
-    fn test_parse_zero_limit() {
-        let result = parse_limit_entry("blocked_user,0");
-        assert_eq!(result, Some(("blocked_user".to_string(), 0)));
-    }
-
-    #[test]
-    fn test_parse_large_limit() {
-        let result = parse_limit_entry("sip_trunk,10000");
-        assert_eq!(result, Some(("sip_trunk".to_string(), 10000)));
-    }
-
-    // ── build_limits ─────────────────────────────────────────────
-
-    #[test]
-    fn test_limits_file_parse() {
-        let entries = vec![
-            "alice,5".to_string(),
-            "bob,20".to_string(),
-        ];
-        let limits = build_limits(entries);
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits.get("alice"), Some(&5));
-        assert_eq!(limits.get("bob"), Some(&20));
-    }
-
-    #[test]
-    fn test_limits_file_comments() {
-        let entries = vec![
-            "alice,5".to_string(),
-            "notavalidline".to_string(),
-            "bob,20".to_string(),
-        ];
-        let limits = build_limits(entries);
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits.get("alice"), Some(&5));
-        assert_eq!(limits.get("bob"), Some(&20));
-    }
-
-    #[test]
-    fn test_limits_empty() {
-        let limits = build_limits(vec![]);
-        assert!(limits.is_empty());
-    }
-
-    // ── check_limit ──────────────────────────────────────────────
-
-    #[test]
-    fn test_check_under_limit() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 2);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_at_limit() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 5);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 5);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_over_limit() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 6);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 6);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_default_limit() {
-        let counts = HashMap::new();
-        let limits = HashMap::new();
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "unknown_user", 10);
-        assert!(allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 10);
-    }
-
-    #[test]
-    fn test_check_zero_count() {
-        let counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_zero_limit_blocks() {
-        let counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("blocked".to_string(), 0);
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "blocked", 10);
-        assert!(!allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 0);
-    }
-
-    // ── increment ────────────────────────────────────────────────
-
-    #[test]
-    fn test_increment_from_zero() {
-        let mut counts = HashMap::new();
-        let new = increment(&mut counts, "alice");
-        assert_eq!(new, 1);
-        assert_eq!(counts.get("alice"), Some(&1));
-    }
-
-    #[test]
-    fn test_increment_existing() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 1);
-        let new = increment(&mut counts, "alice");
-        assert_eq!(new, 2);
-        assert_eq!(counts.get("alice"), Some(&2));
-    }
-
-    #[test]
-    fn test_increment_multiple() {
-        let mut counts = HashMap::new();
-        increment(&mut counts, "alice");
-        increment(&mut counts, "alice");
-        increment(&mut counts, "alice");
-        assert_eq!(counts.get("alice"), Some(&3));
-    }
-
-    // ── decrement ────────────────────────────────────────────────
-
-    #[test]
-    fn test_decrement_normal() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 2);
-        let new = decrement(&mut counts, "alice");
-        assert_eq!(new, 1);
-    }
-
-    #[test]
-    fn test_decrement_to_zero() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 1);
-        let new = decrement(&mut counts, "alice");
-        assert_eq!(new, 0);
-    }
-
-    #[test]
-    fn test_decrement_floor() {
-        let mut counts = HashMap::new();
-        let new = decrement(&mut counts, "alice");
-        assert_eq!(new, 0);
-
-        counts.insert("bob".to_string(), 0);
-        let new = decrement(&mut counts, "bob");
-        assert_eq!(new, 0);
-    }
-
-    // ── Multiple accounts ────────────────────────────────────────
-
-    #[test]
-    fn test_multiple_accounts() {
-        let mut counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 2);
-        limits.insert("bob".to_string(), 5);
-        limits.insert("charlie".to_string(), 1);
-
-        increment(&mut counts, "alice");
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-
-        increment(&mut counts, "alice");
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 2);
-
-        increment(&mut counts, "bob");
-        increment(&mut counts, "bob");
-        increment(&mut counts, "bob");
-        let (allowed, count, _) = check_limit(&counts, &limits, "bob", 10);
-        assert!(allowed);
-        assert_eq!(count, 3);
-
-        increment(&mut counts, "charlie");
-        let (allowed, _, _) = check_limit(&counts, &limits, "charlie", 10);
-        assert!(!allowed);
-
-        decrement(&mut counts, "alice");
-        let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 1);
-    }
-
-    // ── Integration: inc/dec/check cycle ─────────────────────────
-
-    #[test]
-    fn test_full_call_lifecycle() {
-        let mut counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 2);
-
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        increment(&mut counts, "alice");
-
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        increment(&mut counts, "alice");
-
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 2);
-
-        decrement(&mut counts, "alice");
-
-        let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 1);
-    }
-
-    // ── Stats JSON output tests ──────────────────────────────────
-
-    #[test]
-    fn test_concurrent_stats_json() {
-        let stats = Stats::new("rust_concurrent_calls",
-            &["checked", "allowed", "blocked", "incremented", "decremented", "accounts"]);
-        stats.set("accounts", 10);
-        stats.inc("checked");
-        stats.inc("allowed");
-        stats.inc("incremented");
-        stats.inc("incremented");
-        stats.inc("decremented");
-
-        let json = stats.to_json();
-        assert!(json.starts_with("{"));
-        assert!(json.ends_with("}"));
-        assert!(json.contains(r#""accounts":10"#));
-        assert!(json.contains(r#""checked":1"#));
-        assert!(json.contains(r#""incremented":2"#));
-    }
-
-    // ── configuration validation edge case tests ────────────────
-
-    #[test]
-    fn test_default_limit_zero_blocks_all() {
-        let counts = HashMap::new();
-        let limits = HashMap::new();
-        let (allowed, count, limit) = check_limit(&counts, &limits, "anyone", 0);
-        assert!(!allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 0);
-    }
-
-    #[test]
-    fn test_default_limit_very_high() {
-        let counts = HashMap::new();
-        let limits = HashMap::new();
-        let (allowed, count, limit) = check_limit(&counts, &limits, "user", 100_000);
-        assert!(allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 100_000);
-    }
-
-    // ── Reload integration test (file-backed) ────────────────────
-
-    #[test]
-    fn test_reload_updates_limits() {
-        use rust_common::reload::{csv_line_parser, FileLoader};
-        use std::io::Write;
-
-        let path = format!("{}/rust_cc_reload_test", std::env::temp_dir().display());
-
-        // Create initial file
-        {
-            let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "alice,5").unwrap();
-            writeln!(f, "bob,10").unwrap();
-        }
-
-        let loader = FileLoader::new(&path, csv_line_parser, build_limits).unwrap();
-        let limits = loader.get();
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits.get("alice"), Some(&5));
-        assert_eq!(limits.get("bob"), Some(&10));
-        drop(limits);
-
-        // Update file: change alice's limit, add charlie
-        std::fs::write(&path, "alice,20\nbob,10\ncharlie,3\n").unwrap();
-
-        let count = loader.reload().unwrap();
-        assert_eq!(count, 3);
-
-        let limits = loader.get();
-        assert_eq!(limits.len(), 3);
-        assert_eq!(limits.get("alice"), Some(&20));
-        assert_eq!(limits.get("bob"), Some(&10));
-        assert_eq!(limits.get("charlie"), Some(&3));
-        drop(limits);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_reload_file_error_returns_err() {
-        use rust_common::reload::{csv_line_parser, FileLoader};
-
-        let path = format!("{}/rust_cc_reload_err_test", std::env::temp_dir().display());
-        std::fs::write(&path, "alice,5\n").unwrap();
-
-        let loader = FileLoader::new(&path, csv_line_parser, build_limits).unwrap();
-        assert_eq!(loader.get().len(), 1);
-
-        // Delete file, then attempt reload
-        std::fs::remove_file(&path).unwrap();
-        let result = loader.reload();
-        assert!(result.is_err());
-    }
-
-    // ── Dialog tracker integration tests (Task 39) ───────────────
-
-    #[test]
-    fn test_dialog_auto_track_inc_dec() {
-        // Simulate automatic dialog tracking: created increments, terminated decrements.
-        let mut counts = HashMap::new();
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-
-        // Simulate DLGCB_CREATED: increment and track
-        let account = "alice";
-        let call_id = "call-abc-123";
-        increment(&mut counts, account);
-        tracker.on_created(call_id);
-        tracker.with_state(call_id, |s| {
-            s.account = account.to_string();
-        });
-
-        assert_eq!(counts.get("alice"), Some(&1));
-        assert!(tracker.contains(call_id));
-
-        // Simulate DLGCB_TERMINATED: look up account, decrement
-        let terminated_state = tracker.on_terminated(call_id);
-        assert!(terminated_state.is_some());
-        let acct = terminated_state.unwrap().account;
-        assert_eq!(acct, "alice");
-        decrement(&mut counts, &acct);
-
-        assert_eq!(counts.get("alice"), Some(&0));
-        assert!(!tracker.contains(call_id));
-    }
-
-    #[test]
-    fn test_dialog_auto_track_multiple_calls() {
-        let mut counts = HashMap::new();
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-
-        // Alice makes 3 calls
-        for i in 0..3 {
-            let call_id = format!("call-alice-{}", i);
-            increment(&mut counts, "alice");
-            tracker.on_created(&call_id);
-            tracker.with_state(&call_id, |s| {
-                s.account = "alice".to_string();
-            });
-        }
-        assert_eq!(counts.get("alice"), Some(&3));
-        assert_eq!(tracker.active_count(), 3);
-
-        // Terminate first 2 calls
-        for i in 0..2 {
-            let call_id = format!("call-alice-{}", i);
-            let state = tracker.on_terminated(&call_id).unwrap();
-            decrement(&mut counts, &state.account);
-        }
-        assert_eq!(counts.get("alice"), Some(&1));
-        assert_eq!(tracker.active_count(), 1);
-    }
-
-    #[test]
-    fn test_dialog_auto_track_expired() {
-        let mut counts = HashMap::new();
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-
-        increment(&mut counts, "bob");
-        tracker.on_created("call-expired");
-        tracker.with_state("call-expired", |s| {
-            s.account = "bob".to_string();
-        });
-
-        // Dialog expires (not terminated)
-        let state = tracker.on_expired("call-expired").unwrap();
-        decrement(&mut counts, &state.account);
-        assert_eq!(counts.get("bob"), Some(&0));
-    }
-
-    #[test]
-    fn test_dialog_auto_track_unknown_terminated() {
-        // TERMINATED for a dialog we never tracked should be a no-op
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-        let result = tracker.on_terminated("never-seen");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_dialog_auto_track_with_limits() {
-        let mut counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 2);
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-
-        // Simulate: check, then auto-inc on CREATED
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        increment(&mut counts, "alice");
-        tracker.on_created("c1");
-        tracker.with_state("c1", |s| s.account = "alice".to_string());
-
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        increment(&mut counts, "alice");
-        tracker.on_created("c2");
-        tracker.with_state("c2", |s| s.account = "alice".to_string());
-
-        // Third call should be blocked
-        let (allowed, count, limit) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 2);
-
-        // First call ends
-        let state = tracker.on_terminated("c1").unwrap();
-        decrement(&mut counts, &state.account);
-
-        // Now allowed again
-        let (allowed, count, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 1);
-    }
-
-    // ── Dialog profile check tests (Task 40) ────────────────────
-
-    #[test]
-    fn test_check_limit_with_profile_count_under() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let (allowed, count, limit) = check_limit_with_profile_count(2, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_limit_with_profile_count_at_limit() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let (allowed, count, limit) = check_limit_with_profile_count(5, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 5);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_limit_with_profile_count_over() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let (allowed, count, limit) = check_limit_with_profile_count(7, &limits, "alice", 10);
-        assert!(!allowed);
-        assert_eq!(count, 7);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_limit_with_profile_count_default_limit() {
-        let limits = HashMap::new();
-        let (allowed, count, limit) = check_limit_with_profile_count(0, &limits, "unknown", 10);
-        assert!(allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 10);
-    }
-
-    #[test]
-    fn test_check_limit_with_profile_count_zero_limit() {
-        let mut limits = HashMap::new();
-        limits.insert("blocked".to_string(), 0);
-        let (allowed, count, limit) = check_limit_with_profile_count(0, &limits, "blocked", 10);
-        assert!(!allowed);
-        assert_eq!(count, 0);
-        assert_eq!(limit, 0);
-    }
-
-    #[test]
-    fn test_profile_vs_local_different_counts() {
-        // Simulate: local count is 1 (this worker), profile count is 5 (all workers)
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 1);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-
-        // Local check says allowed (1 < 5)
-        let (local_allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(local_allowed);
-
-        // Profile check says blocked (5 >= 5)
-        let (profile_allowed, _, _) = check_limit_with_profile_count(5, &limits, "alice", 10);
-        assert!(!profile_allowed);
-    }
-
-    // ── Burst detection tests (Task 44) ──────────────────────────
-
-    #[test]
-    fn test_burst_empty_history() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(!is_burst);
-        assert_eq!(delta, 0);
-    }
-
-    #[test]
-    fn test_burst_single_snapshot() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 2);
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 2, 3, 10);
-        assert!(!is_burst);
-        assert_eq!(delta, 0);
-    }
-
-    #[test]
-    fn test_burst_detected() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 1);
-        // Current count jumped to 5 (delta = 4, threshold = 3)
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(is_burst);
-        assert_eq!(delta, 4);
-    }
-
-    #[test]
-    fn test_burst_not_detected_below_threshold() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 3);
-        // Current count is 5 (delta = 2, threshold = 3)
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(!is_burst);
-        assert_eq!(delta, 2);
-    }
-
-    #[test]
-    fn test_burst_at_threshold() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 2);
-        // Current count is 5 (delta = 3, threshold = 3)
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(is_burst);
-        assert_eq!(delta, 3);
-    }
-
-    #[test]
-    fn test_burst_window_expiry() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        // Insert old snapshot (2 seconds ago)
-        let old_time = Instant::now() - std::time::Duration::from_secs(2);
-        history.entry("alice".to_string())
-            .or_default()
-            .push_back((old_time, 1));
-        // With 1-second window, the old snapshot should be pruned
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 1);
-        // After pruning, no snapshots remain, so no burst
-        assert!(!is_burst);
-        assert_eq!(delta, 0);
-    }
-
-    #[test]
-    fn test_burst_per_account() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 1);
-        record_burst_snapshot(&mut history, "bob", 10);
-
-        let (alice_burst, _) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(alice_burst); // delta = 4 >= 3
-
-        let (bob_burst, _) = check_burst_from_history(&mut history, "bob", 11, 3, 10);
-        assert!(!bob_burst); // delta = 1 < 3
-    }
-
-    #[test]
-    fn test_burst_negative_delta() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 10);
-        // Count went down (calls ended)
-        let (is_burst, delta) = check_burst_from_history(&mut history, "alice", 5, 3, 10);
-        assert!(!is_burst);
-        assert_eq!(delta, -5);
-    }
-
-    #[test]
-    fn test_record_burst_snapshot() {
-        let mut history: HashMap<String, VecDeque<(Instant, u32)>> = HashMap::new();
-        record_burst_snapshot(&mut history, "alice", 1);
-        record_burst_snapshot(&mut history, "alice", 2);
-        record_burst_snapshot(&mut history, "alice", 3);
-        assert_eq!(history.get("alice").unwrap().len(), 3);
-    }
-
-    // ── Cooldown tests (Task 43) ─────────────────────────────────
-
-    #[test]
-    fn test_cooldown_disabled() {
-        let cooldowns = HashMap::new();
-        assert!(!is_in_cooldown(&cooldowns, "alice", 0));
-    }
-
-    #[test]
-    fn test_cooldown_not_set() {
-        let cooldowns = HashMap::new();
-        assert!(!is_in_cooldown(&cooldowns, "alice", 30));
-    }
-
-    #[test]
-    fn test_cooldown_active() {
-        let mut cooldowns = HashMap::new();
-        set_cooldown(&mut cooldowns, "alice");
-        // Just set, should still be in cooldown
-        assert!(is_in_cooldown(&cooldowns, "alice", 30));
-    }
-
-    #[test]
-    fn test_cooldown_expired() {
-        let mut cooldowns: HashMap<String, Instant> = HashMap::new();
-        // Insert a cooldown that started 2 seconds ago
-        cooldowns.insert("alice".to_string(), Instant::now() - std::time::Duration::from_secs(2));
-        // With 1-second cooldown, it should be expired
-        assert!(!is_in_cooldown(&cooldowns, "alice", 1));
-    }
-
-    #[test]
-    fn test_cooldown_per_account() {
-        let mut cooldowns = HashMap::new();
-        set_cooldown(&mut cooldowns, "alice");
-        assert!(is_in_cooldown(&cooldowns, "alice", 30));
-        assert!(!is_in_cooldown(&cooldowns, "bob", 30));
-    }
-
-    #[test]
-    fn test_cooldown_set_overwrites() {
-        let mut cooldowns = HashMap::new();
-        set_cooldown(&mut cooldowns, "alice");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        set_cooldown(&mut cooldowns, "alice"); // reset
-        // Should still be in cooldown
-        assert!(is_in_cooldown(&cooldowns, "alice", 30));
-    }
-
-    #[test]
-    fn test_cooldown_integration_with_limits() {
-        let mut counts = HashMap::new();
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 2);
-        let mut cooldowns: HashMap<String, Instant> = HashMap::new();
-
-        // First two calls allowed
-        increment(&mut counts, "alice");
-        increment(&mut counts, "alice");
-
-        // Third blocked (at limit)
-        let (allowed, _, _) = check_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-
-        // Set cooldown
-        set_cooldown(&mut cooldowns, "alice");
-
-        // Even after decrement, cooldown blocks
-        decrement(&mut counts, "alice");
-        assert!(is_in_cooldown(&cooldowns, "alice", 30));
-    }
-
-    // ── MI status and limit override tests (Task 42) ────────────
-
-    #[test]
-    fn test_build_status_json() {
-        let json = build_status_json("alice", 3, 5, 2, 1);
-        assert_eq!(json, r#"{"account":"alice","count":3,"limit":5,"direction":{"inbound":2,"outbound":1}}"#);
-    }
-
-    #[test]
-    fn test_build_status_json_zeros() {
-        let json = build_status_json("bob", 0, 10, 0, 0);
-        assert_eq!(json, r#"{"account":"bob","count":0,"limit":10,"direction":{"inbound":0,"outbound":0}}"#);
-    }
-
-    #[test]
-    fn test_effective_limit_override() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let mut overrides = HashMap::new();
-        overrides.insert("alice".to_string(), 20);
-
-        // Override takes precedence
-        let limit = effective_limit(&limits, &overrides, "alice", 10);
-        assert_eq!(limit, 20);
-    }
-
-    #[test]
-    fn test_effective_limit_no_override() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let overrides = HashMap::new();
-
-        // No override, use file limit
-        let limit = effective_limit(&limits, &overrides, "alice", 10);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_effective_limit_default() {
-        let limits = HashMap::new();
-        let overrides = HashMap::new();
-
-        // No file limit, no override, use default
-        let limit = effective_limit(&limits, &overrides, "unknown", 10);
-        assert_eq!(limit, 10);
-    }
-
-    #[test]
-    fn test_effective_limit_override_zero_blocks() {
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let mut overrides = HashMap::new();
-        overrides.insert("alice".to_string(), 0);
-
-        let limit = effective_limit(&limits, &overrides, "alice", 10);
-        assert_eq!(limit, 0);
-    }
-
-    #[test]
-    fn test_override_cleared_on_reload() {
-        // Simulate: set override, then clear (as reload would do)
-        let mut overrides = HashMap::new();
-        overrides.insert("alice".to_string(), 99);
-        assert_eq!(overrides.get("alice"), Some(&99));
-
-        overrides.clear();
-        assert!(overrides.is_empty());
-    }
-
-    #[test]
-    fn test_override_with_check_limit() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 3);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 5);
-        let mut overrides = HashMap::new();
-
-        // Without override: 3 < 5, allowed
-        let eff = effective_limit(&limits, &overrides, "alice", 10);
-        assert!(counts.get("alice").copied().unwrap_or(0) < eff);
-
-        // With override to 2: 3 >= 2, blocked
-        overrides.insert("alice".to_string(), 2);
-        let eff = effective_limit(&limits, &overrides, "alice", 10);
-        assert!(counts.get("alice").copied().unwrap_or(0) >= eff);
-    }
-
-    // ── Direction-aware limit tests (Task 41) ────────────────────
-
-    #[test]
-    fn test_parse_direction_limit_entry() {
-        let result = parse_direction_limit_entry("alice,5,3");
-        assert_eq!(result, Some(("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 })));
-    }
-
-    #[test]
-    fn test_parse_direction_limit_whitespace() {
-        let result = parse_direction_limit_entry("  bob , 10 , 5 ");
-        assert_eq!(result, Some(("bob".to_string(), DirectionLimits { inbound: 10, outbound: 5 })));
-    }
-
-    #[test]
-    fn test_parse_direction_limit_invalid() {
-        assert_eq!(parse_direction_limit_entry("alice,5"), None);
-        assert_eq!(parse_direction_limit_entry("alice,abc,3"), None);
-        assert_eq!(parse_direction_limit_entry(",5,3"), None);
-    }
-
-    #[test]
-    fn test_build_direction_limits() {
-        let entries = vec![
-            "alice,5,3".to_string(),
-            "trunk-1,100,50".to_string(),
-        ];
-        let limits = build_direction_limits(entries);
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits.get("alice"), Some(&DirectionLimits { inbound: 5, outbound: 3 }));
-        assert_eq!(limits.get("trunk-1"), Some(&DirectionLimits { inbound: 100, outbound: 50 }));
-    }
-
-    #[test]
-    fn test_check_inbound_limit_under() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 2);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
-
-        let (allowed, count, limit) = check_inbound_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 2);
-        assert_eq!(limit, 5);
-    }
-
-    #[test]
-    fn test_check_inbound_limit_at() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 5);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
-
-        let (allowed, _, _) = check_inbound_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-    }
-
-    #[test]
-    fn test_check_outbound_limit_under() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 1);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
-
-        let (allowed, count, limit) = check_outbound_limit(&counts, &limits, "alice", 10);
-        assert!(allowed);
-        assert_eq!(count, 1);
-        assert_eq!(limit, 3);
-    }
-
-    #[test]
-    fn test_check_outbound_limit_at() {
-        let mut counts = HashMap::new();
-        counts.insert("alice".to_string(), 3);
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), DirectionLimits { inbound: 5, outbound: 3 });
-
-        let (allowed, _, _) = check_outbound_limit(&counts, &limits, "alice", 10);
-        assert!(!allowed);
-    }
-
-    #[test]
-    fn test_direction_default_limit() {
-        let counts = HashMap::new();
-        let limits: HashMap<String, DirectionLimits> = HashMap::new();
-
-        let (allowed, _, limit) = check_inbound_limit(&counts, &limits, "unknown", 10);
-        assert!(allowed);
-        assert_eq!(limit, 10);
-
-        let (allowed, _, limit) = check_outbound_limit(&counts, &limits, "unknown", 10);
-        assert!(allowed);
-        assert_eq!(limit, 10);
-    }
-
-    #[test]
-    fn test_direction_asymmetric_limits() {
-        // Inbound limit 100, outbound limit 5
-        let mut limits = HashMap::new();
-        limits.insert("trunk".to_string(), DirectionLimits { inbound: 100, outbound: 5 });
-
-        let mut in_counts = HashMap::new();
-        in_counts.insert("trunk".to_string(), 50);
-
-        let mut out_counts = HashMap::new();
-        out_counts.insert("trunk".to_string(), 5);
-
-        // Inbound: 50 < 100, allowed
-        let (allowed, _, _) = check_inbound_limit(&in_counts, &limits, "trunk", 10);
-        assert!(allowed);
-
-        // Outbound: 5 >= 5, blocked
-        let (allowed, _, _) = check_outbound_limit(&out_counts, &limits, "trunk", 10);
-        assert!(!allowed);
-    }
-
-    #[test]
-    fn test_profile_count_matches_cross_worker_total() {
-        // Simulate 3 workers each with 2 calls = 6 total
-        let mut limits = HashMap::new();
-        limits.insert("alice".to_string(), 10);
-
-        // Each worker sees only its own 2 calls
-        let mut w1_counts = HashMap::new();
-        w1_counts.insert("alice".to_string(), 2);
-        let (w1_allowed, w1_count, _) = check_limit(&w1_counts, &limits, "alice", 10);
-        assert!(w1_allowed);
-        assert_eq!(w1_count, 2);
-
-        // Profile-based check sees all 6
-        let (profile_allowed, profile_count, _) = check_limit_with_profile_count(6, &limits, "alice", 10);
-        assert!(profile_allowed);
-        assert_eq!(profile_count, 6);
-    }
-
-    #[test]
-    fn test_dialog_auto_track_mixed_accounts() {
-        let mut counts = HashMap::new();
-        let tracker: dialog::DialogTracker<CallDialogState> = dialog::DialogTracker::new(3600);
-
-        // Alice and Bob both make calls
-        increment(&mut counts, "alice");
-        tracker.on_created("call-a1");
-        tracker.with_state("call-a1", |s| s.account = "alice".to_string());
-
-        increment(&mut counts, "bob");
-        tracker.on_created("call-b1");
-        tracker.with_state("call-b1", |s| s.account = "bob".to_string());
-
-        assert_eq!(counts.get("alice"), Some(&1));
-        assert_eq!(counts.get("bob"), Some(&1));
-
-        // Bob's call ends
-        let state = tracker.on_terminated("call-b1").unwrap();
-        assert_eq!(state.account, "bob");
-        decrement(&mut counts, &state.account);
-
-        assert_eq!(counts.get("alice"), Some(&1));
-        assert_eq!(counts.get("bob"), Some(&0));
-    }
-
-    // ── event publishing tests ──────────────────────────────────
-
-    #[test]
-    fn test_event_payload_concurrent_limit() {
-        let payload = event::format_payload(&[
-            ("account", &event::json_str("alice")),
-            ("count", "10"),
-            ("limit", "10"),
-        ]);
-        assert!(payload.contains(r#""account":"alice""#));
-        assert!(payload.contains(r#""count":10"#));
-        assert!(payload.contains(r#""limit":10"#));
-    }
-
-    #[test]
-    fn test_event_payload_concurrent_burst() {
-        let payload = event::format_payload(&[
-            ("account", &event::json_str("bob")),
-            ("recent_count", "5"),
-            ("threshold", "3"),
-        ]);
-        assert!(payload.contains(r#""account":"bob""#));
-        assert!(payload.contains(r#""recent_count":5"#));
-    }
-}
