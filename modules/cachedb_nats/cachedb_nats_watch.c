@@ -60,6 +60,8 @@
 
 #include "../../dprint.h"
 #include "../../str.h"
+#include "../../ipc.h"
+#include "../../mem/shm_mem.h"
 
 /*
  * EVI support: OpenSIPS 4.x provides evi_publish_event(), evi_raise_event(),
@@ -111,26 +113,42 @@ static void *_watcher_thread_fn(void *arg);
 static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
 
 /* ------------------------------------------------------------------ */
-/*  EVI event raising                                                  */
+/*  EVI event raising via IPC (thread-safe)                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * _raise_kv_change_event() -- Raise an E_NATS_KV_CHANGE EVI event.
+/*
+ * Architecture: The watcher runs as a pthread inside a SIP worker process.
+ * EVI functions (evi_get_params, evi_raise_event) use pkg_malloc which is
+ * NOT thread-safe.  To avoid heap corruption, the pthread copies event
+ * data into a shm_malloc'd struct and dispatches an IPC RPC to a SIP
+ * worker, where the EVI functions run safely in the reactor context.
  *
- * Called from the watcher thread for every KV mutation (put, delete, purge).
- * When compiled with HAVE_EVI, builds an EVI parameter set containing
- * the key, operation name, value (for puts), and revision number, then
- * raises the event through the OpenSIPS EVI subsystem.
- *
- * When EVI is not available at build time, falls back to a DBG log line
- * so KV changes are still observable during development.
- *
- * @param entry  The kvEntry delivered by kvWatcher_Next().
- * @param op     The KV operation type (put, delete, or purge).
+ * Flow:  pthread → shm_malloc + copy → ipc_dispatch_rpc → worker raises EVI → shm_free
  */
-static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
-{
+
 #ifdef HAVE_EVI
+/**
+ * IPC event struct -- carries KV change data from pthread to worker.
+ * Single allocation with flexible array for key + value strings.
+ */
+struct kv_change_ipc_event {
+	kvOperation op;
+	int         revision;
+	int         key_len;
+	int         val_len;   /* 0 when op != kvOp_Put */
+	char        data[0];   /* key\0[value\0] packed */
+};
+
+/**
+ * _kv_change_rpc_cb() -- IPC callback that raises the EVI event.
+ *
+ * Runs in a SIP worker's reactor context where pkg_malloc is safe.
+ * Reconstructs the event parameters from the shm struct, raises the
+ * EVI event, then frees the shm allocation.
+ */
+static void _kv_change_rpc_cb(int sender, void *param)
+{
+	struct kv_change_ipc_event *ev = (struct kv_change_ipc_event *)param;
 	evi_params_t *params;
 	str key_str, op_str, val_str;
 	int rev;
@@ -140,24 +158,19 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	static str pn_val = str_init("value");
 	static str pn_rev = str_init("revision");
 
-	/* Only raise if EVI event is subscribed */
-	if (evi_kv_change_id == EVI_ERROR) {
-		LM_DBG("EVI not available for kv_change event\n");
-		return;
-	}
-	if (!evi_probe_event(evi_kv_change_id))
-		return;
+	/* Short-circuit if no subscribers */
+	if (evi_kv_change_id == EVI_ERROR || !evi_probe_event(evi_kv_change_id))
+		goto done;
 
 	params = evi_get_params();
 	if (!params)
-		return;
+		goto done;
 
-	/* key */
-	key_str.s   = (char *)kvEntry_Key(entry);
-	key_str.len = strlen(key_str.s);
+	/* Reconstruct strings from packed data */
+	key_str.s   = ev->data;
+	key_str.len = ev->key_len;
 
-	/* operation -- map enum to human-readable string */
-	switch (op) {
+	switch (ev->op) {
 		case kvOp_Put:    op_str = (str){.s = "put",    .len = 3}; break;
 		case kvOp_Delete: op_str = (str){.s = "delete", .len = 6}; break;
 		default:          op_str = (str){.s = "purge",  .len = 5}; break;
@@ -168,26 +181,91 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	if (evi_param_add_str(params, &pn_op, &op_str) < 0)
 		goto err;
 
-	/* value (only for put operations -- deletes/purges have no payload) */
-	if (op == kvOp_Put) {
-		val_str.s   = (char *)kvEntry_ValueString(entry);
-		val_str.len = kvEntry_ValueLen(entry);
+	if (ev->op == kvOp_Put && ev->val_len > 0) {
+		val_str.s   = ev->data + ev->key_len + 1; /* after key\0 */
+		val_str.len = ev->val_len;
 		if (evi_param_add_str(params, &pn_val, &val_str) < 0)
 			goto err;
 	}
 
-	/* revision */
-	rev = (int)kvEntry_Revision(entry);
+	rev = ev->revision;
 	if (evi_param_add_int(params, &pn_rev, &rev) < 0)
 		goto err;
 
-	/* Dispatch the event to all subscribed EVI listeners */
 	if (evi_raise_event(evi_kv_change_id, params) < 0)
 		LM_ERR("failed to raise E_NATS_KV_CHANGE event\n");
-	return;
+	goto done;
 
 err:
 	evi_free_params(params);
+done:
+	shm_free(ev);
+}
+#endif /* HAVE_EVI */
+
+/**
+ * _raise_kv_change_event() -- Dispatch a KV change to the EVI subsystem.
+ *
+ * Called from the watcher pthread.  Copies event data into shared memory
+ * and dispatches an IPC RPC to a SIP worker for safe EVI event raising.
+ * No pkg_malloc is used in this function -- only shm_malloc (thread-safe)
+ * and ipc_dispatch_rpc (atomic pipe write, thread-safe).
+ *
+ * @param entry  The kvEntry delivered by kvWatcher_Next().
+ * @param op     The KV operation type (put, delete, or purge).
+ */
+static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
+{
+#ifdef HAVE_EVI
+	struct kv_change_ipc_event *ev;
+	const char *key;
+	const char *val = NULL;
+	int key_len, val_len = 0;
+	unsigned long alloc_size;
+
+	if (evi_kv_change_id == EVI_ERROR)
+		return;
+
+	key     = kvEntry_Key(entry);
+	key_len = strlen(key);
+
+	if (op == kvOp_Put) {
+		val     = kvEntry_ValueString(entry);
+		val_len = kvEntry_ValueLen(entry);
+		if (!val) val_len = 0;
+	}
+
+	/* Single shm allocation: struct + key\0 + [value\0] */
+	alloc_size = sizeof(*ev) + key_len + 1
+		+ (val_len > 0 ? val_len + 1 : 0);
+
+	ev = shm_malloc(alloc_size);
+	if (!ev) {
+		LM_ERR("shm_malloc failed for KV change event (%lu bytes)\n",
+			alloc_size);
+		return;
+	}
+
+	ev->op       = op;
+	ev->revision = (int)kvEntry_Revision(entry);
+	ev->key_len  = key_len;
+	ev->val_len  = val_len;
+
+	/* Pack key into data[] */
+	memcpy(ev->data, key, key_len);
+	ev->data[key_len] = '\0';
+
+	/* Pack value after key (put operations only) */
+	if (val_len > 0) {
+		memcpy(ev->data + key_len + 1, val, val_len);
+		ev->data[key_len + 1 + val_len] = '\0';
+	}
+
+	/* Dispatch to a SIP worker -- atomic pipe write, pthread-safe */
+	if (ipc_dispatch_rpc(_kv_change_rpc_cb, ev) < 0) {
+		LM_ERR("ipc_dispatch_rpc failed for KV change event\n");
+		shm_free(ev);
+	}
 #else
 	/* EVI not available at build time -- log the change instead */
 	const char *key = kvEntry_Key(entry);
