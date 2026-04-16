@@ -166,6 +166,7 @@ enum rtpe_operation {
 	OP_SUBSCRIBE_REQUEST,
 	OP_SUBSCRIBE_ANSWER,
 	OP_UNSUBSCRIBE,
+	OP_PUBLISH,
 };
 
 enum rtpe_stat {
@@ -257,6 +258,7 @@ static const char *command_strings[] = {
 	[OP_SUBSCRIBE_REQUEST]= "subscribe request",
 	[OP_SUBSCRIBE_ANSWER] = "subscribe answer",
 	[OP_UNSUBSCRIBE]    = "unsubscribe",
+	[OP_PUBLISH]        = "publish",
 };
 
 static const str stat_maps[] = {
@@ -312,6 +314,13 @@ static int rtpengine_unblockdtmf_f(struct sip_msg* msg, str *flags, pv_spec_t *s
 static int rtpengine_start_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar);
 static int rtpengine_stop_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar);
 static int rtpengine_play_dtmf_f(struct sip_msg* msg, str *code, str *flags, pv_spec_t *spvar);
+static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar, pv_spec_t *tpvar);
+static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar);
+static int rtpengine_unsubscribe_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar);
+static int rtpengine_publish_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar,
+		pv_spec_t *bpvar);
 static void rtpengine_notify_process(int rank);
 
 static int rtpengine_api_offer(struct rtp_relay_session *sess,
@@ -552,6 +561,28 @@ static const cmd_export_t cmds[] = {
 	{"rtpengine_play_dtmf", (cmd_function)rtpengine_play_dtmf_f, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_subscribe_request", (cmd_function)rtpengine_subscribe_request_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_subscribe_answer", (cmd_function)rtpengine_subscribe_answer_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_unsubscribe", (cmd_function)rtpengine_unsubscribe_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_publish", (cmd_function)rtpengine_publish_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{0,0,0}},
 		ALL_ROUTES},
@@ -2713,7 +2744,7 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 		ng_flags->rtcp_mux = bencode_list(bencbuf);
 
 		bencode_dictionary_add_str(ng_flags->dict, "sdp", body_in);
-	} else if (op == OP_SUBSCRIBE_ANSWER) {
+	} else if (op == OP_SUBSCRIBE_ANSWER || op == OP_PUBLISH) {
 		bencode_dictionary_add_str(ng_flags->dict, "sdp", body_in);
 	}
 
@@ -4742,6 +4773,152 @@ static int rtpengine_start_forward_f(struct sip_msg* msg, str *flags, pv_spec_t 
 static int rtpengine_stop_forward_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar)
 {
 	return rtpe_function_call_simple(msg, OP_STOP_FORWARD, flags, NULL, NULL, spvar);
+}
+
+static int rtpengine_unsubscribe_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar)
+{
+	return rtpe_function_call_simple(msg, OP_UNSUBSCRIBE, flags, NULL, NULL, spvar);
+}
+
+static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar, pv_spec_t *tpvar)
+{
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	str sdp_body, to_tag;
+	pv_value_t val;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_SUBSCRIBE_REQUEST,
+			flags, NULL, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("subscribe request failed\n");
+		return -1;
+	}
+
+	/* extract offer SDP from reply and store in body pvar */
+	if (bpvar) {
+		if (!bencode_dictionary_get_str(dict, "sdp", &sdp_body)) {
+			LM_ERR("subscribe request reply missing sdp\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_VAL_STR;
+		val.rs = sdp_body;
+		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0)
+			LM_ERR("failed to set body pvar\n");
+	}
+
+	/* extract to-tag (subscription identifier) from reply */
+	if (tpvar) {
+		if (!bencode_dictionary_get_str(dict, "to-tag", &to_tag)) {
+			LM_ERR("subscribe request reply missing to-tag\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_VAL_STR;
+		val.rs = to_tag;
+		if (pv_set_value(msg, tpvar, (int)EQ_T, &val) < 0)
+			LM_ERR("failed to set tag pvar\n");
+	}
+
+	bencode_buffer_free(&bencbuf);
+	return 1;
+}
+
+static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar)
+{
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	str oldbody;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	/* get the answer SDP — from the pvar if provided, otherwise from message body */
+	if (bpvar) {
+		pv_value_t pval;
+		memset(&pval, 0, sizeof(pv_value_t));
+		if (pv_get_spec_value(msg, bpvar, &pval) < 0 ||
+				!(pval.flags & PV_VAL_STR) || !pval.rs.len) {
+			LM_ERR("subscribe answer: body pvar is empty or not a string\n");
+			return -1;
+		}
+		oldbody = pval.rs;
+	} else {
+		if (extract_body(msg, &oldbody) == -1) {
+			LM_ERR("subscribe answer: can't extract body from message\n");
+			return -1;
+		}
+	}
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_SUBSCRIBE_ANSWER,
+			flags, &oldbody, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("subscribe answer failed\n");
+		return -1;
+	}
+
+	bencode_buffer_free(&bencbuf);
+	return 1;
+}
+
+static int rtpengine_publish_f(struct sip_msg *msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *bpvar)
+{
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	str oldbody, newbody;
+	pv_value_t val;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	/* get the sendonly SDP to publish — from pvar or message body */
+	if (bpvar) {
+		pv_value_t pval;
+		memset(&pval, 0, sizeof(pv_value_t));
+		if (pv_get_spec_value(msg, bpvar, &pval) < 0 ||
+				!(pval.flags & PV_VAL_STR) || !pval.rs.len) {
+			LM_ERR("publish: body pvar is empty or not a string\n");
+			return -1;
+		}
+		oldbody = pval.rs;
+	} else {
+		if (extract_body(msg, &oldbody) == -1) {
+			LM_ERR("publish: can't extract body from the message\n");
+			return -1;
+		}
+	}
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_PUBLISH,
+			flags, &oldbody, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("publish failed\n");
+		return -1;
+	}
+
+	/* extract the recvonly answer SDP from reply and store back in body pvar */
+	if (bpvar) {
+		if (!bencode_dictionary_get_str(dict, "sdp", &newbody)) {
+			LM_ERR("publish reply missing sdp\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_VAL_STR;
+		val.rs = newbody;
+		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0)
+			LM_ERR("failed to set body pvar with answer SDP\n");
+	}
+
+	bencode_buffer_free(&bencbuf);
+	return 1;
 }
 
 static int rtpengine_play_dtmf_f(struct sip_msg* msg, str *code, str *flags, pv_spec_t *spvar)
