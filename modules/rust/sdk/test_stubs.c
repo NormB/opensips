@@ -43,7 +43,7 @@ void dprint(int level, int facility, const char *module, const char *func,
 
 /* ── ip_addr symbols ──────────────────────────────────────────────── */
 struct ip_addr_buf { char buf[64]; };
-__attribute__((weak)) struct ip_addr_buf _ip_addr_A_buffs[4];
+__attribute__((weak)) __thread struct ip_addr_buf _ip_addr_A_buffs[4];
 
 /* ── Memory allocator stubs (pkg + shm) ──────────────────────────── */
 __attribute__((weak))
