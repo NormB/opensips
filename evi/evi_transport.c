@@ -208,10 +208,18 @@ char *evi_build_payload(evi_params_t *params, str *method, int id,
 	if (id)
 		cJSON_AddNumberToObject(ret_obj, "id", id);
 
-	cJSON_AddItemToObject(ret_obj, "jsonrpc",
-		cJSON_CreateString(JSONRPC_VERSION));
-	cJSON_AddItemToObject(ret_obj, "method",
-		cJSON_CreateStr(method->s, method->len));
+	{
+		cJSON *jver = cJSON_CreateString(JSONRPC_VERSION);
+		cJSON *jmethod = cJSON_CreateStr(method->s, method->len);
+		if (!jver || !jmethod) {
+			LM_ERR("cannot create json string items (OOM)\n");
+			cJSON_Delete(jver);
+			cJSON_Delete(jmethod);
+			goto end;
+		}
+		cJSON_AddItemToObject(ret_obj, "jsonrpc", jver);
+		cJSON_AddItemToObject(ret_obj, "method", jmethod);
+	}
 
 	if (params && params->first &&
 		payload_add_params(ret_obj, params, extra_param_k, extra_param_v) < 0) {

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!--
+  SIPp UAC scenario: Caller Screening Test
+
+  Sends an INVITE that should be blocked by the caller_screening handler.
+  The handler has a hardcoded blacklist; this test works because the
+  OpenSIPS full-test config checks source IP against the blacklist.
+
+  For this test to trigger a 403, the OpenSIPS route must call
+  rust_exec("caller_screening") and the source IP must match one of
+  the hardcoded blocked IPs (10.99.99.1, 10.99.99.2, etc.).
+
+  In practice, when testing from localhost (127.0.0.1), the config uses
+  a header-based override: send X-Test-Block: yes to simulate a blocked
+  caller. See opensips-full-test.cfg for the routing logic.
+
+  Usage:
+    sipp -sf caller_screening_uac.xml 127.0.0.1:5060 -m 1
+
+  Expected: 403 Forbidden
+-->
+<scenario name="Caller Screening Test">
+
+  <!-- Send INVITE with blocking indicator header -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:screening-test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Blocked Caller" <sip:blocked@[local_ip]>;tag=[pid][call_number]
+      To: <sip:screening-test@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:blocked@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      User-Agent: SIPp-ScreeningTest/1.0
+      X-Test-Block: yes
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1 1 IN IP4 [local_ip]
+      s=Screening Test
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 6000 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <!-- Expect 403 Forbidden -->
+  <recv response="403" timeout="5000">
+  </recv>
+
+  <!-- Send ACK for non-2xx -->
+  <send>
+    <![CDATA[
+      ACK sip:screening-test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+      From: "Blocked Caller" <sip:blocked@[local_ip]>;tag=[pid][call_number]
+      To: <sip:screening-test@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+</scenario>

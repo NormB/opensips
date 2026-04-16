@@ -1,0 +1,17 @@
+[package]
+name = "opensips-mod-rust"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Production demo OpenSIPS module written in Rust"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+opensips-rs = { path = "sdk" }
+reqwest = { version = "0.12", features = ["blocking"] }
+
+[build-dependencies]
+opensips-build = { path = "build-utils" }
+cc = "1"

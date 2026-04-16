@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding='UTF-8'?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
+"http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd" [
+
+<!ENTITY admin SYSTEM "rust_admin.xml">
+<!ENTITY rust_return_codes SYSTEM "rust_return_codes.xml">
+<!ENTITY architecture SYSTEM "rust_architecture.xml">
+<!ENTITY building SYSTEM "rust_building.xml">
+<!ENTITY scripting SYSTEM "rust_scripting.xml">
+<!ENTITY contrib SYSTEM "contributors.xml">
+
+<!-- Include general documentation entities.
+     In-tree builds: ../../../doc/entities.xml (OpenSIPS source tree)
+     Standalone builds: entities.xml (local subset) -->
+<!ENTITY % docentities SYSTEM "entities.xml">
+%docentities;
+
+]>
+
+<book>
+	<bookinfo>
+	<title>rust Module</title>
+	</bookinfo>
+	<toc></toc>
+
+	&admin;
+	&architecture;
+	&building;
+	&scripting;
+	&contrib;
+
+	&docCopyrights;
+
+</book>
