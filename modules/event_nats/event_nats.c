@@ -65,6 +65,7 @@
 #include "nats_producer.h"
 #include "nats_stats.h"
 #include "nats_consumer.h"
+#include "nats_jetstream.h"
 #include "../../lib/nats/nats_pool.h"
 
 /* module lifecycle */
@@ -129,6 +130,61 @@ static const mi_export_t mi_cmds[] = {
 	},
 	{ "nats_reconnect", 0, 0, 0, {
 		{mi_nats_reconnect, {0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	/* JetStream management MI commands */
+	{ "nats_account_info", 0, 0, 0, {
+		{mi_nats_account_info, {0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_stream_list", 0, 0, 0, {
+		{mi_nats_stream_list, {0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_stream_info", 0, 0, 0, {
+		{mi_nats_stream_info, {"stream", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_stream_create", 0, 0, 0, {
+		{mi_nats_stream_create, {"name", "subjects", 0}},
+		{mi_nats_stream_create, {"name", "subjects", "replicas", 0}},
+		{mi_nats_stream_create, {"name", "subjects", "replicas",
+			"max_msgs", "max_bytes", "max_age", "retention", "storage", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_stream_delete", 0, 0, 0, {
+		{mi_nats_stream_delete, {"stream", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_stream_purge", 0, 0, 0, {
+		{mi_nats_stream_purge, {"stream", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_consumer_list", 0, 0, 0, {
+		{mi_nats_consumer_list, {"stream", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_consumer_info", 0, 0, 0, {
+		{mi_nats_consumer_info, {"stream", "consumer", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_consumer_create", 0, 0, 0, {
+		{mi_nats_consumer_create, {"stream", "name", 0}},
+		{mi_nats_consumer_create, {"stream", "name", "filter_subject", 0}},
+		{mi_nats_consumer_create, {"stream", "name", "filter_subject",
+			"deliver_policy", "ack_policy", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_consumer_delete", 0, 0, 0, {
+		{mi_nats_consumer_delete, {"stream", "consumer", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_msg_get", 0, 0, 0, {
+		{mi_nats_msg_get, {"stream", "seq", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "nats_msg_delete", 0, 0, 0, {
+		{mi_nats_msg_delete, {"stream", "seq", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{EMPTY_MI_EXPORT}
