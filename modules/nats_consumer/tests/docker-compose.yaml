@@ -1,32 +1,54 @@
-# nats_consumer integration-test compose file.
+# nats_consumer integration-test compose stack.
 #
-# PHASE 4 STATUS: scaffold only.  The `opensips` service Dockerfile is
-# a Phase 5 follow-up; right now `docker compose up nats` suffices for
-# manual testing against a locally-built opensips.
+# Two services:
+#   - nats:      JetStream-enabled nats-server, plus the nats CLI via
+#                image. Exposes 4222 (client) and 8222 (monitor).
+#   - opensips:  container built from Dockerfile in this directory;
+#                loads event_nats.so + nats_consumer.so and runs the
+#                minimal opensips.cfg. MI FIFO is at /var/run/opensips/mi.
 #
-# Usage (Phase 4, manual):
-#   cd modules/nats_consumer/tests
-#   docker compose up -d nats
-#   nats --server 127.0.0.1:4222 stream add TEST --subjects 'test.*' \
-#        --storage memory --defaults
-#   nats --server 127.0.0.1:4222 publish test.sync 'hello'
-#   opensips-cli -x mi nats_consumer_bind \
-#        'id=t1;stream=TEST;filter=test.sync;durable=t1'
+# Usage:
+#   docker compose -f docker-compose.yaml build
+#   docker compose -f docker-compose.yaml up -d
+#   bash test_fetch_sync.sh
+#   docker compose -f docker-compose.yaml down -v
 
-version: "3.8"
 services:
   nats:
-    image: nats:latest
+    image: nats:2.10-alpine
     command: -js -m 8222
     ports:
       - "4222:4222"
       - "8222:8222"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
-      interval: 5s
+      interval: 2s
       timeout: 2s
-      retries: 3
+      retries: 10
 
-  # PHASE 5: add an `opensips` service that mounts the module tree and
-  # runs a minimal cfg that exercises nats_fetch / nats_ack.  Skipped
-  # here to avoid dragging a full OpenSIPS Dockerfile into Phase 4.
+  # nats CLI in a separate container so the harness can script stream /
+  # consumer / publish commands without requiring the nats CLI to be
+  # installed on the host.  The CLI runs one-shot invocations and exits.
+  natscli:
+    image: natsio/nats-box:latest
+    depends_on:
+      nats:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+
+  opensips:
+    build:
+      context: ../../..
+      dockerfile: modules/nats_consumer/tests/Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - NATS_URL=nats://nats:4222
+    ports:
+      - "5060:5060/udp"
+    volumes:
+      - mi:/var/run/opensips
+
+volumes:
+  mi:
