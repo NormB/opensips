@@ -1,0 +1,82 @@
+/*
+ * Copyright (C) 2026 OpenSIPS Solutions
+ *
+ * This file is part of opensips, a free SIP server.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+/*
+ * test_ack_token.c -- unit tests for the ack-token packing/unpacking
+ * helpers in nats_ack.h.  Pure header-only; no shim required.
+ */
+
+#include <stdio.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <assert.h>
+
+#include "../nats_ack.h"
+
+static int tests_run  = 0;
+static int tests_fail = 0;
+
+#define CHECK(cond) do { \
+	tests_run++; \
+	if (!(cond)) { \
+		fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+		tests_fail++; \
+	} \
+} while (0)
+
+static void test_pack_roundtrip_basic(void)
+{
+	uint64_t t = nats_ack_token_pack(0x1234, 0xdeadbeefu, 0xc0de);
+	CHECK(nats_ack_token_handle(t)     == 0x1234);
+	CHECK(nats_ack_token_slot(t)       == 0xdeadbeefu);
+	CHECK(nats_ack_token_generation(t) == 0xc0de);
+}
+
+static void test_pack_zero(void)
+{
+	uint64_t t = nats_ack_token_pack(0, 0, 0);
+	CHECK(t == 0);
+	CHECK(nats_ack_token_handle(t)     == 0);
+	CHECK(nats_ack_token_slot(t)       == 0);
+	CHECK(nats_ack_token_generation(t) == 0);
+}
+
+static void test_pack_max(void)
+{
+	uint64_t t = nats_ack_token_pack(0xFFFF, 0xFFFFFFFFu, 0xFFFF);
+	CHECK(t == UINT64_C(0xFFFFFFFFFFFFFFFF));
+	CHECK(nats_ack_token_handle(t)     == 0xFFFF);
+	CHECK(nats_ack_token_slot(t)       == 0xFFFFFFFFu);
+	CHECK(nats_ack_token_generation(t) == 0xFFFF);
+}
+
+static void test_pack_isolation(void)
+{
+	/* Fields don't overlap: changing one doesn't perturb the others. */
+	uint64_t t1 = nats_ack_token_pack(0x0001, 0x00000000, 0x0000);
+	uint64_t t2 = nats_ack_token_pack(0x0000, 0x00000001, 0x0000);
+	uint64_t t3 = nats_ack_token_pack(0x0000, 0x00000000, 0x0001);
+	CHECK(t1 != t2);
+	CHECK(t2 != t3);
+	CHECK(t1 != t3);
+	CHECK(nats_ack_token_handle(t1)     == 1);
+	CHECK(nats_ack_token_slot(t1)       == 0);
+	CHECK(nats_ack_token_generation(t1) == 0);
+	CHECK(nats_ack_token_slot(t2)       == 1);
+	CHECK(nats_ack_token_generation(t3) == 1);
+}
+
+int main(void)
+{
+	test_pack_roundtrip_basic();
+	test_pack_zero();
+	test_pack_max();
+	test_pack_isolation();
+	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
+	return tests_fail == 0 ? 0 : 1;
+}

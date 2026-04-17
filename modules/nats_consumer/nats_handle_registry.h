@@ -81,11 +81,26 @@ typedef enum {
 	NATS_REPLAY_ORIGINAL,
 } nats_replay_policy_e;
 
+/* Upper bound on simultaneously-bound handles in a single opensips
+ * instance.  Used both as a cap (bind past this returns -3) and to size
+ * the consumer process's process-local natsMsg* ref table.  16 bits
+ * worth is overkill; the limit is about keeping the ref table shallow.
+ */
+#define NATS_REGISTRY_MAX_HANDLES 256
+
 typedef struct nats_handle {
 	str id;                             /* registry key; SHM-owned */
 	str stream;                         /* SHM-owned */
 	str durable;                        /* SHM-owned, empty for ephemeral */
 	nats_consumer_type_e type;
+
+	/* Monotonic bind-order index, assigned atomically inside
+	 * nats_registry_bind.  Valid range: [0, NATS_REGISTRY_MAX_HANDLES).
+	 * Used to pack (handle_idx, slot_idx, generation) into an ack token
+	 * so the consumer process can look up the stored natsMsg* without
+	 * a hash.  Stable for the lifetime of the handle; not reused after
+	 * unbind within a single opensips run (Phase 4 scope). */
+	uint16_t index;
 
 	/* filters */
 	str filter;                         /* single-subject filter */

@@ -1,0 +1,32 @@
+# nats_consumer integration-test compose file.
+#
+# PHASE 4 STATUS: scaffold only.  The `opensips` service Dockerfile is
+# a Phase 5 follow-up; right now `docker compose up nats` suffices for
+# manual testing against a locally-built opensips.
+#
+# Usage (Phase 4, manual):
+#   cd modules/nats_consumer/tests
+#   docker compose up -d nats
+#   nats --server 127.0.0.1:4222 stream add TEST --subjects 'test.*' \
+#        --storage memory --defaults
+#   nats --server 127.0.0.1:4222 publish test.sync 'hello'
+#   opensips-cli -x mi nats_consumer_bind \
+#        'id=t1;stream=TEST;filter=test.sync;durable=t1'
+
+version: "3.8"
+services:
+  nats:
+    image: nats:latest
+    command: -js -m 8222
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+
+  # PHASE 5: add an `opensips` service that mounts the module tree and
+  # runs a minimal cfg that exercises nats_fetch / nats_ack.  Skipped
+  # here to avoid dragging a full OpenSIPS Dockerfile into Phase 4.
