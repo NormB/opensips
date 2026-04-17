@@ -1595,7 +1595,17 @@ static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
 
 static MI_CMDS: SyncArray<sys::mi_export_, 4> = SyncArray([
     mi_entry!("concurrent_show", "Show concurrent call accounts", mi_show),
-    mi_entry!("concurrent_override", "Set temporary limit override", mi_override),
+    // concurrent_override takes two named params (account, limit) — declare them
+    // on the recipe so the MI dispatcher accepts the call. Without the params
+    // array, the dispatcher matches the zero-param recipe and rejects every
+    // call with "Too few or too many parameters".
+    mi_entry_params!("concurrent_override", "Set temporary limit override", mi_override,
+        {
+            let mut p: [*mut c_char; 20] = [ptr::null_mut(); 20];
+            p[0] = cstr_lit!("account") as *mut _;
+            p[1] = cstr_lit!("limit") as *mut _;
+            p
+        }),
     mi_entry!("concurrent_reset", "Reset call counts", mi_reset),
     NULL_MI,
 ]);
