@@ -21,14 +21,20 @@
 /*
  * nats_consumer.c -- module lifecycle + registrations.
  *
- * Phase 4 exports:
+ * Phase 6 exports (populated in commit order as the phase lands):
  *   - sync  cmd:   nats_fetch(id, timeout_ms),
- *                  nats_ack(), nats_nak(), nats_nak_delay(delay_ms),
- *                  nats_term(), nats_in_progress()
- *   - async acmd:  nats_fetch(id, timeout_ms)  (wrapped via async())
+ *                  nats_fetch_batch(id, opts), nats_batch_select(i),
+ *                  nats_ack(), nats_ack_next(), nats_ack_progress(),
+ *                  nats_nak(), nats_nak_delay(delay_ms),
+ *                  nats_term(), nats_in_progress(),
+ *                  nats_hdr_set(name, value)
+ *   - async acmd:  nats_fetch(id, timeout_ms),
+ *                  nats_fetch_batch(id, opts)
  *   - pvars:       $nats_subject, $nats_data, $nats_reply_to,
  *                  $nats_seq, $nats_consumer_seq, $nats_delivered,
- *                  $nats_pending, $nats_token
+ *                  $nats_pending, $nats_token, $nats_hdr(Name)
+ *
+ * Later Phase 6 commits add nats_reply and nats_request.
  */
 
 #include "../../sr_module.h"
@@ -41,6 +47,7 @@
 #include "nats_consumer_proc.h"
 #include "nats_fetch.h"
 #include "nats_ack.h"
+#include "nats_rpc.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -85,6 +92,11 @@ static const cmd_export_t cmds[] = {
 	{ "nats_in_progress", (cmd_function)w_nats_in_progress, {
 		{0, 0, 0}},
 		ALL_ROUTES },
+	{ "nats_hdr_set", (cmd_function)w_nats_hdr_set, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
 	{ 0, 0, {{0, 0, 0}}, 0 }
 };
 
@@ -123,6 +135,8 @@ static const pv_export_t mod_pvars[] = {
 		0, 0, 0, 0, 0 },
 	{ str_const_init("nats_token"),        1000, pv_get_nats_token,
 		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_hdr"),          1000, pv_get_nats_hdr,
+		0, pv_parse_nats_hdr_name, 0, 0, 0 },
 	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 
