@@ -518,12 +518,13 @@ int refresh_cluster_topology(redis_con *con)
 }
 
 /*
- When Redis is operating as a cluster, it is possible (very likely)
- that a MOVED redirection will be returned by the Redis nodes that
- received the request. The general format of the reply from Redis is:
- PREFIX slot [IP|FQDN]:port
+ When Redis is operating as a cluster, MOVED or ASK redirections may
+ be returned by the Redis nodes that received the request.  The
+ general format of both redirect replies is:
+ MOVED|ASK slot [IP|FQDN]:port
 
- This routine will parse the Redis redirect reply into its components.
+ This routine parses a redirect reply into its components given
+ the expected prefix (e.g. "MOVED " or "ASK ").
  Note that the redisReply struct MUST be released outside of this routine
  to avoid a memory leak. The out->endpoint pointer must not be used after
  the redisReply has been released.
@@ -537,27 +538,26 @@ int refresh_cluster_topology(redis_con *con)
  } redis_moved;
 
 */
-static int parse_redirect_reply(redisReply *reply, redis_moved *out,
-	const char *prefix, size_t prefix_len) {
-	int i;
+int parse_redirect_reply(redisReply *reply, redis_moved *out,
+		const char *prefix, size_t prefix_len) {
+	size_t i;
 	int slot = 0;
 	const char *p;
 	const char *end;
 	const char *host_start;
 	const char *colon = NULL;
 	const char *port_start;
-	int port = REDIS_DF_PORT; // Default to Redis standard port
+	int port = REDIS_DF_PORT;
 
-	if (!reply || !reply->str || reply->len < prefix_len || !out)
+	if (!reply || !reply->str || (size_t)reply->len < prefix_len || !out)
 		return ERR_INVALID_REPLY;
 
 	p = reply->str;
 	end = reply->str + reply->len;
 
 	for (i = 0; i < prefix_len; ++i) {
-		if (p[i] != prefix[i]) {
-		return ERR_INVALID_REPLY;
-		}
+		if (p[i] != prefix[i])
+			return ERR_INVALID_REPLY;
 	}
 	p += prefix_len;
 

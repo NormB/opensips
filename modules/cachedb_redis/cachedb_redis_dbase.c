@@ -859,23 +859,38 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 					reply,reply?(unsigned)reply->len:7,reply?reply->str:"FAILURE",
 					node->context->errstr);
 
-				if (match_prefix(reply->str, reply->len, MOVED_PREFIX, MOVED_PREFIX_LEN)) {
-					// It's a MOVED response
+				if (match_prefix(reply->str, reply->len, MOVED_PREFIX, MOVED_PREFIX_LEN) ||
+						match_prefix(reply->str, reply->len, ASK_PREFIX, ASK_PREFIX_LEN)) {
+					int is_ask = match_prefix(reply->str, reply->len,
+						ASK_PREFIX, ASK_PREFIX_LEN);
 					redis_moved moved_info;
 
-					if (parse_moved_reply(reply, &moved_info) < 0) {
-						LM_ERR("cachedb_redis: Unable to parse MOVED reply\n");
+					if ((is_ask ?
+							parse_ask_reply(reply, &moved_info) :
+							parse_moved_reply(reply, &moved_info)) < 0) {
+						LM_ERR("Unable to parse %s reply\n",
+							is_ask ? "ASK" : "MOVED");
 						freeReplyObject(reply);
 						goto try_next_con;
 					}
 
-					LM_DBG("cachedb_redis: MOVED slot: [%d] endpoint: [%.*s] port: [%d]\n", moved_info.slot, moved_info.endpoint.len, moved_info.endpoint.s, moved_info.port);
-					node->moved++;
-					update_stat(redis_stat_moved, 1);
+					LM_DBG("%s slot: [%d] endpoint: [%.*s] port: [%d]\n",
+						is_ask ? "ASK" : "MOVED",
+						moved_info.slot,
+						moved_info.endpoint.len,
+						moved_info.endpoint.s,
+						moved_info.port);
+
+					if (!is_ask) {
+						node->moved++;
+						update_stat(redis_stat_moved, 1);
+					}
+
 					node = get_redis_connection_by_endpoint(con, &moved_info);
 
 					if (node == NULL) {
-						LM_DBG("cachedb_redis: MOVED endpoint unknown, creating new node %.*s:%d\n",
+						LM_DBG("cachedb_redis: %s endpoint unknown, creating new node %.*s:%d\n",
+							is_ask ? "ASK" : "MOVED",
 							moved_info.endpoint.len, moved_info.endpoint.s, moved_info.port);
 						node = find_or_create_node(con,
 							moved_info.endpoint.s, moved_info.endpoint.len,
@@ -899,13 +914,35 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 						}
 					}
 
-					/* Refresh topology so future queries go direct */
-					refresh_cluster_topology(con);
-					if (--max_redirects <= 0) {
-						LM_ERR("too many MOVED redirects, giving up\n");
-						last_err = -10;
-						goto try_next_con;
+					if (is_ask) {
+						/* ASK requires sending ASKING before
+						 * retrying the command on the new node */
+						redisReply *asking_reply;
+						asking_reply = redisCommand(
+							node->context, "ASKING");
+						if (!asking_reply ||
+								asking_reply->type ==
+								REDIS_REPLY_ERROR) {
+							LM_ERR("ASKING command failed"
+								" on %s:%d\n",
+								node->ip, node->port);
+							if (asking_reply)
+								freeReplyObject(
+									asking_reply);
+							last_err = -1;
+							goto try_next_con;
+						}
+						freeReplyObject(asking_reply);
+					} else {
+						/* MOVED: refresh topology so future queries go direct */
+						refresh_cluster_topology(con);
+						if (--max_redirects <= 0) {
+							LM_ERR("too many MOVED redirects, giving up\n");
+							last_err = -10;
+							goto try_next_con;
+						}
 					}
+
 					i = QUERY_ATTEMPTS;
 					continue;
 				}
