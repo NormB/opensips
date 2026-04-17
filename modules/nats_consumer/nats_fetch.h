@@ -90,10 +90,30 @@ nats_cur_batch_t *nats_fetch_current_batch(void);
 void              nats_fetch_clear_batch(void);
 
 /* Script-callable: sync-fetch.
+ *
  *   timeout_ms == 0  -> non-blocking poll; returns 1 on hit, 0 on empty.
  *   timeout_ms > 0   -> blocks the worker up to timeout_ms; returns 1/0.
- * Returns -3 on handle-not-found, -1 on internal error. */
+ *
+ * Return codes (Phase 7 extended):
+ *    1   got a message (populated current-msg state).
+ *    0   no message within the budget; not an error.
+ *   -2   NATS connection lost.  Workers can inspect the textual reason
+ *        via nats_last_error() (process-local; valid until the next
+ *        fetch / ack call).  The consumer process will refresh its
+ *        subscriptions on the next epoch bump once the library
+ *        reconnects -- the script should back off and retry.
+ *   -3   handle id not found.
+ *   -1   internal error (OOM, parser failure). */
 int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms);
+
+/* Return the most recent per-worker error string (Phase 7).
+ *
+ * Points into a process-local static buffer; valid until the next
+ * nats_fetch* / nats_ack* / nats_request call on the same worker.
+ * Returns "" when there is no error pending.  Exposed so MI and
+ * debug-log callers can read it without a pseudo-var (Phase 7 scope
+ * keeps the pvar surface frozen). */
+const char *nats_last_error(void);
 
 /* Script-callable: async fetch.  Short-circuits to success if the
  * ring has data already; otherwise registers the ring eventfd with

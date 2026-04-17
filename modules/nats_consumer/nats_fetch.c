@@ -55,11 +55,35 @@
 #include "../../pvar.h"
 #include "../../mem/shm_mem.h"
 #include "../../sr_module.h"
+#include "../../lib/nats/nats_pool.h"
 
 #include "nats_handle_registry.h"
 #include "nats_ring.h"
 #include "nats_fetch.h"
 #include "nats_ack.h"
+
+/* ── per-worker last-error string ─────────────────────────────── */
+
+/* Process-local static; SIP workers are single-threaded so this has
+ * TLS semantics for free.  Updated by the fetch / ack paths whenever
+ * they surface a -2 (connection lost).  Readers access it through
+ * nats_last_error(). */
+static const char *g_last_error_ptr = "";
+
+static inline void set_last_error(const char *s)
+{
+	g_last_error_ptr = s ? s : "";
+}
+
+static inline void clear_last_error(void)
+{
+	g_last_error_ptr = "";
+}
+
+const char *nats_last_error(void)
+{
+	return g_last_error_ptr ? g_last_error_ptr : "";
+}
 
 /* ── per-worker current-message ──────────────────────────────── */
 
@@ -132,6 +156,7 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	(void)msg;
 
 	nats_fetch_clear();
+	clear_last_error();
 
 	h = nats_registry_lookup(id);
 	if (!h) {
@@ -154,6 +179,21 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		 * only the responsibility of the process that ACTUALLY
 		 * blocked on the fd and woke from it. */
 		return cur_set_from_slot(h->index, &slot);
+	}
+
+	/* Phase 7 connection-loss check.  The worker never speaks to NATS
+	 * directly, so the best signal available here is the shared pool's
+	 * connection state: if the pool reports disconnected there will be
+	 * no consumer-process pushes landing on the ring, and blocking on
+	 * the eventfd would just time out.  Surface -2 so the script can
+	 * back off without eating the full timeout budget.  We do this
+	 * BEFORE the blocking poll so the script gets a fast "connection
+	 * lost" answer instead of a slow timeout. */
+	if (!nats_pool_is_connected()) {
+		set_last_error("connection lost");
+		LM_DBG("nats_fetch: '%.*s' ring empty and pool disconnected\n",
+			id->len, id->s);
+		return -2;
 	}
 
 	tmo = timeout_ms ? *timeout_ms : 0;
@@ -185,6 +225,15 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	rc = nats_ring_pop(h->ring, &slot);
 	if (rc == 0)
 		return cur_set_from_slot(h->index, &slot);
+
+	/* Post-poll: if the pool disconnected during the wait, surface -2.
+	 * Re-checking after the poll catches the (common) case where we
+	 * entered with a live connection and the reconnect callback fired
+	 * mid-wait. */
+	if (!nats_pool_is_connected()) {
+		set_last_error("connection lost");
+		return -2;
+	}
 
 	return 0;
 }
@@ -257,6 +306,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	(void)msg;
 
 	nats_fetch_clear();
+	clear_last_error();
 
 	h = nats_registry_lookup(id);
 	if (!h) {
@@ -281,6 +331,16 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		cur_set_from_slot(h->index, &slot);
 		async_status = ASYNC_SYNC;
 		return 1;
+	}
+
+	/* Phase 7: ring empty + pool disconnected -> surface -2 now so the
+	 * script can short-circuit.  Yielding to the reactor on a dead
+	 * connection would just eat the worker's timeout budget with no
+	 * messages to wake on. */
+	if (!nats_pool_is_connected()) {
+		set_last_error("connection lost");
+		async_status = ASYNC_NO_IO;
+		return -2;
 	}
 
 	fd = nats_ring_eventfd(h->ring);
@@ -456,6 +516,7 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 
 	nats_fetch_clear();
 	nats_fetch_clear_batch();
+	clear_last_error();
 
 	h = nats_registry_lookup(id);
 	if (!h || !h->ring) {
@@ -479,8 +540,24 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	}
 	if (g_batch.count >= cap)
 		return g_batch.count;
-	if (bo.no_wait || bo.expires_ms <= 0)
+	if (bo.no_wait || bo.expires_ms <= 0) {
+		/* No-wait path with nothing queued: treat a disconnected pool
+		 * as a -2 signal so the caller distinguishes "empty but
+		 * healthy" (return 0) from "empty because we've lost the
+		 * server" (return -2). */
+		if (g_batch.count == 0 && !nats_pool_is_connected()) {
+			set_last_error("connection lost");
+			return -2;
+		}
 		return g_batch.count;
+	}
+
+	/* Blocking path: if already disconnected, don't bother blocking.
+	 * The eventfd will not fire while the consumer process can't push. */
+	if (!nats_pool_is_connected()) {
+		set_last_error("connection lost");
+		return g_batch.count > 0 ? g_batch.count : -2;
+	}
 
 	/* Phase 2: wait up to expires_ms total.  We loop on poll() so a
 	 * spurious wake (another worker raced us) doesn't exit early. */
@@ -578,6 +655,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 
 	nats_fetch_clear();
 	nats_fetch_clear_batch();
+	clear_last_error();
 
 	h = nats_registry_lookup(id);
 	if (!h || !h->ring) {
@@ -600,8 +678,20 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	}
 
 	if (g_batch.count > 0 || bo.no_wait || bo.expires_ms <= 0) {
+		if (g_batch.count == 0 && !nats_pool_is_connected()) {
+			set_last_error("connection lost");
+			async_status = ASYNC_NO_IO;
+			return -2;
+		}
 		async_status = ASYNC_SYNC;
 		return g_batch.count;
+	}
+
+	/* Blocking path: abort early on dead pool.  See w_nats_fetch_async. */
+	if (!nats_pool_is_connected()) {
+		set_last_error("connection lost");
+		async_status = ASYNC_NO_IO;
+		return -2;
 	}
 
 	fd = nats_ring_eventfd(h->ring);
