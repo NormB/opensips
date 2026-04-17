@@ -174,6 +174,68 @@ static void test_round_trip(void)
 	free(path);
 }
 
+/* Verify unknown-key passthrough survives serialize + rehydrate.  The
+ * parser stashes unrecognized k=v pairs into handle->extra_json; the
+ * serializer must fold them back into the snapshot so a subsequent
+ * rehydrate -> parse reconstructs the same extra_json. */
+static void test_extra_json_round_trip(void)
+{
+	char *path = make_temp_path();
+	CHECK(path != NULL);
+	if (!path) return;
+
+	CHECK(nats_registry_init(16) == 0);
+	CHECK(nats_persist_init(path) == 0);
+
+	/* "future_param" and "vendor_tag" are not in the current parser
+	 * table; they land in extra_json and must survive the snapshot. */
+	CHECK(bind_from("id=fwd;stream=FWD;durable=fd;"
+			"future_param=xyz;vendor_tag=blue") == 0);
+
+	CHECK(nats_persist_flush_now() == 0);
+
+	nats_persist_destroy();
+	nats_registry_destroy();
+
+	CHECK(nats_registry_init(16) == 0);
+	CHECK(nats_persist_init(path) == 0);
+
+	int loaded = nats_persist_rehydrate();
+	CHECK(loaded == 1);
+
+	{
+		str id = mkstr_literal("fwd");
+		nats_handle_t *h = nats_registry_lookup(&id);
+		CHECK(h != NULL);
+		if (h) {
+			/* Re-parsed extra_json should be a well-formed JSON object
+			 * containing both unknown keys. */
+			CHECK(h->extra_json.len > 0);
+			CHECK(h->extra_json.s[0] == '{');
+			CHECK(h->extra_json.s[h->extra_json.len - 1] == '}');
+			{
+				int found_future = 0, found_vendor = 0;
+				int i;
+				for (i = 0; i + 12 < h->extra_json.len; i++) {
+					if (memcmp(h->extra_json.s + i,
+							"\"future_param\"", 14) == 0)
+						found_future = 1;
+					if (memcmp(h->extra_json.s + i,
+							"\"vendor_tag\"", 12) == 0)
+						found_vendor = 1;
+				}
+				CHECK(found_future);
+				CHECK(found_vendor);
+			}
+		}
+	}
+
+	nats_persist_destroy();
+	nats_registry_destroy();
+	unlink(path);
+	free(path);
+}
+
 /* A rehydrate from a nonexistent file is a soft success returning 0. */
 static void test_rehydrate_missing(void)
 {
@@ -220,6 +282,7 @@ int main(void)
 	test_init_missing_dir();
 	test_rehydrate_missing();
 	test_round_trip();
+	test_extra_json_round_trip();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;
