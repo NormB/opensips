@@ -60,6 +60,7 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/select.h>
+#include <sys/timerfd.h>
 
 #include <nats/nats.h>
 
@@ -77,7 +78,13 @@
 
 #define PHASE3_FETCH_BATCH        10     /* messages per fetch */
 #define PHASE3_FETCH_TIMEOUT_MS   1000   /* block up to 1 s per fetch */
-#define PHASE3_IDLE_SLEEP_US      50000  /* 50 ms between empty rounds */
+
+/* Phase 5: idle cycle replaces the Phase 4 usleep(50ms) spin with a
+ * blocking select() on (ack_fd, retry_timerfd).  The retry timerfd
+ * gives us a bounded upper wait so a stalled subscription
+ * (e.g. broker TCP stall) does not keep us asleep forever; acks still
+ * wake us immediately on any worker ack-IPC enqueue. */
+#define PHASE5_IDLE_RETRY_MS      1000   /* 1 s max idle before retry */
 
 /* ── process-local state ─────────────────────────────────────── */
 
@@ -88,6 +95,9 @@ typedef struct proc_sub_state {
 	uint16_t              handle_idx;      /* stable index from registry */
 	natsSubscription     *sub;             /* active pull subscription */
 	struct nats_ring     *ring;            /* borrowed ref to handle ring */
+	nats_handle_t        *h_ref;           /* borrowed ref to SHM handle
+	                                        * (used for pending_ops
+	                                        *  accounting). */
 	time_t                last_fetch;
 
 	/* counters -- local to this process, included in mi_info in Phase 4 */
@@ -503,6 +513,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	}
 	ss->ring       = h->ring;
 	ss->handle_idx = h->index;
+	ss->h_ref      = h;
 
 	/* Pre-size the ref row so pull_one_batch doesn't pay for the
 	 * first-use allocation under load.  nats_ring_capacity reads the
@@ -707,6 +718,11 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	if (!ss || !ss->sub || !ss->ring)
 		return 0;
 
+	/* Phase 5 in-use guard: hold a pending_ops reference across the
+	 * blocking Fetch() + push loop so unbind can defer while we're
+	 * mid-pull.  Paired with the dec below. */
+	nats_handle_pending_inc(ss->h_ref);
+
 	memset(&list, 0, sizeof(list));
 	s = natsSubscription_Fetch(&list, ss->sub,
 	        PHASE3_FETCH_BATCH, PHASE3_FETCH_TIMEOUT_MS, NULL);
@@ -714,12 +730,12 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	/* Fast path on idle: timeout is the steady-state condition when
 	 * the broker has nothing to send us. */
 	if (s == NATS_TIMEOUT)
-		return 0;
+		goto out;
 
 	if (s == NATS_CONNECTION_CLOSED) {
 		LM_DBG("nats_consumer_proc: connection closed during fetch "
 			"on id='%.*s'\n", ss->id.len, ss->id.s);
-		return 0;
+		goto out;
 	}
 
 	if (s != NATS_OK && list.Count == 0) {
@@ -728,7 +744,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		ss->total_fetch_errors++;
 		LM_DBG("nats_consumer_proc: fetch id='%.*s': %s\n",
 			ss->id.len, ss->id.s, natsStatus_GetText(s));
-		return 0;
+		goto out;
 	}
 
 	ss->total_pulled += (uint64_t)list.Count;
@@ -834,6 +850,8 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	 * above, so this just frees the Msgs array itself. */
 	natsMsgList_Destroy(&list);
 
+out:
+	nats_handle_pending_dec(ss->h_ref);
 	return pushed;
 }
 
@@ -978,6 +996,7 @@ static void drain_ack_eventfd(int fd)
 void nats_consumer_proc_main(int rank)
 {
 	int ack_fd;
+	int retry_fd;
 
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
@@ -996,8 +1015,18 @@ void nats_consumer_proc_main(int rank)
 	}
 
 	ack_fd = nats_ack_ipc_fd();
-	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d, entering main loop\n",
-		ack_fd);
+
+	/* Blocking-idle timerfd -- armed each idle round to cap how long
+	 * we sleep when there is no worker ack traffic.  If timerfd_create
+	 * fails we fall back to a coarse 1s select() timeout. */
+	retry_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+	if (retry_fd < 0) {
+		LM_WARN("nats_consumer_proc: timerfd_create failed (%s); "
+			"falling back to 1s select timeout\n", strerror(errno));
+	}
+
+	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d retry_fd=%d, "
+		"entering main loop\n", ack_fd, retry_fd);
 
 	for (;;) {
 		proc_sub_state_t *ss;
@@ -1063,7 +1092,43 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
-		if (!any_work)
-			usleep(PHASE3_IDLE_SLEEP_US);
+		if (!any_work) {
+			/* Phase 5 blocking idle: wait until either the ack IPC
+			 * eventfd becomes readable (a worker acked something) or
+			 * the retry timerfd fires (bounded stall recovery).  This
+			 * replaces the Phase 3/4 50 ms busy-poll so the consumer
+			 * process spends ~0% CPU on empty subscriptions. */
+			fd_set rfds;
+			int    maxfd = ack_fd;
+			struct timeval tv;
+
+			FD_ZERO(&rfds);
+			if (ack_fd >= 0) FD_SET(ack_fd, &rfds);
+
+			if (retry_fd >= 0) {
+				struct itimerspec its;
+				memset(&its, 0, sizeof(its));
+				its.it_value.tv_sec  = PHASE5_IDLE_RETRY_MS / 1000;
+				its.it_value.tv_nsec =
+					(PHASE5_IDLE_RETRY_MS % 1000) * 1000000L;
+				if (timerfd_settime(retry_fd, 0, &its, NULL) == 0) {
+					FD_SET(retry_fd, &rfds);
+					if (retry_fd > maxfd) maxfd = retry_fd;
+				}
+			}
+
+			tv.tv_sec  = 1;
+			tv.tv_usec = 0;
+			(void)select(maxfd + 1, &rfds, NULL, NULL, &tv);
+
+			/* Drain the retry timer so the next arm is fresh. */
+			if (retry_fd >= 0 && FD_ISSET(retry_fd, &rfds)) {
+				uint64_t sink;
+				ssize_t r;
+				do {
+					r = read(retry_fd, &sink, sizeof(sink));
+				} while (r < 0 && errno == EINTR);
+			}
+		}
 	}
 }

@@ -213,6 +213,69 @@ static void test_foreach(void)
 	nats_registry_destroy();
 }
 
+/* Phase 5: binding past NATS_REGISTRY_MAX_HANDLES returns -3. */
+static void test_bind_cap_exceeded(void)
+{
+	int i, rc;
+	nats_handle_t *h;
+	char id[32];
+	int bound_ok = 0;
+	int rejected = 0;
+
+	CHECK(nats_registry_init(16) == 0);
+
+	/* Bind up to and past the cap; exactly one bind attempt past the
+	 * cap should return -3. */
+	for (i = 0; i < NATS_REGISTRY_MAX_HANDLES + 1; i++) {
+		snprintf(id, sizeof(id), "cap%d", i);
+		h = mk_handle(id, "S", "d");
+		rc = nats_registry_bind(h);
+		if (rc == 0) {
+			bound_ok++;
+		} else if (rc == -3) {
+			rejected++;
+			nats_handle_free(h); /* caller retains on failure */
+		} else {
+			/* unexpected */
+			nats_handle_free(h);
+		}
+	}
+	CHECK(bound_ok == NATS_REGISTRY_MAX_HANDLES);
+	CHECK(rejected == 1);
+
+	nats_registry_destroy();
+}
+
+/* Phase 5: unbind while pending_ops > 0 returns -4 and leaves the
+ * handle in place; once pending_ops drains, unbind succeeds. */
+static void test_unbind_in_use(void)
+{
+	nats_handle_t *h, *found;
+	str key;
+
+	CHECK(nats_registry_init(16) == 0);
+
+	h = mk_handle("busy", "S", "d");
+	CHECK(nats_registry_bind(h) == 0);
+
+	/* Simulate a worker holding the handle across an async op. */
+	nats_handle_pending_inc(h);
+
+	key = dup_str("busy");
+	CHECK(nats_registry_unbind(&key) == -4);
+	found = nats_registry_lookup(&key);
+	CHECK(found != NULL);
+
+	/* Worker releases -- second unbind now succeeds. */
+	nats_handle_pending_dec(h);
+	CHECK(nats_registry_unbind(&key) == 0);
+	found = nats_registry_lookup(&key);
+	CHECK(found == NULL);
+	free(key.s);
+
+	nats_registry_destroy();
+}
+
 /* Phase 4: every bind assigns a fresh monotonic index so the ack
  * token packing is stable for the handle's lifetime. */
 static void test_bind_index_assignment(void)
@@ -255,6 +318,8 @@ int main(void)
 	test_unbind_existing();
 	test_foreach();
 	test_bind_index_assignment();
+	test_bind_cap_exceeded();
+	test_unbind_in_use();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

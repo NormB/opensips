@@ -246,4 +246,30 @@ void nats_handle_free(nats_handle_t *h);
  * underneath them.  A future phase will add refcounting. */
 struct nats_ring *nats_registry_ring_get(const str *id);
 
+/* Phase 5 pending_ops helpers.  Use these from any path that holds a
+ * borrowed nats_handle_t * across a blocking call (e.g. the consumer
+ * process's Fetch() on a subscription owned by handle h).  While the
+ * counter is non-zero, nats_registry_unbind() refuses with -4.
+ *
+ * These operate on the handle directly (not by id) because callers
+ * already have a pointer from a lookup; re-looking-up by id would
+ * reintroduce the race these helpers are meant to close. */
+static inline void nats_handle_pending_inc(struct nats_handle *h)
+{
+	if (h)
+		__atomic_add_fetch(&h->pending_ops, 1, __ATOMIC_SEQ_CST);
+}
+
+static inline void nats_handle_pending_dec(struct nats_handle *h)
+{
+	if (h)
+		__atomic_sub_fetch(&h->pending_ops, 1, __ATOMIC_SEQ_CST);
+}
+
+static inline int nats_handle_pending_get(const struct nats_handle *h)
+{
+	if (!h) return 0;
+	return __atomic_load_n(&h->pending_ops, __ATOMIC_SEQ_CST);
+}
+
 #endif /* NATS_HANDLE_REGISTRY_H */
