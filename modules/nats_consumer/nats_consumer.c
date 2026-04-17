@@ -32,6 +32,8 @@
 #include "nats_consumer.h"
 #include "nats_handle_registry.h"
 #include "nats_mi.h"
+#include "nats_ack_ipc.h"
+#include "nats_consumer_proc.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -43,6 +45,13 @@ static const cmd_export_t cmds[] = {
 
 static const param_export_t params[] = {
 	{ 0, 0, 0 }
+};
+
+/* Phase 3: dedicated JetStream pull consumer process.
+ * One instance -- there is a single process for the module. */
+static const proc_export_t procs[] = {
+	{ "NATS consumer", 0, 0, nats_consumer_proc_main, 1, 0 },
+	{ 0, 0, 0, 0, 0, 0 }
 };
 
 struct module_exports exports = {
@@ -59,7 +68,7 @@ struct module_exports exports = {
 	nats_consumer_mi_cmds,      /* exported MI functions */
 	0,                          /* exported pseudo-variables */
 	0,                          /* exported transformations */
-	0,                          /* extra processes */
+	procs,                      /* extra processes -- NATS consumer */
 	0,                          /* module pre-initialization function */
 	mod_init,                   /* module initialization function */
 	0,                          /* response handling function */
@@ -78,6 +87,13 @@ static int mod_init(void)
 	}
 	LM_DBG("nats_consumer: registry ready (%d buckets)\n",
 		NATS_CONSUMER_REGISTRY_BUCKETS);
+
+	if (nats_ack_ipc_init() < 0) {
+		LM_ERR("nats_consumer: ack IPC init failed\n");
+		nats_registry_destroy();
+		return -1;
+	}
+	LM_DBG("nats_consumer: ack IPC queue ready\n");
 	return 0;
 }
 
@@ -94,5 +110,9 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	LM_INFO("nats_consumer: shutting down\n");
+	/* Order matters: ack IPC first (so any future Phase 4 drain path
+	 * can flush before the registry disappears underneath it), then
+	 * registry. */
+	nats_ack_ipc_destroy();
 	nats_registry_destroy();
 }
