@@ -538,7 +538,11 @@ utils:
 			cd utils/db_oracle; $(MAKE) all ; \
 		fi ;
 
-install-modules: modules $(modules_prefix)/$(modules_dir)
+.PHONY: install-libnats-pool
+install-libnats-pool: gen_misclibs $(modules_prefix)/$(modules_dir)
+	$(MAKE) -C lib/nats install
+
+install-modules: install-libnats-pool modules $(modules_prefix)/$(modules_dir)
 	@for r in $(modules_full_path) "" ; do \
 		if [ -n "$$r" ]; then \
 			if [ -f "$$r" ]; then \
