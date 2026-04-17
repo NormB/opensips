@@ -1,0 +1,45 @@
+<!-- Module User's Guide -->
+
+<chapter>
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>nats_consumer</emphasis> module runs a dedicated
+		JetStream pull-consumer process alongside the OpenSIPS attendant,
+		bridging inbound NATS messages into OpenSIPS event routes.
+	</para>
+	<para>
+		It is a sibling of <emphasis>event_nats</emphasis>: where
+		<emphasis>event_nats</emphasis> handles publication from script
+		and push-based subscription, <emphasis>nats_consumer</emphasis>
+		owns pull-based, durable consumption with explicit ack semantics.
+	</para>
+	<para>
+		This page is a stub — the full admin guide is under active
+		development on the feature branch.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<itemizedlist>
+		<listitem><para><emphasis>event_nats</emphasis> (for shared NATS pool)</para></listitem>
+	</itemizedlist>
+	</section>
+
+	<section id="parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+	<para>
+		See <emphasis>modparam</emphasis> listings on the module page —
+		they are authoritative while the documentation is being
+		finalised. Key parameters include:
+		<emphasis>consumer_url</emphasis>,
+		<emphasis>stream</emphasis>,
+		<emphasis>durable</emphasis>,
+		<emphasis>batch_size</emphasis>,
+		<emphasis>ack_wait</emphasis>.
+	</para>
+	</section>
+</chapter>
