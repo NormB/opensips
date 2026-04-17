@@ -53,6 +53,7 @@
 #include "nats_fetch.h"
 #include "nats_ack.h"
 #include "nats_rpc.h"
+#include "nats_persist.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -134,7 +135,19 @@ static const acmd_export_t acmds[] = {
 	{ 0, 0, {{0, 0, 0}} }
 };
 
+/* ── modparams ───────────────────────────────────────────────── */
+
+/* Phase 8 opt-in persistence.  Defaults: off.  If enabled, the registry
+ * is JSON-serialized to `persist_path` on every bind/unbind (debounced
+ * 500 ms) and rehydrated on mod_init.  If the parent directory of
+ * `persist_path` does not exist at init time, we log a warning and run
+ * with persistence disabled for this instance. */
+static int persist_handles = 0;
+static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
+
 static const param_export_t params[] = {
+	{ "persist_handles", INT_PARAM, &persist_handles },
+	{ "persist_path",    STR_PARAM, &persist_path    },
 	{ 0, 0, 0 }
 };
 
@@ -210,6 +223,29 @@ static int mod_init(void)
 	}
 	LM_DBG("nats_consumer: ack IPC queue ready (fd=%d)\n",
 		nats_ack_ipc_fd());
+
+	/* Phase 8 opt-in persistence.  If enabled, start the writer thread
+	 * and rehydrate any snapshot left by a previous run.  Failures
+	 * here are non-fatal -- we log, disable persistence, and continue
+	 * with an empty registry so the module still loads. */
+	if (persist_handles) {
+		if (!persist_path || !*persist_path) {
+			LM_WARN("nats_consumer: persist_handles=1 but persist_path "
+					"is empty; persistence disabled\n");
+		} else if (nats_persist_init(persist_path) < 0) {
+			LM_WARN("nats_consumer: persistence init failed for %s; "
+					"continuing with empty registry\n", persist_path);
+		} else {
+			int n = nats_persist_rehydrate();
+			if (n < 0)
+				LM_WARN("nats_consumer: rehydrate failed; starting "
+						"with empty registry\n");
+			else
+				LM_INFO("nats_consumer: rehydrated %d handles from %s\n",
+						n, persist_path);
+		}
+	}
+
 	return 0;
 }
 
@@ -226,9 +262,13 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	LM_INFO("nats_consumer: shutting down\n");
-	/* Order matters: ack IPC first (so any future Phase 4 drain path
-	 * can flush before the registry disappears underneath it), then
-	 * registry. */
+	/* Order matters: persistence flush first (so the outgoing snapshot
+	 * reflects the final live state), then ack IPC (so any future
+	 * Phase 4 drain path can flush before the registry disappears
+	 * underneath it), then registry.  nats_persist_destroy() joins the
+	 * writer thread after flushing any outstanding dirty state -- no
+	 * pending writer can race with the registry teardown below. */
+	nats_persist_destroy();
 	nats_ack_ipc_destroy();
 	nats_registry_destroy();
 }
