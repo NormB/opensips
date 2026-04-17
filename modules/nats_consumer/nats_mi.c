@@ -35,6 +35,7 @@
 #include "nats_handle_registry.h"
 #include "nats_handle_parse.h"
 #include "nats_mi.h"
+#include "nats_persist.h"
 
 /* ── enum -> string helpers ───────────────────────────────────── */
 
@@ -220,6 +221,41 @@ mi_response_t *mi_consumer_list(const mi_params_t *params,
 	return resp;
 }
 
+/* ── handle_reload ────────────────────────────────────────────── */
+
+/* Re-read the persist file and merge any new bindings into the live
+ * registry.  Does NOT clear the existing registry -- new handles are
+ * added; ids that already exist keep their current state.  Phase 8
+ * does not implement "full replacement" semantics (no way to represent
+ * "unbind id X" from a snapshot).
+ *
+ * Refuses with 400 if persistence was not enabled via modparam. */
+mi_response_t *mi_handle_reload(const mi_params_t *params,
+		struct mi_handler *async)
+{
+	mi_response_t *resp;
+	mi_item_t *resp_obj;
+	int loaded;
+	(void)params;
+	(void)async;
+
+	if (!nats_persist_enabled())
+		return init_mi_error(400, MI_SSTR("persistence disabled"));
+
+	loaded = nats_persist_rehydrate();
+	if (loaded < 0)
+		return init_mi_error(500, MI_SSTR("reload failed"));
+
+	resp = init_mi_result_object(&resp_obj);
+	if (!resp)
+		return NULL;
+	if (add_mi_number(resp_obj, MI_SSTR("loaded"), (double)loaded) < 0) {
+		free_mi_response(resp);
+		return init_mi_error(500, MI_SSTR("reload result alloc failed"));
+	}
+	return resp;
+}
+
 /* ── MI export table ──────────────────────────────────────────── */
 
 const mi_export_t nats_consumer_mi_cmds[] = {
@@ -238,6 +274,12 @@ const mi_export_t nats_consumer_mi_cmds[] = {
 	{ "nats_consumer_list",
 	  "list all registered handles", 0, 0, {
 		{ mi_consumer_list, {0} },
+		{ EMPTY_MI_RECIPE }
+	  }, { 0 }
+	},
+	{ "nats_handle_reload",
+	  "re-read the persistence file and merge new bindings", 0, 0, {
+		{ mi_handle_reload, {0} },
 		{ EMPTY_MI_RECIPE }
 	  }, { 0 }
 	},
