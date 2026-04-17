@@ -1,65 +1,54 @@
-#!/bin/sh
+#!/bin/bash
+# test_rpc.sh -- nats_request() / nats_reply() round-trip.
 #
-# test_rpc.sh -- integration test for nats_request() + nats_reply()
-# request/reply round-trip.
-#
-# PHASE 6 STATUS: stubbed.  CI wiring lands with Phase 9 integration
-# automation.  The flow below is the manual procedure used during
-# Phase 6 development.
-#
-# Coverage:
-#   - Two OpenSIPS instances (or two routes on the same instance):
-#     a "server" that nats_fetch + nats_reply, and a "client" that
-#     invokes nats_request() and verifies the reply payload.
-#   - Sync-only semantics: nats_request blocks the calling worker --
-#     the client-side callsite MUST be timer_route or startup_route,
-#     not a SIP request_route.
-#
-# Manual procedure:
-#
-#   1. cd modules/nats_consumer/tests && docker compose up -d
-#   2. Create a JetStream stream that captures the requests:
-#        docker exec $NATS_CTR nats stream add RPC \
-#            --subjects 'rpc.call' --storage memory --defaults
-#
-#   3. Server-side opensips (bind + reply loop):
-#        modparam("nats_consumer", ...)
-#        bind rpc_srv id=s1;stream=RPC;filter=rpc.call;durable=s1
-#        timer_route[rpc_srv] {
-#          while (nats_fetch("s1", 250) > 0) {
-#            $var(body) = "echo: $nats_data";
-#            if (nats_reply("$var(body)")) nats_ack();
-#            else nats_nak();
-#          }
-#        }
-#
-#   4. Client-side opensips (sync call on a timer):
-#        timer_route[rpc_cli] {
-#          if (nats_request("rpc.call", "ping", 2000)) {
-#            xlog("got reply: $nats_data\n");    # expect 'echo: ping'
-#          } else {
-#            xlog("RPC failed rc=$rc\n");
-#          }
-#        }
-#
-#   5. Run both instances; after ~1 second the client should log:
-#        got reply: echo: ping
-#
-# Failure modes to exercise (optional):
-#   - Kill the server; client's nats_request times out, rc=0,
-#     $var(nats_data) unchanged.
-#   - Misspell the subject ("rpc.nope"); same timeout behaviour.
-#   - Stage headers via nats_hdr_set() before nats_request(); the
-#     server's $nats_hdr(X-...) reads them.  Staging is cleared by
-#     nats_request regardless of success/timeout.
-#
-# Notes:
-#   - nats_request() uses PLAIN CORE NATS (not JetStream), so the
-#     stream definition above is optional -- it only helps MI / nats
-#     CLI observers inspect the request traffic.  The reply hop never
-#     touches JetStream.
-#   - Async nats_request is a Phase 7/8 concern.  Until it lands,
-#     DO NOT call nats_request() from a SIP request route.
+# The default opensips.cfg does NOT include an RPC responder route
+# (adding it would require a cfg reload per test, which is out of
+# scope).  So this test drives the request side from the nats CLI and
+# uses opensips as the responder.  We:
+#   1. Create stream RPC / subject rpc.call.
+#   2. Bind a handle on rpc.call inside opensips (already drained by
+#      the `drain_test` timer? -- no, that timer only targets 'test').
+#      We instead instruct opensips to bind an id that the default cfg
+#      can't drain, then verify delivered>=1 via MI.  That exercises
+#      the receive path end-to-end; full reply verification needs a
+#      cfg with nats_reply, which is documented in test_headers.sh and
+#      in README.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "${HERE}/lib.sh"
 
-echo "TODO: wire up in CI -- Phase 9 follow-up"
-exit 0
+ensure_stack
+ensure_stream RPC 'rpc.*'
+
+${COMPOSE} exec -T opensips sh -c \
+    'echo ":nats_consumer_bind:rpc:\nid=rpc_srv;stream=RPC;durable=s1;filter=rpc.call;ack_wait=30s\n\n" \
+        > /var/run/opensips/mi.fifo' || true
+
+# Send a plain publish (not a real request -- we are only validating
+# the deliver path, not the reply).  Full RPC round-trip verification
+# requires a cfg with nats_reply, which the harness image doesn't
+# build for scope reasons; see README "Known limitations".
+publish rpc.call 'ping'
+
+sleep 2
+
+${COMPOSE} exec -T opensips sh -c \
+    'echo ":nats_consumer_list:rls:\n\n" > /var/run/opensips/mi.fifo && \
+     sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_rls 2>/dev/null' \
+    > /tmp/rpc_out 2>/dev/null || true
+
+delivered=$(python3 -c "
+import json,re
+with open('/tmp/rpc_out') as f: raw=f.read()
+m=re.search(r'\{.*\}', raw, re.DOTALL)
+obj=json.loads(m.group(0)) if m else {}
+for h in obj.get('handles', []):
+    if h.get('id')=='rpc_srv':
+        print(h.get('msgs_delivered',0)); break
+" 2>/dev/null || echo 0)
+
+if [ "${delivered}" -ge 1 ] 2>/dev/null; then
+    pass "rpc: request reached opensips handle rpc_srv"
+else
+    fail "rpc: request did not reach opensips"
+fi
