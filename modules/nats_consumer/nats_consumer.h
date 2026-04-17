@@ -34,7 +34,7 @@
 #include "../../str.h"
 
 /* Module version -- appears in MI help and log lines. */
-#define NATS_CONSUMER_VERSION "0.4.0-fetch"
+#define NATS_CONSUMER_VERSION "0.6.0-rpc"
 
 /* Default registry size -- hash bucket count.  Fixed at init. */
 #define NATS_CONSUMER_REGISTRY_BUCKETS 256
