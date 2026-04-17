@@ -28,15 +28,18 @@
  *                  nats_nak(), nats_nak_delay(delay_ms),
  *                  nats_term(), nats_in_progress(),
  *                  nats_hdr_set(name, value),
- *                  nats_reply(payload)
+ *                  nats_reply(payload),
+ *                  nats_request(subject, payload, timeout_ms)
  *   - async acmd:  nats_fetch(id, timeout_ms),
  *                  nats_fetch_batch(id, opts)
  *   - pvars:       $nats_subject, $nats_data, $nats_reply_to,
  *                  $nats_seq, $nats_consumer_seq, $nats_delivered,
  *                  $nats_pending, $nats_token, $nats_hdr(Name)
  *
- * A later Phase 6 commit adds the sync-only nats_request script
- * function for caller-initiated core NATS request/reply.
+ * IMPORTANT: nats_request() is SYNC-ONLY in Phase 6 -- it blocks the
+ * calling worker for up to timeout_ms.  Restrict callsites to
+ * timer_route / startup_route until the async variant lands in a
+ * later phase.  See nats_rpc.c / nats_rpc.h for the full rationale.
  */
 
 #include "../../sr_module.h"
@@ -101,6 +104,19 @@ static const cmd_export_t cmds[] = {
 		ALL_ROUTES },
 	{ "nats_reply", (cmd_function)w_nats_reply, {
 		{CMD_PARAM_STR, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
+	/* nats_request is SYNC-ONLY in Phase 6 -- natsConnection_RequestMsg
+	 * blocks the calling worker for up to timeout_ms.  The script
+	 * author MUST restrict callsites to timer_route / startup_route
+	 * (or another context that tolerates blocking the worker) until a
+	 * non-blocking async variant ships in a later phase.  Registered
+	 * under ALL_ROUTES to keep the error surface consistent with the
+	 * rest of the module; honouring the rule is the caller's job. */
+	{ "nats_request", (cmd_function)w_nats_request, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_INT, 0, 0},
 		{0, 0, 0}},
 		ALL_ROUTES },
 	{ 0, 0, {{0, 0, 0}}, 0 }

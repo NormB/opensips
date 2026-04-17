@@ -45,6 +45,22 @@
  *                                -3 NATS connection unavailable,
  *                                -4 publish failed,
  *                                 1 on success.
+ *
+ *   nats_request(subj, payload, timeout_ms) -- SYNC-ONLY core NATS RPC
+ *                                request/reply.  Blocks the worker for
+ *                                up to timeout_ms waiting for a reply.
+ *                                Intended for timer_route / startup
+ *                                contexts; DO NOT call from a UDP/TCP
+ *                                SIP worker -- it stalls request
+ *                                processing for that worker until the
+ *                                reply (or timeout) comes back.  A
+ *                                non-blocking async variant lands in a
+ *                                later phase.  On success, the reply
+ *                                populates the current-message state so
+ *                                the script can read $nats_data,
+ *                                $nats_subject, $nats_hdr(...), etc.
+ *                                Returns 1 on success, 0 on timeout,
+ *                                -3 NATS unavailable, -4 request error.
  */
 
 #ifndef NATS_RPC_H
@@ -69,6 +85,8 @@ int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
 /* Script-callable header staging. */
 int w_nats_hdr_set (struct sip_msg *msg, str *name, str *value);
 int w_nats_reply   (struct sip_msg *msg, str *payload);
+int w_nats_request (struct sip_msg *msg, str *subject, str *payload,
+                    int *timeout_ms);
 
 /* Clear the staged-header table and free the backing buffers.
  * Invoked internally by the publish paths; exposed so that a future
