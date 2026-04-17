@@ -48,6 +48,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <poll.h>
+#include <time.h>
 
 #include "../../dprint.h"
 #include "../../async.h"
@@ -64,7 +65,8 @@
 
 /* Per-process static: SIP workers are single-threaded so this has
  * thread-local semantics for free. */
-static nats_cur_msg_t g_cur;
+static nats_cur_msg_t   g_cur;
+static nats_cur_batch_t g_batch;
 
 nats_cur_msg_t *nats_fetch_current(void)
 {
@@ -74,6 +76,17 @@ nats_cur_msg_t *nats_fetch_current(void)
 void nats_fetch_clear(void)
 {
 	memset(&g_cur, 0, sizeof(g_cur));
+}
+
+nats_cur_batch_t *nats_fetch_current_batch(void)
+{
+	return &g_batch;
+}
+
+void nats_fetch_clear_batch(void)
+{
+	memset(&g_batch, 0, sizeof(g_batch));
+	g_batch.selected = -1;
 }
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -300,6 +313,341 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	/* Tell the reactor: "read-monitor this fd on our behalf and
 	 * invoke resume_f when it becomes readable." */
 	async_status = fd;
+	return 1;
+}
+
+/* ── batch fetch ─────────────────────────────────────────────── */
+
+typedef struct batch_opts {
+	int count;        /* cap NATS_BATCH_MAX */
+	int expires_ms;   /* 0 = non-blocking */
+	int max_bytes;    /* advisory */
+	int no_wait;      /* 0/1 */
+} batch_opts_t;
+
+/* Duration syntax matches nats_handle_parse: <int>(ms|s|m|h|d), no
+ * suffix = ms. */
+static int batch_parse_duration_ms(const char *s, int len, int *out)
+{
+	int i = 0, digits = 0;
+	long long v = 0;
+	long long mult;
+
+	while (i < len && s[i] >= '0' && s[i] <= '9') {
+		v = v * 10 + (s[i] - '0');
+		digits++;
+		i++;
+	}
+	if (!digits) return -1;
+
+	if (i == len)                             mult = 1LL;
+	else if (i + 2 == len && s[i]=='m' && s[i+1]=='s') mult = 1LL;
+	else if (i + 1 == len && s[i]=='s') mult = 1000LL;
+	else if (i + 1 == len && s[i]=='m') mult = 60LL * 1000LL;
+	else if (i + 1 == len && s[i]=='h') mult = 60LL * 60LL * 1000LL;
+	else if (i + 1 == len && s[i]=='d') mult = 24LL * 60LL * 60LL * 1000LL;
+	else return -1;
+
+	v *= mult;
+	if (v < 0 || v > (long long)0x7FFFFFFFLL) return -1;
+	*out = (int)v;
+	return 0;
+}
+
+static int batch_parse_int(const char *s, int len, int *out)
+{
+	int i = 0;
+	long long v = 0;
+	if (len <= 0) return -1;
+	while (i < len) {
+		if (s[i] < '0' || s[i] > '9') return -1;
+		v = v * 10 + (s[i] - '0');
+		if (v > 0x7FFFFFFFLL) return -1;
+		i++;
+	}
+	*out = (int)v;
+	return 0;
+}
+
+static int batch_parse_opts(const str *opts, batch_opts_t *out)
+{
+	const char *p, *end, *pair_end, *eq;
+	if (!opts || opts->len <= 0 || !opts->s) return 0; /* accept empty */
+
+	p = opts->s;
+	end = p + opts->len;
+	while (p < end) {
+		while (p < end && (*p == ' ' || *p == '\t' || *p == ';'))
+			p++;
+		if (p >= end) break;
+		pair_end = memchr(p, ';', end - p);
+		if (!pair_end) pair_end = end;
+		eq = memchr(p, '=', pair_end - p);
+		if (!eq) return -1;
+
+		{
+			const char *key = p;
+			int keylen = (int)(eq - p);
+			const char *val = eq + 1;
+			int vallen = (int)(pair_end - val);
+
+			while (keylen > 0 && (key[keylen-1]==' '||key[keylen-1]=='\t'))
+				keylen--;
+			while (vallen > 0 && (val[0]==' '||val[0]=='\t')) {
+				val++; vallen--;
+			}
+			while (vallen > 0 && (val[vallen-1]==' '||val[vallen-1]=='\t'))
+				vallen--;
+
+			if (keylen == 5 && memcmp(key, "count", 5) == 0) {
+				if (batch_parse_int(val, vallen, &out->count) < 0)
+					return -1;
+			} else if (keylen == 7 && memcmp(key, "expires", 7) == 0) {
+				if (batch_parse_duration_ms(val, vallen,
+						&out->expires_ms) < 0)
+					return -1;
+			} else if (keylen == 9 && memcmp(key, "max_bytes", 9) == 0) {
+				if (batch_parse_int(val, vallen, &out->max_bytes) < 0)
+					return -1;
+			} else if (keylen == 7 && memcmp(key, "no_wait", 7) == 0) {
+				if (vallen == 1 && val[0] == '1') out->no_wait = 1;
+				else if (vallen == 1 && val[0] == '0') out->no_wait = 0;
+				else return -1;
+			} else {
+				/* Unknown key: ignore silently for forward-compat. */
+				LM_DBG("nats_fetch_batch: unknown opt '%.*s'\n",
+					keylen, key);
+			}
+		}
+		p = pair_end;
+	}
+	return 0;
+}
+
+static int batch_push_slot(uint16_t handle_idx, const nats_ring_slot_t *slot)
+{
+	if (g_batch.count >= NATS_BATCH_MAX) return -1;
+	g_batch.msgs[g_batch.count].has_message = 1;
+	g_batch.msgs[g_batch.count].handle_idx  = handle_idx;
+	g_batch.msgs[g_batch.count].ack_token   = slot->ack_token;
+	g_batch.msgs[g_batch.count].slot        = *slot;
+	g_batch.count++;
+	g_batch.handle_idx = handle_idx;
+	return 0;
+}
+
+/* Sync batch fetch.  Drains up to opts.count messages; if expires>0
+ * and fewer are ready, blocks on the eventfd for the remaining budget.
+ * Returns the number of messages populated into g_batch. */
+int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
+{
+	nats_handle_t   *h;
+	batch_opts_t     bo = { .count = 1, .expires_ms = 0 };
+	nats_ring_slot_t slot;
+	int              cap, fd;
+	int              deadline_remaining;
+
+	(void)msg;
+
+	nats_fetch_clear();
+	nats_fetch_clear_batch();
+
+	h = nats_registry_lookup(id);
+	if (!h || !h->ring) {
+		LM_DBG("nats_fetch_batch: unknown / no-ring handle '%.*s'\n",
+			id->len, id->s);
+		return -3;
+	}
+
+	if (batch_parse_opts(opts, &bo) < 0) {
+		LM_ERR("nats_fetch_batch: bad opts '%.*s'\n",
+			opts ? opts->len : 0, opts ? opts->s : "");
+		return -1;
+	}
+	if (bo.count <= 0) bo.count = 1;
+	cap = bo.count < NATS_BATCH_MAX ? bo.count : NATS_BATCH_MAX;
+
+	/* Phase 1: drain whatever is already visible. */
+	while (g_batch.count < cap) {
+		if (nats_ring_pop(h->ring, &slot) != 0) break;
+		batch_push_slot(h->index, &slot);
+	}
+	if (g_batch.count >= cap)
+		return g_batch.count;
+	if (bo.no_wait || bo.expires_ms <= 0)
+		return g_batch.count;
+
+	/* Phase 2: wait up to expires_ms total.  We loop on poll() so a
+	 * spurious wake (another worker raced us) doesn't exit early. */
+	fd = nats_ring_eventfd(h->ring);
+	if (fd < 0) return g_batch.count;
+
+	deadline_remaining = bo.expires_ms;
+	while (g_batch.count < cap && deadline_remaining > 0) {
+		struct pollfd pfd;
+		int prc;
+		struct timespec t0, t1;
+		int elapsed;
+
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		do {
+			prc = poll(&pfd, 1, deadline_remaining);
+		} while (prc < 0 && errno == EINTR);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+
+		evfd_drain(fd);
+
+		while (g_batch.count < cap) {
+			if (nats_ring_pop(h->ring, &slot) != 0) break;
+			batch_push_slot(h->index, &slot);
+		}
+
+		elapsed = (int)((t1.tv_sec - t0.tv_sec) * 1000 +
+			(t1.tv_nsec - t0.tv_nsec) / 1000000);
+		if (elapsed <= 0) elapsed = 1;
+		deadline_remaining -= elapsed;
+		if (prc == 0) break; /* timeout */
+	}
+
+	return g_batch.count;
+}
+
+/* Async batch fetch parameter -- lives in SHM across resume. */
+typedef struct nats_batch_async_param {
+	uint16_t      handle_idx;
+	int           evfd;
+	int           cap;
+	nats_ring_t  *ring;
+} nats_batch_async_param_t;
+
+static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
+{
+	nats_batch_async_param_t *p = (nats_batch_async_param_t *)param;
+	nats_ring_slot_t slot;
+
+	(void)msg;
+
+	async_status = ASYNC_DONE;
+
+	if (!p) {
+		LM_ERR("nats_fetch_batch: resume with NULL param\n");
+		return -1;
+	}
+
+	evfd_drain(fd);
+
+	while (g_batch.count < p->cap) {
+		if (nats_ring_pop(p->ring, &slot) != 0) break;
+		batch_push_slot(p->handle_idx, &slot);
+	}
+
+	if (g_batch.count > 0) {
+		shm_free(p);
+		return g_batch.count;
+	}
+
+	/* Spurious wake -- another worker drained the ring before we could.
+	 * Re-arm.  Phase 5 share: the async-core timeout_s is coarse; the
+	 * deadline-aware timerfd would make this cleaner.  For now the
+	 * reactor times the whole fetch out and we return 0. */
+	async_status = ASYNC_CONTINUE;
+	return 0;
+}
+
+int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
+                             str *id, str *opts)
+{
+	nats_handle_t             *h;
+	batch_opts_t               bo = { .count = 1, .expires_ms = 0 };
+	nats_ring_slot_t           slot;
+	nats_batch_async_param_t  *p;
+	int                        cap, fd;
+
+	(void)msg;
+
+	nats_fetch_clear();
+	nats_fetch_clear_batch();
+
+	h = nats_registry_lookup(id);
+	if (!h || !h->ring) {
+		LM_DBG("nats_fetch_batch_async: unknown handle '%.*s'\n",
+			id->len, id->s);
+		async_status = ASYNC_NO_IO;
+		return -3;
+	}
+
+	if (batch_parse_opts(opts, &bo) < 0) {
+		async_status = ASYNC_NO_IO;
+		return -1;
+	}
+	if (bo.count <= 0) bo.count = 1;
+	cap = bo.count < NATS_BATCH_MAX ? bo.count : NATS_BATCH_MAX;
+
+	while (g_batch.count < cap) {
+		if (nats_ring_pop(h->ring, &slot) != 0) break;
+		batch_push_slot(h->index, &slot);
+	}
+
+	if (g_batch.count > 0 || bo.no_wait || bo.expires_ms <= 0) {
+		async_status = ASYNC_SYNC;
+		return g_batch.count;
+	}
+
+	fd = nats_ring_eventfd(h->ring);
+	if (fd < 0) {
+		async_status = ASYNC_NO_IO;
+		return -1;
+	}
+
+	p = (nats_batch_async_param_t *)shm_malloc(sizeof(*p));
+	if (!p) {
+		async_status = ASYNC_NO_IO;
+		return -1;
+	}
+	p->handle_idx = h->index;
+	p->evfd       = fd;
+	p->cap        = cap;
+	p->ring       = h->ring;
+
+	ctx->timeout_s    = (unsigned int)((bo.expires_ms + 999) / 1000);
+	ctx->resume_f     = resume_nats_fetch_batch;
+	ctx->resume_param = p;
+
+	async_status = fd;
+	return 0;
+}
+
+/* Point g_cur at batch slot `index`.  This is the script's hook to
+ * iterate through a batch: subsequent ack/nak/$nats_* reads see that
+ * slot's data.  Returns 1 on success, -1 on bad index. */
+int w_nats_batch_select(struct sip_msg *msg, int *index)
+{
+	int i;
+
+	(void)msg;
+
+	if (!index) return -1;
+	i = *index;
+
+	if (g_batch.count <= 0) {
+		LM_DBG("nats_batch_select: no batch current\n");
+		return -1;
+	}
+	if (i < 0 || i >= g_batch.count) {
+		LM_DBG("nats_batch_select: index %d out of range [0,%d)\n",
+			i, g_batch.count);
+		return -1;
+	}
+
+	/* Copy the chosen slot into g_cur so ack/nak/pvar getters use it.
+	 * Record the selected index in g_batch so the ack path knows which
+	 * batch slot to drop when the worker acks. */
+	g_cur = g_batch.msgs[i];
+	g_batch.selected = i;
 	return 1;
 }
 

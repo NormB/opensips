@@ -55,6 +55,24 @@ static int send_ack_ipc(uint64_t token, nats_ack_action_e action,
 	return 1;
 }
 
+/* Batch-aware clear.  If the currently-selected batch slot is finalized
+ * (ack/nak/term), invalidate it so an unguarded re-select doesn't
+ * resubmit the same token. */
+static void finalize_current(void)
+{
+	nats_cur_batch_t *bt = nats_fetch_current_batch();
+
+	if (bt && bt->selected >= 0 && bt->selected < bt->count) {
+		/* Mark the batch slot as consumed so a second select+ack on
+		 * the same index is a no-op.  Keep count + handle_idx so the
+		 * script can still iterate the remaining slots. */
+		bt->msgs[bt->selected].has_message = 0;
+		bt->msgs[bt->selected].ack_token   = 0;
+		bt->selected = -1;
+	}
+	nats_fetch_clear();
+}
+
 int w_nats_ack(struct sip_msg *msg)
 {
 	nats_cur_msg_t *cur = nats_fetch_current();
@@ -68,7 +86,7 @@ int w_nats_ack(struct sip_msg *msg)
 	}
 	rc = send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_ACK, 0);
 	if (rc == 1)
-		nats_fetch_clear();
+		finalize_current();
 	return rc;
 }
 
@@ -85,7 +103,7 @@ int w_nats_nak(struct sip_msg *msg)
 	}
 	rc = send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_NAK, 0);
 	if (rc == 1)
-		nats_fetch_clear();
+		finalize_current();
 	return rc;
 }
 
@@ -104,7 +122,7 @@ int w_nats_nak_delay(struct sip_msg *msg, int *delay_ms)
 	dly = (delay_ms && *delay_ms > 0) ? (uint32_t)*delay_ms : 0;
 	rc = send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_NAK_DELAY, dly);
 	if (rc == 1)
-		nats_fetch_clear();
+		finalize_current();
 	return rc;
 }
 
@@ -121,7 +139,7 @@ int w_nats_term(struct sip_msg *msg)
 	}
 	rc = send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_TERM, 0);
 	if (rc == 1)
-		nats_fetch_clear();
+		finalize_current();
 	return rc;
 }
 
