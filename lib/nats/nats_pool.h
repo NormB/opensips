@@ -203,4 +203,31 @@ const char *nats_pool_get_server_info(void);
  */
 int nats_pool_get_reconnect_epoch(void);
 
+/*
+ * Return 1 if the calling OpenSIPS process should initialize NATS,
+ * 0 otherwise.
+ *
+ * NATS is initialized in:
+ *   - SIP workers (UDP and TCP workers, rank >= 1)
+ *   - HTTPD/MI process (rank == PROC_MODULE, -2)
+ *
+ * NATS is NOT initialized in:
+ *   - Attendant (rank == PROC_MAIN, 0)
+ *   - Timer (rank == PROC_TIMER, -1)
+ *   - TCP-main (rank == PROC_TCP_MAIN, -4) — holds TLS/OpenSSL state
+ *     in a single process post-refactor, and does not handle SIP routing
+ *   - Module-exported processes (negative rank, self-initialize)
+ *
+ * Post TCP/TLS refactor, TCP workers no longer hold OpenSSL state
+ * (TLS runs only in TCP-main), so they are safe to co-host nats.c.
+ *
+ * This helper is the single source of truth for the admission rule;
+ * both event_nats and cachedb_nats must call it rather than open-coding
+ * the check.
+ *
+ * Callable from any OpenSIPS process context.  Pure function — no
+ * locking, no globals.
+ */
+int nats_pool_should_init(int rank);
+
 #endif /* NATS_POOL_H */
