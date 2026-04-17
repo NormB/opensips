@@ -46,11 +46,17 @@
  * Hard per-slot limits.  Messages exceeding these are rejected at push
  * time with a distinct error code; the producer is expected to redirect
  * oversized payloads to a side channel (or log + drop).  Sized so that
- * one slot fits comfortably in a page-aligned ~17 KB region; a ring of
- * 128 slots is therefore about 2.2 MB per bound handle.
+ * one slot fits comfortably in a page-aligned ~18 KB region; a ring of
+ * 128 slots is therefore about 2.3 MB per bound handle.
+ *
+ * Headers are carried by value in a compact length-prefixed byte stream
+ * (see nats_consumer_proc.c for the serializer); overflow drops the
+ * tail headers and sets the headers_truncated flag so the worker can
+ * log / stat the case.
  */
 #define NATS_RING_SUBJECT_MAX   256
 #define NATS_RING_PAYLOAD_MAX  16384
+#define NATS_RING_HEADERS_MAX   1024
 
 /*
  * One fixed-size cell in the ring.  Producer writes every field and then
@@ -91,6 +97,27 @@ typedef struct nats_ring_slot {
 	uint8_t  has_reply;
 	uint32_t reply_to_len;
 	char     reply_to[NATS_RING_SUBJECT_MAX];
+
+	/*
+	 * NATS message headers serialized in a compact stream:
+	 *   [u16 count]
+	 *   repeated:
+	 *     [u16 key_len][key bytes][u16 val_len][val bytes]
+	 * Keys and values are raw bytes (no NUL); lookups by the
+	 * $nats_hdr(name) pvar run a lazy scan.  Sizes are host-order --
+	 * the ring lives in SHM shared by forked children of the same
+	 * process, so no endian conversion is needed.
+	 *
+	 * `headers_truncated` is set when at least one header could not be
+	 * appended because the serialized length would have exceeded
+	 * NATS_RING_HEADERS_MAX.  The surviving prefix is still valid and
+	 * the worker's getter must treat a miss on a truncated-tail header
+	 * as a benign "not found".
+	 */
+	uint16_t headers_len;
+	uint8_t  headers_truncated;
+	uint8_t  _hdr_pad;
+	char     headers[NATS_RING_HEADERS_MAX];
 } nats_ring_slot_t;
 
 /* Opaque -- laid out in nats_ring.c. */
@@ -135,6 +162,14 @@ void nats_ring_destroy(nats_ring_t *r);
  *
  * `reply_to` may be NULL (and `reply_to_len` 0) for messages with no
  * reply subject; `has_reply` is set accordingly inside the slot.
+ *
+ * `headers` must point at a pre-serialized header stream (see the
+ * format note on `headers[]` above) of length `headers_len`, or be
+ * NULL / 0 for no headers.  `headers_truncated` (0 or 1) is stored
+ * verbatim in the slot; it lets the caller propagate a "we dropped
+ * tail headers" signal it already detected while serializing.  The
+ * ring itself does NOT parse the stream -- it is copied byte-for-byte.
+ * Passing headers_len > NATS_RING_HEADERS_MAX returns -4.
  */
 int nats_ring_push(nats_ring_t *r,
                    const char *subject, uint32_t subject_len,
@@ -143,7 +178,9 @@ int nats_ring_push(nats_ring_t *r,
                    uint64_t delivered,  uint64_t pending,
                    int64_t  timestamp_ns,
                    uint64_t ack_token,
-                   const char *reply_to, uint32_t reply_to_len);
+                   const char *reply_to, uint32_t reply_to_len,
+                   const char *headers,  uint16_t headers_len,
+                   uint8_t headers_truncated);
 
 /*
  * Consumer: claim the oldest ready slot and copy it into `*out`.

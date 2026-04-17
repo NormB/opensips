@@ -68,7 +68,8 @@ static void test_roundtrip_cap2(void)
 		"hello", 5,
 		1001, 2001, 3, 7, 42424242,
 		0xdeadbeefULL,
-		"reply.queue", 11);
+		"reply.queue", 11,
+		NULL, 0, 0);
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 1);
 
@@ -106,14 +107,14 @@ static void test_full_capacity(void)
 
 	for (i = 0; i < 4; i++) {
 		rc = nats_ring_push(r, "s", 1, "x", 1,
-			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0);
+			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0, NULL, 0, 0);
 		CHECK(rc == 0);
 	}
 	CHECK(nats_ring_depth(r) == 4);
 
 	/* 5th should fail with -1 (full). */
 	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 99, NULL, 0);
+		0, 0, 0, 0, 0, 99, NULL, 0, NULL, 0, 0);
 	CHECK(rc == -1);
 
 	/* Pop one, push one, depth stays at 4. */
@@ -123,7 +124,7 @@ static void test_full_capacity(void)
 	CHECK(nats_ring_depth(r) == 3);
 
 	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 100, NULL, 0);
+		0, 0, 0, 0, 0, 100, NULL, 0, NULL, 0, 0);
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 4);
 
@@ -155,7 +156,7 @@ static void *sp_sc_producer(void *u)
 	for (i = 0; i < c->n; i++) {
 		for (;;) {
 			int rc = nats_ring_push(c->r, "s", 1, "x", 1,
-				0, 0, 0, 0, 0, i, NULL, 0);
+				0, 0, 0, 0, 0, i, NULL, 0, NULL, 0, 0);
 			if (rc == 0)
 				break;
 			/* ring full, let consumer catch up */
@@ -239,7 +240,7 @@ static void *stress_producer(void *u)
 		uint64_t tok = TOKEN_MAKE(c->pid, i);
 		for (;;) {
 			int rc = nats_ring_push(c->r, "s", 1, "x", 1,
-				0, 0, 0, 0, 0, tok, NULL, 0);
+				0, 0, 0, 0, 0, tok, NULL, 0, NULL, 0, 0);
 			if (rc == 0)
 				break;
 			sched_yield();
@@ -402,7 +403,7 @@ static void test_eventfd_edge(void)
 
 	/* Push one -- edge should have fired. */
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 1, NULL, 0) == 0);
+		0, 0, 0, 0, 0, 1, NULL, 0, NULL, 0, 0) == 0);
 
 	rc = wait_readable(fd, 500);
 	CHECK(rc == 1);
@@ -422,9 +423,9 @@ static void test_eventfd_edge(void)
 	/* Push two more (consecutive) -- only the first should have
 	 * signalled but both are waiting in the ring. */
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 2, NULL, 0) == 0);
+		0, 0, 0, 0, 0, 2, NULL, 0, NULL, 0, 0) == 0);
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 3, NULL, 0) == 0);
+		0, 0, 0, 0, 0, 3, NULL, 0, NULL, 0, 0) == 0);
 
 	rc = wait_readable(fd, 500);
 	CHECK(rc == 1);
@@ -457,24 +458,25 @@ static void test_size_limits(void)
 
 	/* subject too big */
 	rc = nats_ring_push(r, subj_ok, NATS_RING_SUBJECT_MAX + 1,
-		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0);
+		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
 	CHECK(rc == -3);
 
 	/* data too big */
 	rc = nats_ring_push(r, "s", 1,
 		data_too_big, NATS_RING_PAYLOAD_MAX + 1,
-		0, 0, 0, 0, 0, 0, NULL, 0);
+		0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
 	CHECK(rc == -2);
 
 	/* reply_to too big */
 	rc = nats_ring_push(r, "s", 1, "x", 1,
 		0, 0, 0, 0, 0, 0,
-		subj_ok, NATS_RING_SUBJECT_MAX + 1);
+		subj_ok, NATS_RING_SUBJECT_MAX + 1,
+		NULL, 0, 0);
 	CHECK(rc == -3);
 
 	/* exact maxima succeed */
 	rc = nats_ring_push(r, subj_ok, NATS_RING_SUBJECT_MAX,
-		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0);
+		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 1);
 
@@ -495,7 +497,7 @@ static void test_destroy_nonempty(void)
 
 	for (i = 0; i < 3; i++)
 		CHECK(nats_ring_push(r, "s", 1, "x", 1,
-			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0) == 0);
+			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0, NULL, 0, 0) == 0);
 
 	CHECK(nats_ring_depth(r) == 3);
 
@@ -523,6 +525,94 @@ static void test_invalid_capacity(void)
 	nats_ring_destroy(r);
 }
 
+/* ── headers round-trip ───────────────────────────────────────── */
+
+/*
+ * Push a slot with a pre-serialized header stream and verify the
+ * popped copy has matching headers_len, headers_truncated, and byte
+ * content.  We build the stream by hand here (same shape the consumer
+ * process would emit) rather than depending on natsMsgHeader_*.
+ */
+static int hdr_append(char *buf, int cap, int pos,
+                      const char *k, const char *v)
+{
+	int klen = (int)strlen(k);
+	int vlen = (int)strlen(v);
+	int need = 2 + klen + 2 + vlen;
+	if (pos + need > cap) return -1;
+	buf[pos++] = (char)(klen & 0xFF);
+	buf[pos++] = (char)((klen >> 8) & 0xFF);
+	memcpy(buf + pos, k, klen); pos += klen;
+	buf[pos++] = (char)(vlen & 0xFF);
+	buf[pos++] = (char)((vlen >> 8) & 0xFF);
+	memcpy(buf + pos, v, vlen); pos += vlen;
+	return pos;
+}
+
+static void test_headers_roundtrip(void)
+{
+	nats_ring_t     *r = nats_ring_create(4);
+	nats_ring_slot_t out;
+	char             hdr_buf[NATS_RING_HEADERS_MAX];
+	int              pos;
+	int              rc;
+
+	CHECK(r != NULL);
+
+	/* Build a stream with two headers: X-Trace-Id -> 'abc123',
+	 * Content-Type -> 'application/json'.  Count prefix goes in last. */
+	pos = 2;
+	pos = hdr_append(hdr_buf, sizeof(hdr_buf), pos,
+		"X-Trace-Id", "abc123");
+	CHECK(pos > 0);
+	pos = hdr_append(hdr_buf, sizeof(hdr_buf), pos,
+		"Content-Type", "application/json");
+	CHECK(pos > 0);
+	hdr_buf[0] = 2;
+	hdr_buf[1] = 0;
+
+	rc = nats_ring_push(r, "s", 1, "x", 1,
+		0, 0, 0, 0, 0, 7, NULL, 0,
+		hdr_buf, (uint16_t)pos, 0);
+	CHECK(rc == 0);
+
+	rc = nats_ring_pop(r, &out);
+	CHECK(rc == 0);
+	CHECK(out.headers_len == (uint16_t)pos);
+	CHECK(out.headers_truncated == 0);
+	CHECK(memcmp(out.headers, hdr_buf, pos) == 0);
+	/* count field in byte 0 */
+	CHECK((uint8_t)out.headers[0] == 2);
+	CHECK((uint8_t)out.headers[1] == 0);
+
+	/* Push with truncated flag propagated */
+	rc = nats_ring_push(r, "s", 1, "x", 1,
+		0, 0, 0, 0, 0, 8, NULL, 0,
+		hdr_buf, (uint16_t)pos, 1);
+	CHECK(rc == 0);
+	rc = nats_ring_pop(r, &out);
+	CHECK(rc == 0);
+	CHECK(out.headers_truncated == 1);
+
+	/* Push with no headers -- headers_len is 0 and bytes untouched. */
+	rc = nats_ring_push(r, "s", 1, "x", 1,
+		0, 0, 0, 0, 0, 9, NULL, 0,
+		NULL, 0, 0);
+	CHECK(rc == 0);
+	rc = nats_ring_pop(r, &out);
+	CHECK(rc == 0);
+	CHECK(out.headers_len == 0);
+	CHECK(out.headers_truncated == 0);
+
+	/* Overflow -- reject with -4. */
+	rc = nats_ring_push(r, "s", 1, "x", 1,
+		0, 0, 0, 0, 0, 10, NULL, 0,
+		hdr_buf, NATS_RING_HEADERS_MAX + 1, 0);
+	CHECK(rc == -4);
+
+	nats_ring_destroy(r);
+}
+
 int main(void)
 {
 	test_roundtrip_cap2();
@@ -533,6 +623,7 @@ int main(void)
 	test_size_limits();
 	test_destroy_nonempty();
 	test_invalid_capacity();
+	test_headers_roundtrip();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

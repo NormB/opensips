@@ -189,7 +189,9 @@ int nats_ring_push(nats_ring_t *r,
                    uint64_t delivered,  uint64_t pending,
                    int64_t  timestamp_ns,
                    uint64_t ack_token,
-                   const char *reply_to, uint32_t reply_to_len)
+                   const char *reply_to, uint32_t reply_to_len,
+                   const char *headers,  uint16_t headers_len,
+                   uint8_t headers_truncated)
 {
 	uint64_t h, t;
 	nats_ring_slot_t *slot;
@@ -202,6 +204,8 @@ int nats_ring_push(nats_ring_t *r,
 		return -3;
 	if (reply_to_len > NATS_RING_SUBJECT_MAX)
 		return -3;
+	if (headers_len > NATS_RING_HEADERS_MAX)
+		return -4;
 
 	for (;;) {
 		h = atomic_load_explicit(&r->head, memory_order_relaxed);
@@ -266,6 +270,13 @@ int nats_ring_push(nats_ring_t *r,
 		slot->has_reply    = 0;
 		slot->reply_to_len = 0;
 	}
+
+	/* Headers: raw byte-for-byte copy of the caller-serialized stream.
+	 * The wire format is documented on nats_ring_slot_t.headers[]. */
+	slot->headers_len        = headers_len;
+	slot->headers_truncated  = headers_truncated ? 1 : 0;
+	if (headers && headers_len > 0)
+		memcpy(slot->headers, headers, headers_len);
 
 	/* Publish: release-store ready_gen so the pop-side acquire-load
 	 * observes the fully-written slot. */
@@ -355,6 +366,12 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 	out->reply_to_len = slot->reply_to_len;
 	if (out->reply_to_len)
 		memcpy(out->reply_to, slot->reply_to, out->reply_to_len);
+
+	out->headers_len       = slot->headers_len;
+	out->headers_truncated = slot->headers_truncated;
+	out->_hdr_pad          = 0;
+	if (out->headers_len)
+		memcpy(out->headers, slot->headers, out->headers_len);
 
 	/* Mark the slot consumed at generation t so the matching
 	 * producer (generation t + capacity) may reuse it. */
