@@ -520,8 +520,14 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 			return 0;   /* clean + already subscribed */
 		ss->sub    = NULL;
 		is_rebuild = 1;
-		LM_DBG("nats_consumer_proc: refreshing subscription for "
-			"%.*s (dirty)\n", (int)h->id.len, h->id.s);
+		if (h->type == NATS_CONSUMER_EPHEMERAL) {
+			LM_DBG("nats_consumer_proc: re-creating ephemeral "
+				"consumer for %.*s\n",
+				(int)h->id.len, h->id.s);
+		} else {
+			LM_DBG("nats_consumer_proc: refreshing subscription for "
+				"%.*s (dirty)\n", (int)h->id.len, h->id.s);
+		}
 	} else {
 		ss = (proc_sub_state_t *)calloc(1, sizeof(*ss));
 		if (!ss) {
@@ -898,6 +904,35 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	if (s == NATS_CONNECTION_CLOSED) {
 		LM_DBG("nats_consumer_proc: connection closed during fetch "
 			"on id='%.*s'\n", ss->id.len, ss->id.s);
+		/* The outer loop's epoch check will observe the reconnect
+		 * when the library reconnects and will flip ss->dirty then. */
+		goto out;
+	}
+
+	/* Phase 7 ephemeral-GC / subscription-invalidated detection.
+	 *
+	 * NATS_NOT_FOUND comes back when JetStream has GC'd the consumer
+	 * past its inactive_threshold (the common ephemeral-GC case --
+	 * nats.c 3.13's jsm.c surfaces this via NATS_NOT_FOUND whenever
+	 * the server returns a JSConsumerNotFoundErr).
+	 * NATS_INVALID_SUBSCRIPTION means the nats.c subscription object
+	 * has gone into a bad state (e.g. after a server-initiated close).
+	 * In both cases the right thing is to destroy the subscription
+	 * and flag it dirty so the next reconcile tick rebuilds it.
+	 * Ephemeral consumers get a brand-new server-side id on recreate
+	 * (see the \"re-creating ephemeral\" log line in
+	 * ensure_subscription_for_handle). */
+	if (s == NATS_NOT_FOUND || s == NATS_INVALID_SUBSCRIPTION) {
+		LM_INFO("nats_consumer_proc: consumer for %.*s vanished (%s); "
+			"will recreate\n",
+			ss->id.len, ss->id.s, natsStatus_GetText(s));
+		if (ss->sub) {
+			natsSubscription_Unsubscribe(ss->sub);
+			natsSubscription_Destroy(ss->sub);
+			ss->sub = NULL;
+		}
+		ss->dirty = 1;
+		ss->total_fetch_errors++;
 		goto out;
 	}
 
