@@ -158,3 +158,29 @@ int w_nats_in_progress(struct sip_msg *msg)
 	 * subsequent ack/nak still needs g_cur. */
 	return send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_IN_PROGRESS, 0);
 }
+
+/* Alias for the Phase 5 canonical name. */
+int w_nats_ack_progress(struct sip_msg *msg)
+{
+	return w_nats_in_progress(msg);
+}
+
+int w_nats_ack_next(struct sip_msg *msg)
+{
+	nats_cur_msg_t *cur = nats_fetch_current();
+	int rc;
+
+	(void)msg;
+
+	if (!cur || !cur->has_message) {
+		LM_DBG("nats_ack_next: no current message\n");
+		return -1;
+	}
+	/* Action ACK_NEXT: consumer-process treats this as an ack followed
+	 * by an immediate refill hint for the subscription.  On the wire
+	 * it is a plain ack -- nats.c 3.13 has no direct +NXT payload API. */
+	rc = send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_ACK_NEXT, 0);
+	if (rc == 1)
+		finalize_current();
+	return rc;
+}

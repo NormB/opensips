@@ -48,6 +48,22 @@ int w_nats_nak_delay(struct sip_msg *msg, int *delay_ms);
 int w_nats_term (struct sip_msg *msg);
 int w_nats_in_progress(struct sip_msg *msg);
 
+/* Phase 5 additions.
+ *
+ * nats_ack_next(): acknowledge the current message and hint the
+ *   consumer process to refill the ring as soon as possible.  nats.c
+ *   3.13 does not expose the native "+NXT" ack-and-pull mechanism on
+ *   natsMsg_Ack; the consumer process therefore runs an immediate
+ *   pull_one_batch() right after the ack completes for that
+ *   subscription (documented fallback).  Semantically equivalent to
+ *   nats_ack() followed by a zero-budget nats_fetch() on the same id.
+ *
+ * nats_ack_progress(): same as nats_in_progress() but exported under
+ *   the canonical Phase 5 name.  nats_in_progress remains as an alias
+ *   to preserve Phase 4 scripts. */
+int w_nats_ack_next    (struct sip_msg *msg);
+int w_nats_ack_progress(struct sip_msg *msg);
+
 /* Pack / unpack ack-token helpers.  Exported for the consumer process
  * which decodes tokens back to (handle_idx, slot_idx, generation). */
 
