@@ -251,6 +251,193 @@ static void test_by_start_seq_ok(void)
 	}
 }
 
+/* ── Phase 5: extended bind-matrix coverage ───────────────────── */
+
+static void test_replay_policy_instant_default(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->replay_policy == NATS_REPLAY_INSTANT);
+		nats_handle_free(h);
+	}
+}
+
+static void test_replay_policy_original(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;replay_policy=original");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->replay_policy == NATS_REPLAY_ORIGINAL);
+		nats_handle_free(h);
+	}
+}
+
+static void test_replay_policy_bogus(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;replay_policy=fast");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "invalid replay_policy") != NULL);
+}
+
+static void test_by_start_time_ok(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr(
+		"id=x;stream=S;durable=d;deliver_policy=by_start_time;"
+		"start_time=2026-04-16T12:00:00Z");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->deliver_policy == NATS_DELIVER_BY_START_TIME);
+		CHECK(h->start_time_unix_ns > 0);
+		nats_handle_free(h);
+	}
+}
+
+static void test_by_start_time_requires_time(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr(
+		"id=x;stream=S;durable=d;deliver_policy=by_start_time");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "start_time required") != NULL);
+}
+
+static void test_start_time_malformed(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr(
+		"id=x;stream=S;durable=d;deliver_policy=by_start_time;"
+		"start_time=not-a-time");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "RFC3339") != NULL);
+}
+
+static void test_inactive_threshold(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;inactive_threshold=90s");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->inactive_threshold_ms == 90000);
+		nats_handle_free(h);
+	}
+}
+
+static void test_rate_limit(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;rate_limit=1048576");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->rate_limit_bps == 1048576);
+		nats_handle_free(h);
+	}
+}
+
+static void test_sample_freq_ok(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;sample_freq=25");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->sample_freq == 25);
+		nats_handle_free(h);
+	}
+}
+
+static void test_sample_freq_out_of_range(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;sample_freq=101");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "sample_freq") != NULL);
+}
+
+static void test_headers_only(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;headers_only=1");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->headers_only == 1);
+		nats_handle_free(h);
+	}
+}
+
+static void test_js_domain_api_prefix(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr(
+		"id=x;stream=S;durable=d;js_domain=hub;api_prefix=JSH.API.");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->js_domain.len == 3);
+		CHECK(memcmp(h->js_domain.s, "hub", 3) == 0);
+		CHECK(h->api_prefix.len == (int)strlen("JSH.API."));
+		CHECK(memcmp(h->api_prefix.s, "JSH.API.",
+			strlen("JSH.API.")) == 0);
+		nats_handle_free(h);
+	}
+}
+
+static void test_max_ack_pending(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;max_ack_pending=1024");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->max_ack_pending == 1024);
+		nats_handle_free(h);
+	}
+}
+
+static void test_ring_capacity_ok(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;ring_capacity=256");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->ring_capacity == 256);
+		nats_handle_free(h);
+	}
+}
+
+static void test_ring_capacity_zero_rejected(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;ring_capacity=0");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "ring_capacity") != NULL);
+}
+
+static void test_ring_capacity_not_pow2(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;ring_capacity=100");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "power of two") != NULL);
+}
+
 int main(void)
 {
 	test_minimal_durable();
@@ -269,6 +456,24 @@ int main(void)
 	test_duration_variants();
 	test_by_start_seq_requires_seq();
 	test_by_start_seq_ok();
+
+	/* Phase 5 additions */
+	test_replay_policy_instant_default();
+	test_replay_policy_original();
+	test_replay_policy_bogus();
+	test_by_start_time_ok();
+	test_by_start_time_requires_time();
+	test_start_time_malformed();
+	test_inactive_threshold();
+	test_rate_limit();
+	test_sample_freq_ok();
+	test_sample_freq_out_of_range();
+	test_headers_only();
+	test_js_domain_api_prefix();
+	test_max_ack_pending();
+	test_ring_capacity_ok();
+	test_ring_capacity_zero_rejected();
+	test_ring_capacity_not_pow2();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

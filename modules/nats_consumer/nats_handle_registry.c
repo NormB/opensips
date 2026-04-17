@@ -273,13 +273,20 @@ int nats_registry_bind(nats_handle_t *h)
 	/* Allocate the SHM ring that the consumer process will push into
 	 * and SIP workers will pop from.  Under TEST_SHIM (unit tests) the
 	 * ring would require eventfd and atomic SHM allocation which the
-	 * pthread shim does not provide, so we skip it there. */
+	 * pthread shim does not provide, so we skip it there.
+	 *
+	 * Phase 5: respect the per-handle ring_capacity override (the
+	 * parser has already validated that it is a power of two >= 2 or
+	 * zero).  A zero value means "use the module default". */
 #ifndef TEST_SHIM
 	if (!h->ring) {
-		h->ring = nats_ring_create(NATS_HANDLE_RING_CAPACITY);
+		uint32_t cap = h->ring_capacity ? h->ring_capacity
+		                                : NATS_HANDLE_RING_CAPACITY;
+		h->ring = nats_ring_create(cap);
 		if (!h->ring) {
-			LM_ERR("handle ring create failed for id='%.*s'\n",
-				h->id.len, h->id.s);
+			LM_ERR("handle ring create failed for id='%.*s' "
+				"(capacity=%u)\n",
+				h->id.len, h->id.s, (unsigned)cap);
 			/* leave the rlock in place -- nats_handle_free()
 			 * frees it either way.  The caller still owns h. */
 			return -2;
@@ -398,6 +405,43 @@ int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
 
 out:
 	lock_stop_read(g_registry->global_lock);
+	return rc;
+}
+
+/* Phase 5 stub -- reserved for Phase 7 pause/teardown/recreate flow.
+ * For now, only succeeds if the handle has no ring yet (i.e. bound
+ * without initialization under TEST_SHIM).  Returns -1 otherwise. */
+int nats_registry_set_ring_capacity(const str *id, uint32_t cap)
+{
+	int idx;
+	nats_bucket_t *b;
+	nats_handle_t *cur;
+	int rc = -1;
+
+	if (!g_registry || !id || id->len <= 0)
+		return -1;
+	if (cap < 2 || (cap & (cap - 1)) != 0)
+		return -1;
+
+	idx = bucket_index(id);
+	b = &g_registry->buckets[idx];
+
+	lock_start_write(b->lock);
+	for (cur = b->head; cur; cur = cur->next) {
+		if (str_eq(&cur->id, id)) {
+			if (cur->ring) {
+				/* Runtime resize requires drain-and-recreate; not in
+				 * Phase 5 scope -- use at bind time via the
+				 * ring_capacity= parameter. */
+				rc = -1;
+			} else {
+				cur->ring_capacity = cap;
+				rc = 0;
+			}
+			break;
+		}
+	}
+	lock_stop_write(b->lock);
 	return rc;
 }
 
