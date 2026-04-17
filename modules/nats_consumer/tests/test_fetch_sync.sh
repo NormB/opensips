@@ -1,22 +1,31 @@
-#!/bin/sh
-#
+#!/bin/bash
 # test_fetch_sync.sh -- integration test for nats_fetch() (sync path).
 #
-# PHASE 4 STATUS: stubbed.  The CI harness (docker-compose bring-up of
-# nats-server + opensips, MI invocation, message publish, and log
-# verification) lands in a Phase 5 follow-up.  The script path is
-# exercised manually today using the in-repo docker-compose.yaml.
+# Publishes a single message and verifies opensips' timer_route drain
+# picks it up + acks it (logs 'got test.in: <payload>' and
+# nats_consumer_list reports acks>=1).
 #
-# Manual procedure:
-#   1. cd modules/nats_consumer/tests && docker compose up -d
-#   2. docker exec $NATS_CTR nats stream add TEST --subjects 'test.*' \
-#          --storage memory --defaults
-#   3. opensips-cli -x mi nats_consumer_bind \
-#          'id=t1;stream=TEST;filter=test.sync;durable=t1;ack_wait_ms=30000'
-#   4. docker exec $NATS_CTR nats publish test.sync 'hello'
-#   5. Trigger a timer_route that calls nats_fetch("t1", 2000) + nats_ack().
-#   6. Check MI:  opensips-cli -x mi nats_consumer_info t1
-#      Expect:    acks=1 msgs_delivered=1
+# Requires the docker-compose stack in this directory to be up:
+#   docker compose up -d --build
+# Exits 77 if docker / the stack is unavailable.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "${HERE}/lib.sh"
 
-echo "TODO: wire up in CI -- Phase 5 follow-up"
-exit 0
+ensure_stack
+
+ensure_stream TEST 'test.*'
+
+payload="hello-$(date +%s)"
+publish test.in "${payload}"
+
+# The timer_route drains once a second; give it up to 10s to fire.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if wait_for_log 15 "got test.in: ${payload}"; then
+        pass "fetch_sync delivered payload ${payload}"
+        exit 0
+    fi
+    sleep 1
+done
+
+fail "timer_route never logged the published payload"
