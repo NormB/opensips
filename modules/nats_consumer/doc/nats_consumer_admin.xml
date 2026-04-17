@@ -1,0 +1,718 @@
+<?xml version="1.0" encoding='UTF-8'?>
+<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
+"http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd" [
+<!ENTITY % docentities SYSTEM "../../../doc/entities.xml">
+%docentities;
+]>
+
+<chapter>
+
+    <title>&osips; nats_consumer Module</title>
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-overview">
+        <title>Overview</title>
+        <para>
+            The <emphasis>nats_consumer</emphasis> module turns &osips;
+            into a pull-mode
+            <ulink url="https://nats.io">NATS</ulink> JetStream consumer.
+            A dedicated module process subscribes to JetStream streams,
+            populates a per-handle SHM ring, and exposes the messages to
+            &osips; routing scripts via <function>nats_fetch()</function>
+            and <function>nats_fetch_batch()</function>.  Acknowledgements
+            (<function>nats_ack()</function>,
+            <function>nats_ack_next()</function>,
+            <function>nats_ack_progress()</function>,
+            <function>nats_nak()</function>,
+            <function>nats_term()</function>) travel back to the
+            consumer process over an IPC socket and are then relayed to
+            NATS.
+        </para>
+        <para>
+            <emphasis>nats_consumer</emphasis> is the receive-side
+            counterpart to the two other &osips; NATS modules:
+        </para>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    <emphasis>event_nats</emphasis> — publishes &osips;
+                    events and script payloads to NATS subjects,
+                    optionally via JetStream async publish.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <emphasis>cachedb_nats</emphasis> — exposes NATS
+                    Key-Value buckets through the &osips;
+                    <emphasis>cachedb</emphasis> interface.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <emphasis>nats_consumer</emphasis> — pulls messages
+                    off JetStream streams and delivers them to routing
+                    scripts, with explicit ack and request/reply support.
+                </para>
+            </listitem>
+        </itemizedlist>
+        <para>
+            Handles are registered dynamically at runtime via the MI
+            command <function>nats_consumer_bind</function> or the
+            script function <function>nats_consumer_bind()</function>
+            (called from <varname>startup_route</varname>).  There are
+            no bind-time modparams: the module loads with an empty
+            registry and every consumer handle is added on demand.  When
+            <varname>persist_handles</varname> is enabled, the registry
+            is snapshotted to disk and rehydrated across restarts.
+        </para>
+        <para>
+            The module shares the same nats.c connection pool as
+            <emphasis>event_nats</emphasis> (via
+            <filename>lib/nats/libnats_pool.a</filename>), so a single
+            &osips; instance consumes one NATS connection per worker
+            regardless of which NATS modules are loaded.
+        </para>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-dependencies">
+        <title>Dependencies</title>
+
+        <section id="nats_consumer-deps-opensips">
+            <title>&osips; Modules</title>
+            <para>
+                The <emphasis>nats_consumer</emphasis> module has no
+                mandatory dependency on any other &osips; module.  When
+                TLS is used to reach the NATS cluster, load
+                <emphasis>tls_openssl</emphasis>
+                <emphasis>before</emphasis>
+                <emphasis>nats_consumer</emphasis> so that the nats.c
+                library defers OpenSSL lifecycle management to &osips;.
+            </para>
+            <para>
+                It is safe (and typical) to load
+                <emphasis>event_nats</emphasis> and
+                <emphasis>nats_consumer</emphasis> together.  They share
+                the shared nats.c connection pool and do not contend for
+                the same socket or subject space.
+            </para>
+        </section>
+
+        <section id="nats_consumer-deps-external">
+            <title>External Libraries</title>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <emphasis>nats.c</emphasis> v3.13 or later
+                        (<filename>libnats.so</filename>) — the official
+                        C client library for NATS.  The multi-subject
+                        filter and pull-consumer APIs used here require
+                        v3.13 at minimum.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        A JetStream-enabled NATS server (v2.9 or later).
+                    </para>
+                </listitem>
+            </itemizedlist>
+        </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-parameters">
+        <title>Exported Parameters</title>
+
+        <!-- persist_handles -->
+        <section id="param_persist_handles">
+            <title><varname>persist_handles</varname> (integer)</title>
+            <para>
+                Opt-in snapshot persistence for the handle registry.
+                When set to <varname>1</varname>, every successful
+                <function>nats_consumer_bind</function> or
+                <function>nats_consumer_unbind</function> schedules a
+                debounced (500 ms) write of the full registry as a JSON
+                array to <varname>persist_path</varname>.  On
+                <function>mod_init</function>, the module rehydrates from
+                that file so handles registered by a previous run come
+                back automatically.
+            </para>
+            <para>
+                A persistence failure at init (missing parent directory,
+                unwritable target, malformed JSON) is logged as a warning
+                and the module loads with an empty registry — it never
+                blocks startup.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>0</varname>
+                (disabled)
+            </para>
+            <example>
+                <title>Enable handle persistence</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "persist_handles", 1)
+modparam("nats_consumer", "persist_path",
+         "/var/lib/opensips/nats_consumer/handles.json")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- persist_path -->
+        <section id="param_persist_path">
+            <title><varname>persist_path</varname> (string)</title>
+            <para>
+                Filesystem path used by the persistence writer when
+                <varname>persist_handles</varname> is <varname>1</varname>.
+                The parent directory must exist at init time; the module
+                does not create it.  Writes use the standard
+                tempfile + <function>fsync</function> +
+                <function>rename</function> pattern so a crash cannot
+                leave the file half-written.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>/var/lib/opensips/nats_consumer/handles.json</varname>
+            </para>
+            <example>
+                <title>Override snapshot location</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "persist_path",
+         "/etc/opensips/nats_handles.json")
+                </programlisting>
+            </example>
+        </section>
+
+        <para>
+            All NATS transport parameters
+            (<varname>nats_url</varname>, <varname>reconnect_wait</varname>,
+            <varname>max_reconnect</varname>,
+            <varname>tls_skip_verify</varname>, <varname>tls_ca</varname>,
+            <varname>tls_cert</varname>, <varname>tls_key</varname>,
+            <varname>tls_hostname</varname>,
+            <varname>skip_openssl_init</varname>) are owned by
+            <emphasis>event_nats</emphasis> and read through the shared
+            <filename>lib/nats</filename> connection pool.  Set them on
+            the <emphasis>event_nats</emphasis> module; the consumer
+            reuses the pool directly.
+        </para>
+    </section><!-- /parameters -->
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-functions">
+        <title>Exported Functions</title>
+
+        <section id="func_nats_fetch">
+            <title>
+                <function moreinfo="none">nats_fetch(id, [timeout_ms])</function>
+            </title>
+            <para>
+                Pull a single JetStream message for the handle
+                <emphasis>id</emphasis> off the SHM ring.  Populates the
+                per-worker <varname>$nats_*</varname> pseudo-variables
+                with the delivered message's subject, data, sequence,
+                delivery count, pending count, reply subject, and
+                headers.  Does not acknowledge the message — call
+                <function>nats_ack()</function>,
+                <function>nats_nak()</function>, or
+                <function>nats_term()</function> explicitly.
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <emphasis>id</emphasis> (string) — a previously-
+                        bound consumer handle id.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>timeout_ms</emphasis> (integer, optional)
+                        — block up to this many milliseconds waiting for a
+                        message.  Default <varname>0</varname> = non-blocking.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <para>
+                Return values:
+                <varname>1</varname> on success,
+                <varname>0</varname> on empty-after-timeout,
+                <varname>-1</varname> on handle-not-found or transient
+                error,
+                <varname>-2</varname> when the underlying NATS connection
+                is down (the consumer process surfaces this so scripts
+                can distinguish transport failure from empty ring; call
+                <function>nats_last_error()</function> for the human
+                string).
+            </para>
+            <para>
+                Also exported as an async command; see
+                <xref linkend="func_nats_fetch_async"/>.
+            </para>
+        </section>
+
+        <section id="func_nats_fetch_async">
+            <title>
+                <function moreinfo="none">async nats_fetch(id, [timeout_ms])</function>
+            </title>
+            <para>
+                Non-blocking variant of <function>nats_fetch()</function>
+                for use inside <function>async(...)</function> launcher
+                statements.  The worker yields immediately after the
+                call and is resumed by the ring's eventfd when a message
+                arrives, or by a reactor timer when
+                <emphasis>timeout_ms</emphasis> expires.
+            </para>
+            <example>
+                <title>Async fetch + ack in a request route</title>
+                <programlisting format="linespecific">
+route[PROCESS] {
+    async(nats_fetch("orders", 5000), ON_MSG);
+}
+
+route[ON_MSG] {
+    if ($retcode == 1) {
+        xlog("L_INFO", "got $nats_subject: $nats_data\n");
+        nats_ack();
+    } else {
+        xlog("L_WARN", "no message, rc=$retcode\n");
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="func_nats_fetch_batch">
+            <title>
+                <function moreinfo="none">nats_fetch_batch(id, [opts])</function>
+            </title>
+            <para>
+                Drain up to <emphasis>count</emphasis> messages in a
+                single call.  The fetched messages are staged in a
+                per-worker batch buffer.  Use
+                <function>nats_batch_select(i)</function> to activate
+                each one, then ack / nak / term it before moving on.
+            </para>
+            <para>
+                <emphasis>opts</emphasis> is a semicolon-separated
+                <literal>k=v</literal> string recognizing
+                <literal>count</literal> (default 16),
+                <literal>expires</literal> (duration, default 100ms),
+                and <literal>no_wait</literal> (bool, default 0).
+            </para>
+            <para>
+                Returns the number of messages staged, or a negative
+                error code identical to <function>nats_fetch()</function>.
+            </para>
+            <example>
+                <title>Drain ten messages in one pass</title>
+                <programlisting format="linespecific">
+timer_route[drain] {
+    $var(n) = nats_fetch_batch("jobs", "count=10;expires=2s");
+    $var(i) = 0;
+    while ($var(i) &lt; $var(n)) {
+        nats_batch_select($var(i));
+        xlog("L_INFO", "job $nats_seq: $nats_data\n");
+        nats_ack();
+        $var(i) = $var(i) + 1;
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="func_nats_batch_select">
+            <title>
+                <function moreinfo="none">nats_batch_select(idx)</function>
+            </title>
+            <para>
+                Activate the <emphasis>idx</emphasis>-th message in the
+                worker's current batch so subsequent
+                <varname>$nats_*</varname> reads and
+                <function>nats_ack()</function> /
+                <function>nats_nak()</function> /
+                <function>nats_term()</function> calls target it.  Valid
+                indices are <literal>0 .. n-1</literal> where
+                <emphasis>n</emphasis> is the return of the most recent
+                <function>nats_fetch_batch()</function>.  Calling
+                <function>nats_batch_select()</function> twice with the
+                same index after acknowledging is a no-op and returns
+                <varname>-1</varname>.
+            </para>
+        </section>
+
+        <section id="func_nats_ack_family">
+            <title>
+                Acknowledgement functions
+            </title>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_ack()</function>
+                        — acknowledge the current message successfully.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_ack_next()</function>
+                        — ack the current message and immediately
+                        request another delivery (reduces round-trips
+                        when tight-looping a durable consumer).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_ack_progress()</function>
+                        — refresh the broker's ack timer without
+                        terminating the delivery.  Use when a handler
+                        must exceed the handle's
+                        <varname>ack_wait</varname> without triggering
+                        a redelivery.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_nak([delay_ms])</function>
+                        — negative-ack the current message.  When
+                        <emphasis>delay_ms</emphasis> is supplied, the
+                        broker schedules redelivery for that many
+                        milliseconds in the future instead of using the
+                        consumer's <varname>ack_wait</varname>.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_term()</function>
+                        — terminate the delivery with no retry.
+                        <varname>max_deliver</varname>-style advisory
+                        semantics still apply on the server side.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <para>
+                All five return <varname>1</varname> on success or
+                <varname>-1</varname> when there is no current message
+                (or the worker's ack token has already been consumed).
+            </para>
+        </section>
+
+        <section id="func_nats_hdr_set">
+            <title>
+                <function moreinfo="none">nats_hdr_set(name, value)</function>
+            </title>
+            <para>
+                Stage a header on the worker-local outgoing header
+                buffer.  The next <function>nats_reply()</function> or
+                <function>nats_request()</function> flushes the staged
+                headers onto the outbound NATS message.  Up to 16
+                headers can be staged per worker; attempts to add more
+                return <varname>-1</varname>.
+            </para>
+            <para>
+                Staged headers are cleared after every
+                <function>nats_reply()</function> or
+                <function>nats_request()</function> regardless of
+                outcome.
+            </para>
+        </section>
+
+        <section id="func_nats_reply">
+            <title>
+                <function moreinfo="none">nats_reply(payload)</function>
+            </title>
+            <para>
+                Publish <emphasis>payload</emphasis> to the current
+                message's <varname>reply_to</varname> subject.  Useful
+                as the responder side of a request/reply exchange.
+                Returns <varname>1</varname> on success,
+                <varname>-1</varname> when there is no current message,
+                no <varname>reply_to</varname>, or the publish failed.
+            </para>
+        </section>
+
+        <section id="func_nats_request">
+            <title>
+                <function moreinfo="none">nats_request(subject, payload, timeout_ms)</function>
+            </title>
+            <para>
+                Synchronous NATS request/reply.  Publishes
+                <emphasis>payload</emphasis> to
+                <emphasis>subject</emphasis>, blocks the calling worker
+                for up to <emphasis>timeout_ms</emphasis> milliseconds,
+                and populates <varname>$nats_data</varname> +
+                <varname>$nats_hdr(...)</varname> with the reply.
+            </para>
+            <para>
+                <emphasis>This function is sync-only.</emphasis>  It
+                blocks the worker process for the full timeout.
+                Callsites <emphasis>must</emphasis> be restricted to
+                <varname>timer_route</varname> or
+                <varname>startup_route</varname> (or any other context
+                that tolerates a blocking worker).  Calling it from a
+                SIP <varname>request_route</varname> stalls SIP
+                processing for the whole timeout.
+            </para>
+            <para>
+                Returns <varname>1</varname> on success,
+                <varname>0</varname> on timeout with no reply,
+                <varname>-1</varname> on local error, and
+                <varname>-2</varname> on transport error.
+            </para>
+        </section>
+
+    </section><!-- /functions -->
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-pvars">
+        <title>Exported Pseudo-Variables</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    <varname>$nats_subject</varname> — NATS subject the
+                    current message was delivered on.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_data</varname> — message payload.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_reply_to</varname> — reply subject
+                    (empty string when the publisher did not request a
+                    reply).
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_seq</varname> — JetStream stream
+                    sequence number.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_consumer_seq</varname> — JetStream
+                    consumer-side sequence number.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_delivered</varname> — broker's
+                    delivered counter (1 on first delivery, bumps on
+                    each redelivery).
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_pending</varname> — broker's
+                    estimate of messages still waiting on the stream
+                    after this one.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_token</varname> — opaque ack token
+                    encoding (handle_idx, slot_idx, generation).
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <varname>$nats_hdr(Name)</varname> — read a header
+                    from the current message.  Lookup is
+                    case-insensitive.  <emphasis>Name</emphasis> must be
+                    a literal; dynamic
+                    <varname>$nats_hdr($var(x))</varname> forms are not
+                    supported.
+                </para>
+            </listitem>
+        </itemizedlist>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-mi">
+        <title>Exported MI Functions</title>
+
+        <section id="mi_nats_consumer_bind">
+            <title><function moreinfo="none">nats_consumer_bind</function></title>
+            <para>
+                Register a consumer handle.  Takes a single
+                <varname>config</varname> parameter: a
+                semicolon-separated <literal>k=v</literal> string.
+                Required keys: <literal>id</literal>,
+                <literal>stream</literal>, and either
+                <literal>durable=&lt;name&gt;</literal> or
+                <literal>ephemeral=1</literal>.  Optional keys cover
+                the full JetStream pull-consumer matrix:
+                <literal>filter</literal>, <literal>filters</literal>,
+                <literal>deliver_policy</literal>,
+                <literal>start_seq</literal>, <literal>start_time</literal>,
+                <literal>replay_policy</literal>,
+                <literal>ack_policy</literal>, <literal>ack_wait</literal>,
+                <literal>max_deliver</literal>, <literal>backoff</literal>,
+                <literal>max_ack_pending</literal>,
+                <literal>headers_only</literal>,
+                <literal>sample_freq</literal>,
+                <literal>rate_limit</literal>,
+                <literal>inactive_threshold</literal>,
+                <literal>js_domain</literal>,
+                <literal>api_prefix</literal>,
+                <literal>ring_capacity</literal>.
+            </para>
+            <para>
+                Unknown keys are preserved in the handle's
+                <varname>extra_json</varname> for forward-compat and
+                survive persistence round-trips.
+            </para>
+            <example>
+                <title>Register a durable work-queue consumer</title>
+                <programlisting format="linespecific">
+opensips-cli -x mi nats_consumer_bind \
+  'id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5'
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="mi_nats_consumer_unbind">
+            <title><function moreinfo="none">nats_consumer_unbind</function></title>
+            <para>
+                Remove a handle by id.  The handle is marked
+                <emphasis>retired</emphasis> immediately so subsequent
+                lookups miss; the consumer process tears down the
+                JetStream subscription on its next iteration, and the
+                registry reaper frees the handle once all in-flight ack
+                operations drain.  <function>nats_consumer_unbind</function>
+                always returns promptly — the deferred teardown is
+                invisible to the caller.
+            </para>
+            <example>
+                <title>Unbind a handle</title>
+                <programlisting format="linespecific">
+opensips-cli -x mi nats_consumer_unbind id=jobs
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="mi_nats_consumer_list">
+            <title><function moreinfo="none">nats_consumer_list</function></title>
+            <para>
+                List all registered handles with their bind-time
+                configuration and current runtime counters
+                (pulls_requested, msgs_delivered, acks, naks, terms,
+                redeliveries, last_error_code, last_error_msg).
+            </para>
+        </section>
+
+        <section id="mi_nats_handle_reload">
+            <title><function moreinfo="none">nats_handle_reload</function></title>
+            <para>
+                Re-read the persistence file
+                (<varname>persist_path</varname>) and merge in any
+                handles that are not already bound.  Existing handles
+                are untouched — the reload is additive.  Returns the
+                number of new handles loaded.  Useful when the snapshot
+                has been hand-edited or copied in from another node.
+            </para>
+        </section>
+
+    </section><!-- /mi -->
+
+    <!-- ============================================================ -->
+    <section id="nats_consumer-patterns">
+        <title>Usage Patterns</title>
+
+        <section id="nats_consumer-patterns-workqueue">
+            <title>Durable Work Queue</title>
+            <para>
+                Two or more &osips; instances binding the same durable
+                name on the same stream load-balance deliveries via
+                JetStream's consumer machinery.  No duplicates unless
+                <function>nats_nak()</function>/<varname>ack_wait</varname>
+                expiry triggers a redelivery.
+            </para>
+            <example>
+                <title>startup_route + timer_route drain loop</title>
+                <programlisting format="linespecific">
+startup_route {
+    nats_consumer_bind(
+        "id=jobs;stream=WORK;durable=jobs_worker;"
+        "filter=work.jobs;ack_wait=30s;max_deliver=5");
+}
+
+timer_route[drain, 1] {
+    while (nats_fetch("jobs", 250) > 0) {
+        xlog("L_INFO", "job $nats_seq: $nats_data\n");
+        nats_ack_next();
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="nats_consumer-patterns-ephemeral">
+            <title>Ephemeral Advisory Subscriber</title>
+            <para>
+                JetStream advisories
+                (<literal>$JS.EVENT.ADVISORY.&gt;</literal>) are a
+                natural fit for an ephemeral consumer — the subscription
+                lives only while &osips; does, and
+                <varname>inactive_threshold</varname> keeps the broker
+                tidy if the process dies unexpectedly.
+            </para>
+            <example>
+                <title>Subscribe to max-delivery advisories</title>
+                <programlisting format="linespecific">
+startup_route {
+    nats_consumer_bind(
+        "id=dlq;stream=_SYS_JS;ephemeral=1;"
+        "filter=$JS.EVENT.ADVISORY.MAX_DELIVERIES.>;"
+        "inactive_threshold=5m");
+}
+
+timer_route[check_dlq, 5] {
+    while (nats_fetch("dlq", 100) > 0) {
+        xlog("L_ALERT", "dead letter: $nats_subject $nats_data\n");
+        nats_ack();
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="nats_consumer-patterns-rpc">
+            <title>Request / Reply</title>
+            <para>
+                The responder side binds a durable consumer on a stream
+                covering the request subject; the requester side calls
+                <function>nats_request()</function> from a
+                <varname>timer_route</varname> or
+                <varname>startup_route</varname>.
+            </para>
+            <example>
+                <title>Two-route RPC on the same instance</title>
+                <programlisting format="linespecific">
+startup_route {
+    nats_consumer_bind(
+        "id=rpc_srv;stream=RPC;durable=srv;"
+        "filter=rpc.call;ack_wait=5s");
+}
+
+timer_route[rpc_srv, 1] {
+    while (nats_fetch("rpc_srv", 100) > 0) {
+        nats_hdr_set("X-Trace-Id", "$nats_hdr(X-Trace-Id)");
+        if (nats_reply("echo: $nats_data"))
+            nats_ack();
+        else
+            nats_nak();
+    }
+}
+
+timer_route[rpc_cli, 5] {
+    if (nats_request("rpc.call", "ping", 2000))
+        xlog("L_INFO", "reply: $nats_data\n");
+}
+                </programlisting>
+            </example>
+        </section>
+
+    </section><!-- /patterns -->
+
+</chapter>
