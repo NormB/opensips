@@ -59,9 +59,9 @@ static STAT_CHECKED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mu
 static STAT_ACCEPTED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 static STAT_REJECTED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
-/// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
+/// STAT_NO_RESET re-export for source ergonomics (mirrors SDK constants).
 #[allow(dead_code)]
-const STAT_NO_RESET: u16 = 1;
+use opensips_rs::stat_flags::NO_RESET as STAT_NO_RESET;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -171,12 +171,12 @@ unsafe extern "C" fn w_rust_sst_check(
 ) -> c_int {
     // Parse the two string parameters as integers
     let param_interval = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => parse_str_param(s),
-        None => 0,
+        Ok(s) => parse_str_param(s),
+        Err(_) => 0,
     };
     let param_min_se = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
-        Some(s) => parse_str_param(s),
-        None => 0,
+        Ok(s) => parse_str_param(s),
+        Err(_) => 0,
     };
 
     // Get our configured minimum
@@ -259,8 +259,8 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = [sys::cmd_param { flags: 0, fixup: Non
 
 const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
     let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
-    p[0].flags = 2; // CMD_PARAM_STR
-    p[1].flags = 2; // CMD_PARAM_STR
+    p[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    p[1].flags = opensips_rs::command::CMD_PARAM_STR;
     p
 };
 
@@ -269,37 +269,37 @@ static CMDS: SyncArray<sys::cmd_export_, 7> = SyncArray([
         name: cstr_lit!("sst_check"),
         function: Some(w_rust_sst_check),
         params: TWO_STR_PARAMS,
-        flags: 1, // REQUEST_ROUTE
+        flags: opensips_rs::route_flags::REQUEST,
     },
     sys::cmd_export_ {
         name: cstr_lit!("sst_update"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 4, // REQUEST_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route_flags::REQUEST | opensips_rs::route_flags::ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("sst_stats"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("sst_status"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("sst_reload"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("sst_prometheus"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -317,22 +317,22 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 static PARAMS: SyncArray<sys::param_export_, 5> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("default_interval"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: DEFAULT_INTERVAL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("default_min_se"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: DEFAULT_MIN_SE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("default_refresher"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: DEFAULT_REFRESHER.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("publish_events"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
@@ -364,7 +364,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_sst"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),

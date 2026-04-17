@@ -1035,8 +1035,8 @@ unsafe extern "C" fn w_check_concurrent(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let key = account.as_bytes();
 
@@ -1090,8 +1090,8 @@ unsafe extern "C" fn w_check_concurrent_inbound(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let key = account.as_bytes();
 
@@ -1144,8 +1144,8 @@ unsafe extern "C" fn w_check_concurrent_outbound(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let key = account.as_bytes();
 
@@ -1196,8 +1196,8 @@ unsafe extern "C" fn w_concurrent_inc(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
 
     // Read dialog profile settings before entering with_worker
@@ -1231,8 +1231,8 @@ unsafe extern "C" fn w_concurrent_dec(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
 
     with_worker(|state| {
@@ -1291,8 +1291,8 @@ unsafe extern "C" fn w_check_burst(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let key = account.as_bytes();
 
@@ -1333,8 +1333,8 @@ unsafe extern "C" fn w_concurrent_status(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let key = account.as_bytes();
 
@@ -1360,12 +1360,12 @@ unsafe extern "C" fn w_concurrent_set_limit(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let limit_str = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
-        Some(s) => s,
-        None => return -2,
+        Ok(s) => s,
+        Err(_) => return -2,
     };
     let limit = match parse_u32(limit_str.as_bytes()) {
         Some(v) => v,
@@ -1548,29 +1548,29 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = [sys::cmd_param { flags: 0, fixup: Non
 
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
-    p[0].flags = 2; // CMD_PARAM_STR
+    p[0].flags = opensips_rs::command::CMD_PARAM_STR;
     p
 };
 
 const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
     let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
-    p[0].flags = 2; // CMD_PARAM_STR
-    p[1].flags = 2; // CMD_PARAM_STR
+    p[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    p[1].flags = opensips_rs::command::CMD_PARAM_STR;
     p
 };
 
 static CMDS: SyncArray<sys::cmd_export_, 12> = SyncArray([
-    sys::cmd_export_ { name: cstr_lit!("check_concurrent"), function: Some(w_check_concurrent), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_inc"), function: Some(w_concurrent_inc), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_dec"), function: Some(w_concurrent_dec), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_reload"), function: Some(w_concurrent_reload), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_stats"), function: Some(w_concurrent_stats), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("check_burst"), function: Some(w_check_burst), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_status"), function: Some(w_concurrent_status), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_set_limit"), function: Some(w_concurrent_set_limit), params: TWO_STR_PARAMS, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("check_concurrent_inbound"), function: Some(w_check_concurrent_inbound), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("check_concurrent_outbound"), function: Some(w_check_concurrent_outbound), params: ONE_STR_PARAM, flags: 1 | 2 | 4 },
-    sys::cmd_export_ { name: cstr_lit!("concurrent_prometheus"), function: Some(w_concurrent_prometheus), params: EMPTY_PARAMS, flags: 1 | 2 | 4 },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent"), function: Some(w_check_concurrent), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_inc"), function: Some(w_concurrent_inc), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_dec"), function: Some(w_concurrent_dec), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_reload"), function: Some(w_concurrent_reload), params: EMPTY_PARAMS, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_stats"), function: Some(w_concurrent_stats), params: EMPTY_PARAMS, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("check_burst"), function: Some(w_check_burst), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_status"), function: Some(w_concurrent_status), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_set_limit"), function: Some(w_concurrent_set_limit), params: TWO_STR_PARAMS, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent_inbound"), function: Some(w_check_concurrent_inbound), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("check_concurrent_outbound"), function: Some(w_check_concurrent_outbound), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_prometheus"), function: Some(w_concurrent_prometheus), params: EMPTY_PARAMS, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
     sys::cmd_export_ { name: ptr::null(), function: None, params: EMPTY_PARAMS, flags: 0 },
 ]);
 
@@ -1579,17 +1579,17 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 ]);
 
 static PARAMS: SyncArray<sys::param_export_, 12> = SyncArray([
-    sys::param_export_ { name: cstr_lit!("limits_file"), type_: 1, param_pointer: LIMITS_FILE.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("default_limit"), type_: 2, param_pointer: DEFAULT_LIMIT.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("auto_track"), type_: 2, param_pointer: AUTO_TRACK.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("account_var"), type_: 1, param_pointer: ACCOUNT_VAR.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("use_dialog_profiles"), type_: 2, param_pointer: USE_DIALOG_PROFILES.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("profile_name"), type_: 1, param_pointer: PROFILE_NAME.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("direction_aware"), type_: 2, param_pointer: DIRECTION_AWARE.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("cooldown_secs"), type_: 2, param_pointer: COOLDOWN_SECS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("burst_threshold"), type_: 2, param_pointer: BURST_THRESHOLD.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("burst_window_secs"), type_: 2, param_pointer: BURST_WINDOW_SECS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("publish_events"), type_: 2, param_pointer: PUBLISH_EVENTS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("limits_file"), type_: opensips_rs::param_type::STR, param_pointer: LIMITS_FILE.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("default_limit"), type_: opensips_rs::param_type::INT, param_pointer: DEFAULT_LIMIT.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("auto_track"), type_: opensips_rs::param_type::INT, param_pointer: AUTO_TRACK.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("account_var"), type_: opensips_rs::param_type::STR, param_pointer: ACCOUNT_VAR.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("use_dialog_profiles"), type_: opensips_rs::param_type::INT, param_pointer: USE_DIALOG_PROFILES.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("profile_name"), type_: opensips_rs::param_type::STR, param_pointer: PROFILE_NAME.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("direction_aware"), type_: opensips_rs::param_type::INT, param_pointer: DIRECTION_AWARE.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("cooldown_secs"), type_: opensips_rs::param_type::INT, param_pointer: COOLDOWN_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("burst_threshold"), type_: opensips_rs::param_type::INT, param_pointer: BURST_THRESHOLD.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("burst_window_secs"), type_: opensips_rs::param_type::INT, param_pointer: BURST_WINDOW_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("publish_events"), type_: opensips_rs::param_type::INT, param_pointer: PUBLISH_EVENTS.as_ptr() },
     sys::param_export_ { name: ptr::null(), type_: 0, param_pointer: ptr::null_mut() },
 ]);
 
@@ -1604,7 +1604,7 @@ static MOD_STATS: SyncArray<sys::stat_export_, 5> = SyncArray([
     sys::stat_export_ { name: cstr_lit!("concurrent_checked") as *mut _, flags: 0, stat_pointer: &STAT_CHECKED as *const _ as *mut _ },
     sys::stat_export_ { name: cstr_lit!("concurrent_allowed") as *mut _, flags: 0, stat_pointer: &STAT_ALLOWED as *const _ as *mut _ },
     sys::stat_export_ { name: cstr_lit!("concurrent_blocked") as *mut _, flags: 0, stat_pointer: &STAT_BLOCKED as *const _ as *mut _ },
-    sys::stat_export_ { name: cstr_lit!("concurrent_active") as *mut _, flags: 1, stat_pointer: &STAT_ACTIVE_CALLS as *const _ as *mut _ },
+    sys::stat_export_ { name: cstr_lit!("concurrent_active") as *mut _, flags: opensips_rs::stat_flags::NO_RESET, stat_pointer: &STAT_ACTIVE_CALLS as *const _ as *mut _ },
     sys::stat_export_ { name: ptr::null_mut(), flags: 0, stat_pointer: ptr::null_mut() },
 ]);
 
@@ -1616,7 +1616,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_concurrent_calls"),
-    type_: 1,
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),
@@ -1643,3 +1643,65 @@ pub static exports: sys::module_exports = sys::module_exports {
     init_child_f: Some(mod_child_init),
     reload_ack_f: None,
 };
+
+// ── Unit tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_bytes_handles_empty_and_whitespace() {
+        assert_eq!(trim_bytes(b""), b"");
+        assert_eq!(trim_bytes(b"   "), b"");
+        assert_eq!(trim_bytes(b"\t\t"), b"");
+        assert_eq!(trim_bytes(b"  alice  "), b"alice");
+        assert_eq!(trim_bytes(b"alice\r"), b"alice");
+        assert_eq!(trim_bytes(b"  alice\t\r"), b"alice");
+    }
+
+    #[test]
+    fn trim_bytes_preserves_interior_whitespace() {
+        // Only leading/trailing are stripped; interior spaces remain.
+        assert_eq!(trim_bytes(b"  alice bob  "), b"alice bob");
+    }
+
+    #[test]
+    fn parse_u32_accepts_digits_only() {
+        assert_eq!(parse_u32(b"0"), Some(0));
+        assert_eq!(parse_u32(b"5"), Some(5));
+        assert_eq!(parse_u32(b"100"), Some(100));
+        assert_eq!(parse_u32(b"4294967295"), Some(u32::MAX));
+    }
+
+    #[test]
+    fn parse_u32_rejects_invalid() {
+        assert_eq!(parse_u32(b""), None);
+        assert_eq!(parse_u32(b"abc"), None);
+        assert_eq!(parse_u32(b"-1"), None);
+        assert_eq!(parse_u32(b"1.5"), None);
+        assert_eq!(parse_u32(b" 5"), None);  // caller must trim first
+        assert_eq!(parse_u32(b"5 "), None);
+    }
+
+    #[test]
+    fn parse_u32_rejects_overflow() {
+        // u32::MAX is 4_294_967_295 → one more digit overflows.
+        assert_eq!(parse_u32(b"4294967296"), None);
+        assert_eq!(parse_u32(b"99999999999"), None);
+    }
+
+    #[test]
+    fn fnv1a_is_deterministic() {
+        assert_eq!(fnv1a(b""), fnv1a(b""));
+        assert_eq!(fnv1a(b"alice"), fnv1a(b"alice"));
+    }
+
+    #[test]
+    fn fnv1a_distinguishes_inputs() {
+        // Collision-free for this small set — sanity check, not a hash quality test.
+        assert_ne!(fnv1a(b"alice"), fnv1a(b"bob"));
+        assert_ne!(fnv1a(b"alice"), fnv1a(b"Alice"));
+        assert_ne!(fnv1a(b"alice"), fnv1a(b""));
+    }
+}

@@ -91,7 +91,7 @@ static STAT_FILTERED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_m
 static STAT_QUEUE_DEPTH: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
-const STAT_NO_RESET: u16 = 1;
+use opensips_rs::stat_flags::NO_RESET as STAT_NO_RESET;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -361,8 +361,8 @@ unsafe extern "C" fn w_rust_webhook(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let payload = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_http_webhook",
                     "webhook: missing or invalid payload parameter");
                 return -2;
@@ -481,7 +481,7 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
 
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
@@ -559,19 +559,19 @@ static CMDS: SyncArray<sys::cmd_export_, 4> = SyncArray([
         name: cstr_lit!("webhook"),
         function: Some(w_rust_webhook),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("webhook_stats"),
         function: Some(w_rust_webhook_stats),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("webhook_prometheus"),
         function: Some(w_rust_webhook_prometheus),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -594,62 +594,62 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 static PARAMS: SyncArray<sys::param_export_, 13> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("url"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: URL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("max_queue"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: MAX_QUEUE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("http_timeout"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: HTTP_TIMEOUT.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("content_type"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: CONTENT_TYPE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("tls_ca_file"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: TLS_CA_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("headers"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: HEADERS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("max_retries"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: MAX_RETRIES.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("retry_delay_ms"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: RETRY_DELAY_MS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("batch_size"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: BATCH_SIZE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("batch_timeout_ms"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: BATCH_TIMEOUT_MS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("method_filter"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: METHOD_FILTER.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("log_errors"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: LOG_ERRORS.as_ptr(),
     },
     // Null terminator
@@ -670,7 +670,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_http_webhook"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),

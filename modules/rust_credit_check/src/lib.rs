@@ -726,8 +726,8 @@ unsafe extern "C" fn w_rust_credit_check(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_check: missing or invalid parameter");
                 return -2;
@@ -795,16 +795,16 @@ unsafe extern "C" fn w_rust_credit_check_dest(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_check_dest: missing account parameter");
                 return -2;
             }
         };
         let destination = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_check_dest: missing destination parameter");
                 return -2;
@@ -875,16 +875,16 @@ unsafe extern "C" fn w_rust_credit_debit(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_debit: missing account parameter");
                 return -2;
             }
         };
         let duration = match unsafe { <i32 as CommandFunctionParam>::from_raw(p1) } {
-            Some(d) => d,
-            None => {
+            Ok(d) => d,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_debit: missing duration parameter");
                 return -2;
@@ -949,8 +949,8 @@ unsafe extern "C" fn w_rust_credit_end(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_end: missing account parameter");
                 return -2;
@@ -1023,8 +1023,8 @@ unsafe extern "C" fn w_rust_credit_recheck(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_recheck: missing account parameter");
                 return -2;
@@ -1079,8 +1079,8 @@ unsafe extern "C" fn w_rust_credit_check_async(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_check_async: missing account parameter");
                 return -2;
@@ -1167,8 +1167,8 @@ unsafe extern "C" fn w_rust_credit_clear(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_credit_check",
                     "credit_clear: missing or invalid parameter");
                 return -2;
@@ -1244,20 +1244,20 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
 
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
 const TWO_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
-    arr[1].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    arr[1].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
 const STR_INT_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
     arr[1].flags = 4; // CMD_PARAM_INT
     arr
 };
@@ -1271,55 +1271,55 @@ static CMDS: SyncArray<sys::cmd_export_, 11> = SyncArray([
         name: cstr_lit!("credit_check"),
         function: Some(w_rust_credit_check),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_check_dest"),
         function: Some(w_rust_credit_check_dest),
         params: TWO_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_check_async"),
         function: Some(w_rust_credit_check_async),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_debit"),
         function: Some(w_rust_credit_debit),
         params: STR_INT_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_end"),
         function: Some(w_rust_credit_end),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_recheck"),
         function: Some(w_rust_credit_recheck),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_clear"),
         function: Some(w_rust_credit_clear),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_stats"),
         function: Some(w_rust_credit_stats),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("credit_prometheus"),
         function: Some(w_rust_credit_prometheus),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -1348,88 +1348,88 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 static PARAMS: SyncArray<sys::param_export_, 17> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("billing_url"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: BILLING_URL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("cache_ttl"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: CACHE_TTL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("http_timeout"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: HTTP_TIMEOUT.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("pool_size"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: POOL_SIZE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("rate_per_min"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: RATE_PER_MIN.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("on_error"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: ON_ERROR.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("tls_ca_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: TLS_CA_FILE.as_ptr(),
     },
     // Task 45
     sys::param_export_ {
         name: cstr_lit!("debit_url"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DEBIT_URL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("debit_on_end"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: DEBIT_ON_END.as_ptr(),
     },
     // Task 46
     sys::param_export_ {
         name: cstr_lit!("balance_field"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: BALANCE_FIELD.as_ptr(),
     },
     // Task 47
     sys::param_export_ {
         name: cstr_lit!("billing_url_backup"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: BILLING_URL_BACKUP.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("failover_timeout_secs"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: FAILOVER_TIMEOUT_SECS.as_ptr(),
     },
     // Task 48
     sys::param_export_ {
         name: cstr_lit!("rate_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: RATE_FILE.as_ptr(),
     },
     // Task 49
     sys::param_export_ {
         name: cstr_lit!("recheck_interval_secs"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: RECHECK_INTERVAL_SECS.as_ptr(),
     },
     // Task 50
     sys::param_export_ {
         name: cstr_lit!("cache_warmup_url"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: CACHE_WARMUP_URL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("publish_events"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     // Null terminator
@@ -1449,7 +1449,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("credit_check"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),
