@@ -50,6 +50,11 @@
 #include "../../rw_locking.h"
 #endif
 
+/* Forward declaration; full type defined in nats_ring.h.  The handle
+ * keeps a pointer to the SHM-backed per-handle ring; consumers include
+ * nats_ring.h directly when they need to operate on it. */
+struct nats_ring;
+
 typedef enum {
 	NATS_CONSUMER_DURABLE = 0,
 	NATS_CONSUMER_EPHEMERAL,
@@ -125,6 +130,22 @@ typedef struct nats_handle {
 	int last_error_code;
 	str last_error_msg;
 
+	/* SHM ring for this handle -- created on bind, destroyed on unbind.
+	 * Producer: the dedicated consumer process.
+	 * Consumer: SIP workers.
+	 * Ownership: the registry owns the ring and tears it down when the
+	 * handle is released.  May be NULL under TEST_SHIM where the test
+	 * shim does not provide eventfd-compatible allocation. */
+	struct nats_ring *ring;
+
+	/* Active JetStream subscription handle.
+	 * Owned by the consumer process (not SHM; process-local).
+	 * NULL until the consumer process creates the subscription.
+	 *
+	 * Not written by SIP workers.  Treated as opaque in shared headers;
+	 * the consumer process code casts this to natsSubscription *. */
+	void *subscription;
+
 	/* intrusive bucket chain */
 	struct nats_handle *next;
 } nats_handle_t;
@@ -168,5 +189,15 @@ int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
  * if initialized, then frees the handle itself.
  * Used by parse-then-fail paths where the caller still owns the handle. */
 void nats_handle_free(nats_handle_t *h);
+
+/* Accessor -- returns the SHM ring owned by the handle with the given
+ * `id`, or NULL if no such handle is bound.  Intended for SIP worker
+ * side script functions (Phase 4) that need to pop messages.
+ *
+ * The registry keeps the handle alive until nats_registry_unbind(), so
+ * the returned pointer is valid until a concurrent unbind -- callers
+ * that race with unbind must be prepared for the ring to disappear
+ * underneath them.  A future phase will add refcounting. */
+struct nats_ring *nats_registry_ring_get(const str *id);
 
 #endif /* NATS_HANDLE_REGISTRY_H */
