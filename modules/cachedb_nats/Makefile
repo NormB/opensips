@@ -8,7 +8,6 @@ NAME=cachedb_nats.so
 # Installed into $(modules_dir); modules locate it via $ORIGIN rpath so
 # all loaded NATS modules share one copy of pool_cfg / _nc / _js state.
 LIBS    += -L../../lib/nats -lnats_pool
-LDFLAGS += -Wl,-rpath,'$$ORIGIN'
 
 # External libnats dependency (pkg-config or fallback)
 include ../../lib/nats/Makefile.nats
@@ -20,3 +19,8 @@ DEFS += -DHAVE_EVI
 LIBS += -lpthread
 
 include ../../Makefile.modules
+
+# Appended AFTER Makefile.modules so it survives the `LDFLAGS:=$(MOD_LDFLAGS)`
+# reassignment that happens inside Makefile.modules.  LDFLAGS is deferred in
+# the $(NAME) link rule, so late edits still reach the linker.
+LDFLAGS += -Wl,-rpath,'$$ORIGIN'
