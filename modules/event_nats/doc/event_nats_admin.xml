@@ -40,11 +40,14 @@
         <para>
             NATS connections are managed by the shared
             <varname>lib/nats</varname> connection pool
-            (<filename>libnats_pool.a</filename>).  Each qualifying worker
-            process obtains its own connection from the pool during
-            <function>child_init()</function>.  The pool handles startup
-            retries (bounded by <varname>max_reconnect</varname>) and runtime
-            reconnection (unlimited) automatically.
+            (<filename>libnats_pool.so</filename>) — a dynamic library
+            installed alongside the module <filename>.so</filename> files
+            and resolved at load time via an <emphasis>$ORIGIN</emphasis>
+            RUNPATH.  Each qualifying worker process obtains its own
+            connection from the pool during <function>child_init()</function>.
+            The pool handles startup retries (bounded by
+            <varname>max_reconnect</varname>) and runtime reconnection
+            (unlimited) automatically.
         </para>
     </section>
 
@@ -56,12 +59,31 @@
             <title>&osips; Modules</title>
             <para>
                 The <emphasis>event_nats</emphasis> module has no mandatory
-                dependency on any other &osips; module.  The shared NATS
-                connection pool (<filename>lib/nats/nats_pool</filename>) is
-                compiled directly into the module shared object
-                (<filename>event_nats.so</filename>) via the
-                <varname>misclibs</varname> build mechanism; no separate
-                connection module is required.
+                dependency on any other &osips; module.  It links dynamically
+                against the shared NATS connection pool
+                (<filename>lib/nats/libnats_pool.so</filename>), which is
+                installed alongside the module <filename>.so</filename> files
+                and resolved at load time via an <emphasis>$ORIGIN</emphasis>
+                RUNPATH; no separate &osips; module exports the pool.
+            </para>
+            <para>
+                When more than one NATS module
+                (<emphasis>event_nats</emphasis>,
+                <emphasis>cachedb_nats</emphasis>,
+                <emphasis>nats_consumer</emphasis>, ...) is loaded in the same
+                &osips; instance they all share one
+                <filename>libnats_pool.so</filename> and therefore one copy of
+                the pool globals
+                (<varname>pool_cfg</varname>, <varname>_nc</varname>,
+                <varname>_js</varname>, KV handle cache).  The first module to
+                call <function>nats_pool_register</function> at
+                <function>mod_init</function> time seeds the connection
+                parameters (seed URL list, TLS options, reconnect tuning);
+                later calls from other modules only append any additional
+                seed URLs.  <function>loadmodule</function> the module whose
+                <varname>nats_url</varname> and TLS parameters should take
+                effect <emphasis>first</emphasis> in
+                <filename>opensips.cfg</filename>.
             </para>
             <para>
                 When TLS is used, the <emphasis>tls_openssl</emphasis> module
@@ -86,8 +108,11 @@
                         (<filename>libnats.so</filename>) — the official C
                         client library for NATS, available from
                         <ulink url="https://github.com/nats-io/nats.c">
-                        github.com/nats-io/nats.c</ulink>.  Build nats.c with
-                        the same OpenSSL installation used by &osips; to avoid
+                        github.com/nats-io/nats.c</ulink>.  For TLS support,
+                        nats.c must be built against OpenSSL; WolfSSL,
+                        mbedTLS, and other TLS libraries are not supported by
+                        the nats.c build system.  Build nats.c against the
+                        same OpenSSL installation used by &osips; to avoid
                         symbol conflicts at runtime.
                     </para>
                 </listitem>

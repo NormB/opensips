@@ -79,14 +79,48 @@
 		</para>
 		<itemizedlist>
 			<listitem><para>
-				<emphasis>None.</emphasis>
-				The module is self-contained and carries its own copy of the
-				shared NATS connection pool (statically linked from
-				<emphasis>lib/nats/libnats_pool.a</emphasis>).  It does not depend
-				on the <emphasis>nats_connection</emphasis> module or any other
-				&osips; module.
+				<emphasis>None are required.</emphasis>
+				The module links dynamically against
+				<emphasis>libnats_pool.so</emphasis> in
+				<emphasis>lib/nats</emphasis> (installed alongside the module
+				<emphasis>.so</emphasis> files and located at load time via an
+				<emphasis>$ORIGIN</emphasis> RUNPATH), and registers directly
+				with the &osips; CacheDB and EVI subsystems in the core.  No
+				other &osips; module needs to be loaded first.
 			</para></listitem>
 		</itemizedlist>
+		<para>
+			The following modules are only needed for specific script-level
+			uses:
+		</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>event_nats</emphasis> — required only if a script
+				forwards <emphasis>E_NATS_KV_CHANGE</emphasis> (or any other
+				event) to a NATS subject via <function>subscribe_event</function>
+				with a <emphasis>nats:</emphasis> transport.  For purely local
+				consumption through an <emphasis>event_route</emphasis> block
+				the core EVI subsystem handles dispatch and
+				<emphasis>event_nats</emphasis> is not needed.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+			When more than one NATS module
+			(<emphasis>cachedb_nats</emphasis>, <emphasis>event_nats</emphasis>,
+			<emphasis>nats_consumer</emphasis>, ...) is loaded in the same
+			&osips; instance, they all share a single
+			<emphasis>libnats_pool.so</emphasis> instance and therefore a
+			single set of pool globals (<varname>pool_cfg</varname>,
+			<varname>_nc</varname>, <varname>_js</varname>, KV handle cache).
+			The first <function>nats_pool_register</function> call at
+			<function>mod_init</function> time seeds the connection parameters
+			(seed URL list, TLS options, reconnection tuning); subsequent
+			calls from other modules only append any additional seed URLs and
+			otherwise do not override the configuration.  Load the module
+			whose <emphasis>nats_url</emphasis> / TLS parameters you want to
+			take effect <emphasis>first</emphasis> in
+			<filename>opensips.cfg</filename>.
+		</para>
 	</section>
 
 	<section>
@@ -108,9 +142,12 @@
 				later is required for JetStream KV support.
 			</para>
 			<para>
-				For TLS connections, nats.c must be built against OpenSSL.  The
-				same OpenSSL installation used by &osips; must be present at
-				runtime to avoid library version conflicts.
+				For TLS connections, nats.c must be built against OpenSSL.
+				OpenSSL is the only TLS backend supported by upstream nats.c:
+				WolfSSL, mbedTLS, and other TLS libraries are not supported by
+				the library's build system.  The same OpenSSL installation used
+				by &osips; must be present at runtime to avoid library version
+				conflicts.
 			</para>
 			</listitem>
 			<listitem>
@@ -141,15 +178,24 @@
 		CacheDB convention:
 	</para>
 	<para>
-		<emphasis role="bold">nats[:<replaceable>group</replaceable>]://<replaceable>host</replaceable>:<replaceable>port</replaceable>/</emphasis>
+		<emphasis role="bold">nats[:<replaceable>group</replaceable>]://[<replaceable>user</replaceable>[:<replaceable>password</replaceable>]@]<replaceable>host</replaceable>[:<replaceable>port</replaceable>][,<replaceable>host</replaceable>[:<replaceable>port</replaceable>]]*/</emphasis>
 	</para>
 	<para>
 		The optional <replaceable>group</replaceable> label (e.g.
 		<emphasis>nats:mycluster://</emphasis>) distinguishes multiple cache
-		namespaces in the same script.  When <varname>nats_url</varname> is
-		also set it takes precedence over the host:port portion of this URL
-		for the actual NATS connection; the URL is then used solely for group
-		registration.
+		namespaces in the same script.  Multiple comma-separated
+		<replaceable>host[:port]</replaceable> pairs may be supplied as a
+		bootstrap seed list; nats.c discovers the remainder of the cluster via
+		INFO gossip.  An optional <replaceable>user[:password]</replaceable>
+		section supplies NATS user/password authentication credentials which
+		are passed through verbatim to the nats.c client (for token-based
+		authentication, place the token in the <replaceable>user</replaceable>
+		field with no password).
+	</para>
+	<para>
+		When <varname>nats_url</varname> is also set it takes precedence over
+		the host/credentials portion of this URL for the actual NATS
+		connection; the URL is then used solely for group registration.
 	</para>
 	<para>
 		This parameter may be set more than once to register multiple cache
@@ -159,8 +205,18 @@
 	<title>Set <varname>cachedb_url</varname> parameter</title>
 	<programlisting format="linespecific">
 ...
+# Plain, single node
 modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:4222/")
+
+# Named group
 modparam("cachedb_nats", "cachedb_url", "nats:calls://127.0.0.1:4222/")
+
+# User/password authentication
+modparam("cachedb_nats", "cachedb_url", "nats://alice:s3cret@nats.example.com:4222/")
+
+# Multi-host seed list
+modparam("cachedb_nats", "cachedb_url",
+    "nats://nats-1:4222,nats-2:4222,nats-3:4222/")
 ...
 	</programlisting>
 	</example>
@@ -179,11 +235,15 @@ cache_fetch("nats:calls", "call:$ci", $var(caller));
 	<title><varname>nats_url</varname> (string)</title>
 	<para>
 		Comma-separated list of NATS server URLs used as the bootstrap seed
-		list for the connection pool.  After the initial connection is
-		established, nats.c discovers all cluster peers via the INFO protocol
-		gossip mechanism and maintains the full topology automatically.
-		This parameter only needs to contain enough servers to bootstrap the
-		initial connection.
+		list for the connection pool.  Each entry follows the native nats.c
+		URL form
+		<emphasis>nats://[<replaceable>user</replaceable>[:<replaceable>password</replaceable>]@]<replaceable>host</replaceable>[:<replaceable>port</replaceable>]</emphasis>
+		(or <emphasis>tls://...</emphasis> to request TLS explicitly).  Token
+		authentication is expressed as a user without a password.  After the
+		initial connection is established, nats.c discovers all cluster peers
+		via the INFO protocol gossip mechanism and maintains the full topology
+		automatically, so this parameter only needs to contain enough servers
+		to bootstrap.
 	</para>
 	<para>
 		Use DNS hostnames rather than IP addresses so that
@@ -191,8 +251,8 @@ cache_fetch("nats:calls", "call:$ci", $var(caller));
 		automatically following topology changes in the cluster.
 	</para>
 	<para>
-		When this parameter is set it takes precedence over the host:port
-		embedded in <varname>cachedb_url</varname>.
+		When this parameter is set it takes precedence over the host and
+		credentials portion of <varname>cachedb_url</varname>.
 	</para>
 	<para>
 		<emphasis>
@@ -203,8 +263,17 @@ cache_fetch("nats:calls", "call:$ci", $var(caller));
 	<title>Set <varname>nats_url</varname> parameter</title>
 	<programlisting format="linespecific">
 ...
+# Three-node cluster seed list
 modparam("cachedb_nats", "nats_url",
     "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")
+
+# User/password authentication
+modparam("cachedb_nats", "nats_url",
+    "nats://alice:s3cret@nats.example.com:4222")
+
+# Token authentication (user field only, no password)
+modparam("cachedb_nats", "nats_url",
+    "nats://s3cret-token@nats.example.com:4222")
 ...
 	</programlisting>
 	</example>

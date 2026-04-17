@@ -9,7 +9,24 @@ with an in-process JSON full-text search index and live KV change watching.
 
 ## Dependencies
 
-- `nats_connection.so` — must be loaded first (provides the shared connection pool)
+- **OpenSIPS modules:** none are required. The module links dynamically
+  against `lib/nats/libnats_pool.so` (installed alongside the module `.so`
+  files and resolved via an `$ORIGIN` RUNPATH) and registers directly with
+  the core CacheDB and EVI subsystems.
+- **`event_nats` (optional):** only needed if a script uses `subscribe_event(...,
+  "nats:...")` to forward `E_NATS_KV_CHANGE` (or any other event) onto a NATS
+  subject. Purely local consumption via `event_route[E_NATS_KV_CHANGE]` is
+  handled by the core EVI subsystem and does not need `event_nats`.
+- **Load order when combining NATS modules:** when `event_nats`,
+  `nats_consumer`, or any other NATS module is loaded in the same OpenSIPS
+  instance, all modules share one `libnats_pool.so` instance and therefore
+  one copy of pool globals (`pool_cfg`, `_nc`, `_js`, KV handle cache). The
+  first module's `nats_pool_register()` call seeds the shared
+  configuration (seed URL list, TLS options, reconnect tuning); later calls
+  from other modules only append additional seed URLs. `loadmodule` the
+  module whose `nats_url`/TLS parameters should take effect **first**.
+- **External:** `libnats` v3.13+, and a NATS server (2.9+) with JetStream
+  enabled.
 
 ## Features
 
@@ -26,8 +43,8 @@ with an in-process JSON full-text search index and live KV change watching.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `cachedb_url` | string (func) | -- | OpenSIPS cachedb URL (e.g., `nats://127.0.0.1:4222/`) |
-| `nats_url` | string | `nats://127.0.0.1:4222` | NATS server seed list. Use DNS hostnames for cluster resilience. |
+| `cachedb_url` | string (func) | -- | OpenSIPS cachedb URL: `nats[:group]://[user[:password]@]host[:port][,host[:port]]*/`. May be set multiple times for separate cache groups. |
+| `nats_url` | string | `nats://127.0.0.1:4222` | NATS seed list in native `nats://[user[:password]@]host[:port]` (or `tls://...`) form, comma-separated. Use DNS hostnames for cluster resilience. Overrides the host/credentials portion of `cachedb_url` when set. |
 | `kv_bucket` | string | `opensips` | JetStream KV bucket name |
 | `kv_replicas` | int | 3 | Replication factor (only used when creating a new bucket) |
 | `kv_history` | int | 5 | Version history depth per key |
@@ -35,7 +52,8 @@ with an in-process JSON full-text search index and live KV change watching.
 | `fts_json_prefix` | string | `json:` | Key prefix for JSON documents included in the search index |
 | `fts_max_results` | int | 100 | Maximum results returned by `cache_query` |
 | `kv_watch` | string | NULL | Key pattern to watch (e.g., `usrloc.>` for wildcard). NULL = watch all keys. |
-| `tls_*`, `reconnect_*`, `max_reconnect` | -- | -- | Same TLS and reconnect params as event_nats |
+| `tls_ca`, `tls_cert`, `tls_key`, `tls_hostname`, `tls_skip_verify` | -- | -- | Client TLS parameters. nats.c supports OpenSSL only (not WolfSSL/mbedTLS). |
+| `reconnect_wait`, `max_reconnect`, `skip_openssl_init` | -- | -- | Connection pool tuning (see admin guide). |
 
 ## Script Functions
 
@@ -111,7 +129,6 @@ watcher restarts.
 ## Cluster Configuration
 
 ```
-loadmodule "nats_connection.so"
 loadmodule "cachedb_nats.so"
 
 modparam("cachedb_nats", "cachedb_url", "nats://localhost:4222/")
@@ -120,8 +137,11 @@ modparam("cachedb_nats", "kv_bucket", "opensips")
 modparam("cachedb_nats", "kv_replicas", 3)
 ```
 
-The `nats_url` is a seed list — see the `nats_connection` README for cluster topology
-and resilience details. Use DNS hostnames for automatic discovery of topology changes.
+The `nats_url` is a seed list. After the initial connection, nats.c discovers
+the full cluster topology via INFO protocol gossip and maintains it
+automatically. Use DNS hostnames (rather than IP addresses) so
+`getaddrinfo` re-resolves on each reconnect attempt and automatically
+follows topology changes.
 
 The `kv_replicas` setting only takes effect when the bucket is first created. To change
 replication on an existing bucket, use the NATS CLI: `nats kv update <bucket> --replicas=N`.

@@ -11,13 +11,27 @@ persistence.
 
 ## Dependencies
 
-- `nats_connection.so` — must be loaded first (provides the shared connection pool)
+- **OpenSIPS modules:** none are required. The module links dynamically
+  against `lib/nats/libnats_pool.so` (installed alongside the module `.so`
+  files and resolved via an `$ORIGIN` RUNPATH) and registers directly with
+  the core EVI subsystem.
+- **Load order when combining NATS modules:** when `cachedb_nats`,
+  `nats_consumer`, or any other NATS module is loaded in the same OpenSIPS
+  instance, all modules share one `libnats_pool.so` instance and therefore
+  one copy of pool globals (`pool_cfg`, `_nc`, `_js`, KV handle cache). The
+  first module's `nats_pool_register()` call at `mod_init` time seeds the
+  shared configuration (seed URL list, TLS options, reconnect tuning);
+  later calls from other modules only append additional seed URLs.
+  `loadmodule` the module whose `nats_url`/TLS parameters should take
+  effect **first**.
+- **External:** `libnats` v3.13+, and (for JetStream) a NATS server 2.9+
+  with JetStream enabled.
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `nats_url` | string | `nats://127.0.0.1:4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See nats_connection README for topology details. |
+| `nats_url` | string | `nats://127.0.0.1:4222` | Comma-separated NATS server URLs (seed list) in native `nats://[user[:password]@]host[:port]` (or `tls://...`) form. Use DNS hostnames so `getaddrinfo` re-resolves on each reconnect attempt. |
 | `jetstream` | int | 0 | Enable JetStream for persistent async publish (1=on, 0=off) |
 | `reconnect_wait` | int | 2000 | Milliseconds between startup connection retries |
 | `max_reconnect` | int | 60 | Max startup connection attempts. Does NOT limit runtime reconnection (that is unlimited). |
@@ -91,12 +105,12 @@ modparam("event_nats", "nats_url", "nats://nats-1:4222,nats://nats-2:4222,nats:/
 
 The URL list is a **seed list for bootstrap only**. After the initial connection, nats.c
 discovers the full cluster topology via the INFO protocol gossip and adds/removes servers
-dynamically. See the `nats_connection` README for details.
+dynamically. Use DNS hostnames (not IP addresses) so `getaddrinfo` re-resolves on each
+reconnect attempt and automatically picks up node replacement or IP reassignment.
 
 ## Usage
 
 ```
-loadmodule "nats_connection.so"
 loadmodule "event_nats.so"
 
 modparam("event_nats", "nats_url", "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")

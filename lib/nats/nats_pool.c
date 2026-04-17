@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 Summit-2026 / nats_connection contributors
+ * Copyright (C) 2025 Summit-2026 / lib/nats contributors
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -24,8 +24,14 @@
  * @brief Shared NATS connection pool for OpenSIPS modules.
  *
  * This library provides a single shared NATS connection per OpenSIPS worker
- * process, used by both event_nats.so and cachedb_nats.so.  It is compiled
- * as libnats_pool.a and statically linked into each module via misclibs=.
+ * process, used by event_nats.so, cachedb_nats.so, and any other NATS
+ * module loaded in the same OpenSIPS instance.  It is compiled as
+ * libnats_pool.so and dynamically linked into each module via
+ * -lnats_pool, with an $ORIGIN RUNPATH so ld.so resolves it from the
+ * modules directory.  All NATS modules loaded in one process therefore
+ * share a single copy of pool_cfg / _nc / _js / _kv state — a
+ * nats_pool_register() call from one module is visible to every other
+ * NATS module.
  *
  * ## Thread model
  *
@@ -72,9 +78,10 @@
 #include "../../ut.h"
 #include "nats_pool.h"
 
-/* This is a shared library (lib/nats), not a loadable module.
- * Compiled as libnats_pool.a and linked into event_nats.so
- * and cachedb_nats.so via misclibs= in their Makefiles. */
+/* This is a shared support library (lib/nats), not a loadable OpenSIPS
+ * module.  It is built as libnats_pool.so and linked dynamically into the
+ * NATS modules (event_nats.so, cachedb_nats.so, ...) via -lnats_pool with
+ * an $ORIGIN RUNPATH set in each module's Makefile. */
 
 /* ----------------------------------------------------------------
  * Shared pool configuration (shm, set pre-fork in mod_init)

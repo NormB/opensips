@@ -286,8 +286,12 @@ static int mod_init(void)
 	/*
 	 * Register with the NATS connection pool.
 	 *
-	 * Since lib/nats is statically linked, each module has its own pool.
-	 * cachedb_nats needs its own nats_url and TLS params to connect.
+	 * lib/nats is now a shared library (libnats_pool.so) linked into every
+	 * NATS module.  The first module to call nats_pool_register() wins:
+	 * its nats_url and TLS options seed the shared pool_cfg, and later
+	 * calls from other modules only augment the server list.  This module
+	 * still supplies a url/TLS pair from its own parameters in case it is
+	 * loaded standalone or ahead of event_nats.
 	 *
 	 * If nats_url is set, use it directly. Otherwise, extract server
 	 * addresses from the cachedb_url (format: nats:group://host:port,.../)
