@@ -54,6 +54,15 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_INT|CMD_PARAM_OPT, 0, 0},
 		{0, 0, 0}},
 		ALL_ROUTES },
+	{ "nats_fetch_batch", (cmd_function)w_nats_fetch_batch, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_batch_select", (cmd_function)w_nats_batch_select, {
+		{CMD_PARAM_INT, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
 	{ "nats_ack", (cmd_function)w_nats_ack, {
 		{0, 0, 0}},
 		ALL_ROUTES },
@@ -77,6 +86,10 @@ static const acmd_export_t acmds[] = {
 	{ "nats_fetch", (acmd_function)w_nats_fetch_async, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_INT|CMD_PARAM_OPT, 0, 0},
+		{0, 0, 0}} },
+	{ "nats_fetch_batch", (acmd_function)w_nats_fetch_batch_async, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
 		{0, 0, 0}} },
 	{ 0, 0, {{0, 0, 0}} }
 };
