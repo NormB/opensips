@@ -37,6 +37,11 @@
 #include <stdint.h>
 
 #include "nats_handle_registry.h"
+#include "nats_ring.h"
+
+/* Default slot count for per-handle rings.  Phase 3: fixed.  A later
+ * phase will expose this as a bind-time option. */
+#define NATS_HANDLE_RING_CAPACITY 128
 
 /* ── bucket ──────────────────────────────────────────────────── */
 
@@ -210,6 +215,15 @@ void nats_handle_free(nats_handle_t *h)
 		h->rlock = NULL;
 	}
 
+	/* Tear down the SHM ring.  Subscription cleanup happens in the
+	 * consumer process (process-local pointer), not here. */
+#ifndef TEST_SHIM
+	if (h->ring) {
+		nats_ring_destroy(h->ring);
+		h->ring = NULL;
+	}
+#endif
+
 	shm_free(h);
 }
 
@@ -240,6 +254,23 @@ int nats_registry_bind(nats_handle_t *h)
 	}
 	h->created_at = time(NULL);
 	h->last_used_at = 0;
+
+	/* Allocate the SHM ring that the consumer process will push into
+	 * and SIP workers will pop from.  Under TEST_SHIM (unit tests) the
+	 * ring would require eventfd and atomic SHM allocation which the
+	 * pthread shim does not provide, so we skip it there. */
+#ifndef TEST_SHIM
+	if (!h->ring) {
+		h->ring = nats_ring_create(NATS_HANDLE_RING_CAPACITY);
+		if (!h->ring) {
+			LM_ERR("handle ring create failed for id='%.*s'\n",
+				h->id.len, h->id.s);
+			/* leave the rlock in place -- nats_handle_free()
+			 * frees it either way.  The caller still owns h. */
+			return -2;
+		}
+	}
+#endif
 
 	lock_start_write(b->lock);
 
@@ -353,4 +384,29 @@ int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
 out:
 	lock_stop_read(g_registry->global_lock);
 	return rc;
+}
+
+struct nats_ring *nats_registry_ring_get(const str *id)
+{
+	int idx;
+	nats_bucket_t *b;
+	nats_handle_t *cur;
+	struct nats_ring *ring = NULL;
+
+	if (!g_registry || !id || id->len <= 0)
+		return NULL;
+
+	idx = bucket_index(id);
+	b = &g_registry->buckets[idx];
+
+	lock_start_read(b->lock);
+	for (cur = b->head; cur; cur = cur->next) {
+		if (str_eq(&cur->id, id)) {
+			ring = cur->ring;
+			break;
+		}
+	}
+	lock_stop_read(b->lock);
+
+	return ring;
 }
