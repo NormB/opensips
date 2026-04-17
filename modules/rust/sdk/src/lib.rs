@@ -40,6 +40,7 @@ pub mod sys;
 pub mod ffi;
 pub mod param;
 pub mod command;
+pub mod constants;
 pub mod msg;
 pub mod log;
 pub mod pv;
@@ -51,6 +52,7 @@ pub mod dlg;
 
 // Re-export key types at crate root
 pub use call::CallArg;
+pub use constants::{route_flags, param_type, module_type, dep_behaviour, route, stat_flags};
 pub use error::{Error, Result};
 pub use msg::SipMessage;
 pub use param::{Integer, ModString};
