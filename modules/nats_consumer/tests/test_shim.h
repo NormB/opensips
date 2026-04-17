@@ -1,0 +1,64 @@
+/*
+ * Copyright (C) 2026 OpenSIPS Solutions
+ *
+ * This file is part of opensips, a free SIP server.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+/*
+ * test_shim.h -- drop-in replacement for shm_mem.h + rw_locking.h + dprint.h
+ * so the registry and parser can be compiled and run in a plain process
+ * unit test.  Included only when -DTEST_SHIM is on.
+ */
+
+#ifndef NATS_CONSUMER_TEST_SHIM_H
+#define NATS_CONSUMER_TEST_SHIM_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+
+/* ── allocator ───────────────────────────────────────────────── */
+
+void *test_shm_malloc(size_t n);
+void *test_shm_realloc(void *p, size_t n);
+void  test_shm_free(void *p);
+
+#define shm_malloc(n)     test_shm_malloc(n)
+#define shm_malloc_func   test_shm_malloc_func
+#define shm_realloc(p,n)  test_shm_realloc((p),(n))
+#define shm_free(p)       test_shm_free(p)
+
+/* ── dprint ──────────────────────────────────────────────────── */
+
+#define LM_ERR(fmt, ...)  fprintf(stderr, "ERR:  " fmt, ##__VA_ARGS__)
+#define LM_WARN(fmt, ...) fprintf(stderr, "WARN: " fmt, ##__VA_ARGS__)
+#define LM_INFO(fmt, ...) fprintf(stderr, "INFO: " fmt, ##__VA_ARGS__)
+#define LM_DBG(fmt, ...)  do {} while (0)
+#define LM_NOTICE(fmt, ...) fprintf(stderr, "NOTE: " fmt, ##__VA_ARGS__)
+#define LM_CRIT(fmt, ...) fprintf(stderr, "CRIT: " fmt, ##__VA_ARGS__)
+#define LM_ALERT(fmt, ...) fprintf(stderr, "ALRT: " fmt, ##__VA_ARGS__)
+
+/* ── rw_lock ─────────────────────────────────────────────────── */
+
+typedef struct rw_lock_t {
+	pthread_rwlock_t rw;
+} rw_lock_t;
+
+rw_lock_t *test_lock_init_rw(void);
+void       test_lock_destroy_rw(rw_lock_t *l);
+
+#define lock_init_rw()       test_lock_init_rw()
+#define lock_destroy_rw(l)   test_lock_destroy_rw(l)
+
+#define lock_start_read(l)   pthread_rwlock_rdlock(&(l)->rw)
+#define lock_stop_read(l)    pthread_rwlock_unlock(&(l)->rw)
+#define lock_start_write(l)  pthread_rwlock_wrlock(&(l)->rw)
+#define lock_stop_write(l)   pthread_rwlock_unlock(&(l)->rw)
+
+/* ── silence the core str.h include that pulls in lib/str2const.h ── */
+/* We still need str.h -- it's a plain header with no core dep. */
+
+#endif /* NATS_CONSUMER_TEST_SHIM_H */
