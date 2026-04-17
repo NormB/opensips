@@ -31,6 +31,11 @@ void  test_shm_free(void *p);
 #define shm_realloc(p,n)  test_shm_realloc((p),(n))
 #define shm_free(p)       test_shm_free(p)
 
+/* pkg_* are aliased to the same plain malloc in tests. */
+#define pkg_malloc(n)     test_shm_malloc(n)
+#define pkg_realloc(p,n)  test_shm_realloc((p),(n))
+#define pkg_free(p)       test_shm_free(p)
+
 /* ── dprint ──────────────────────────────────────────────────── */
 
 #define LM_ERR(fmt, ...)  fprintf(stderr, "ERR:  " fmt, ##__VA_ARGS__)
