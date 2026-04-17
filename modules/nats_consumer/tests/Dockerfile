@@ -9,7 +9,7 @@
 # cycle tight -- this image is for functional + stress testing, not a
 # production base.
 
-FROM debian:bookworm-slim AS builder
+FROM debian:trixie-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnats-dev \
         libpcre2-dev \
         libxml2-dev \
+        libncurses-dev \
         ca-certificates \
         netbase \
         git \
@@ -33,21 +34,25 @@ COPY . /src
 # `include_modules` knob tells opensips' Makefile to only compile those
 # modules.  The resulting opensips binary has mi_fifo + the two NATS
 # modules + standard core.
-RUN make include_modules="mi_fifo event_nats nats_consumer" -j"$(nproc)" \
-        modules && \
-    make include_modules="mi_fifo event_nats nats_consumer" \
-        cfg_target=/etc/opensips/ \
-        modules-cfg && \
-    make include_modules="mi_fifo event_nats nats_consumer" \
-        install-cfg install-modules install-bin
+RUN make -j"$(nproc)" app && \
+    make -C lib/nats && \
+    make -C modules/mi_fifo && \
+    make -C modules/event_nats && \
+    make -C modules/nats_consumer && \
+    mkdir -p /usr/local/lib64/opensips/modules /etc/opensips && \
+    install -m755 lib/nats/libnats_pool.so              /usr/local/lib64/opensips/modules/ && \
+    install -m755 modules/mi_fifo/mi_fifo.so            /usr/local/lib64/opensips/modules/ && \
+    install -m755 modules/event_nats/event_nats.so      /usr/local/lib64/opensips/modules/ && \
+    install -m755 modules/nats_consumer/nats_consumer.so /usr/local/lib64/opensips/modules/ && \
+    install -m755 opensips /usr/local/sbin/opensips
 
 # --- runtime image ---------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
         libcurl4 \
-        libnats2 \
+        libnats3.10 \
         libpcre2-8-0 \
         libxml2 \
         ca-certificates \
@@ -57,8 +62,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/sbin/opensips    /usr/local/sbin/opensips
-COPY --from=builder /usr/local/lib/opensips/    /usr/local/lib/opensips/
+COPY --from=builder /usr/local/sbin/opensips      /usr/local/sbin/opensips
+COPY --from=builder /usr/local/lib64/opensips/    /usr/local/lib64/opensips/
 COPY modules/nats_consumer/tests/opensips.cfg   /etc/opensips/opensips.cfg
 COPY modules/nats_consumer/tests/run.sh         /usr/local/bin/run.sh
 
