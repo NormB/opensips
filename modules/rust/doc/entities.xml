@@ -1,0 +1,22 @@
+<!-- Entity definitions for standalone doc builds.
+     When building in-tree, OpenSIPS provides these via doc/entities.xml.
+     This file provides the subset needed by the rust module docs. -->
+
+<!-- Text substitution entities -->
+<!ENTITY osips "OpenSIPS">
+<!ENTITY sip "SIP">
+<!ENTITY http "HTTP">
+<!ENTITY ip "IP">
+<!ENTITY uri "URI">
+<!ENTITY url "URL">
+
+<!-- Character entities -->
+<!ENTITY mdash "&#8212;">
+<!ENTITY ndash "&#8211;">
+
+<!-- Documentation section titles -->
+<!ENTITY adminguide "Administrator's Guide">
+<!ENTITY contributors "Contributors">
+
+<!-- Copyright (standalone builds) -->
+<!ENTITY docCopyrights "">
