@@ -66,6 +66,12 @@ static const cmd_export_t cmds[] = {
 	{ "nats_ack", (cmd_function)w_nats_ack, {
 		{0, 0, 0}},
 		ALL_ROUTES },
+	{ "nats_ack_next", (cmd_function)w_nats_ack_next, {
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_ack_progress", (cmd_function)w_nats_ack_progress, {
+		{0, 0, 0}},
+		ALL_ROUTES },
 	{ "nats_nak", (cmd_function)w_nats_nak, {
 		{0, 0, 0}},
 		ALL_ROUTES },

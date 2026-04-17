@@ -230,11 +230,13 @@ static natsMsg *release_msg_ref(uint64_t token)
 
 /* ── forward declarations ────────────────────────────────────── */
 
+typedef struct drain_ack_ctx drain_ack_ctx_t;
+
 static int  reconcile_subs_cb(nats_handle_t *h, void *user);
 static int  ensure_subscription_for_handle(nats_handle_t *h);
 static int  pull_one_batch(proc_sub_state_t *ss);
 static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
-static int  drain_ack_ipc(void);
+static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
 static proc_sub_state_t *find_sub_by_id(const str *id);
 
 /* ── enum mapping helpers ────────────────────────────────────── */
@@ -837,11 +839,32 @@ static int pull_one_batch(proc_sub_state_t *ss)
 
 /* ── ack IPC drain ───────────────────────────────────────────── */
 
+/* Per-drain cookie: counts acks applied and tracks which handle
+ * indices saw an ACK_NEXT so the outer loop can prioritize pulling
+ * from them on the same iteration. */
+typedef struct drain_ack_ctx {
+	int      count;
+	uint64_t next_bits[(NATS_REGISTRY_MAX_HANDLES + 63) / 64];
+} drain_ack_ctx_t;
+
+static inline void next_bits_set(drain_ack_ctx_t *c, uint16_t handle_idx)
+{
+	if (handle_idx < NATS_REGISTRY_MAX_HANDLES)
+		c->next_bits[handle_idx / 64] |= (uint64_t)1 << (handle_idx % 64);
+}
+
+static inline int next_bits_test(const drain_ack_ctx_t *c,
+                                 uint16_t handle_idx)
+{
+	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES) return 0;
+	return (c->next_bits[handle_idx / 64] >> (handle_idx % 64)) & 1;
+}
+
 static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 {
 	natsMsg    *nmsg;
 	natsStatus  s;
-	int        *ack_count = (int *)user;
+	drain_ack_ctx_t *ctx = (drain_ack_ctx_t *)user;
 
 	nmsg = release_msg_ref(m->ack_token);
 	if (!nmsg) {
@@ -852,6 +875,22 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 	switch ((nats_ack_action_e)m->action) {
 		case NATS_ACK_ACTION_ACK:
 			s = natsMsg_Ack(nmsg, NULL);
+			break;
+		case NATS_ACK_ACTION_ACK_NEXT:
+			/* nats.c 3.13 does not expose the server's +NXT ack-and-pull
+			 * payload via the public API, so we fall back to:
+			 *   1) synchronous ack (so the broker has definitively seen
+			 *      the ack before we ask for a refill), and
+			 *   2) flag the originating handle in the drain context so
+			 *      the outer loop runs an extra pull_one_batch() for it
+			 *      on this tick rather than waiting for the next idle
+			 *      wake-up.
+			 * This matches the user-observable semantics of +NXT
+			 * (finish the current message and immediately hand me the
+			 * next one) without depending on library internals. */
+			s = natsMsg_AckSync(nmsg, NULL, NULL);
+			if (ctx)
+				next_bits_set(ctx, nats_ack_token_handle(m->ack_token));
 			break;
 		case NATS_ACK_ACTION_NAK:
 			s = natsMsg_Nak(nmsg, NULL);
@@ -883,8 +922,8 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 					slot->msg        = nmsg;
 					slot->in_use     = 1;
 					slot->generation = gen;
-					if (ack_count)
-						(*ack_count)++;
+					if (ctx)
+						ctx->count++;
 					return;
 				}
 				/* Fall through to destroy if somehow invalid. */
@@ -907,18 +946,17 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 	}
 
 	natsMsg_Destroy(nmsg);
-	if (ack_count)
-		(*ack_count)++;
+	if (ctx)
+		ctx->count++;
 }
 
-static int drain_ack_ipc(void)
+static int drain_ack_ipc(drain_ack_ctx_t *ctx)
 {
-	int acks = 0;
 	int n;
-	n = nats_ack_ipc_drain(drain_ack_ipc_cb, &acks);
+	n = nats_ack_ipc_drain(drain_ack_ipc_cb, ctx);
 	(void)n;   /* currently logged only if ack_count differs, but
 	            * they should match -- kept for future MI metrics */
-	return acks;
+	return ctx->count;
 }
 
 /* Read the ack eventfd counter to rearm the reactor-ish select().
@@ -1005,9 +1043,24 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 		{
-			int acks = drain_ack_ipc();
+			drain_ack_ctx_t ctx;
+			int acks;
+			memset(&ctx, 0, sizeof(ctx));
+			acks = drain_ack_ipc(&ctx);
 			if (acks > 0)
 				any_work = 1;
+
+			/* ACK_NEXT fallback: any handle that got an ack-and-pull
+			 * hint on this tick gets an extra pull_one_batch() right
+			 * now, without waiting for the next outer iteration.  This
+			 * is the fallback for the missing +NXT payload API. */
+			for (ss = g_subs; ss; ss = ss->next) {
+				if (next_bits_test(&ctx, ss->handle_idx)) {
+					int pushed = pull_one_batch(ss);
+					if (pushed > 0)
+						any_work = 1;
+				}
+			}
 		}
 
 		if (!any_work)

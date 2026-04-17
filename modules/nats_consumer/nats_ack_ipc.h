@@ -64,6 +64,11 @@ typedef enum {
 	NATS_ACK_ACTION_NAK_DELAY,      /* natsMsg_NakWithDelay */
 	NATS_ACK_ACTION_TERM,           /* natsMsg_Term */
 	NATS_ACK_ACTION_IN_PROGRESS,    /* natsMsg_InProgress */
+	NATS_ACK_ACTION_ACK_NEXT,       /* natsMsg_AckSync + hint for an
+	                                 * immediate pull refill.  nats.c
+	                                 * 3.13 does not expose the server's
+	                                 * native +NXT reply; we fall back
+	                                 * to ack+ring-refill-on-next-tick. */
 } nats_ack_action_e;
 
 /* Public message format used by both producer (worker) and consumer
