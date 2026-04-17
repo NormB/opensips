@@ -748,6 +748,69 @@ opensips-cli -x mi nats_reconnect
             </example>
         </section>
 
+        <section id="mi_input_validation">
+            <title>Input Validation</title>
+            <para>
+                All JetStream management MI commands validate their
+                parameters before forwarding to the NATS server.
+                Invalid inputs are rejected with HTTP 400 / JSON-RPC
+                error code 400 rather than being delegated to NATS
+                (which would otherwise return opaque 500 errors).
+                This also prevents a data-loss bug where supplying
+                more than 32 subjects would silently truncate the
+                list.
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <emphasis>Stream / consumer names</emphasis> must
+                        be non-empty, contain no control chars,
+                        whitespace, <literal>.</literal>, <literal>*</literal>,
+                        <literal>&gt;</literal>, <literal>/</literal>, or
+                        <literal>\</literal>. These rules apply to every
+                        handler that accepts a <varname>stream</varname>,
+                        <varname>consumer</varname>, or <varname>name</varname>
+                        parameter.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>Subjects</emphasis> may contain dots
+                        (token separators) and wildcards
+                        (<literal>*</literal>, <literal>&gt;</literal>),
+                        but not whitespace or control chars. Each
+                        comma-separated token is validated individually.
+                        More than 32 subjects returns
+                        <literal>too many subjects (max 32)</literal>.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>filter_subject</emphasis> (consumer) — same
+                        rules as subjects; rejected above 512 bytes.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>Numeric ranges</emphasis> — <varname>replicas</varname>
+                        must be 1..5; <varname>max_msgs</varname> and
+                        <varname>max_bytes</varname> must be ≥ -1
+                        (-1 = unlimited); <varname>max_age</varname> is seconds
+                        in [0 .. 10 years] (capped to prevent int64 overflow when
+                        converted to nanoseconds); <varname>seq</varname> for
+                        <varname>nats_msg_get</varname> and
+                        <varname>nats_msg_delete</varname> must be ≥ 1.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>Buffer limits</emphasis> — stream/consumer
+                        name ≤ 255 chars; subjects list ≤ 1023 chars.
+                    </para>
+                </listitem>
+            </itemizedlist>
+        </section>
+
     </section><!-- /mi -->
 
     <!-- ============================================================ -->
