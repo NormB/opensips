@@ -39,10 +39,15 @@
  *   handles reconnection automatically.
  *
  * Rank filtering:
- *   Only SIP UDP workers (rank 1..udp_workers_no) and the HTTPD/MI
- *   process (PROC_MODULE) initialize NATS.  TCP/WSS receivers are
- *   excluded because nats.c's internal I/O threads cause heap corruption
- *   in processes that also run OpenSSL for WSS.
+ *   NATS initializes in SIP workers (UDP and TCP, rank >= 1) and the
+ *   HTTPD/MI process (PROC_MODULE).  Attendant (PROC_MAIN), timer
+ *   (PROC_TIMER), and TCP-main (PROC_TCP_MAIN) processes skip
+ *   initialization -- they do not handle SIP routing and TCP-main holds
+ *   TLS/OpenSSL state in isolation post-refactor.  Module-exported
+ *   processes (negative rank) self-initialize and are not driven by
+ *   child_init().
+ *
+ *   The admission rule is centralized in lib/nats/nats_pool_should_init().
  *
  * MI commands:
  *   nats_status  -- connection state and server info
@@ -312,11 +317,8 @@ static int mod_init(void)
  * Obtains a NATS connection from the shared pool and optionally a
  * JetStream context, then registers them with the producer module.
  *
- * Rank filtering: only SIP UDP workers (rank 1..udp_workers_no) and the
- * HTTPD/MI process (PROC_MODULE) initialize NATS.  TCP/WSS receivers
- * (ranks above udp_workers_no) are excluded because nats.c's internal
- * I/O threads cause heap corruption in processes that also handle
- * OpenSSL for WSS.
+ * Rank filtering is delegated to lib/nats/nats_pool_should_init();
+ * see that function's documentation for the admission set.
  *
  * @param rank  OpenSIPS process rank (1-based for SIP workers).
  * @return      0 on success, -1 on error (kills the child process).
@@ -326,10 +328,7 @@ static int child_init(int rank)
 	natsConnection *nc;
 	jsCtx *js;
 
-	/* Rank filtering: skip non-SIP processes (attendant, timer, TCP main).
-	 * UDP workers, TCP/WSS receivers, and the MI/HTTPD process all need
-	 * NATS access so that events are published regardless of transport. */
-	if (rank != PROC_MODULE && rank < 1) {
+	if (!nats_pool_should_init(rank)) {
 		LM_DBG("skipping NATS init for process rank=%d\n", rank);
 		return 0;
 	}
