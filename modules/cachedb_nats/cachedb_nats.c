@@ -44,10 +44,13 @@
  *   thread on the first SIP worker.
  *
  * Rank filtering:
- *   Only SIP UDP workers (rank 1..udp_workers_no) and the HTTPD/MI
- *   process (PROC_MODULE) initialize NATS.  TCP/WSS receivers are
- *   excluded to avoid heap corruption from nats.c I/O threads
- *   conflicting with OpenSSL in WSS receiver processes.
+ *   NATS initializes in SIP workers (UDP and TCP, rank >= 1) and the
+ *   HTTPD/MI process (PROC_MODULE).  Attendant, timer, and TCP-main
+ *   processes skip initialization.  The KV watcher thread spawns only
+ *   on rank 1 (first SIP worker) to minimize JetStream consumer count;
+ *   other workers receive live updates via the shared SHM index.
+ *
+ *   The admission rule is centralized in lib/nats/nats_pool_should_init().
  */
 
 #include <stdio.h>
@@ -414,16 +417,13 @@ static int mod_init(void)
  * index from existing KV data, starts the self-healing watcher thread
  * (on rank 1 only), and opens cachedb connections for each configured URL.
  *
- * Rank filtering: only SIP UDP workers (rank 1..udp_workers_no) and the
- * HTTPD/MI process (PROC_MODULE) initialize NATS.  TCP/WSS receivers are
- * excluded because nats.c's internal I/O threads cause heap corruption
- * in processes that also handle OpenSSL for WSS.
+ * Rank filtering is delegated to lib/nats/nats_pool_should_init();
+ * see that function's documentation for the admission set.
  *
  * Watcher startup decision: only rank 1 (first SIP worker) starts the
- * watcher thread to minimize JetStream ordered consumer count.  Each
- * watcher creates an ordered consumer; fewer consumers reduce the race
- * window during cluster topology changes.  Other workers rely on the
- * initial index build; live updates from rank 1's watcher are best-effort.
+ * KV watcher thread.  All other workers rely on the SHM-shared index
+ * for the initial build; live updates from rank 1's watcher are
+ * best-effort.
  *
  * @param rank  OpenSIPS process rank (1-based for SIP workers).
  * @return      0 on success, -1 on error (kills the child process).
@@ -434,10 +434,7 @@ static int child_init(int rank)
 	cachedb_con *con;
 	kvStore *kv;
 
-	/* Rank filtering: skip non-SIP processes (attendant, timer, TCP main).
-	 * UDP workers, TCP/WSS receivers, and the MI/HTTPD process all need
-	 * NATS access so that events are published regardless of transport. */
-	if (rank != PROC_MODULE && rank < 1)
+	if (!nats_pool_should_init(rank))
 		return 0;
 
 	/* ensure KV bucket exists via the shared pool */
@@ -461,12 +458,10 @@ static int child_init(int rank)
 	}
 
 	/* Start the self-healing KV watcher thread on rank 1 only.
-	 * Only the first SIP worker runs the watcher to minimize JetStream
-	 * ordered consumer count.  Each watcher creates an ordered consumer
-	 * in nats.c; during cluster topology changes (node failure), nats.c's
-	 * I/O thread rebalances consumers and can race with kvWatcher_Next()
-	 * causing a free(): invalid pointer.  Fewer consumers = smaller race
-	 * window.
+	 * Only the first SIP worker runs the watcher to minimize the
+	 * JetStream ordered-consumer count -- each watcher creates one
+	 * ordered consumer in nats.c, and keeping that count low is a
+	 * cluster-side resource optimization.
 	 *
 	 * The HTTPD/MI process (PROC_MODULE) doesn't need a watcher -- it
 	 * only handles MI commands, not SIP routing with index lookups.
