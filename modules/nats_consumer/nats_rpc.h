@@ -35,6 +35,16 @@
  *                                name.  Cleared automatically after the
  *                                next outbound publish (nats_reply /
  *                                nats_request), even on publish failure.
+ *
+ *   nats_reply(payload)       -- publish `payload` on the current
+ *                                message's reply subject.  Plain core
+ *                                NATS publish (not JetStream); attaches
+ *                                any staged headers.  Returns
+ *                                -1 no current message,
+ *                                -2 no reply-to on the current message,
+ *                                -3 NATS connection unavailable,
+ *                                -4 publish failed,
+ *                                 1 on success.
  */
 
 #ifndef NATS_RPC_H
@@ -58,6 +68,7 @@ int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
 
 /* Script-callable header staging. */
 int w_nats_hdr_set (struct sip_msg *msg, str *name, str *value);
+int w_nats_reply   (struct sip_msg *msg, str *payload);
 
 /* Clear the staged-header table and free the backing buffers.
  * Invoked internally by the publish paths; exposed so that a future

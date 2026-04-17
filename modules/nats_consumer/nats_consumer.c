@@ -27,14 +27,16 @@
  *                  nats_ack(), nats_ack_next(), nats_ack_progress(),
  *                  nats_nak(), nats_nak_delay(delay_ms),
  *                  nats_term(), nats_in_progress(),
- *                  nats_hdr_set(name, value)
+ *                  nats_hdr_set(name, value),
+ *                  nats_reply(payload)
  *   - async acmd:  nats_fetch(id, timeout_ms),
  *                  nats_fetch_batch(id, opts)
  *   - pvars:       $nats_subject, $nats_data, $nats_reply_to,
  *                  $nats_seq, $nats_consumer_seq, $nats_delivered,
  *                  $nats_pending, $nats_token, $nats_hdr(Name)
  *
- * Later Phase 6 commits add nats_reply and nats_request.
+ * A later Phase 6 commit adds the sync-only nats_request script
+ * function for caller-initiated core NATS request/reply.
  */
 
 #include "../../sr_module.h"
@@ -94,6 +96,10 @@ static const cmd_export_t cmds[] = {
 		ALL_ROUTES },
 	{ "nats_hdr_set", (cmd_function)w_nats_hdr_set, {
 		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_reply", (cmd_function)w_nats_reply, {
 		{CMD_PARAM_STR, 0, 0},
 		{0, 0, 0}},
 		ALL_ROUTES },

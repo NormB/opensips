@@ -22,8 +22,8 @@
  * nats_rpc.c -- Phase 6 script surface: NATS headers, reply-to, and
  * sync caller RPC.  This file grows incrementally across the Phase 6
  * commit chain:
- *     1. $nats_hdr pvar + nats_hdr_set script function (this commit).
- *     2. nats_reply (plain core publish onto the reply-to).
+ *     1. $nats_hdr pvar + nats_hdr_set script function.
+ *     2. nats_reply (plain core publish onto the reply-to) -- this commit.
  *     3. nats_request (sync core RPC).
  *
  * Headers (read)
@@ -40,16 +40,28 @@
  *   transfer them onto a natsMsg via natsMsgHeader_Set and clear the
  *   table.  Replacing an existing entry frees its old value buffer
  *   before installing the new one.
+ *
+ * Reply
+ *   nats_reply takes the reply-to subject off the current ring slot
+ *   and calls natsConnection_PublishMsg -- plain core NATS publish,
+ *   not JetStream (replies are request/response affairs; the producer
+ *   is a transient JetStream message but the reply hop typically
+ *   targets a plain NATS subscriber).  Staged headers are attached
+ *   to the outbound natsMsg; the staging table is cleared after the
+ *   publish regardless of outcome so the next message starts clean.
  */
 
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 
+#include <nats/nats.h>
+
 #include "../../dprint.h"
 #include "../../mem/mem.h"
 #include "../../pvar.h"
 #include "../../sr_module.h"
+#include "../../lib/nats/nats_pool.h"
 
 #include "nats_fetch.h"
 #include "nats_rpc.h"
@@ -272,5 +284,112 @@ int w_nats_hdr_set(struct sip_msg *msg, str *name, str *value)
 		return -1;
 	}
 	g_staged[free_slot].in_use = 1;
+	return 1;
+}
+
+/* ── publish helpers ─────────────────────────────────────────── */
+
+/* Apply every staged header onto `out` and clear the staging table
+ * regardless of publish outcome.  The caller keeps ownership of `out`.
+ */
+static void staged_apply_and_clear(natsMsg *out)
+{
+	int i;
+	if (!out) {
+		/* Still clear so the next publish starts with an empty stage. */
+		nats_rpc_staged_clear();
+		return;
+	}
+	for (i = 0; i < NATS_MAX_STAGED_HDRS; i++) {
+		if (!g_staged[i].in_use) continue;
+		if (!g_staged[i].name.s) continue;
+		/* natsMsgHeader_Set requires NUL-terminated keys/values;
+		 * staged_dup appends a NUL past .len.  natsMsg stores a
+		 * copy of the bytes internally so our pkg buffers can be
+		 * freed right after. */
+		(void)natsMsgHeader_Set(out,
+			g_staged[i].name.s,
+			g_staged[i].value.s ? g_staged[i].value.s : "");
+	}
+	nats_rpc_staged_clear();
+}
+
+/* Render a nats_cur subject (raw, possibly not NUL-terminated) into a
+ * stack buffer with NUL termination, and return the pointer.  Returns
+ * NULL on overflow (must not happen since slot.reply_to_len is bounded
+ * by NATS_RING_SUBJECT_MAX). */
+static const char *cstr_buf(char *buf, size_t cap, const char *src, int len)
+{
+	if (!src || len <= 0) return "";
+	if ((size_t)len + 1 > cap) return NULL;
+	memcpy(buf, src, len);
+	buf[len] = '\0';
+	return buf;
+}
+
+/* ── nats_reply ──────────────────────────────────────────────── */
+
+int w_nats_reply(struct sip_msg *msg, str *payload)
+{
+	const nats_cur_msg_t *cur = nats_fetch_current();
+	natsConnection       *nc;
+	natsMsg              *out = NULL;
+	natsStatus            s;
+	char                  subj_buf[NATS_RING_SUBJECT_MAX + 1];
+	const char           *subj_c;
+	const char           *data_s;
+	int                   data_len;
+
+	(void)msg;
+
+	if (!cur || !cur->has_message) {
+		LM_DBG("nats_reply: no current message\n");
+		return -1;
+	}
+	if (!cur->slot.has_reply || cur->slot.reply_to_len == 0) {
+		LM_DBG("nats_reply: current message has no reply-to\n");
+		nats_rpc_staged_clear();   /* don't leak stage across retries */
+		return -2;
+	}
+
+	nc = nats_pool_get();
+	if (!nc) {
+		LM_ERR("nats_reply: no NATS connection\n");
+		nats_rpc_staged_clear();
+		return -3;
+	}
+
+	subj_c = cstr_buf(subj_buf, sizeof(subj_buf),
+		cur->slot.reply_to, (int)cur->slot.reply_to_len);
+	if (!subj_c) {
+		/* Should never happen: reply_to_len is bounded. */
+		LM_ERR("nats_reply: reply_to overflow (%u bytes)\n",
+			(unsigned)cur->slot.reply_to_len);
+		nats_rpc_staged_clear();
+		return -3;
+	}
+
+	data_s   = (payload && payload->s)   ? payload->s   : "";
+	data_len = (payload && payload->len > 0) ? payload->len : 0;
+
+	s = natsMsg_Create(&out, subj_c, NULL /* no reply-of-reply */,
+		data_s, data_len);
+	if (s != NATS_OK || !out) {
+		LM_ERR("nats_reply: natsMsg_Create failed: %s\n",
+			natsStatus_GetText(s));
+		nats_rpc_staged_clear();
+		return -4;
+	}
+
+	staged_apply_and_clear(out);
+
+	s = natsConnection_PublishMsg(nc, out);
+	natsMsg_Destroy(out);
+
+	if (s != NATS_OK) {
+		LM_ERR("nats_reply: publish to '%s' failed: %s\n",
+			subj_c, natsStatus_GetText(s));
+		return -4;
+	}
 	return 1;
 }
