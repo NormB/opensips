@@ -70,6 +70,7 @@
 #define ERR_BAD_PAIR        "malformed pair (missing =)"
 #define ERR_OOM             "out of memory"
 #define ERR_SAMPLE_RANGE    "sample_freq out of range 0..100"
+#define ERR_RING_POW2       "ring_capacity must be power of two >= 2"
 
 /* ── helpers: trim / case-insensitive compare ─────────────────── */
 
@@ -145,6 +146,15 @@ static int parse_uint64(const char *s, int len, uint64_t *out)
 	v = strtoull(buf, &end, 10);
 	if (errno != 0 || *end != '\0') return -1;
 	*out = (uint64_t)v;
+	return 0;
+}
+
+static int parse_uint32(const char *s, int len, uint32_t *out)
+{
+	uint64_t v;
+	if (parse_uint64(s, len, &v) < 0) return -1;
+	if (v > 0xFFFFFFFFull) return -1;
+	*out = (uint32_t)v;
 	return 0;
 }
 
@@ -305,6 +315,7 @@ enum {
 	F_INACTIVE_THR   = 1<<18,
 	F_JS_DOMAIN      = 1<<19,
 	F_API_PREFIX     = 1<<20,
+	F_RING_CAPACITY  = 1<<21,
 };
 
 /* ── extra_json builder ───────────────────────────────────────── */
@@ -517,6 +528,15 @@ nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 		} else if (ieq(key, keylen, "api_prefix")) {
 			SETFLAG(F_API_PREFIX);
 			if (str_dup_shm(&h->api_prefix, val, vallen) < 0) FAIL(ERR_OOM);
+		} else if (ieq(key, keylen, "ring_capacity")) {
+			SETFLAG(F_RING_CAPACITY);
+			if (parse_uint32(val, vallen, &h->ring_capacity) < 0)
+				FAIL(ERR_BAD_UINT);
+			/* Reject 0/1 and non-power-of-2 now so the registry can
+			 * trust the value at bind time without re-validating. */
+			if (h->ring_capacity < 2 ||
+			    (h->ring_capacity & (h->ring_capacity - 1)) != 0)
+				FAIL(ERR_RING_POW2);
 		} else {
 			/* unknown: forward-compat via extra_json */
 			if (extra_json_append(&h->extra_json, key, keylen,

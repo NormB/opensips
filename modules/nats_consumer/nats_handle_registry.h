@@ -129,6 +129,13 @@ typedef struct nats_handle {
 	str js_domain;
 	str api_prefix;
 
+	/* Per-handle ring capacity override.  Phase 5: if non-zero at bind
+	 * time, the registry sizes the SHM ring to this value instead of
+	 * the module default (NATS_HANDLE_RING_CAPACITY).  Must be a power
+	 * of two >= 2; the parser rejects anything else so the registry can
+	 * trust the value.  0 = "use default". */
+	uint32_t ring_capacity;
+
 	/* forward-compat */
 	str extra_json;
 
@@ -152,6 +159,15 @@ typedef struct nats_handle {
 	 * handle is released.  May be NULL under TEST_SHIM where the test
 	 * shim does not provide eventfd-compatible allocation. */
 	struct nats_ring *ring;
+
+	/* Phase 5 stop-gap refcount guarding against unbind-while-in-use.
+	 * Incremented by consumer-process ring push-success and any worker
+	 * that holds an ack IPC pending for this handle; decremented when
+	 * that operation completes.  nats_registry_unbind() refuses
+	 * (returns -4) while this is non-zero.  Not a true refcount for
+	 * the handle's lifetime -- Phase 7 will replace it with a proper
+	 * get/put lifecycle.  Atomic SEQ_CST for cross-process visibility. */
+	int pending_ops;
 
 	/* Active JetStream subscription handle.
 	 * Owned by the consumer process (not SHM; process-local).
@@ -179,12 +195,27 @@ void nats_registry_destroy(void);
  * Returns:
  *    0 on success
  *   -1 on duplicate id
- *   -2 on SHM exhaustion / internal error */
+ *   -2 on SHM exhaustion / internal error
+ *   -3 on handle-count cap reached (NATS_REGISTRY_MAX_HANDLES) */
 int nats_registry_bind(nats_handle_t *h);
 
 /* Remove a handle by id.
- * Returns 0 on success, -1 if not found. */
+ * Returns:
+ *    0 on success
+ *   -1 if not found
+ *   -4 if the handle has in-flight operations (pending_ops > 0); the
+ *      caller should retry later or accept the leak.  Phase 5 stop-gap
+ *      until Phase 7 adds full lifecycle. */
 int nats_registry_unbind(const str *id);
+
+/* Optional runtime ring-capacity override helper.  Convenience wrapper
+ * for scripts / MI to resize a handle's ring after bind; Phase 5
+ * declares it so callers have a known entry point, but the current
+ * implementation only supports setting the override at bind time via
+ * the `ring_capacity` field on the parsed handle and rejects runtime
+ * resize (returns -1 if the handle already has a ring).  Phase 7 will
+ * wire up a proper pause-teardown-recreate flow. */
+int nats_registry_set_ring_capacity(const str *id, uint32_t cap);
 
 /* Borrowed lookup.  Returns NULL if not found.
  * Caller must not free.  Handle content is stable until unbind. */
