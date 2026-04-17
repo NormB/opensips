@@ -163,6 +163,15 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		LM_DBG("nats_fetch: unknown handle '%.*s'\n", id->len, id->s);
 		return -3;
 	}
+	/* Phase 7: a retired handle still lives on the retire list; the
+	 * bucket-chain lookup we just did misses it so a concurrent unbind
+	 * is already visible here.  Defence in depth: if a lookup slipped
+	 * in between unlink and retire=1, treat it as -3 (not found). */
+	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
+		LM_DBG("nats_fetch: handle '%.*s' is retiring\n",
+			id->len, id->s);
+		return -3;
+	}
 	if (!h->ring) {
 		LM_DBG("nats_fetch: handle '%.*s' has no ring\n",
 			id->len, id->s);
@@ -311,6 +320,12 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	h = nats_registry_lookup(id);
 	if (!h) {
 		LM_DBG("nats_fetch_async: unknown handle '%.*s'\n",
+			id->len, id->s);
+		async_status = ASYNC_NO_IO;
+		return -3;
+	}
+	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
+		LM_DBG("nats_fetch_async: handle '%.*s' retiring\n",
 			id->len, id->s);
 		async_status = ASYNC_NO_IO;
 		return -3;
@@ -524,6 +539,11 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 			id->len, id->s);
 		return -3;
 	}
+	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
+		LM_DBG("nats_fetch_batch: handle '%.*s' retiring\n",
+			id->len, id->s);
+		return -3;
+	}
 
 	if (batch_parse_opts(opts, &bo) < 0) {
 		LM_ERR("nats_fetch_batch: bad opts '%.*s'\n",
@@ -660,6 +680,12 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	h = nats_registry_lookup(id);
 	if (!h || !h->ring) {
 		LM_DBG("nats_fetch_batch_async: unknown handle '%.*s'\n",
+			id->len, id->s);
+		async_status = ASYNC_NO_IO;
+		return -3;
+	}
+	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
+		LM_DBG("nats_fetch_batch_async: handle '%.*s' retiring\n",
 			id->len, id->s);
 		async_status = ASYNC_NO_IO;
 		return -3;
