@@ -706,6 +706,131 @@ static int reconcile_subs_cb(nats_handle_t *h, void *user)
 	return 0;
 }
 
+/* ── header serialization ────────────────────────────────────── */
+
+/*
+ * Serialize the headers of `m` into `out[]` using the compact stream
+ * format documented on nats_ring_slot_t.headers[]:
+ *     [u16 count]
+ *     repeated:  [u16 key_len][key][u16 val_len][val]
+ *
+ * All sizes are host-order uint16 (the ring lives in SHM shared
+ * between forked workers of this process, so no endian conversion is
+ * necessary).  Multi-valued keys are flattened: each value becomes a
+ * separate entry with the same key.  Binary / NUL bytes in values are
+ * preserved because we write `strlen(value)` and copy the bytes
+ * verbatim -- nats.c does not document binary-safe headers, so this is
+ * a best effort.
+ *
+ * Returns:
+ *    the number of bytes written to `out[]` on success (0 when there
+ *    were no headers to serialize -- not an error).
+ *    `*truncated` is set to 1 iff at least one header was dropped
+ *    because the output would have exceeded `out_cap`; the surviving
+ *    prefix is still valid.
+ *    `*count_out` receives the number of headers actually written.
+ *
+ * The count field is patched after the fact once we know how many
+ * headers survived truncation.
+ */
+static int serialize_headers(natsMsg *m, char *out, int out_cap,
+                             int *truncated, int *count_out)
+{
+	const char * *keys   = NULL;
+	int           nkeys  = 0;
+	natsStatus    s;
+	int           pos    = 0;
+	int           count  = 0;
+	int           i;
+	int           trunc  = 0;
+
+	*truncated = 0;
+	*count_out = 0;
+
+	if (!m || !out || out_cap < 2)
+		return 0;
+
+	/* Reserve the count prefix; patched after the loop. */
+	pos = 2;
+
+	s = natsMsgHeader_Keys(m, &keys, &nkeys);
+	if (s != NATS_OK || !keys || nkeys <= 0) {
+		/* No headers -- still emit the zero count so the stream is
+		 * valid.  Callers that see headers_len == 2 know the message
+		 * carried no headers but was inspected. */
+		out[0] = 0;
+		out[1] = 0;
+		if (keys) free((void *)keys);
+		return 2;
+	}
+
+	for (i = 0; i < nkeys; i++) {
+		const char * *vals = NULL;
+		int           nvals = 0;
+		natsStatus    vs;
+		int           j;
+		int           klen;
+
+		if (!keys[i])
+			continue;
+		klen = (int)strlen(keys[i]);
+		if (klen <= 0 || klen > 0xFFFF)
+			continue;
+
+		vs = natsMsgHeader_Values(m, keys[i], &vals, &nvals);
+		if (vs != NATS_OK || !vals || nvals <= 0) {
+			if (vals) free((void *)vals);
+			continue;
+		}
+
+		for (j = 0; j < nvals; j++) {
+			int  vlen;
+			int  need;
+
+			if (!vals[j]) continue;
+			vlen = (int)strlen(vals[j]);
+			if (vlen < 0 || vlen > 0xFFFF) continue;
+			/* 2 (klen) + klen + 2 (vlen) + vlen */
+			need = 2 + klen + 2 + vlen;
+			if (pos + need > out_cap) {
+				/* No room for this entry or any more; mark truncated
+				 * and stop.  Header order is not specified by the
+				 * NATS protocol so we don't try to skip-ahead. */
+				trunc = 1;
+				goto done_vals;
+			}
+
+			out[pos++] = (char)(klen & 0xFF);
+			out[pos++] = (char)((klen >> 8) & 0xFF);
+			memcpy(out + pos, keys[i], klen); pos += klen;
+			out[pos++] = (char)(vlen & 0xFF);
+			out[pos++] = (char)((vlen >> 8) & 0xFF);
+			if (vlen) memcpy(out + pos, vals[j], vlen);
+			pos += vlen;
+			count++;
+			if (count >= 0xFFFF) {
+				/* u16 ceiling -- cannot encode more headers even if
+				 * we had room.  Unlikely in practice but guard for
+				 * correctness. */
+				trunc = 1;
+				goto done_vals;
+			}
+		}
+done_vals:
+		free((void *)vals);
+		if (trunc)
+			break;
+	}
+
+	free((void *)keys);
+
+	out[0] = (char)(count & 0xFF);
+	out[1] = (char)((count >> 8) & 0xFF);
+	*truncated = trunc;
+	*count_out = count;
+	return pos;
+}
+
 /* ── fetch loop ──────────────────────────────────────────────── */
 
 static int pull_one_batch(proc_sub_state_t *ss)
@@ -768,6 +893,11 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		uint64_t  ack_token    = 0;
 		int       ref_ok       = 0;
 
+		char     hdr_buf[NATS_RING_HEADERS_MAX];
+		int      hdr_len       = 0;
+		int      hdr_truncated = 0;
+		int      hdr_count     = 0;
+
 		int rc;
 
 		if (!m)
@@ -779,6 +909,18 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		reply       = natsMsg_GetReply(m);
 		subject_len = subject ? strlen(subject) : 0;
 		reply_len   = reply   ? strlen(reply)   : 0;
+
+		/* Serialize headers into the per-message stack buffer; ring_push
+		 * copies the bytes into the slot so this local array's lifetime
+		 * ends with the loop iteration. */
+		hdr_len = serialize_headers(m, hdr_buf, (int)sizeof(hdr_buf),
+			&hdr_truncated, &hdr_count);
+		if (hdr_truncated) {
+			LM_DBG("nats_consumer_proc: headers truncated on id='%.*s' "
+				"(count_emitted=%d cap=%d)\n",
+				ss->id.len, ss->id.s,
+				hdr_count, (int)sizeof(hdr_buf));
+		}
 
 		if (natsMsg_GetMetaData(&md, m) == NATS_OK && md) {
 			stream_seq   = md->Sequence.Stream;
@@ -808,7 +950,10 @@ static int pull_one_batch(proc_sub_state_t *ss)
 			data    ? data    : "", (uint32_t)data_len,
 			stream_seq, consumer_seq, delivered, pending,
 			timestamp_ns, ack_token,
-			reply   ? reply   : "", (uint32_t)reply_len);
+			reply   ? reply   : "", (uint32_t)reply_len,
+			hdr_len > 0 ? hdr_buf : NULL,
+			(uint16_t)(hdr_len > 0 ? hdr_len : 0),
+			(uint8_t)(hdr_truncated ? 1 : 0));
 
 		if (rc == 0) {
 			pushed++;
