@@ -245,13 +245,16 @@ int nats_registry_bind(nats_handle_t *h)
 
 	/* Assign monotonic bind-order index BEFORE dropping into the bucket.
 	 * If we exceed the cap, refuse to bind -- the consumer process's
-	 * ref table would not have a slot for us. */
+	 * ref table would not have a slot for us.  Phase 5: return the
+	 * distinct -3 code so callers can surface a specific MI / script
+	 * error ("handle count limit reached") instead of the generic -2. */
 	assigned_index = __atomic_fetch_add(&g_registry->next_index, 1,
 		__ATOMIC_SEQ_CST);
 	if (assigned_index < 0 || assigned_index >= NATS_REGISTRY_MAX_HANDLES) {
-		LM_ERR("nats_registry: handle index %d exceeds cap %d\n",
+		LM_ERR("nats_registry: handle index %d exceeds cap %d "
+			"(NATS_REGISTRY_MAX_HANDLES)\n",
 			assigned_index, NATS_REGISTRY_MAX_HANDLES);
-		return -2;
+		return -3;
 	}
 	h->index = (uint16_t)assigned_index;
 
@@ -319,6 +322,7 @@ int nats_registry_unbind(const str *id)
 	int idx;
 	nats_bucket_t *b;
 	nats_handle_t *cur, *prev;
+	int pending;
 
 	if (!g_registry || !id || id->len <= 0)
 		return -1;
@@ -331,6 +335,21 @@ int nats_registry_unbind(const str *id)
 	prev = NULL;
 	for (cur = b->head; cur; prev = cur, cur = cur->next) {
 		if (str_eq(&cur->id, id)) {
+			/* Phase 5 stop-gap: refuse while the handle has in-flight
+			 * operations.  Proper refcount lifecycle (where unbind
+			 * marks the handle dying and the last releaser frees it)
+			 * lands with Phase 7.  Reading under the bucket write
+			 * lock rules out a simultaneous bind; SEQ_CST load pairs
+			 * with the producers' inc/dec in the data plane. */
+			pending = nats_handle_pending_get(cur);
+			if (pending > 0) {
+				lock_stop_write(b->lock);
+				LM_WARN("nats_registry: refusing unbind id='%.*s' "
+					"(%d pending op%s)\n",
+					id->len, id->s, pending,
+					pending == 1 ? "" : "s");
+				return -4;
+			}
 			if (prev)
 				prev->next = cur->next;
 			else

@@ -194,12 +194,13 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 typedef struct nats_fetch_async_param {
 	uint16_t  handle_idx;
 	int       evfd;
-	/* Borrowed ref into the registry-owned handle.  Valid while the
-	 * handle is bound; if an unbind races our resume the ring pointer
-	 * becomes dangling.  Phase 5 adds handle refcounting; for now a
-	 * scripter that unbinds while an async fetch is in flight gets
-	 * undefined behaviour.  Documented caveat. */
-	nats_ring_t *ring;
+	/* Borrowed refs into the registry-owned handle.  Phase 5 pending_ops
+	 * guards against unbind-while-in-flight: the param holds a pending
+	 * ref across the reactor round-trip and the resume path releases it.
+	 * A Phase 7 refcount will replace this stop-gap with a proper
+	 * get/put pair keyed on handle identity. */
+	nats_handle_t *h_ref;
+	nats_ring_t   *ring;
 } nats_fetch_async_param_t;
 
 static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
@@ -228,6 +229,7 @@ static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
 	rc = nats_ring_pop(p->ring, &slot);
 	if (rc == 0) {
 		cur_set_from_slot(p->handle_idx, &slot);
+		nats_handle_pending_dec(p->h_ref);
 		shm_free(p);
 		return 1;    /* script rc=1, "got a message" */
 	}
@@ -298,6 +300,9 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	p->handle_idx = h->index;
 	p->evfd       = fd;
 	p->ring       = h->ring;
+	p->h_ref      = h;
+	/* Hold the handle across the reactor round-trip so unbind defers. */
+	nats_handle_pending_inc(h);
 
 	tmo = timeout_ms ? *timeout_ms : 0;
 	if (tmo > 0) {
@@ -518,10 +523,11 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 
 /* Async batch fetch parameter -- lives in SHM across resume. */
 typedef struct nats_batch_async_param {
-	uint16_t      handle_idx;
-	int           evfd;
-	int           cap;
-	nats_ring_t  *ring;
+	uint16_t       handle_idx;
+	int            evfd;
+	int            cap;
+	nats_ring_t   *ring;
+	nats_handle_t *h_ref;  /* pending_ops guard across resume */
 } nats_batch_async_param_t;
 
 static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
@@ -546,6 +552,7 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 	}
 
 	if (g_batch.count > 0) {
+		nats_handle_pending_dec(p->h_ref);
 		shm_free(p);
 		return g_batch.count;
 	}
@@ -612,6 +619,8 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	p->evfd       = fd;
 	p->cap        = cap;
 	p->ring       = h->ring;
+	p->h_ref      = h;
+	nats_handle_pending_inc(h);
 
 	ctx->timeout_s    = (unsigned int)((bo.expires_ms + 999) / 1000);
 	ctx->resume_f     = resume_nats_fetch_batch;
