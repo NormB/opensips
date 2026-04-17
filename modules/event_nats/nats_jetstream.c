@@ -84,6 +84,45 @@ static jsStorageType _parse_storage(const char *s, int len)
 	return js_FileStorage; /* default */
 }
 
+/* Cluster replication ceiling. JetStream supports R=1..5. */
+#define NATS_MAX_REPLICAS      5
+/* MaxAge is stored in nanoseconds as int64; cap input seconds to avoid overflow. */
+#define NATS_MAX_AGE_SECONDS   (10LL * 365 * 24 * 60 * 60)  /* 10 years */
+/* Hard cap for user-facing subject listing. Must match subj_ptrs capacity below. */
+#define NATS_STREAM_SUBJECT_CAP 32
+
+/* Validate a NATS identifier (stream or consumer name). NATS forbids dots (they are
+ * subject-token separators), wildcards ('*' and '>'), whitespace and control chars.
+ * Return 0 if valid, -1 otherwise. Name must be non-empty. */
+static int _valid_nats_name(const char *s, int len)
+{
+	int i;
+	if (!s || len <= 0) return -1;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c < 0x20 || c == 0x7f) return -1;   /* control / DEL */
+		if (c == ' ' || c == '\t') return -1;   /* whitespace */
+		if (c == '.' || c == '*' || c == '>') return -1; /* reserved */
+		if (c == '/' || c == '\\') return -1;    /* path-ish */
+	}
+	return 0;
+}
+
+/* Validate each comma-separated subject token. Dots are allowed (they separate
+ * subject hierarchy); wildcards are allowed ('*' = single token, '>' = tail).
+ * Control chars, whitespace, empty tokens are rejected. */
+static int _valid_nats_subject(const char *s, int len)
+{
+	int i;
+	if (!s || len <= 0) return -1;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c < 0x20 || c == 0x7f) return -1;
+		if (c == ' ' || c == '\t') return -1;
+	}
+	return 0;
+}
+
 /* ── nats_account_info ──────────────────────────────────────── */
 
 mi_response_t *mi_nats_account_info(const mi_params_t *params,
@@ -247,6 +286,8 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 	char name_buf[256];
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -389,6 +430,9 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 
 	if (name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("name too long"));
+	if (_valid_nats_name(name, name_len) < 0)
+		return init_mi_error(400,
+			MI_SSTR("invalid stream name (empty, wildcard, dot, or control char)"));
 	memcpy(name_buf, name, name_len);
 	name_buf[name_len] = '\0';
 
@@ -404,16 +448,25 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	jsStreamConfig_Init(&cfg);
 	cfg.Name = name_buf;
 
-	/* Parse comma-separated subjects */
-	const char *subj_ptrs[32];
+	/* Parse comma-separated subjects. Silent truncation on more than
+	 * NATS_STREAM_SUBJECT_CAP tokens would be a data-loss bug, so we
+	 * reject instead. Each token is validated individually. */
+	const char *subj_ptrs[NATS_STREAM_SUBJECT_CAP];
 	int subj_count = 0;
 	{
-		char *p = subj_buf;
-		while (*p && subj_count < 32) {
+		char *p = subj_buf, *tok_start;
+		while (*p) {
 			while (*p == ' ' || *p == ',') p++;
 			if (!*p) break;
-			subj_ptrs[subj_count++] = p;
+			if (subj_count >= NATS_STREAM_SUBJECT_CAP)
+				return init_mi_error(400,
+					MI_SSTR("too many subjects (max 32)"));
+			tok_start = p;
 			while (*p && *p != ',') p++;
+			if (_valid_nats_subject(tok_start, (int)(p - tok_start)) < 0)
+				return init_mi_error(400,
+					MI_SSTR("invalid subject token (whitespace or control char)"));
+			subj_ptrs[subj_count++] = tok_start;
 			if (*p == ',') *p++ = '\0';
 		}
 	}
@@ -423,8 +476,12 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	cfg.SubjectsLen = subj_count;
 
 	/* Optional params */
-	if (try_get_mi_int_param(params, "replicas", &replicas_int) == 0)
+	if (try_get_mi_int_param(params, "replicas", &replicas_int) == 0) {
+		if (replicas_int < 1 || replicas_int > NATS_MAX_REPLICAS)
+			return init_mi_error(400,
+				MI_SSTR("replicas must be between 1 and 5"));
 		cfg.Replicas = replicas_int;
+	}
 	if (try_get_mi_string_param(params, "retention",
 			&retention_str, &retention_len) == 0)
 		cfg.Retention = _parse_retention(retention_str, retention_len);
@@ -432,15 +489,29 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 			&storage_str, &storage_len) == 0)
 		cfg.Storage = _parse_storage(storage_str, storage_len);
 
-	/* Optional numeric params */
+	/* Optional numeric params. Values are int on the wire; -1 is the NATS
+	 * sentinel for "unlimited" on msgs/bytes but not age. max_age in seconds
+	 * is bounded to avoid int64 overflow when multiplied by 1e9 ns. */
 	{
 		int val;
-		if (try_get_mi_int_param(params, "max_msgs", &val) == 0)
+		if (try_get_mi_int_param(params, "max_msgs", &val) == 0) {
+			if (val < -1)
+				return init_mi_error(400,
+					MI_SSTR("max_msgs must be >= -1"));
 			cfg.MaxMsgs = (int64_t)val;
-		if (try_get_mi_int_param(params, "max_bytes", &val) == 0)
+		}
+		if (try_get_mi_int_param(params, "max_bytes", &val) == 0) {
+			if (val < -1)
+				return init_mi_error(400,
+					MI_SSTR("max_bytes must be >= -1"));
 			cfg.MaxBytes = (int64_t)val;
-		if (try_get_mi_int_param(params, "max_age", &val) == 0)
+		}
+		if (try_get_mi_int_param(params, "max_age", &val) == 0) {
+			if (val < 0 || (int64_t)val > NATS_MAX_AGE_SECONDS)
+				return init_mi_error(400,
+					MI_SSTR("max_age seconds out of range (0..10y)"));
 			cfg.MaxAge = (int64_t)val * 1000000000LL; /* seconds → nanoseconds */
+		}
 	}
 
 	s = js_AddStream(&si, js, &cfg, NULL, &jerr);
@@ -486,6 +557,8 @@ mi_response_t *mi_nats_stream_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -523,6 +596,8 @@ mi_response_t *mi_nats_stream_purge(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -564,6 +639,8 @@ mi_response_t *mi_nats_consumer_list(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -665,11 +742,15 @@ mi_response_t *mi_nats_consumer_info(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
+	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
@@ -798,11 +879,15 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
+	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
@@ -819,6 +904,9 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 			&filter_subject, &filter_subject_len) == 0) {
 		if (filter_subject_len >= (int)sizeof(filter_buf))
 			return init_mi_error(400, MI_SSTR("filter_subject too long"));
+		if (_valid_nats_subject(filter_subject, filter_subject_len) < 0)
+			return init_mi_error(400,
+				MI_SSTR("invalid filter_subject (whitespace or control char)"));
 		memcpy(filter_buf, filter_subject, filter_subject_len);
 		filter_buf[filter_subject_len] = '\0';
 		cfg.FilterSubject = filter_buf;
@@ -902,11 +990,15 @@ mi_response_t *mi_nats_consumer_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
+	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
@@ -950,6 +1042,10 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
+	if (seq_int <= 0)
+		return init_mi_error(400, MI_SSTR("seq must be >= 1"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -1015,6 +1111,10 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
+	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+		return init_mi_error(400, MI_SSTR("invalid stream name"));
+	if (seq_int <= 0)
+		return init_mi_error(400, MI_SSTR("seq must be >= 1"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
