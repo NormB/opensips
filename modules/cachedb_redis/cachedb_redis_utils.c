@@ -617,7 +617,3 @@ int parse_redirect_reply(redisReply *reply, redis_moved *out,
 	return 0;
 }
 
-int parse_moved_reply(redisReply *reply, redis_moved *out) {
-	return parse_redirect_reply(reply, out, MOVED_PREFIX, MOVED_PREFIX_LEN);
-}
-
