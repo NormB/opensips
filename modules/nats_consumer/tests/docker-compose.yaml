@@ -18,8 +18,8 @@ services:
     image: nats:2.10-alpine
     command: -js -m 8222
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "14222:4222"
+      - "18222:8222"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
       interval: 2s
@@ -46,7 +46,7 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
     ports:
-      - "5060:5060/udp"
+      - "15060:5060/udp"
     volumes:
       - mi:/var/run/opensips
 

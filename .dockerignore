@@ -1,0 +1,15 @@
+# Exclude host build artifacts so container builds from clean source.
+# Required by modules/nats_consumer/tests/Dockerfile: prebuilt .o/.so files
+# from the host get a different git-revision stamp than the core rebuilt
+# in the container, which trips version_control at load time.
+**/*.o
+**/*.so
+**/*.so.*
+**/*.a
+**/opensips
+!**/opensips.cfg
+!**/opensips.sample.cfg
+**/lex.yy.c
+**/cfg.tab.c
+**/cfg.tab.h
+.git
