@@ -30,6 +30,8 @@
 #include "../../dprint.h"
 #include "../../lib/nats/nats_pool.h"
 #include "nats_consumer.h"
+#include "nats_handle_registry.h"
+#include "nats_mi.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -43,10 +45,6 @@ static const param_export_t params[] = {
 	{ 0, 0, 0 }
 };
 
-static const mi_export_t mi_cmds[] = {
-	{ 0, 0, 0, 0, {{0, {0}}}, {0} }
-};
-
 struct module_exports exports = {
 	"nats_consumer",            /* module name */
 	MOD_TYPE_DEFAULT,           /* class of this module */
@@ -58,7 +56,7 @@ struct module_exports exports = {
 	0,                          /* exported async functions */
 	params,                     /* exported parameters */
 	0,                          /* exported statistics */
-	mi_cmds,                    /* exported MI functions */
+	nats_consumer_mi_cmds,      /* exported MI functions */
 	0,                          /* exported pseudo-variables */
 	0,                          /* exported transformations */
 	0,                          /* extra processes */
@@ -73,6 +71,13 @@ struct module_exports exports = {
 static int mod_init(void)
 {
 	LM_INFO("nats_consumer %s initializing\n", NATS_CONSUMER_VERSION);
+
+	if (nats_registry_init(NATS_CONSUMER_REGISTRY_BUCKETS) < 0) {
+		LM_ERR("nats_consumer: registry init failed\n");
+		return -1;
+	}
+	LM_DBG("nats_consumer: registry ready (%d buckets)\n",
+		NATS_CONSUMER_REGISTRY_BUCKETS);
 	return 0;
 }
 
@@ -89,4 +94,5 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	LM_INFO("nats_consumer: shutting down\n");
+	nats_registry_destroy();
 }

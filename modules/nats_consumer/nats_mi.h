@@ -19,24 +19,22 @@
  */
 
 /*
- * nats_consumer.h -- public module types and entry points.
- *
- * Module: modules/nats_consumer -- script-controlled JetStream pull
- * consumer with SHM handle registry and per-worker async yield.
- *
- * See docs/superpowers/specs/2026-04-16-nats-consumer-design.md on branch
- * feature/nats-consumer-spec for the full design.
+ * nats_mi.h -- MI command declarations for the nats_consumer registry.
  */
 
-#ifndef NATS_CONSUMER_H
-#define NATS_CONSUMER_H
+#ifndef NATS_MI_H
+#define NATS_MI_H
 
-#include "../../str.h"
+#include "../../mi/item.h"
+#include "../../mi/mi.h"
 
-/* Module version -- appears in MI help and log lines. */
-#define NATS_CONSUMER_VERSION "0.2.0-registry"
+mi_response_t *mi_consumer_bind(const mi_params_t *params,
+		struct mi_handler *async);
+mi_response_t *mi_consumer_unbind(const mi_params_t *params,
+		struct mi_handler *async);
+mi_response_t *mi_consumer_list(const mi_params_t *params,
+		struct mi_handler *async);
 
-/* Default registry size -- hash bucket count.  Fixed at init. */
-#define NATS_CONSUMER_REGISTRY_BUCKETS 256
+extern const mi_export_t nats_consumer_mi_cmds[];
 
-#endif /* NATS_CONSUMER_H */
+#endif /* NATS_MI_H */
