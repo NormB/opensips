@@ -106,6 +106,16 @@ typedef struct proc_sub_state {
 	uint64_t              total_dropped_backpressure;
 	uint64_t              total_fetch_errors;
 
+	/* Phase 7 subscription-refresh bookkeeping.
+	 *
+	 * Set to 1 when the main loop observes a reconnect-epoch bump (the
+	 * nats.c library has dropped and re-established the TCP connection
+	 * and anything we had open against the old connection is dead).
+	 * The reconcile pass rebuilds the natsSubscription in place,
+	 * keeping the proc_sub_state_t (and its counters) intact, then
+	 * clears the flag. */
+	int                   dirty;
+
 	struct proc_sub_state *next;
 } proc_sub_state_t;
 
@@ -494,35 +504,51 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	int               backoff_len   = 0;
 	const char      **filters_arr   = NULL;
 	int               filters_len   = 0;
+	int               is_rebuild    = 0;
 
 	if (!h || !h->ring)
 		return 0;   /* handle still being constructed or TEST_SHIM */
 
-	if (find_sub_by_id(&h->id))
-		return 0;   /* already subscribed */
-
-	ss = (proc_sub_state_t *)calloc(1, sizeof(*ss));
-	if (!ss) {
-		LM_ERR("nats_consumer_proc: proc_sub_state calloc failed\n");
-		return -1;
+	/* Phase 7: dirty handles refresh in place -- the sub was destroyed
+	 * on the epoch bump (and will be destroyed for other reasons in
+	 * Phase 7 follow-ups).  We rebuild the natsSubscription while
+	 * keeping the proc_sub_state_t (and its counters) intact so
+	 * mi_info totals stay monotonic across reconnect events. */
+	ss = find_sub_by_id(&h->id);
+	if (ss) {
+		if (!ss->dirty)
+			return 0;   /* clean + already subscribed */
+		ss->sub    = NULL;
+		is_rebuild = 1;
+		LM_DBG("nats_consumer_proc: refreshing subscription for "
+			"%.*s (dirty)\n", (int)h->id.len, h->id.s);
+	} else {
+		ss = (proc_sub_state_t *)calloc(1, sizeof(*ss));
+		if (!ss) {
+			LM_ERR("nats_consumer_proc: proc_sub_state calloc failed\n");
+			return -1;
+		}
+		if (dup_str_local(&ss->id, &h->id) < 0) {
+			LM_ERR("nats_consumer_proc: id dup failed\n");
+			free(ss);
+			return -1;
+		}
+		ss->ring       = h->ring;
+		ss->handle_idx = h->index;
+		ss->h_ref      = h;
 	}
-	if (dup_str_local(&ss->id, &h->id) < 0) {
-		LM_ERR("nats_consumer_proc: id dup failed\n");
-		free(ss);
-		return -1;
-	}
-	ss->ring       = h->ring;
-	ss->handle_idx = h->index;
-	ss->h_ref      = h;
 
 	/* Pre-size the ref row so pull_one_batch doesn't pay for the
 	 * first-use allocation under load.  nats_ring_capacity reads the
-	 * ring's fixed capacity field atomically. */
+	 * ring's fixed capacity field atomically.  On rebuild the row is
+	 * already sized; ensure_row is idempotent and returns 0. */
 	if (ensure_row(h->index, nats_ring_capacity(h->ring)) < 0) {
 		LM_ERR("nats_consumer_proc: ref-row init failed for id='%.*s'\n",
 			h->id.len, h->id.s);
-		free(ss->id.s);
-		free(ss);
+		if (!is_rebuild) {
+			free(ss->id.s);
+			free(ss);
+		}
 		return -1;
 	}
 
@@ -653,8 +679,11 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	}
 
 	ss->last_fetch = 0;
-	ss->next = g_subs;
-	g_subs = ss;
+	ss->dirty      = 0;
+	if (!is_rebuild) {
+		ss->next = g_subs;
+		g_subs = ss;
+	}
 
 	/* Publish the subscription pointer back to the handle so MI can
 	 * introspect it (read-only).  This is a process-local pointer the
@@ -662,9 +691,10 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * "consumer process has a live sub". */
 	h->subscription = (void *)ss->sub;
 
-	LM_INFO("nats_consumer_proc: subscribed id='%.*s' index=%u "
+	LM_INFO("nats_consumer_proc: %s id='%.*s' index=%u "
 		"stream='%.*s' filter='%.*s' durable='%.*s' filters_n=%d "
 		"backoff_n=%d domain='%s' prefix='%s'\n",
+		is_rebuild ? "refreshed" : "subscribed",
 		h->id.len, h->id.s, (unsigned)h->index,
 		h->stream.len, h->stream.s,
 		h->filter.len, h->filter.s,
@@ -677,7 +707,12 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * sample_freq_c / backoff_arr / filters_arr[i]* are all leaked on
 	 * purpose for the sub's lifetime -- jsConsumerConfig stores
 	 * borrowed pointers into them and nats.c holds them until the
-	 * subscription is destroyed.  Phase 7 adds the teardown path. */
+	 * subscription is destroyed.  On rebuild the previous allocations
+	 * are ALSO leaked (nats.c still holds pointers after the old
+	 * subscription's destroy because the Config struct was copied by
+	 * value into the subscription).  A follow-up Phase 7 commit adds
+	 * per-ss stash slots + free_proc_sub_strings() to plug these
+	 * leaks for both the rebuild and the teardown-on-unbind paths. */
 	return 0;
 
 fail_free_sub:
@@ -691,7 +726,10 @@ fail_free_sub:
 	free(domain_c);
 	free(api_prefix_c);
 	/* durable_c / filter_c / stream_c are leaked on the failure path to
-	 * keep the error handling simple; acceptable for a rare path. */
+	 * keep the error handling simple; acceptable for a rare path.  On
+	 * rebuild failure keep dirty=1 so the next reconcile tick retries. */
+	if (is_rebuild)
+		return -1;
 	free(ss->id.s);
 	free(ss);
 	return -1;
@@ -1142,6 +1180,7 @@ void nats_consumer_proc_main(int rank)
 {
 	int ack_fd;
 	int retry_fd;
+	int baseline_epoch;
 
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
@@ -1161,6 +1200,15 @@ void nats_consumer_proc_main(int rank)
 
 	ack_fd = nats_ack_ipc_fd();
 
+	/* Phase 7: snapshot the shared pool's reconnect epoch.  The nats.c
+	 * library bumps this counter from its reconnect callback (on a
+	 * library thread); comparing against this snapshot on every
+	 * iteration lets us detect "the TCP connection was replaced
+	 * underneath us" without registering nats.c callbacks that would
+	 * otherwise have to run OpenSIPS APIs on non-worker threads.
+	 * See lib/nats/nats_pool.h for the full epoch contract. */
+	baseline_epoch = nats_pool_get_reconnect_epoch();
+
 	/* Blocking-idle timerfd -- armed each idle round to cap how long
 	 * we sleep when there is no worker ack traffic.  If timerfd_create
 	 * fails we fall back to a coarse 1s select() timeout. */
@@ -1171,16 +1219,43 @@ void nats_consumer_proc_main(int rank)
 	}
 
 	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d retry_fd=%d, "
-		"entering main loop\n", ack_fd, retry_fd);
+		"baseline_epoch=%d, entering main loop\n",
+		ack_fd, retry_fd, baseline_epoch);
 
 	for (;;) {
 		proc_sub_state_t *ss;
 		int any_work = 0;
+		int cur_epoch;
+
+		/* 0. Phase 7 reconnect-epoch check.  When the library reports
+		 *    a new TCP connection, everything we have open against
+		 *    the previous connection is dead: subscriptions still
+		 *    hold a pointer to the old state and any Fetch() on them
+		 *    would never return new messages.  Destroy them right
+		 *    here and flag them dirty so the reconcile pass below
+		 *    rebuilds them in place -- mi_info counters survive the
+		 *    transparent rebuild. */
+		cur_epoch = nats_pool_get_reconnect_epoch();
+		if (cur_epoch != baseline_epoch) {
+			LM_INFO("nats_consumer_proc: reconnect detected "
+				"(epoch %d -> %d); refreshing all subscriptions\n",
+				baseline_epoch, cur_epoch);
+			for (ss = g_subs; ss; ss = ss->next) {
+				if (ss->sub) {
+					natsSubscription_Unsubscribe(ss->sub);
+					natsSubscription_Destroy(ss->sub);
+					ss->sub = NULL;
+				}
+				ss->dirty = 1;
+			}
+			baseline_epoch = cur_epoch;
+		}
 
 		/* 1. Reconcile subscriptions with the registry.  New binds
-		 *    land here on the next tick; unbinds leave a dangling
-		 *    proc_sub_state_t whose ring pointer is stale -- Phase 7
-		 *    adds the teardown path. */
+		 *    land here on the next tick; dirty subs are rebuilt in
+		 *    place.  Unbinds leave a dangling proc_sub_state_t whose
+		 *    ring pointer is stale -- a follow-up Phase 7 commit adds
+		 *    the teardown path. */
 		(void)nats_registry_foreach(reconcile_subs_cb, NULL);
 
 		/* 2. Fetch + push for every live subscription.  A ring-full
