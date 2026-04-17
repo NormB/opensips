@@ -56,6 +56,22 @@ typedef struct nats_registry {
 	nats_bucket_t *buckets;
 	int handle_count;           /* accessed with __atomic_* builtins */
 	int next_index;             /* monotonic; used to assign h->index */
+
+	/* Phase 7 retire list.  Handles removed from their bucket by
+	 * nats_registry_unbind() are parked here until nats_registry_reap()
+	 * can safely free them (sub_torn_down && pending_ops == 0).
+	 *
+	 * Guarded by `retire_lock`.  The retire list uses `h->next` as its
+	 * chain pointer; once a handle is on the retire list it is not on
+	 * any bucket chain, so the single `next` is not contested.
+	 *
+	 * Lock ordering: `retire_lock` is NEVER taken while holding a
+	 * bucket lock.  The only place we need both is in unbind(), which
+	 * takes them in order (bucket write -> drop -> retire write) --
+	 * the bucket lock is released before the retire lock is acquired,
+	 * so there is no nesting.  Callers of reap() hold no other lock. */
+	rw_lock_t *retire_lock;
+	nats_handle_t *retire_head;
 } nats_registry_t;
 
 static nats_registry_t *g_registry = NULL;
@@ -154,6 +170,18 @@ int nats_registry_init(int bucket_count)
 		return -1;
 	}
 
+	r->retire_lock = lock_init_rw();
+	if (!r->retire_lock) {
+		LM_ERR("retire rwlock init failed\n");
+		lock_destroy_rw(r->global_lock);
+		for (i = 0; i < bucket_count; i++)
+			lock_destroy_rw(r->buckets[i].lock);
+		shm_free(r->buckets);
+		shm_free(r);
+		return -1;
+	}
+	r->retire_head = NULL;
+
 	r->handle_count = 0;
 	r->next_index   = 0;
 	g_registry = r;
@@ -184,6 +212,24 @@ void nats_registry_destroy(void)
 		r->buckets[i].head = NULL;
 		lock_stop_write(r->buckets[i].lock);
 		lock_destroy_rw(r->buckets[i].lock);
+	}
+
+	/* Drain the retire list -- force-free anything that unbind parked
+	 * but the consumer process never got around to tearing down.
+	 * mod_destroy is the last writer, so ignore the retire bookkeeping
+	 * (sub_torn_down / pending_ops) and just free. */
+	if (r->retire_lock)
+		lock_start_write(r->retire_lock);
+	h = r->retire_head;
+	while (h) {
+		next = h->next;
+		nats_handle_free(h);
+		h = next;
+	}
+	r->retire_head = NULL;
+	if (r->retire_lock) {
+		lock_stop_write(r->retire_lock);
+		lock_destroy_rw(r->retire_lock);
 	}
 
 	lock_stop_write(r->global_lock);
@@ -322,7 +368,7 @@ int nats_registry_unbind(const str *id)
 	int idx;
 	nats_bucket_t *b;
 	nats_handle_t *cur, *prev;
-	int pending;
+	nats_handle_t *retiree = NULL;
 
 	if (!g_registry || !id || id->len <= 0)
 		return -1;
@@ -335,36 +381,143 @@ int nats_registry_unbind(const str *id)
 	prev = NULL;
 	for (cur = b->head; cur; prev = cur, cur = cur->next) {
 		if (str_eq(&cur->id, id)) {
-			/* Phase 5 stop-gap: refuse while the handle has in-flight
-			 * operations.  Proper refcount lifecycle (where unbind
-			 * marks the handle dying and the last releaser frees it)
-			 * lands with Phase 7.  Reading under the bucket write
-			 * lock rules out a simultaneous bind; SEQ_CST load pairs
-			 * with the producers' inc/dec in the data plane. */
-			pending = nats_handle_pending_get(cur);
-			if (pending > 0) {
-				lock_stop_write(b->lock);
-				LM_WARN("nats_registry: refusing unbind id='%.*s' "
-					"(%d pending op%s)\n",
-					id->len, id->s, pending,
-					pending == 1 ? "" : "s");
-				return -4;
-			}
+			/* Phase 7: regardless of pending_ops we unlink the handle
+			 * from its bucket chain immediately so subsequent lookups
+			 * fail.  The physical free is deferred to
+			 * nats_registry_reap() once the consumer process has torn
+			 * down the JetStream subscription (sub_torn_down=1) and
+			 * any in-flight ack-IPC references have drained
+			 * (pending_ops==0).  Workers that raced and already hold
+			 * a borrowed pointer observe retire=1 and release without
+			 * making new calls. */
 			if (prev)
 				prev->next = cur->next;
 			else
 				b->head = cur->next;
-			lock_stop_write(b->lock);
-
-			__atomic_sub_fetch(&g_registry->handle_count, 1,
-				__ATOMIC_SEQ_CST);
-			nats_handle_free(cur);
-			return 0;
+			cur->next = NULL;
+			retiree = cur;
+			break;
 		}
 	}
 
 	lock_stop_write(b->lock);
-	return -1;
+
+	if (!retiree)
+		return -1;
+
+	/* Mark retire BEFORE linking onto the retire list so any thread
+	 * that observes the handle via a stale bucket-chain pointer (none
+	 * should, but defensive) sees retire=1. */
+	__atomic_store_n(&retiree->retire, 1, __ATOMIC_SEQ_CST);
+
+	/* Park on the retire list for the reaper to drain.  The retire
+	 * lock is never held simultaneously with a bucket lock (we dropped
+	 * the bucket lock above), so no lock-order deadlock is possible. */
+	lock_start_write(g_registry->retire_lock);
+	retiree->next = g_registry->retire_head;
+	g_registry->retire_head = retiree;
+	lock_stop_write(g_registry->retire_lock);
+
+	__atomic_sub_fetch(&g_registry->handle_count, 1, __ATOMIC_SEQ_CST);
+	return 0;
+}
+
+nats_handle_t *nats_registry_lookup_weak(const str *id)
+{
+	int idx;
+	nats_bucket_t *b;
+	nats_handle_t *cur, *found = NULL;
+
+	if (!g_registry || !id || id->len <= 0)
+		return NULL;
+
+	/* First check the live bucket -- a non-retired handle with the
+	 * same id lives here and is what the consumer process wants.
+	 * A lookup that races with unbind may see either the live handle
+	 * (before unbind takes the bucket write lock) or nothing (after
+	 * unbind) -- both outcomes are safe. */
+	idx = bucket_index(id);
+	b = &g_registry->buckets[idx];
+	lock_start_read(b->lock);
+	for (cur = b->head; cur; cur = cur->next) {
+		if (str_eq(&cur->id, id)) {
+			found = cur;
+			break;
+		}
+	}
+	lock_stop_read(b->lock);
+	if (found)
+		return found;
+
+	/* Fall back to the retire list.  This is the expected path after
+	 * unbind: the consumer process still has a proc_sub_state_t with
+	 * a cached id and wants to observe `retire` on the original
+	 * handle object to know it needs to tear down the subscription. */
+	lock_start_read(g_registry->retire_lock);
+	for (cur = g_registry->retire_head; cur; cur = cur->next) {
+		if (str_eq(&cur->id, id)) {
+			found = cur;
+			break;
+		}
+	}
+	lock_stop_read(g_registry->retire_lock);
+
+	return found;
+}
+
+void nats_registry_reap(void)
+{
+	nats_handle_t *reap_list = NULL;
+	nats_handle_t *prev;
+	nats_handle_t *cur;
+	nats_handle_t *next;
+
+	if (!g_registry)
+		return;
+
+	/* Walk the retire list under write lock; splice out anything that
+	 * is ready to free (retire && sub_torn_down && pending_ops==0)
+	 * into a private reap_list, then free under no lock.  Freeing
+	 * under the retire lock would serialize every consumer-process
+	 * iteration on a single lock; freeing outside keeps the critical
+	 * section tiny. */
+	lock_start_write(g_registry->retire_lock);
+
+	prev = NULL;
+	cur  = g_registry->retire_head;
+	while (cur) {
+		next = cur->next;
+
+		int torn = __atomic_load_n(&cur->sub_torn_down, __ATOMIC_SEQ_CST);
+		int pending = nats_handle_pending_get(cur);
+
+		if (torn && pending == 0) {
+			/* splice out */
+			if (prev)
+				prev->next = next;
+			else
+				g_registry->retire_head = next;
+
+			/* Prepend to local reap_list */
+			cur->next = reap_list;
+			reap_list = cur;
+
+			cur = next;
+			continue;
+		}
+		prev = cur;
+		cur  = next;
+	}
+
+	lock_stop_write(g_registry->retire_lock);
+
+	while (reap_list) {
+		next = reap_list->next;
+		LM_DBG("nats_registry: reaping retired handle id='%.*s'\n",
+			reap_list->id.len, reap_list->id.s);
+		nats_handle_free(reap_list);
+		reap_list = next;
+	}
 }
 
 nats_handle_t *nats_registry_lookup(const str *id)

@@ -163,11 +163,35 @@ typedef struct nats_handle {
 	/* Phase 5 stop-gap refcount guarding against unbind-while-in-use.
 	 * Incremented by consumer-process ring push-success and any worker
 	 * that holds an ack IPC pending for this handle; decremented when
-	 * that operation completes.  nats_registry_unbind() refuses
-	 * (returns -4) while this is non-zero.  Not a true refcount for
-	 * the handle's lifetime -- Phase 7 will replace it with a proper
-	 * get/put lifecycle.  Atomic SEQ_CST for cross-process visibility. */
+	 * that operation completes.  nats_registry_unbind() refuses while
+	 * this is non-zero in Phase 5; Phase 7 replaces that rejection with
+	 * the retire/reap lifecycle: unbind still returns 0 but the actual
+	 * free is deferred until both `retire` is set AND `sub_torn_down`
+	 * is set AND `pending_ops` has drained to zero.  Atomic SEQ_CST for
+	 * cross-process visibility. */
 	int pending_ops;
+
+	/* Phase 7 retire/reap lifecycle.
+	 *
+	 * `retire` is set by nats_registry_unbind() the moment the handle
+	 *   is unlinked from its bucket (so new lookups fail).  The handle
+	 *   object itself is NOT freed yet -- the consumer process may
+	 *   still hold a borrowed pointer in its proc_sub_state_t and
+	 *   workers may still have in-flight ack-IPC references.
+	 *
+	 * `sub_torn_down` is set by the consumer process right after it
+	 *   destroys the natsSubscription + frees the process-local
+	 *   proc_sub_state_t strings for this handle.  A retired handle
+	 *   that the consumer process has never seen (bind-then-unbind
+	 *   before the reconcile loop ran) still gets this flag raised
+	 *   because the consumer process's retire scan runs unconditionally.
+	 *
+	 * nats_registry_reap() frees the handle when retire == 1 AND
+	 * sub_torn_down == 1 AND pending_ops == 0.  All three conditions
+	 * are atomic-SEQ_CST so the ordering across processes is well
+	 * defined without a heavy barrier. */
+	volatile int retire;
+	volatile int sub_torn_down;
 
 	/* Active JetStream subscription handle.
 	 * Owned by the consumer process (not SHM; process-local).
@@ -177,7 +201,9 @@ typedef struct nats_handle {
 	 * the consumer process code casts this to natsSubscription *. */
 	void *subscription;
 
-	/* intrusive bucket chain */
+	/* intrusive bucket chain.  After retire=1 the handle is removed
+	 * from the bucket and instead lives on the registry's retire list
+	 * (see nats_handle_registry.c), walked by nats_registry_reap(). */
 	struct nats_handle *next;
 } nats_handle_t;
 
@@ -200,13 +226,40 @@ void nats_registry_destroy(void);
 int nats_registry_bind(nats_handle_t *h);
 
 /* Remove a handle by id.
+ *
+ * Phase 7 lifecycle:
+ *   1. unbind marks the handle retired and unlinks it from its bucket
+ *      chain so subsequent lookups miss.
+ *   2. The consumer process observes `retire` on its next iteration,
+ *      destroys the JetStream subscription + frees the process-local
+ *      proc_sub_state_t, and sets `sub_torn_down`.
+ *   3. nats_registry_reap() (called periodically by the consumer
+ *      process) frees the handle once `pending_ops==0` AND
+ *      `sub_torn_down==1`.
+ *
  * Returns:
- *    0 on success
- *   -1 if not found
- *   -4 if the handle has in-flight operations (pending_ops > 0); the
- *      caller should retry later or accept the leak.  Phase 5 stop-gap
- *      until Phase 7 adds full lifecycle. */
+ *    0 on success (handle retired; actual free deferred to reap).
+ *   -1 if not found. */
 int nats_registry_unbind(const str *id);
+
+/* Weak lookup that returns retired handles.
+ *
+ * Used by the consumer process to finalize cleanup after `retire=1`:
+ * the handle is off its bucket chain so the normal nats_registry_lookup
+ * cannot find it, but the consumer process needs to observe `retire`
+ * and set `sub_torn_down` on the same handle object.  The returned
+ * pointer is valid until nats_registry_reap() frees the handle, which
+ * happens only after `sub_torn_down==1` AND `pending_ops==0`. */
+nats_handle_t *nats_registry_lookup_weak(const str *id);
+
+/* Phase 7 reaper.
+ *
+ * Frees any handle whose retire=1, sub_torn_down=1, and pending_ops==0.
+ * Intended to be called from the consumer process's main loop (cheap
+ * enough to run every iteration: O(retired-handles) with a short list).
+ * Safe to call from any process context but only the consumer process
+ * ever sets sub_torn_down, so calling it from elsewhere is a no-op. */
+void nats_registry_reap(void);
 
 /* Optional runtime ring-capacity override helper.  Convenience wrapper
  * for scripts / MI to resize a handle's ring after bind; Phase 5

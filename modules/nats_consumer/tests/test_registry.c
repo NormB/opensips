@@ -246,11 +246,16 @@ static void test_bind_cap_exceeded(void)
 	nats_registry_destroy();
 }
 
-/* Phase 5: unbind while pending_ops > 0 returns -4 and leaves the
- * handle in place; once pending_ops drains, unbind succeeds. */
-static void test_unbind_in_use(void)
+/* Phase 7: unbind while pending_ops > 0 now SUCCEEDS (replacing the
+ * Phase 5 -4 rejection).  The handle is marked retired, dropped from
+ * its bucket so lookups miss, and parked on the retire list until the
+ * consumer process tears the subscription down and the reaper drains
+ * it.  A subsequent nats_registry_reap() without sub_torn_down keeps
+ * the handle parked (no crash). */
+static void test_unbind_retires_while_in_use(void)
 {
 	nats_handle_t *h, *found;
+	nats_handle_t *weak;
 	str key;
 
 	CHECK(nats_registry_init(16) == 0);
@@ -262,17 +267,72 @@ static void test_unbind_in_use(void)
 	nats_handle_pending_inc(h);
 
 	key = dup_str("busy");
-	CHECK(nats_registry_unbind(&key) == -4);
-	found = nats_registry_lookup(&key);
-	CHECK(found != NULL);
-
-	/* Worker releases -- second unbind now succeeds. */
-	nats_handle_pending_dec(h);
+	/* Phase 7: unbind returns 0 even with pending_ops > 0 -- the
+	 * handle is retired, not freed yet. */
 	CHECK(nats_registry_unbind(&key) == 0);
+
+	/* Normal lookup misses a retired handle. */
 	found = nats_registry_lookup(&key);
 	CHECK(found == NULL);
-	free(key.s);
 
+	/* Weak lookup still finds it on the retire list so the consumer
+	 * process can do cleanup.  retire flag must be set. */
+	weak = nats_registry_lookup_weak(&key);
+	CHECK(weak == h);
+	CHECK(__atomic_load_n(&weak->retire, __ATOMIC_SEQ_CST) == 1);
+
+	/* Reap without sub_torn_down: handle stays parked. */
+	nats_registry_reap();
+	weak = nats_registry_lookup_weak(&key);
+	CHECK(weak == h);
+
+	/* Simulate consumer-process teardown + pending release. */
+	__atomic_store_n(&weak->sub_torn_down, 1, __ATOMIC_SEQ_CST);
+	nats_registry_reap();
+	/* Still pending, still parked. */
+	weak = nats_registry_lookup_weak(&key);
+	CHECK(weak == h);
+
+	nats_handle_pending_dec(h);
+	/* Both flags set + pending == 0 -> reap frees it. */
+	nats_registry_reap();
+	weak = nats_registry_lookup_weak(&key);
+	CHECK(weak == NULL);
+
+	free(key.s);
+	nats_registry_destroy();
+}
+
+/* Phase 7: unbind without pending_ops retires instantly; reap frees
+ * the handle once the consumer process signals sub_torn_down. */
+static void test_unbind_retire_flow(void)
+{
+	nats_handle_t *h, *weak;
+	str key;
+
+	CHECK(nats_registry_init(16) == 0);
+
+	h = mk_handle("clean", "S", "d");
+	CHECK(nats_registry_bind(h) == 0);
+
+	key = dup_str("clean");
+	CHECK(nats_registry_unbind(&key) == 0);
+
+	/* Off the bucket, on the retire list. */
+	CHECK(nats_registry_lookup(&key) == NULL);
+	weak = nats_registry_lookup_weak(&key);
+	CHECK(weak == h);
+	CHECK(__atomic_load_n(&weak->retire, __ATOMIC_SEQ_CST) == 1);
+
+	/* Before sub_torn_down, reap is a no-op for this handle. */
+	nats_registry_reap();
+	CHECK(nats_registry_lookup_weak(&key) == h);
+
+	__atomic_store_n(&weak->sub_torn_down, 1, __ATOMIC_SEQ_CST);
+	nats_registry_reap();
+	CHECK(nats_registry_lookup_weak(&key) == NULL);
+
+	free(key.s);
 	nats_registry_destroy();
 }
 
@@ -319,7 +379,8 @@ int main(void)
 	test_foreach();
 	test_bind_index_assignment();
 	test_bind_cap_exceeded();
-	test_unbind_in_use();
+	test_unbind_retires_while_in_use();
+	test_unbind_retire_flow();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

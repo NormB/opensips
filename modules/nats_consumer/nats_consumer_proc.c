@@ -106,15 +106,31 @@ typedef struct proc_sub_state {
 	uint64_t              total_dropped_backpressure;
 	uint64_t              total_fetch_errors;
 
-	/* Phase 7 subscription-refresh bookkeeping.
-	 *
-	 * Set to 1 when the main loop observes a reconnect-epoch bump (the
-	 * nats.c library has dropped and re-established the TCP connection
-	 * and anything we had open against the old connection is dead).
-	 * The reconcile pass rebuilds the natsSubscription in place,
-	 * keeping the proc_sub_state_t (and its counters) intact, then
-	 * clears the flag. */
-	int                   dirty;
+	/* Phase 7 subscription-refresh bookkeeping. */
+	int                   dirty;   /* 1 iff the subscription needs
+	                                 * rebuild (epoch bump or broker
+	                                 * GC'd ephemeral); cleared when
+	                                 * ensure_subscription_for_handle
+	                                 * successfully creates a fresh
+	                                 * natsSubscription. */
+
+	/* Phase 7 string cleanup slots.  These point at the malloc'd
+	 * C-strings and arrays we hand to nats.c in
+	 * ensure_subscription_for_handle(); they are leaked by Phase 5 on
+	 * purpose because nats.c holds borrowed pointers for the life of
+	 * the subscription.  With the retire/reap lifecycle in place, we
+	 * stash them here so the teardown path can free them along with
+	 * the proc_sub_state_t.  NULL entries mean "no allocation for
+	 * that slot". */
+	char                 *c_durable;
+	char                 *c_filter;
+	char                 *c_stream;
+	char                 *c_domain;
+	char                 *c_api_prefix;
+	char                 *c_sample_freq;
+	int64_t              *backoff_arr;
+	const char          **filters_arr;
+	int                   filters_arr_len;
 
 	struct proc_sub_state *next;
 } proc_sub_state_t;
@@ -336,6 +352,38 @@ static proc_sub_state_t *find_sub_by_id(const str *id)
 	return NULL;
 }
 
+/* Free all the malloc'd C-strings / arrays we stashed on ss during
+ * ensure_subscription_for_handle().  Phase 5 leaked these for the life
+ * of the sub because nats.c's jsConsumerConfig holds borrowed pointers;
+ * Phase 7's retire path lets us free them along with the sub.
+ *
+ * Leaves ss itself alive -- caller decides whether to free the struct
+ * (on full teardown) or to clear the slots for recreation (on an
+ * ephemeral consumer rebuild). */
+static void free_proc_sub_strings(proc_sub_state_t *ss)
+{
+	int i;
+	if (!ss)
+		return;
+
+	free(ss->c_durable);     ss->c_durable     = NULL;
+	free(ss->c_filter);      ss->c_filter      = NULL;
+	free(ss->c_stream);      ss->c_stream      = NULL;
+	free(ss->c_domain);      ss->c_domain      = NULL;
+	free(ss->c_api_prefix);  ss->c_api_prefix  = NULL;
+	free(ss->c_sample_freq); ss->c_sample_freq = NULL;
+
+	free(ss->backoff_arr);   ss->backoff_arr   = NULL;
+
+	if (ss->filters_arr) {
+		for (i = 0; i < ss->filters_arr_len; i++)
+			free((void *)ss->filters_arr[i]);
+		free(ss->filters_arr);
+		ss->filters_arr     = NULL;
+		ss->filters_arr_len = 0;
+	}
+}
+
 /* ── subscription setup ──────────────────────────────────────── */
 
 /*
@@ -510,15 +558,18 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		return 0;   /* handle still being constructed or TEST_SHIM */
 
 	/* Phase 7: dirty handles refresh in place -- the sub was destroyed
-	 * on the epoch bump (and will be destroyed for other reasons in
-	 * Phase 7 follow-ups).  We rebuild the natsSubscription while
-	 * keeping the proc_sub_state_t (and its counters) intact so
-	 * mi_info totals stay monotonic across reconnect events. */
+	 * on the epoch bump or on a fetch-time "consumer vanished" error,
+	 * and we now rebuild the natsSubscription while keeping the
+	 * proc_sub_state_t (and its counters) intact. */
 	ss = find_sub_by_id(&h->id);
 	if (ss) {
 		if (!ss->dirty)
 			return 0;   /* clean + already subscribed */
-		ss->sub    = NULL;
+		/* Rebuild path: free any strings we allocated last time so
+		 * we can stash fresh ones below.  The old natsSubscription
+		 * has already been destroyed by whoever set dirty. */
+		free_proc_sub_strings(ss);
+		ss->sub = NULL;
 		is_rebuild = 1;
 		if (h->type == NATS_CONSUMER_EPHEMERAL) {
 			LM_DBG("nats_consumer_proc: re-creating ephemeral "
@@ -526,7 +577,8 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 				(int)h->id.len, h->id.s);
 		} else {
 			LM_DBG("nats_consumer_proc: refreshing subscription for "
-				"%.*s (dirty)\n", (int)h->id.len, h->id.s);
+				"%.*s (epoch bump)\n",
+				(int)h->id.len, h->id.s);
 		}
 	} else {
 		ss = (proc_sub_state_t *)calloc(1, sizeof(*ss));
@@ -546,8 +598,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 
 	/* Pre-size the ref row so pull_one_batch doesn't pay for the
 	 * first-use allocation under load.  nats_ring_capacity reads the
-	 * ring's fixed capacity field atomically.  On rebuild the row is
-	 * already sized; ensure_row is idempotent and returns 0. */
+	 * ring's fixed capacity field atomically. */
 	if (ensure_row(h->index, nats_ring_capacity(h->ring)) < 0) {
 		LM_ERR("nats_consumer_proc: ref-row init failed for id='%.*s'\n",
 			h->id.len, h->id.s);
@@ -691,6 +742,21 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		g_subs = ss;
 	}
 
+	/* Phase 7: stash the allocations on ss so the retire / rebuild
+	 * paths can free them without leaking.  nats.c has borrowed
+	 * pointers into these for the life of the subscription, so they
+	 * must outlive the natsSubscription_Destroy() call but NOT the
+	 * proc_sub_state_t itself. */
+	ss->c_durable       = durable_c;
+	ss->c_filter        = filter_c;
+	ss->c_stream        = stream_c;
+	ss->c_domain        = domain_c;
+	ss->c_api_prefix    = api_prefix_c;
+	ss->c_sample_freq   = sample_freq_c;
+	ss->backoff_arr     = backoff_arr;
+	ss->filters_arr     = filters_arr;
+	ss->filters_arr_len = filters_len;
+
 	/* Publish the subscription pointer back to the handle so MI can
 	 * introspect it (read-only).  This is a process-local pointer the
 	 * SIP workers must not dereference; they just observe non-NULL as
@@ -709,16 +775,6 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		domain_c ? domain_c : "",
 		api_prefix_c ? api_prefix_c : "");
 
-	/* durable_c / filter_c / stream_c / domain_c / api_prefix_c /
-	 * sample_freq_c / backoff_arr / filters_arr[i]* are all leaked on
-	 * purpose for the sub's lifetime -- jsConsumerConfig stores
-	 * borrowed pointers into them and nats.c holds them until the
-	 * subscription is destroyed.  On rebuild the previous allocations
-	 * are ALSO leaked (nats.c still holds pointers after the old
-	 * subscription's destroy because the Config struct was copied by
-	 * value into the subscription).  A follow-up Phase 7 commit adds
-	 * per-ss stash slots + free_proc_sub_strings() to plug these
-	 * leaks for both the rebuild and the teardown-on-unbind paths. */
 	return 0;
 
 fail_free_sub:
@@ -731,11 +787,26 @@ fail_free_sub:
 	free(sample_freq_c);
 	free(domain_c);
 	free(api_prefix_c);
-	/* durable_c / filter_c / stream_c are leaked on the failure path to
-	 * keep the error handling simple; acceptable for a rare path.  On
-	 * rebuild failure keep dirty=1 so the next reconcile tick retries. */
-	if (is_rebuild)
+	free(durable_c);
+	free(filter_c);
+	free(stream_c);
+	/* On rebuild failure, keep the proc_sub_state_t on g_subs but
+	 * leave dirty=1 so the next reconcile tick retries.  Reset any
+	 * partially filled string slots (we freed the locals above, so
+	 * the ss-> copies must not point at stale memory).  On first-bind
+	 * failure, free the struct since it never landed on g_subs. */
+	if (is_rebuild) {
+		ss->c_durable     = NULL;
+		ss->c_filter      = NULL;
+		ss->c_stream      = NULL;
+		ss->c_domain      = NULL;
+		ss->c_api_prefix  = NULL;
+		ss->c_sample_freq = NULL;
+		ss->backoff_arr   = NULL;
+		ss->filters_arr     = NULL;
+		ss->filters_arr_len = 0;
 		return -1;
+	}
 	free(ss->id.s);
 	free(ss);
 	return -1;
@@ -744,6 +815,13 @@ fail_free_sub:
 static int reconcile_subs_cb(nats_handle_t *h, void *user)
 {
 	(void)user;
+	/* Phase 7: skip retired handles -- the teardown path owns them now.
+	 * A retired handle is already off its bucket chain so registry
+	 * foreach should not surface it, but defense-in-depth against a
+	 * race where unbind fires between the foreach-global-lock
+	 * acquisition and the bucket-lock acquisition. */
+	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST))
+		return 0;
 	/* ignore individual-handle failures; Phase 3 retries next tick
 	 * because find_sub_by_id() keeps returning NULL for that id */
 	(void)ensure_subscription_for_handle(h);
@@ -912,16 +990,13 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	/* Phase 7 ephemeral-GC / subscription-invalidated detection.
 	 *
 	 * NATS_NOT_FOUND comes back when JetStream has GC'd the consumer
-	 * past its inactive_threshold (the common ephemeral-GC case --
-	 * nats.c 3.13's jsm.c surfaces this via NATS_NOT_FOUND whenever
-	 * the server returns a JSConsumerNotFoundErr).
+	 * past its inactive_threshold (the common ephemeral-GC case).
 	 * NATS_INVALID_SUBSCRIPTION means the nats.c subscription object
 	 * has gone into a bad state (e.g. after a server-initiated close).
 	 * In both cases the right thing is to destroy the subscription
 	 * and flag it dirty so the next reconcile tick rebuilds it.
 	 * Ephemeral consumers get a brand-new server-side id on recreate
-	 * (see the \"re-creating ephemeral\" log line in
-	 * ensure_subscription_for_handle). */
+	 * (see the rebuild log line in ensure_subscription_for_handle). */
 	if (s == NATS_NOT_FOUND || s == NATS_INVALID_SUBSCRIPTION) {
 		LM_INFO("nats_consumer_proc: consumer for %.*s vanished (%s); "
 			"will recreate\n",
@@ -1209,6 +1284,81 @@ static void drain_ack_eventfd(int fd)
 	} while (r < 0 && errno == EINTR);
 }
 
+/* ── retire teardown ─────────────────────────────────────────── */
+
+/*
+ * Walk g_subs and tear down any proc_sub_state_t whose underlying
+ * handle is (a) gone from the registry entirely, or (b) still in the
+ * registry but with retire=1.  For case (b) we set sub_torn_down on
+ * the handle so nats_registry_reap() can free it; for case (a) the
+ * handle was already freed by a parallel teardown path, so we just
+ * drop our ss.
+ *
+ * Must NOT be called while iterating g_subs via another pointer --
+ * it mutates the list.  The main loop calls this after the pull /
+ * drain phases complete so the iteration pointers have gone out of
+ * scope.
+ */
+static void tear_down_retired_subs(void)
+{
+	proc_sub_state_t **pp = &g_subs;
+
+	while (*pp) {
+		proc_sub_state_t *ss = *pp;
+		nats_handle_t *h = nats_registry_lookup_weak(&ss->id);
+
+		int should_tear_down = 0;
+		if (!h) {
+			/* Handle already freed (bind-unbind-reap cycle completed
+			 * without us participating, or TEST_SHIM path).  Tear
+			 * down the proc-local state only. */
+			should_tear_down = 1;
+		} else if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
+			should_tear_down = 1;
+		}
+
+		if (!should_tear_down) {
+			pp = &(*pp)->next;
+			continue;
+		}
+
+		LM_INFO("nats_consumer_proc: tearing down retired "
+			"subscription id='%.*s'\n",
+			ss->id.len, ss->id.s);
+
+		if (ss->sub) {
+			natsSubscription_Unsubscribe(ss->sub);
+			natsSubscription_Destroy(ss->sub);
+			ss->sub = NULL;
+		}
+
+		/* Free the Phase-5-leaked C-strings and arrays.  This is the
+		 * cleanup Phase 5 deferred to Phase 7. */
+		free_proc_sub_strings(ss);
+
+		if (h) {
+			/* Publish the teardown completion so the reaper can
+			 * free the handle.  This store MUST happen AFTER the
+			 * subscription destroy + string free so the reaper sees
+			 * a fully torn-down handle if it observes sub_torn_down=1. */
+			__atomic_store_n(&h->sub_torn_down, 1, __ATOMIC_SEQ_CST);
+		}
+
+		*pp = ss->next;
+
+		/* Clear the handle's subscription publish pointer; the handle
+		 * may still be on the retire list (not yet reaped) and MI
+		 * could observe it.  Do this AFTER the sub_torn_down store
+		 * above so there's no window where sub_torn_down=1 but the
+		 * handle->subscription pointer still looks live. */
+		if (h)
+			h->subscription = NULL;
+
+		free(ss->id.s);
+		free(ss);
+	}
+}
+
 /* ── main loop ───────────────────────────────────────────────── */
 
 void nats_consumer_proc_main(int rank)
@@ -1234,14 +1384,6 @@ void nats_consumer_proc_main(int rank)
 	}
 
 	ack_fd = nats_ack_ipc_fd();
-
-	/* Phase 7: snapshot the shared pool's reconnect epoch.  The nats.c
-	 * library bumps this counter from its reconnect callback (on a
-	 * library thread); comparing against this snapshot on every
-	 * iteration lets us detect "the TCP connection was replaced
-	 * underneath us" without registering nats.c callbacks that would
-	 * otherwise have to run OpenSIPS APIs on non-worker threads.
-	 * See lib/nats/nats_pool.h for the full epoch contract. */
 	baseline_epoch = nats_pool_get_reconnect_epoch();
 
 	/* Blocking-idle timerfd -- armed each idle round to cap how long
@@ -1262,14 +1404,15 @@ void nats_consumer_proc_main(int rank)
 		int any_work = 0;
 		int cur_epoch;
 
-		/* 0. Phase 7 reconnect-epoch check.  When the library reports
-		 *    a new TCP connection, everything we have open against
-		 *    the previous connection is dead: subscriptions still
-		 *    hold a pointer to the old state and any Fetch() on them
-		 *    would never return new messages.  Destroy them right
-		 *    here and flag them dirty so the reconcile pass below
-		 *    rebuilds them in place -- mi_info counters survive the
-		 *    transparent rebuild. */
+		/* 0. Phase 7 reconnect-epoch check.  The nats.c library bumps
+		 *    the epoch from its reconnect callback (on a library
+		 *    thread); here we observe the bump and mark every live
+		 *    subscription dirty so the next reconcile pass rebuilds
+		 *    them.  Destroying the old subs immediately avoids the
+		 *    "ghost subscription held against a new connection"
+		 *    failure mode where nats.c has internally re-plumbed
+		 *    everything but our old Subscription* still points at a
+		 *    dead context. */
 		cur_epoch = nats_pool_get_reconnect_epoch();
 		if (cur_epoch != baseline_epoch) {
 			LM_INFO("nats_consumer_proc: reconnect detected "
@@ -1288,9 +1431,7 @@ void nats_consumer_proc_main(int rank)
 
 		/* 1. Reconcile subscriptions with the registry.  New binds
 		 *    land here on the next tick; dirty subs are rebuilt in
-		 *    place.  Unbinds leave a dangling proc_sub_state_t whose
-		 *    ring pointer is stale -- a follow-up Phase 7 commit adds
-		 *    the teardown path. */
+		 *    place. */
 		(void)nats_registry_foreach(reconcile_subs_cb, NULL);
 
 		/* 2. Fetch + push for every live subscription.  A ring-full
@@ -1346,6 +1487,15 @@ void nats_consumer_proc_main(int rank)
 				}
 			}
 		}
+
+		/* 4. Phase 7 lifecycle: tear down subscriptions whose handles
+		 *    are retiring, then reap any fully-drained handles.
+		 *    Running these every iteration keeps the unbind latency
+		 *    bounded (worst case: one iteration delay between unbind
+		 *    and reap).  Both are cheap when the retire list is
+		 *    empty. */
+		tear_down_retired_subs();
+		nats_registry_reap();
 
 		if (!any_work) {
 			/* Phase 5 blocking idle: wait until either the ack IPC
