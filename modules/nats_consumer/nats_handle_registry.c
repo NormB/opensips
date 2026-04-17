@@ -55,6 +55,7 @@ typedef struct nats_registry {
 	int bucket_count;
 	nats_bucket_t *buckets;
 	int handle_count;           /* accessed with __atomic_* builtins */
+	int next_index;             /* monotonic; used to assign h->index */
 } nats_registry_t;
 
 static nats_registry_t *g_registry = NULL;
@@ -154,6 +155,7 @@ int nats_registry_init(int bucket_count)
 	}
 
 	r->handle_count = 0;
+	r->next_index   = 0;
 	g_registry = r;
 	return 0;
 }
@@ -232,6 +234,7 @@ void nats_handle_free(nats_handle_t *h)
 int nats_registry_bind(nats_handle_t *h)
 {
 	int idx;
+	int assigned_index;
 	nats_handle_t *cur;
 	nats_bucket_t *b;
 
@@ -239,6 +242,18 @@ int nats_registry_bind(nats_handle_t *h)
 		return -2;
 	if (h->id.len <= 0 || !h->id.s)
 		return -2;
+
+	/* Assign monotonic bind-order index BEFORE dropping into the bucket.
+	 * If we exceed the cap, refuse to bind -- the consumer process's
+	 * ref table would not have a slot for us. */
+	assigned_index = __atomic_fetch_add(&g_registry->next_index, 1,
+		__ATOMIC_SEQ_CST);
+	if (assigned_index < 0 || assigned_index >= NATS_REGISTRY_MAX_HANDLES) {
+		LM_ERR("nats_registry: handle index %d exceeds cap %d\n",
+			assigned_index, NATS_REGISTRY_MAX_HANDLES);
+		return -2;
+	}
+	h->index = (uint16_t)assigned_index;
 
 	idx = bucket_index(&h->id);
 	b = &g_registry->buckets[idx];

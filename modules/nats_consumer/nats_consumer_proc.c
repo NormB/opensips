@@ -32,25 +32,25 @@
  *        proc_sub_state_t + natsSubscription for any handle it has not
  *        yet seen.
  *     2. pull_one_batch() fetches up to PHASE3_FETCH_BATCH messages per
- *        subscription with a PHASE3_FETCH_TIMEOUT_MS timeout and pushes
- *        each into the handle's SHM ring.
- *     3. drain_ack_ipc() is a stub until Phase 4.
+ *        subscription with a PHASE3_FETCH_TIMEOUT_MS timeout, stashes
+ *        each natsMsg under a freshly-minted ack_token, then pushes
+ *        into the handle's SHM ring.
+ *     3. drain_ack_ipc() dequeues every pending ack request from the
+ *        IPC queue, looks up the stashed natsMsg, and calls the
+ *        requested natsMsg_Ack / Nak / Term / InProgress.
  *
  *   Back-pressure: when nats_ring_push returns -1 (ring full) we do
  *   not ack the message, so the broker will redeliver it after
  *   ack_wait.  We do NOT retry in a tight loop; the next outer
  *   iteration tries again.
  *
- *   PHASE 3 AUTO-ACK CAVEAT
- *   -----------------------
- *   Until Phase 4 wires a real ack_token + worker->consumer ack IPC,
- *   this process auto-acks every successfully-pushed message.  This
- *   keeps the consumer from burning through max_deliver instantly
- *   during bring-up -- BUT it is incorrect end-to-end semantics: a SIP
- *   worker that crashes between pop() and processing will never see
- *   that message again.  Phase 4 replaces natsMsg_Ack here with a
- *   stash-the-ref / issue-a-token sequence, and acks in drain_ack_ipc
- *   on the worker's command.
+ *   Phase 4 change: the Phase 3 auto-ack after push is gone.  The
+ *   consumer process now stashes natsMsg* in a process-local ref
+ *   table indexed by (handle_idx, slot_idx) and only calls
+ *   natsMsg_Ack / Nak / Term / InProgress in drain_ack_ipc() on a
+ *   worker's explicit request.  A 16-bit generation counter in each
+ *   ref slot is bumped on (re)use and checked on ack to guard against
+ *   ABA-style stale-token reuse after ring wrap.
  */
 
 #include <string.h>
@@ -58,6 +58,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
+#include <errno.h>
+#include <sys/select.h>
 
 #include <nats/nats.h>
 
@@ -68,6 +70,7 @@
 #include "nats_handle_registry.h"
 #include "nats_ring.h"
 #include "nats_ack_ipc.h"
+#include "nats_ack.h"
 #include "nats_consumer_proc.h"
 
 /* ── tuning ──────────────────────────────────────────────────── */
@@ -82,6 +85,7 @@ typedef struct proc_sub_state {
 	str                   id;              /* copy of registry handle id
 	                                        * (process-local buffer, NOT
 	                                        *  shared) */
+	uint16_t              handle_idx;      /* stable index from registry */
 	natsSubscription     *sub;             /* active pull subscription */
 	struct nats_ring     *ring;            /* borrowed ref to handle ring */
 	time_t                last_fetch;
@@ -99,12 +103,138 @@ static proc_sub_state_t *g_subs = NULL;
 static natsConnection   *g_nc   = NULL;
 static jsCtx            *g_js   = NULL;
 
+/* ── natsMsg ref table ───────────────────────────────────────── */
+
+/*
+ * Process-local 2D ref table: for each (handle_idx, slot_idx) we keep
+ * the live natsMsg* plus a 16-bit generation counter bumped every
+ * time the slot is reused.  The ack token encodes generation so a
+ * stale ack (one issued for a natsMsg that has already been acked and
+ * the slot reused) is detected and ignored.
+ *
+ * The ring-capacity dimension is sized at first use of a handle in
+ * store_msg_ref().  All rings in Phase 4 share the same capacity
+ * (NATS_HANDLE_RING_CAPACITY), but we key off the handle's ring
+ * object to future-proof Phase 5's per-handle capacity.
+ */
+typedef struct msg_ref_slot {
+	natsMsg  *msg;
+	uint16_t  generation;
+	uint16_t  in_use;       /* 1 iff msg != NULL and ack pending */
+	uint32_t  _pad;
+} msg_ref_slot_t;
+
+typedef struct msg_ref_row {
+	uint32_t         capacity;     /* 0 == row not allocated yet */
+	msg_ref_slot_t  *slots;        /* [capacity] */
+	uint32_t         next_slot;    /* round-robin hint */
+} msg_ref_row_t;
+
+static msg_ref_row_t g_msg_refs[NATS_REGISTRY_MAX_HANDLES];
+
+static int ensure_row(uint16_t handle_idx, uint32_t capacity)
+{
+	msg_ref_row_t *row;
+	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
+		return -1;
+	row = &g_msg_refs[handle_idx];
+	if (row->slots)
+		return 0;
+	row->slots = (msg_ref_slot_t *)calloc(capacity, sizeof(msg_ref_slot_t));
+	if (!row->slots) {
+		LM_ERR("nats_consumer_proc: oom for msg-ref row "
+			"handle_idx=%u capacity=%u\n",
+			(unsigned)handle_idx, (unsigned)capacity);
+		return -1;
+	}
+	row->capacity  = capacity;
+	row->next_slot = 0;
+	return 0;
+}
+
+/* Reserve a slot, stash the natsMsg, return the packed ack_token.
+ * On failure (no free slot) returns 0 and sets *ok to 0. */
+static uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
+                              natsMsg *m, int *ok)
+{
+	msg_ref_row_t  *row;
+	msg_ref_slot_t *slot;
+	uint32_t        i, start;
+
+	*ok = 0;
+	if (ensure_row(handle_idx, ring_capacity) < 0)
+		return 0;
+	row = &g_msg_refs[handle_idx];
+
+	/* Scan from next_slot for a free slot.  The ring and the ref
+	 * table are the same size by construction, so if the ring ever
+	 * has room (the worker hasn't acked yet for some outstanding
+	 * slot), we should also have a free entry.  If not, the worker
+	 * is lagging acks -- return the "full" signal and let the caller
+	 * skip the push. */
+	start = row->next_slot;
+	for (i = 0; i < row->capacity; i++) {
+		uint32_t idx = (start + i) % row->capacity;
+		slot = &row->slots[idx];
+		if (!slot->in_use) {
+			slot->msg        = m;
+			slot->in_use     = 1;
+			slot->generation = (uint16_t)(slot->generation + 1);
+			row->next_slot   = (idx + 1) % row->capacity;
+			*ok = 1;
+			return nats_ack_token_pack(handle_idx, idx, slot->generation);
+		}
+	}
+
+	LM_WARN("nats_consumer_proc: msg-ref table full for handle_idx=%u; "
+		"worker is not acking fast enough\n", (unsigned)handle_idx);
+	return 0;
+}
+
+/* Take the msg out of the ref table if generation matches.  Returns
+ * the natsMsg* (which the caller MUST destroy after calling the
+ * requested ack action), or NULL if the slot is stale / unused. */
+static natsMsg *release_msg_ref(uint64_t token)
+{
+	uint16_t         handle_idx = nats_ack_token_handle(token);
+	uint32_t         slot_idx   = nats_ack_token_slot(token);
+	uint16_t         gen        = nats_ack_token_generation(token);
+	msg_ref_row_t   *row;
+	msg_ref_slot_t  *slot;
+	natsMsg         *m;
+
+	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
+		return NULL;
+	row = &g_msg_refs[handle_idx];
+	if (!row->slots || slot_idx >= row->capacity)
+		return NULL;
+	slot = &row->slots[slot_idx];
+	if (!slot->in_use) {
+		LM_DBG("nats_consumer_proc: stale ack for token=0x%016lx "
+			"(slot already free)\n", (unsigned long)token);
+		return NULL;
+	}
+	if (slot->generation != gen) {
+		LM_DBG("nats_consumer_proc: generation mismatch for "
+			"token=0x%016lx (expected gen=%u got %u) -- stale ack\n",
+			(unsigned long)token,
+			(unsigned)slot->generation, (unsigned)gen);
+		return NULL;
+	}
+	m = slot->msg;
+	slot->msg    = NULL;
+	slot->in_use = 0;
+	/* keep generation; next use bumps it again. */
+	return m;
+}
+
 /* ── forward declarations ────────────────────────────────────── */
 
 static int  reconcile_subs_cb(nats_handle_t *h, void *user);
 static int  ensure_subscription_for_handle(nats_handle_t *h);
 static int  pull_one_batch(proc_sub_state_t *ss);
-static void drain_ack_ipc(void);
+static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
+static int  drain_ack_ipc(void);
 static proc_sub_state_t *find_sub_by_id(const str *id);
 
 /* ── enum mapping helpers ────────────────────────────────────── */
@@ -221,7 +351,19 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		free(ss);
 		return -1;
 	}
-	ss->ring = h->ring;
+	ss->ring       = h->ring;
+	ss->handle_idx = h->index;
+
+	/* Pre-size the ref row so pull_one_batch doesn't pay for the
+	 * first-use allocation under load.  nats_ring_capacity reads the
+	 * ring's fixed capacity field atomically. */
+	if (ensure_row(h->index, nats_ring_capacity(h->ring)) < 0) {
+		LM_ERR("nats_consumer_proc: ref-row init failed for id='%.*s'\n",
+			h->id.len, h->id.s);
+		free(ss->id.s);
+		free(ss);
+		return -1;
+	}
 
 	/* Build jsConsumerConfig.  Phase 3 covers the critical fields;
 	 * Phase 5 fills in the rest (backoff, sample_freq, rate_limit,
@@ -257,7 +399,8 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	jsSubOptions_Init(&so);
 	so.Stream    = stream_c;
 	so.Config    = cc;
-	/* We drive acks ourselves (Phase 3 auto-acks after push to ring). */
+	/* We drive acks ourselves -- Phase 4 replaces Phase 3's auto-ack
+	 * with the real worker-driven path. */
 	so.ManualAck = true;
 
 	s = js_PullSubscribe(&ss->sub, g_js,
@@ -287,9 +430,9 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * "consumer process has a live sub". */
 	h->subscription = (void *)ss->sub;
 
-	LM_INFO("nats_consumer_proc: subscribed id='%.*s' stream='%.*s' "
-		"filter='%.*s' durable='%.*s'\n",
-		h->id.len, h->id.s,
+	LM_INFO("nats_consumer_proc: subscribed id='%.*s' index=%u "
+		"stream='%.*s' filter='%.*s' durable='%.*s'\n",
+		h->id.len, h->id.s, (unsigned)h->index,
 		h->stream.len, h->stream.s,
 		h->filter.len, h->filter.s,
 		h->durable.len, h->durable.s);
@@ -360,7 +503,8 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		uint64_t  delivered    = 0;
 		uint64_t  pending      = 0;
 		int64_t   timestamp_ns = 0;
-		uint64_t  ack_token    = 0;   /* Phase 4 will assign */
+		uint64_t  ack_token    = 0;
+		int       ref_ok       = 0;
 
 		int rc;
 
@@ -383,6 +527,20 @@ static int pull_one_batch(proc_sub_state_t *ss)
 			jsMsgMetaData_Destroy(md);
 		}
 
+		/* Stash the natsMsg under a fresh (handle, slot, gen) token.
+		 * On ref-table exhaustion we leave the broker to redeliver --
+		 * not acking this message means it comes back after
+		 * ack_wait, by which time workers will (hopefully) have
+		 * caught up on their ack backlog. */
+		ack_token = store_msg_ref(ss->handle_idx,
+			nats_ring_capacity(ss->ring), m, &ref_ok);
+		if (!ref_ok) {
+			ss->total_dropped_backpressure++;
+			natsMsg_Destroy(m);
+			list.Msgs[i] = NULL;
+			continue;
+		}
+
 		rc = nats_ring_push(ss->ring,
 			subject ? subject : "", (uint32_t)subject_len,
 			data    ? data    : "", (uint32_t)data_len,
@@ -393,31 +551,26 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		if (rc == 0) {
 			pushed++;
 			ss->total_pushed++;
-
-			/* --------------------------------------------------
-			 * PHASE 3 AUTO-ACK
-			 * --------------------------------------------------
-			 * Without ack_token plumbing, workers cannot issue
-			 * acks yet.  Auto-ack here prevents max_deliver
-			 * exhaustion during bring-up.  REPLACE in Phase 4
-			 * with: stash `m` under a freshly minted ack_token
-			 * (don't destroy it here), and ack in
-			 * drain_ack_ipc() on worker request.
-			 * -------------------------------------------------- */
-			(void)natsMsg_Ack(m, NULL);
+			/* natsMsg stays alive in the ref table until the worker
+			 * sends an ack IPC.  Do NOT destroy it here. */
+			list.Msgs[i] = NULL;
 		} else if (rc == -1) {
-			/* Ring full: don't ack.  Broker redelivers after
-			 * ack_wait.  Don't spin fetching more for this
-			 * handle this tick -- the outer loop rate-limits. */
+			/* Ring full: release the ref slot and do NOT ack.
+			 * Broker redelivers after ack_wait. */
+			(void)release_msg_ref(ack_token);
 			ss->total_dropped_backpressure++;
 			LM_DBG("nats_consumer_proc: ring full id='%.*s', "
 				"deferring message\n",
 				ss->id.len, ss->id.s);
+			natsMsg_Destroy(m);
+			list.Msgs[i] = NULL;
 		} else {
 			/* -2 / -3: payload or subject too large.  These are
 			 * permanently undeliverable on the current ring
 			 * geometry; terminate the message so the broker
-			 * doesn't redeliver forever. */
+			 * doesn't redeliver forever.  Release the ref slot
+			 * first so we don't leak it on retry. */
+			(void)release_msg_ref(ack_token);
 			ss->total_dropped_backpressure++;
 			LM_WARN("nats_consumer_proc: oversize message on "
 				"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
@@ -425,34 +578,125 @@ static int pull_one_batch(proc_sub_state_t *ss)
 				ss->id.len, ss->id.s,
 				subject_len, data_len, rc);
 			(void)natsMsg_Term(m, NULL);
+			natsMsg_Destroy(m);
+			list.Msgs[i] = NULL;
 		}
-
-		natsMsg_Destroy(m);
-		list.Msgs[i] = NULL;
 	}
 
 	/* natsMsgList_Destroy walks the Msgs array and destroys any
-	 * non-NULL entries; we've already destroyed ours above, so this
-	 * just frees the Msgs array itself. */
+	 * non-NULL entries; we've already consumed (or destroyed) ours
+	 * above, so this just frees the Msgs array itself. */
 	natsMsgList_Destroy(&list);
 
 	return pushed;
 }
 
-/* ── ack IPC drain stub ──────────────────────────────────────── */
+/* ── ack IPC drain ───────────────────────────────────────────── */
 
-static void drain_ack_ipc(void)
+static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 {
-	/* Phase 3 stub.  The SHM queue is allocated in mod_init but has
-	 * no producers; Phase 4 will read pending ack requests here and
-	 * route them to natsMsg_Ack / Nak / Term / InProgress. */
-	nats_ack_ipc_drain();
+	natsMsg    *nmsg;
+	natsStatus  s;
+	int        *ack_count = (int *)user;
+
+	nmsg = release_msg_ref(m->ack_token);
+	if (!nmsg) {
+		/* Stale or already-released.  release_msg_ref logged at DBG. */
+		return;
+	}
+
+	switch ((nats_ack_action_e)m->action) {
+		case NATS_ACK_ACTION_ACK:
+			s = natsMsg_Ack(nmsg, NULL);
+			break;
+		case NATS_ACK_ACTION_NAK:
+			s = natsMsg_Nak(nmsg, NULL);
+			break;
+		case NATS_ACK_ACTION_NAK_DELAY:
+			s = natsMsg_NakWithDelay(nmsg,
+				(int64_t)m->delay_ms * 1000000LL, NULL);
+			break;
+		case NATS_ACK_ACTION_TERM:
+			s = natsMsg_Term(nmsg, NULL);
+			break;
+		case NATS_ACK_ACTION_IN_PROGRESS:
+			s = natsMsg_InProgress(nmsg, NULL);
+			/* in_progress does NOT finalize the message; we must
+			 * keep it alive.  Put it back in the ref table under
+			 * the same token (same handle, slot, and generation). */
+			{
+				uint16_t handle_idx =
+					nats_ack_token_handle(m->ack_token);
+				uint32_t slot_idx =
+					nats_ack_token_slot(m->ack_token);
+				uint16_t gen =
+					nats_ack_token_generation(m->ack_token);
+				msg_ref_slot_t *slot;
+				if (handle_idx < NATS_REGISTRY_MAX_HANDLES &&
+				    g_msg_refs[handle_idx].slots &&
+				    slot_idx < g_msg_refs[handle_idx].capacity) {
+					slot = &g_msg_refs[handle_idx].slots[slot_idx];
+					slot->msg        = nmsg;
+					slot->in_use     = 1;
+					slot->generation = gen;
+					if (ack_count)
+						(*ack_count)++;
+					return;
+				}
+				/* Fall through to destroy if somehow invalid. */
+			}
+			break;
+		default:
+			LM_WARN("nats_consumer_proc: unknown ack action %u for "
+				"token=0x%016lx\n",
+				(unsigned)m->action,
+				(unsigned long)m->ack_token);
+			s = NATS_OK;
+			break;
+	}
+
+	if (s != NATS_OK) {
+		LM_DBG("nats_consumer_proc: ack action=%u token=0x%016lx "
+			"returned %s\n",
+			(unsigned)m->action, (unsigned long)m->ack_token,
+			natsStatus_GetText(s));
+	}
+
+	natsMsg_Destroy(nmsg);
+	if (ack_count)
+		(*ack_count)++;
+}
+
+static int drain_ack_ipc(void)
+{
+	int acks = 0;
+	int n;
+	n = nats_ack_ipc_drain(drain_ack_ipc_cb, &acks);
+	(void)n;   /* currently logged only if ack_count differs, but
+	            * they should match -- kept for future MI metrics */
+	return acks;
+}
+
+/* Read the ack eventfd counter to rearm the reactor-ish select().
+ * The eventfd is edge-signaled on empty->non-empty; one read clears
+ * the counter irrespective of how many enqueues coalesced. */
+static void drain_ack_eventfd(int fd)
+{
+	uint64_t sink;
+	ssize_t r;
+	if (fd < 0)
+		return;
+	do {
+		r = read(fd, &sink, sizeof(sink));
+	} while (r < 0 && errno == EINTR);
 }
 
 /* ── main loop ───────────────────────────────────────────────── */
 
 void nats_consumer_proc_main(int rank)
 {
+	int ack_fd;
+
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
 
@@ -469,7 +713,9 @@ void nats_consumer_proc_main(int rank)
 		return;
 	}
 
-	LM_INFO("nats_consumer_proc: pool ready, entering main loop\n");
+	ack_fd = nats_ack_ipc_fd();
+	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d, entering main loop\n",
+		ack_fd);
 
 	for (;;) {
 		proc_sub_state_t *ss;
@@ -490,8 +736,35 @@ void nats_consumer_proc_main(int rank)
 				any_work = 1;
 		}
 
-		/* 3. Service pending ack requests (stub in Phase 3). */
-		drain_ack_ipc();
+		/* 3. Service pending ack requests.  Drain the eventfd
+		 *    counter first so the next edge wakes us again; then
+		 *    drain the IPC queue.  The order matters: reading the
+		 *    counter BEFORE draining the queue is a rendez-vous
+		 *    against the producer-side race where an enqueue
+		 *    happens right between the two steps -- we simply see
+		 *    it on the next iteration. */
+		if (ack_fd >= 0) {
+			struct timeval tv;
+			fd_set rfds;
+			int sr;
+
+			/* Non-blocking poll of the ack fd.  We already polled
+			 * nats for up to fetch_timeout above, so here we only
+			 * check whether acks arrived during that window. */
+			FD_ZERO(&rfds);
+			FD_SET(ack_fd, &rfds);
+			tv.tv_sec  = 0;
+			tv.tv_usec = 0;
+			sr = select(ack_fd + 1, &rfds, NULL, NULL, &tv);
+			if (sr > 0 && FD_ISSET(ack_fd, &rfds)) {
+				drain_ack_eventfd(ack_fd);
+			}
+		}
+		{
+			int acks = drain_ack_ipc();
+			if (acks > 0)
+				any_work = 1;
+		}
 
 		if (!any_work)
 			usleep(PHASE3_IDLE_SLEEP_US);

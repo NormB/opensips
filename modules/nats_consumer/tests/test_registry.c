@@ -213,6 +213,38 @@ static void test_foreach(void)
 	nats_registry_destroy();
 }
 
+/* Phase 4: every bind assigns a fresh monotonic index so the ack
+ * token packing is stable for the handle's lifetime. */
+static void test_bind_index_assignment(void)
+{
+	nats_handle_t *a, *b, *c;
+	int rc;
+
+	CHECK(nats_registry_init(16) == 0);
+
+	a = mk_handle("xi1", "S", "d");
+	b = mk_handle("xi2", "S", "d");
+	c = mk_handle("xi3", "S", "d");
+
+	rc = nats_registry_bind(a); CHECK(rc == 0);
+	rc = nats_registry_bind(b); CHECK(rc == 0);
+	rc = nats_registry_bind(c); CHECK(rc == 0);
+
+	/* indices must be distinct and strictly monotonic by bind order. */
+	CHECK(a->index != b->index);
+	CHECK(b->index != c->index);
+	CHECK(a->index != c->index);
+	CHECK(b->index > a->index);
+	CHECK(c->index > b->index);
+
+	/* bounded below MAX_HANDLES cap. */
+	CHECK(a->index < NATS_REGISTRY_MAX_HANDLES);
+	CHECK(b->index < NATS_REGISTRY_MAX_HANDLES);
+	CHECK(c->index < NATS_REGISTRY_MAX_HANDLES);
+
+	nats_registry_destroy();
+}
+
 int main(void)
 {
 	test_init_destroy_empty();
@@ -222,6 +254,7 @@ int main(void)
 	test_unbind_missing();
 	test_unbind_existing();
 	test_foreach();
+	test_bind_index_assignment();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

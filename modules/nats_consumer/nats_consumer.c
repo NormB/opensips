@@ -21,9 +21,14 @@
 /*
  * nats_consumer.c -- module lifecycle + registrations.
  *
- * Phase 0 skeleton: loads, logs a version line at mod_init, uses the
- * lib/nats rank helper to admit the right process ranks.  Real script
- * functions, MI commands, and the consumer process arrive in later phases.
+ * Phase 4 exports:
+ *   - sync  cmd:   nats_fetch(id, timeout_ms),
+ *                  nats_ack(), nats_nak(), nats_nak_delay(delay_ms),
+ *                  nats_term(), nats_in_progress()
+ *   - async acmd:  nats_fetch(id, timeout_ms)  (wrapped via async())
+ *   - pvars:       $nats_subject, $nats_data, $nats_reply_to,
+ *                  $nats_seq, $nats_consumer_seq, $nats_delivered,
+ *                  $nats_pending, $nats_token
  */
 
 #include "../../sr_module.h"
@@ -34,17 +39,72 @@
 #include "nats_mi.h"
 #include "nats_ack_ipc.h"
 #include "nats_consumer_proc.h"
+#include "nats_fetch.h"
+#include "nats_ack.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
 static void mod_destroy(void);
 
+/* ── script-callable commands ────────────────────────────────── */
+
 static const cmd_export_t cmds[] = {
+	{ "nats_fetch", (cmd_function)w_nats_fetch, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_INT|CMD_PARAM_OPT, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_ack", (cmd_function)w_nats_ack, {
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_nak", (cmd_function)w_nats_nak, {
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_nak_delay", (cmd_function)w_nats_nak_delay, {
+		{CMD_PARAM_INT, 0, 0},
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_term", (cmd_function)w_nats_term, {
+		{0, 0, 0}},
+		ALL_ROUTES },
+	{ "nats_in_progress", (cmd_function)w_nats_in_progress, {
+		{0, 0, 0}},
+		ALL_ROUTES },
 	{ 0, 0, {{0, 0, 0}}, 0 }
+};
+
+static const acmd_export_t acmds[] = {
+	{ "nats_fetch", (acmd_function)w_nats_fetch_async, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_INT|CMD_PARAM_OPT, 0, 0},
+		{0, 0, 0}} },
+	{ 0, 0, {{0, 0, 0}} }
 };
 
 static const param_export_t params[] = {
 	{ 0, 0, 0 }
+};
+
+/* ── pseudo-variables ────────────────────────────────────────── */
+
+static const pv_export_t mod_pvars[] = {
+	{ str_const_init("nats_subject"),      1000, pv_get_nats_subject,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_data"),         1000, pv_get_nats_data,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_reply_to"),     1000, pv_get_nats_reply_to,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_seq"),          1000, pv_get_nats_seq,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_consumer_seq"), 1000, pv_get_nats_consumer_seq,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_delivered"),    1000, pv_get_nats_delivered,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_pending"),      1000, pv_get_nats_pending,
+		0, 0, 0, 0, 0 },
+	{ str_const_init("nats_token"),        1000, pv_get_nats_token,
+		0, 0, 0, 0, 0 },
+	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 /* Phase 3: dedicated JetStream pull consumer process.
@@ -62,11 +122,11 @@ struct module_exports exports = {
 	0,                          /* load function */
 	NULL,                       /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
-	0,                          /* exported async functions */
+	acmds,                      /* exported async functions */
 	params,                     /* exported parameters */
 	0,                          /* exported statistics */
 	nats_consumer_mi_cmds,      /* exported MI functions */
-	0,                          /* exported pseudo-variables */
+	mod_pvars,                  /* exported pseudo-variables */
 	0,                          /* exported transformations */
 	procs,                      /* extra processes -- NATS consumer */
 	0,                          /* module pre-initialization function */
@@ -93,7 +153,8 @@ static int mod_init(void)
 		nats_registry_destroy();
 		return -1;
 	}
-	LM_DBG("nats_consumer: ack IPC queue ready\n");
+	LM_DBG("nats_consumer: ack IPC queue ready (fd=%d)\n",
+		nats_ack_ipc_fd());
 	return 0;
 }
 

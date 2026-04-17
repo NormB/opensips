@@ -21,22 +21,25 @@
 /*
  * nats_ack_ipc.h -- worker -> consumer-process ack queue.
  *
- * This is a stub in Phase 3.  Only the allocation/teardown scaffold is
- * wired in the module lifecycle so Phase 4 can turn it into the real
- * MPSC queue (many SIP worker producers, the single consumer process
- * consumer) without restructuring mod_init / mod_destroy.
+ * Phase 4 implementation: a bounded SHM ring acting as a
+ * multi-producer / single-consumer queue.  Producers are any SIP
+ * worker that called nats_ack() / nats_nak() / nats_term() from a
+ * script; the single consumer is the dedicated nats_consumer process
+ * which turns queued entries into natsMsg_Ack / Nak / Term /
+ * InProgress calls on the corresponding natsMsg refs it stashed when
+ * it originally pushed the message into the per-handle ring.
  *
- * Phase 4 will:
- *   - record a per-message `ack_token` when the consumer process
- *     publishes to a ring;
- *   - expose a `nats_ack(token, action)` script function that enqueues
- *     an ack request into this queue;
- *   - have the consumer process drain the queue on every iteration and
- *     translate tokens back to natsMsg refs for natsMsg_Ack / Nak /
- *     Term / InProgress.
+ * The queue has its own eventfd so the consumer process can block on
+ * "something to ack OR something to fetch" with a single select() /
+ * poll() without spinning.  Producers signal the eventfd on the
+ * empty -> non-empty edge; the consumer drains everything visible on
+ * wake.
  *
- * Phase 5+ will extend the action vocabulary to include AckAll,
- * Nak with redelivery hints, and priority-tier acks.
+ * Concurrency: a single SHM spinlock guards the head/tail advance
+ * plus the slot write.  This is fine: acks are rare compared to the
+ * data-plane and the critical section is a handful of stores.
+ * Phase 5 can replace this with a lock-free variant if profiling shows
+ * it matters.
  */
 
 #ifndef NATS_ACK_IPC_H
@@ -44,48 +47,79 @@
 
 #include <stdint.h>
 
-/* Tuning -- Phase 3 placeholder.  The real queue depth is chosen in
- * Phase 4 after load-testing, and will probably be per-handle rather
- * than module-global. */
+/* Tuning -- bounded ring sized for bursts.  Oversubscription is
+ * handled by returning -1 from enqueue; the caller decides whether
+ * to log+drop or retry.  Phase 4 choice: log+drop so a mis-scripted
+ * worker cannot wedge the module. */
 #define NATS_ACK_IPC_QUEUE_DEPTH 4096
 
-/* An in-flight ack request.  Phase 3: fields reserved, not used.
- * The queue holds slots by value so workers never malloc on the hot
- * path. */
+/* Ack action vocabulary.  Keep this aligned with the nats.c JetStream
+ * client enumerations -- the consumer process maps these into calls
+ * on natsMsg_Ack / natsMsg_Nak / natsMsg_NakWithDelay /
+ * natsMsg_InProgress / natsMsg_Term. */
 typedef enum {
 	NATS_ACK_ACTION_NOOP = 0,       /* ignored */
 	NATS_ACK_ACTION_ACK,            /* natsMsg_Ack */
 	NATS_ACK_ACTION_NAK,            /* natsMsg_Nak */
+	NATS_ACK_ACTION_NAK_DELAY,      /* natsMsg_NakWithDelay */
 	NATS_ACK_ACTION_TERM,           /* natsMsg_Term */
 	NATS_ACK_ACTION_IN_PROGRESS,    /* natsMsg_InProgress */
 } nats_ack_action_e;
 
+/* Public message format used by both producer (worker) and consumer
+ * (consumer process).  Fits in one cache line so the whole slot write
+ * is a single store-after-lock sequence. */
+typedef struct nats_ack_ipc_msg {
+	uint64_t ack_token;        /* handle_idx:16 | slot_idx:32 | gen:16 */
+	uint32_t action;           /* nats_ack_action_e -- 32 bits for ABI */
+	uint32_t delay_ms;         /* NAK_DELAY only; ignored otherwise */
+} nats_ack_ipc_msg_t;
+
+/* Back-compat alias kept for any callers that referenced the Phase 3
+ * slot-level struct.  Prefer nats_ack_ipc_msg_t. */
 typedef struct nats_ack_ipc_slot {
-	uint64_t ack_token;        /* issued by consumer process at push time */
-	uint8_t  action;           /* nats_ack_action_e */
+	uint64_t ack_token;
+	uint8_t  action;
 	uint8_t  _pad[7];
 } nats_ack_ipc_slot_t;
 
-/* Allocate the SHM-backed MPSC queue and its indices.
- * Called from mod_init (pre-fork).
- * Returns 0 on success, -1 on SHM exhaustion. */
+/* Allocate the SHM-backed queue, the eventfd, and the protecting
+ * spinlock.  Called from mod_init (pre-fork) so the eventfd is
+ * inherited by every child process.
+ * Returns 0 on success, -1 on SHM exhaustion / eventfd failure. */
 int nats_ack_ipc_init(void);
 
 /* Tear down the queue.  Called from mod_destroy before registry
- * teardown (so that anything still holding references is flushed
- * first).  Safe to call even if init failed; no-op on NULL. */
+ * teardown.  Closes the eventfd and frees the SHM backing.  Safe to
+ * call even if init failed; no-op on already-destroyed. */
 void nats_ack_ipc_destroy(void);
 
-/* Drain whatever is currently queued.
- * Called by the consumer process on every iteration.  In Phase 3 this
- * is a no-op because no producer writes to the queue; Phase 4 will
- * implement the actual dequeue + natsMsg_Ack loop. */
-void nats_ack_ipc_drain(void);
+/* Worker-side enqueue.  Returns 0 on success, -1 on full queue.
+ * Signals the eventfd on the empty -> non-empty edge. */
+int nats_ack_ipc_enqueue(const nats_ack_ipc_msg_t *msg);
 
-/* Advisory snapshots of queue depth and lifetime counters.  Safe from
- * any process -- atomic reads.  Always zero in Phase 3. */
+/* Consumer-process side: drain everything visible right now,
+ * invoking `cb` for each dequeued message.  `user` is passed through
+ * to the callback.  Returns the number of messages drained.
+ *
+ * The callback is responsible for converting the token into a
+ * natsMsg* and calling the appropriate natsMsg_Ack / Nak / etc.
+ * The drainer does not read the eventfd -- callers that blocked on
+ * it must drain the eventfd counter separately. */
+int nats_ack_ipc_drain(
+		void (*cb)(const nats_ack_ipc_msg_t *msg, void *user),
+		void *user);
+
+/* Return the eventfd for the consumer process to include in its
+ * select() / reactor loop.  Ownership stays with the module; callers
+ * must not close(). */
+int nats_ack_ipc_fd(void);
+
+/* Advisory snapshots of queue state.  Atomic, non-blocking, OK from
+ * any process.  Zero when the queue is not initialized. */
 uint64_t nats_ack_ipc_enqueued_total(void);
 uint64_t nats_ack_ipc_drained_total(void);
 uint32_t nats_ack_ipc_depth(void);
+uint64_t nats_ack_ipc_dropped_total(void);
 
 #endif /* NATS_ACK_IPC_H */
