@@ -241,6 +241,53 @@ static int serialize_cb(nats_handle_t *h, void *user)
 		cJSON_AddNumberToObject(obj, "ring_capacity",
 				(double)h->ring_capacity);
 
+	/* forward-compat passthrough: copy any keys the parser stashed into
+	 * extra_json back onto the object so round-trips do not strip them.
+	 * extra_json is already a JSON object literal produced by the parser
+	 * (e.g. {"foo":"bar","baz":"qux"}), so parse it and shallow-merge
+	 * each child.  A malformed extra_json is logged and skipped -- we do
+	 * not want a single bad entry to fail the whole snapshot. */
+	if (h->extra_json.len > 0 && h->extra_json.s) {
+		char *tmp = (char *)malloc(h->extra_json.len + 1);
+		if (tmp) {
+			cJSON *ex;
+			memcpy(tmp, h->extra_json.s, h->extra_json.len);
+			tmp[h->extra_json.len] = '\0';
+			ex = cJSON_Parse(tmp);
+			free(tmp);
+			if (ex && (ex->type & cJSON_Object)) {
+				cJSON *c;
+				for (c = ex->child; c; c = c->next) {
+					cJSON *dup = NULL;
+					if (!c->string) continue;
+					/* do not clobber a key we already emitted */
+					if (cJSON_GetObjectItem(obj, c->string))
+						continue;
+					/* The parser stores all extras as JSON strings, so a
+					 * shallow duplicate is enough -- no arrays/objects or
+					 * nested structure to worry about. */
+					if (c->type & cJSON_String) {
+						dup = cJSON_CreateString(
+								c->valuestring ? c->valuestring : "");
+					} else if (c->type & cJSON_Number) {
+						dup = cJSON_CreateNumber(c->valuedouble);
+					} else if (c->type & cJSON_True) {
+						dup = cJSON_CreateBool(1);
+					} else if (c->type & cJSON_False) {
+						dup = cJSON_CreateBool(0);
+					}
+					if (dup)
+						cJSON_AddItemToObject(obj, c->string, dup);
+				}
+			} else {
+				LM_WARN("nats_persist: extra_json for id=%.*s not a "
+						"JSON object; skipping passthrough\n",
+						h->id.len, h->id.s);
+			}
+			if (ex) cJSON_Delete(ex);
+		}
+	}
+
 	cJSON_AddItemToArray(ctx->arr, obj);
 	return 0;
 }
