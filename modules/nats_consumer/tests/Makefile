@@ -1,18 +1,19 @@
-# Unit tests for nats_consumer Phase 1.
+# Unit tests for nats_consumer.
 # Standalone; uses pthread shim for SHM + rw_locks.
 
 CC      ?= cc
-CFLAGS  ?= -Wall -Wextra -O0 -g -DTEST_SHIM -I. -I../../..
+CFLAGS  ?= -Wall -Wextra -O2 -g -DTEST_SHIM -I. -I../../..
 LDFLAGS ?= -lpthread
 
 SHIM    := test_shim.c
 
 REG_SRCS    := test_registry.c $(SHIM) ../nats_handle_registry.c
 PARSER_SRCS := test_parser.c   $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
+RING_SRCS   := test_ring.c     $(SHIM) ../nats_ring.c
 
 .PHONY: all clean check
 
-all: test_registry test_parser
+all: test_registry test_parser test_ring
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -20,9 +21,13 @@ test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 test_parser: $(PARSER_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle_parse.h
 	$(CC) $(CFLAGS) -o $@ $(PARSER_SRCS) $(LDFLAGS)
 
+test_ring: $(RING_SRCS) test_shim.h ../nats_ring.h
+	$(CC) $(CFLAGS) -o $@ $(RING_SRCS) $(LDFLAGS)
+
 check: all
 	./test_registry
 	./test_parser
+	./test_ring
 
 clean:
-	rm -f test_registry test_parser
+	rm -f test_registry test_parser test_ring
