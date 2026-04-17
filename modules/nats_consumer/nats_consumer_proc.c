@@ -325,15 +325,163 @@ static proc_sub_state_t *find_sub_by_id(const str *id)
  * intentionally (see str_to_cstr comment) -- Phase 3 has no unbind-
  * aware cleanup.
  */
+/* Parse a comma-separated list of durations into an allocated
+ * `int64_t` array of nanoseconds.  Returns 0 on success and fills
+ * `*out_arr` and `*out_len`; returns -1 on parse error.  Called only
+ * when `csv` is non-empty.  The returned array is malloc'd (NOT SHM);
+ * the caller owns it and should treat it as consumer-process-local
+ * (leaked until Phase 7 adds the unbind teardown path).
+ *
+ * Grammar matches nats_handle_parse's duration syntax:
+ *   <int>(ms|s|m|h|d), no suffix = ms.
+ */
+static int parse_backoff_csv(const str *csv, int64_t **out_arr, int *out_len)
+{
+	int64_t *arr = NULL;
+	int      n = 0, cap = 0;
+	const char *p = csv->s;
+	const char *end = csv->s + csv->len;
+
+	*out_arr = NULL;
+	*out_len = 0;
+	if (csv->len <= 0) return 0;
+
+	while (p < end) {
+		const char *tok_end;
+		int tok_len;
+		long long v = 0;
+		int i = 0, digits = 0;
+		long long mult;
+
+		/* skip leading ws + commas */
+		while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
+			p++;
+		if (p >= end) break;
+
+		tok_end = memchr(p, ',', end - p);
+		if (!tok_end) tok_end = end;
+		tok_len = (int)(tok_end - p);
+		/* trim trailing ws */
+		while (tok_len > 0 &&
+		       (p[tok_len-1] == ' ' || p[tok_len-1] == '\t'))
+			tok_len--;
+		if (tok_len == 0) { p = tok_end; continue; }
+
+		while (i < tok_len && p[i] >= '0' && p[i] <= '9') {
+			v = v * 10 + (p[i] - '0');
+			digits++;
+			i++;
+		}
+		if (!digits) { free(arr); return -1; }
+
+		if (i == tok_len)                                 mult = 1LL;
+		else if (i + 2 == tok_len && p[i]=='m' && p[i+1]=='s') mult = 1LL;
+		else if (i + 1 == tok_len && p[i]=='s') mult = 1000LL;
+		else if (i + 1 == tok_len && p[i]=='m') mult = 60LL * 1000LL;
+		else if (i + 1 == tok_len && p[i]=='h') mult = 60LL*60LL*1000LL;
+		else if (i + 1 == tok_len && p[i]=='d') mult = 24LL*60LL*60LL*1000LL;
+		else { free(arr); return -1; }
+
+		if (n == cap) {
+			int newcap = cap ? cap * 2 : 8;
+			int64_t *tmp = (int64_t *)realloc(arr,
+				sizeof(int64_t) * (size_t)newcap);
+			if (!tmp) { free(arr); return -1; }
+			arr = tmp;
+			cap = newcap;
+		}
+		arr[n++] = v * mult * 1000000LL;   /* ms -> ns */
+
+		p = tok_end;
+	}
+
+	*out_arr = arr;
+	*out_len = n;
+	return 0;
+}
+
+/* Parse a comma-separated list of filter subjects into an allocated
+ * `const char **` array.  Returns 0 and fills `*out_arr` + `*out_len`;
+ * returns -1 on OOM.  Each element and the array are malloc'd; caller
+ * must free on teardown (Phase 7 wires the cleanup path; Phase 5 leaks
+ * the allocation for the lifetime of the subscription). */
+static int parse_filters_csv(const str *csv,
+                             const char ***out_arr, int *out_len)
+{
+	const char **arr = NULL;
+	int n = 0, cap = 0;
+	const char *p = csv->s;
+	const char *end = csv->s + csv->len;
+
+	*out_arr = NULL;
+	*out_len = 0;
+	if (csv->len <= 0) return 0;
+
+	while (p < end) {
+		const char *tok_end;
+		int tok_len;
+		char *dup;
+
+		while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
+			p++;
+		if (p >= end) break;
+
+		tok_end = memchr(p, ',', end - p);
+		if (!tok_end) tok_end = end;
+		tok_len = (int)(tok_end - p);
+		while (tok_len > 0 &&
+		       (p[tok_len-1] == ' ' || p[tok_len-1] == '\t'))
+			tok_len--;
+		if (tok_len == 0) { p = tok_end; continue; }
+
+		dup = (char *)malloc((size_t)tok_len + 1);
+		if (!dup) goto oom;
+		memcpy(dup, p, tok_len);
+		dup[tok_len] = '\0';
+
+		if (n == cap) {
+			int newcap = cap ? cap * 2 : 4;
+			const char **tmp = (const char **)realloc(arr,
+				sizeof(const char *) * (size_t)newcap);
+			if (!tmp) { free(dup); goto oom; }
+			arr = tmp;
+			cap = newcap;
+		}
+		arr[n++] = dup;
+		p = tok_end;
+	}
+
+	*out_arr = arr;
+	*out_len = n;
+	return 0;
+
+oom:
+	{
+		int i;
+		for (i = 0; i < n; i++) free((void *)arr[i]);
+	}
+	free(arr);
+	return -1;
+}
+
 static int ensure_subscription_for_handle(nats_handle_t *h)
 {
 	proc_sub_state_t *ss;
 	jsConsumerConfig  cc;
 	jsSubOptions      so;
+	jsOptions         js_opts;
+	jsOptions        *js_opts_p = NULL;
 	natsStatus        s;
-	char             *durable_c = NULL;
-	char             *filter_c  = NULL;
-	char             *stream_c  = NULL;
+	char             *durable_c     = NULL;
+	char             *filter_c      = NULL;
+	char             *stream_c      = NULL;
+	char             *sample_freq_c = NULL;
+	char             *domain_c      = NULL;
+	char             *api_prefix_c  = NULL;
+	int64_t          *backoff_arr   = NULL;
+	int               backoff_len   = 0;
+	const char      **filters_arr   = NULL;
+	int               filters_len   = 0;
 
 	if (!h || !h->ring)
 		return 0;   /* handle still being constructed or TEST_SHIM */
@@ -365,25 +513,56 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		return -1;
 	}
 
-	/* Build jsConsumerConfig.  Phase 3 covers the critical fields;
-	 * Phase 5 fills in the rest (backoff, sample_freq, rate_limit,
-	 * filters_csv multi-filter, inactive_threshold, js_domain,
-	 * api_prefix, extra_json). */
+	/* Build jsConsumerConfig.  Phase 5 fills in the full matrix. */
 	jsConsumerConfig_Init(&cc);
 
-	durable_c = str_to_cstr(&h->durable);
-	filter_c  = str_to_cstr(&h->filter);
-	stream_c  = str_to_cstr(&h->stream);
+	durable_c    = str_to_cstr(&h->durable);
+	filter_c     = str_to_cstr(&h->filter);
+	stream_c     = str_to_cstr(&h->stream);
+	domain_c     = str_to_cstr(&h->js_domain);
+	api_prefix_c = str_to_cstr(&h->api_prefix);
+
+	/* Render sample_freq as a string -- nats.c expects a C string here,
+	 * e.g. "25" for 25% sampling.  Only set when the script supplied
+	 * a non-zero value; zero means "disabled / don't sample". */
+	if (h->sample_freq > 0) {
+		sample_freq_c = (char *)malloc(8);
+		if (sample_freq_c)
+			snprintf(sample_freq_c, 8, "%d", h->sample_freq);
+	}
 
 	if (h->type == NATS_CONSUMER_DURABLE && durable_c)
 		cc.Durable = durable_c;
 	if (filter_c)
 		cc.FilterSubject = filter_c;
 
+	/* Multi-filter: nats.c 3.13 exposes FilterSubjects (array) +
+	 * FilterSubjectsLen.  Only honored when single-subject FilterSubject
+	 * is unset -- the broker rejects the combination.  We parse the CSV
+	 * at subscription time rather than keeping it pre-split in SHM so
+	 * the parser output stays simple. */
+	if (h->filters_csv.len > 0) {
+		if (parse_filters_csv(&h->filters_csv,
+				&filters_arr, &filters_len) < 0) {
+			LM_ERR("nats_consumer_proc: filters= oom/parse failure "
+				"for id='%.*s'\n", h->id.len, h->id.s);
+			goto fail_free_sub;
+		}
+		if (filter_c && filters_len > 0) {
+			LM_WARN("nats_consumer_proc: both filter= and filters= set "
+				"for id='%.*s'; ignoring multi-filter list\n",
+				h->id.len, h->id.s);
+		} else if (filters_len > 0) {
+			cc.FilterSubjects    = filters_arr;
+			cc.FilterSubjectsLen = filters_len;
+		}
+	}
+
 	cc.DeliverPolicy  = map_deliver_policy(h->deliver_policy);
 	cc.AckPolicy      = map_ack_policy(h->ack_policy);
 	cc.ReplayPolicy   = map_replay_policy(h->replay_policy);
 
+	/* ack_wait / max_deliver / max_ack_pending (ns vs unit-less in nats.c) */
 	if (h->ack_wait_ms > 0)
 		cc.AckWait = (int64_t)h->ack_wait_ms * 1000000LL;
 	if (h->max_deliver > 0)
@@ -391,10 +570,43 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	if (h->max_ack_pending > 0)
 		cc.MaxAckPending = (int64_t)h->max_ack_pending;
 
+	/* Backoff: nats.c takes int64_t[] in nanoseconds.  Drop in on top
+	 * of MaxDeliver; the broker honours whichever CSV length we ship. */
+	if (h->backoff_csv.len > 0) {
+		if (parse_backoff_csv(&h->backoff_csv,
+				&backoff_arr, &backoff_len) < 0) {
+			LM_ERR("nats_consumer_proc: backoff= parse failed for "
+				"id='%.*s'\n", h->id.len, h->id.s);
+			goto fail_free_sub;
+		}
+		if (backoff_len > 0) {
+			cc.BackOff    = backoff_arr;
+			cc.BackOffLen = backoff_len;
+		}
+	}
+
 	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ)
 		cc.OptStartSeq = h->start_seq;
 	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME)
 		cc.OptStartTime = h->start_time_unix_ns;
+
+	/* Shaping + ephemeral options.  nats.c uses ns for InactiveThreshold. */
+	if (h->inactive_threshold_ms > 0)
+		cc.InactiveThreshold =
+			(int64_t)h->inactive_threshold_ms * 1000000LL;
+	if (h->rate_limit_bps > 0)
+		cc.RateLimit = (uint64_t)h->rate_limit_bps;
+	if (sample_freq_c)
+		cc.SampleFrequency = sample_freq_c;
+	if (h->headers_only)
+		cc.HeadersOnly = true;
+
+	if (h->replay_policy == NATS_REPLAY_ORIGINAL) {
+		LM_INFO("nats_consumer_proc: id='%.*s' replay_policy=original; "
+			"historical replay may introduce multi-second idle gaps "
+			"between messages and is not a correctness issue\n",
+			h->id.len, h->id.s);
+	}
 
 	jsSubOptions_Init(&so);
 	so.Stream    = stream_c;
@@ -403,21 +615,28 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * with the real worker-driven path. */
 	so.ManualAck = true;
 
+	/* Multi-env: when js_domain / api_prefix are set, build a per-call
+	 * jsOptions and hand it to js_PullSubscribe.  nats.c uses
+	 * jsOptions.Domain to route API calls to a mirror / leaf domain and
+	 * jsOptions.Prefix to override the default "$JS.API" prefix when a
+	 * site has a custom gateway. */
+	if (domain_c || api_prefix_c) {
+		jsOptions_Init(&js_opts);
+		if (domain_c)     js_opts.Domain = domain_c;
+		if (api_prefix_c) js_opts.Prefix = api_prefix_c;
+		js_opts_p = &js_opts;
+	}
+
 	s = js_PullSubscribe(&ss->sub, g_js,
-		filter_c /* subject -- may be NULL when Config has FilterSubject */,
+		filter_c /* subject -- may be NULL when Config has FilterSubject(s) */,
 		durable_c /* durable -- may be NULL for ephemeral */,
-		NULL /* jsOptions */,
+		js_opts_p /* jsOptions for domain / prefix */,
 		&so,
 		NULL /* jsErrCode */);
 	if (s != NATS_OK) {
 		LM_ERR("nats_consumer_proc: js_PullSubscribe('%.*s') failed: %s\n",
 			h->id.len, h->id.s, natsStatus_GetText(s));
-		free(ss->id.s);
-		free(ss);
-		/* durable_c / filter_c / stream_c are leaked on failure --
-		 * acceptable for the short-lived failure path; Phase 7 will
-		 * tidy this. */
-		return -1;
+		goto fail_free_sub;
 	}
 
 	ss->last_fetch = 0;
@@ -431,13 +650,38 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	h->subscription = (void *)ss->sub;
 
 	LM_INFO("nats_consumer_proc: subscribed id='%.*s' index=%u "
-		"stream='%.*s' filter='%.*s' durable='%.*s'\n",
+		"stream='%.*s' filter='%.*s' durable='%.*s' filters_n=%d "
+		"backoff_n=%d domain='%s' prefix='%s'\n",
 		h->id.len, h->id.s, (unsigned)h->index,
 		h->stream.len, h->stream.s,
 		h->filter.len, h->filter.s,
-		h->durable.len, h->durable.s);
+		h->durable.len, h->durable.s,
+		filters_len, backoff_len,
+		domain_c ? domain_c : "",
+		api_prefix_c ? api_prefix_c : "");
 
+	/* durable_c / filter_c / stream_c / domain_c / api_prefix_c /
+	 * sample_freq_c / backoff_arr / filters_arr[i]* are all leaked on
+	 * purpose for the sub's lifetime -- jsConsumerConfig stores
+	 * borrowed pointers into them and nats.c holds them until the
+	 * subscription is destroyed.  Phase 7 adds the teardown path. */
 	return 0;
+
+fail_free_sub:
+	{
+		int i;
+		for (i = 0; i < filters_len; i++) free((void *)filters_arr[i]);
+	}
+	free(filters_arr);
+	free(backoff_arr);
+	free(sample_freq_c);
+	free(domain_c);
+	free(api_prefix_c);
+	/* durable_c / filter_c / stream_c are leaked on the failure path to
+	 * keep the error handling simple; acceptable for a rare path. */
+	free(ss->id.s);
+	free(ss);
+	return -1;
 }
 
 static int reconcile_subs_cb(nats_handle_t *h, void *user)
