@@ -23,8 +23,8 @@
  * sync caller RPC.  This file grows incrementally across the Phase 6
  * commit chain:
  *     1. $nats_hdr pvar + nats_hdr_set script function.
- *     2. nats_reply (plain core publish onto the reply-to) -- this commit.
- *     3. nats_request (sync core RPC).
+ *     2. nats_reply (plain core publish onto the reply-to).
+ *     3. nats_request (SYNC-ONLY core RPC) -- this commit.
  *
  * Headers (read)
  *   The ring slot carries a compact serialized header stream (see
@@ -49,6 +49,25 @@
  *   targets a plain NATS subscriber).  Staged headers are attached
  *   to the outbound natsMsg; the staging table is cleared after the
  *   publish regardless of outcome so the next message starts clean.
+ *
+ * Request (SYNC-ONLY)
+ *   Phase 6 ships sync-only nats_request: natsConnection_RequestMsg
+ *   blocks the calling worker for up to timeout_ms.  This is the
+ *   correct choice for timer_route / startup_route callers where a
+ *   worker stall is acceptable, but WRONG for SIP request_route on
+ *   UDP/TCP workers -- calling it there stalls SIP processing for
+ *   that worker until the RPC returns.  The docstring in nats_rpc.h
+ *   and the script registration comment in nats_consumer.c both
+ *   state this; script authors are responsible for honouring it.
+ *   A future phase will add a non-blocking variant that routes the
+ *   request through the dedicated consumer process.
+ *
+ *   On success, the reply natsMsg is unpacked into the per-worker
+ *   current-message state so the script can read $nats_data /
+ *   $nats_subject / $nats_hdr(...) in the continuation.  ack_token
+ *   is cleared -- a core NATS reply is not JetStream-ackable -- and
+ *   handle_idx is set to 0xFFFF to distinguish a synthetic reply
+ *   state from a real ring-pop slot.
  */
 
 #include <string.h>
@@ -391,5 +410,248 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
 			subj_c, natsStatus_GetText(s));
 		return -4;
 	}
+	return 1;
+}
+
+/* ── nats_request (sync-only) ────────────────────────────────── */
+
+/*
+ * Serialize the reply natsMsg's headers into the ring-slot header
+ * stream format so the script's $nats_hdr(...) getter reads them
+ * transparently after the RPC resumes.  Uses the same format as
+ * nats_consumer_proc's serialize_headers(); kept separate here
+ * rather than shared to avoid a public dependency on the consumer
+ * process's internals.
+ */
+static int hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
+                                    int *truncated, int *count_out)
+{
+	const char * *keys = NULL;
+	int nkeys = 0;
+	natsStatus s;
+	int pos;
+	int count = 0;
+	int trunc = 0;
+	int i;
+
+	*truncated = 0;
+	*count_out = 0;
+	if (!m || !out || cap < 2) return 0;
+
+	pos = 2;   /* reserve count prefix */
+
+	s = natsMsgHeader_Keys(m, &keys, &nkeys);
+	if (s != NATS_OK || !keys || nkeys <= 0) {
+		out[0] = 0; out[1] = 0;
+		if (keys) free((void *)keys);
+		return 2;
+	}
+
+	for (i = 0; i < nkeys; i++) {
+		const char * *vals = NULL;
+		int nvals = 0;
+		natsStatus vs;
+		int j;
+		int klen;
+
+		if (!keys[i]) continue;
+		klen = (int)strlen(keys[i]);
+		if (klen <= 0 || klen > 0xFFFF) continue;
+
+		vs = natsMsgHeader_Values(m, keys[i], &vals, &nvals);
+		if (vs != NATS_OK || !vals || nvals <= 0) {
+			if (vals) free((void *)vals);
+			continue;
+		}
+		for (j = 0; j < nvals; j++) {
+			int vlen;
+			int need;
+
+			if (!vals[j]) continue;
+			vlen = (int)strlen(vals[j]);
+			if (vlen < 0 || vlen > 0xFFFF) continue;
+			need = 2 + klen + 2 + vlen;
+			if (pos + need > cap) { trunc = 1; goto done; }
+			out[pos++] = (char)(klen & 0xFF);
+			out[pos++] = (char)((klen >> 8) & 0xFF);
+			memcpy(out + pos, keys[i], klen); pos += klen;
+			out[pos++] = (char)(vlen & 0xFF);
+			out[pos++] = (char)((vlen >> 8) & 0xFF);
+			if (vlen) memcpy(out + pos, vals[j], vlen);
+			pos += vlen;
+			count++;
+			if (count >= 0xFFFF) { trunc = 1; goto done; }
+		}
+done:
+		free((void *)vals);
+		if (trunc) break;
+	}
+
+	free((void *)keys);
+	out[0] = (char)(count & 0xFF);
+	out[1] = (char)((count >> 8) & 0xFF);
+	*truncated = trunc;
+	*count_out = count;
+	return pos;
+}
+
+/*
+ * Populate g_cur from a reply natsMsg so the script can read
+ * $nats_data / $nats_subject / $nats_hdr(...) after the RPC returns.
+ * We reuse the ring-slot layout by copying fields into the current-
+ * message slot directly -- no ring push needed because no worker other
+ * than the caller needs to see this message.
+ *
+ * Limitations of the reply-state handoff:
+ *   - jsMsgMetaData is absent on core NATS replies; broker-metadata
+ *     fields stay zero.
+ *   - ack_token is cleared -- the reply is not a JetStream-ackable
+ *     message.
+ *   - handle_idx is set to 0xFFFF as a synthetic marker.
+ */
+static void cur_set_from_nats_reply(natsMsg *reply)
+{
+	nats_cur_msg_t  *cur = nats_fetch_current();
+	const char      *subject;
+	const char      *data;
+	int              data_len;
+	size_t           slen;
+	int              hdr_len;
+	int              hdr_trunc = 0;
+	int              hdr_count = 0;
+
+	memset(cur, 0, sizeof(*cur));
+	if (!reply) return;
+
+	cur->has_message = 1;
+	cur->handle_idx  = 0xFFFF;   /* synthetic -- not tied to a handle */
+	cur->ack_token   = 0;
+
+	subject  = natsMsg_GetSubject(reply);
+	data     = natsMsg_GetData(reply);
+	data_len = natsMsg_GetDataLength(reply);
+	slen     = subject ? strlen(subject) : 0;
+
+	if (slen > NATS_RING_SUBJECT_MAX) slen = NATS_RING_SUBJECT_MAX;
+	if (slen > 0 && subject)
+		memcpy(cur->slot.subject, subject, slen);
+	cur->slot.subject_len = (uint32_t)slen;
+
+	if (data_len < 0) data_len = 0;
+	if (data_len > NATS_RING_PAYLOAD_MAX) data_len = NATS_RING_PAYLOAD_MAX;
+	if (data_len > 0 && data) memcpy(cur->slot.data, data, data_len);
+	cur->slot.data_len = (uint32_t)data_len;
+
+	cur->slot.has_reply    = 0;
+	cur->slot.reply_to_len = 0;
+
+	hdr_len = hdr_serialize_from_reply(reply,
+		cur->slot.headers, NATS_RING_HEADERS_MAX,
+		&hdr_trunc, &hdr_count);
+	cur->slot.headers_len       = (uint16_t)(hdr_len > 0 ? hdr_len : 0);
+	cur->slot.headers_truncated = (uint8_t)(hdr_trunc ? 1 : 0);
+}
+
+/*
+ * Script-callable synchronous NATS request/reply.
+ *
+ * ### SYNC-ONLY -- BLOCKS THE CALLING WORKER ###
+ *
+ * natsConnection_RequestMsg blocks for up to timeout_ms.  Callers MUST
+ * restrict this function to timer_route / startup_route (or another
+ * context that tolerates blocking a worker for the full timeout).
+ * Calling from a UDP/TCP SIP request_route stalls that worker's entire
+ * SIP pipeline until the RPC returns -- avoid.  A non-blocking async
+ * variant is a Phase 7+ concern (it requires bridging nats.c callbacks
+ * onto an eventfd because nats.c runs them on a library-internal
+ * thread that cannot touch OpenSIPS APIs).
+ *
+ * The function clears the per-worker staged-header table on every
+ * exit path so a timeout does not leak stage bytes into the next
+ * publish.
+ */
+int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
+                   int *timeout_ms)
+{
+	natsConnection *nc;
+	natsMsg        *out   = NULL;
+	natsMsg        *reply = NULL;
+	natsStatus      s;
+	char            subj_buf[NATS_RING_SUBJECT_MAX + 1];
+	const char     *subj_c;
+	int             tmo;
+	const char     *data_s;
+	int             data_len;
+
+	(void)msg;
+
+	if (!subject || subject->len <= 0 || !subject->s) {
+		LM_DBG("nats_request: empty/null subject\n");
+		nats_rpc_staged_clear();
+		return -4;
+	}
+	if (subject->len > NATS_RING_SUBJECT_MAX) {
+		LM_ERR("nats_request: subject too long (%d > %d)\n",
+			subject->len, NATS_RING_SUBJECT_MAX);
+		nats_rpc_staged_clear();
+		return -4;
+	}
+
+	tmo = timeout_ms ? *timeout_ms : 0;
+	if (tmo <= 0) {
+		LM_DBG("nats_request: non-positive timeout %d; using 1000 ms\n", tmo);
+		tmo = 1000;
+	}
+
+	nc = nats_pool_get();
+	if (!nc) {
+		LM_ERR("nats_request: no NATS connection\n");
+		nats_rpc_staged_clear();
+		return -3;
+	}
+
+	subj_c = cstr_buf(subj_buf, sizeof(subj_buf), subject->s, subject->len);
+	if (!subj_c) {
+		nats_rpc_staged_clear();
+		return -4;
+	}
+
+	data_s   = (payload && payload->s) ? payload->s : "";
+	data_len = (payload && payload->len > 0) ? payload->len : 0;
+
+	/* Build an outbound natsMsg so we can carry staged headers onto
+	 * the request.  natsConnection_RequestMsg uses the msg's subject,
+	 * headers and payload.  We construct with reply=NULL; nats.c
+	 * assigns a private inbox internally. */
+	s = natsMsg_Create(&out, subj_c, NULL, data_s, data_len);
+	if (s != NATS_OK || !out) {
+		LM_ERR("nats_request: natsMsg_Create failed: %s\n",
+			natsStatus_GetText(s));
+		nats_rpc_staged_clear();
+		return -4;
+	}
+
+	staged_apply_and_clear(out);
+
+	/* SYNC RPC: blocks this worker until reply arrives or timeout. */
+	s = natsConnection_RequestMsg(&reply, nc, out, (int64_t)tmo);
+	natsMsg_Destroy(out);
+
+	if (s == NATS_TIMEOUT) {
+		LM_DBG("nats_request: timeout waiting for reply on '%s' "
+			"after %d ms\n", subj_c, tmo);
+		return 0;
+	}
+	if (s != NATS_OK || !reply) {
+		LM_ERR("nats_request: request on '%s' failed: %s\n",
+			subj_c, natsStatus_GetText(s));
+		if (reply) natsMsg_Destroy(reply);
+		return -4;
+	}
+
+	/* Install the reply into the per-worker current-message state
+	 * so the script can read $nats_data etc. after this returns. */
+	cur_set_from_nats_reply(reply);
+	natsMsg_Destroy(reply);
 	return 1;
 }
