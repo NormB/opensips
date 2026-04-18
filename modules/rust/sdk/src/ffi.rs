@@ -14,33 +14,60 @@ macro_rules! cstr_lit {
     };
 }
 
+/// Log a panic payload without allocating.
+///
+/// On aarch64 the rustc 1.94 cdylib vtable bug fires when `format!`/`String`
+/// allocation triggers a Debug trait dispatch — exactly the path taken by
+/// `{msg}` interpolation. We therefore handle the three common payload
+/// shapes (`&str`, `String`, other) with `write(STDERR_FILENO)` only,
+/// reusing the SDK's pre-built static prefix.
+fn log_panic(payload: &(dyn std::any::Any + Send)) {
+    const STDERR_FD: std::ffi::c_int = 2;
+    const PREFIX: &[u8] = b"Rust panic caught at FFI boundary: ";
+    const UNKNOWN: &[u8] = b"<non-string payload>";
+    const NEWLINE: &[u8] = b"\n";
+
+    // Use raw write() to avoid the Rust formatter (and its vtable lookups).
+    // SAFETY: STDERR_FD is always valid for the lifetime of the process.
+    let _ = unsafe { libc_write(STDERR_FD, PREFIX) };
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        let _ = unsafe { libc_write(STDERR_FD, s.as_bytes()) };
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        let _ = unsafe { libc_write(STDERR_FD, s.as_bytes()) };
+    } else {
+        let _ = unsafe { libc_write(STDERR_FD, UNKNOWN) };
+    }
+    let _ = unsafe { libc_write(STDERR_FD, NEWLINE) };
+}
+
+unsafe fn libc_write(fd: std::ffi::c_int, bytes: &[u8]) -> isize {
+    extern "C" {
+        fn write(fd: std::ffi::c_int, buf: *const std::ffi::c_void,
+                 count: usize) -> isize;
+    }
+    write(fd, bytes.as_ptr().cast(), bytes.len())
+}
+
 /// Wrap a closure with catch_unwind for use at the FFI boundary.
 ///
 /// If the closure panics, logs the panic (if possible) and returns -1.
 /// This prevents Rust panics from unwinding into C code (undefined behavior).
+/// The panic logger avoids the Rust formatter to sidestep the aarch64
+/// rustc-1.94 cdylib vtable bug.
 pub fn catch_unwind_ffi<F>(f: F) -> c_int
 where
     F: FnOnce() -> c_int + std::panic::UnwindSafe,
 {
     match catch_unwind(f) {
         Ok(ret) => ret,
-        Err(e) => {
-            // Try to extract a message from the panic
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            // Log via our shim if available, otherwise eprintln
-            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {msg}"));
+        Err(payload) => {
+            log_panic(&*payload);
             -1
         }
     }
 }
 
-/// Variant of catch_unwind_ffi that takes a non-UnwindSafe closure.
+/// Variant of `catch_unwind_ffi` that takes a non-UnwindSafe closure.
 /// Use this for closures that capture mutable references.
 pub fn catch_unwind_ffi_mut<F>(f: F) -> c_int
 where
@@ -48,15 +75,8 @@ where
 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(ret) => ret,
-        Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            crate::log::log_err(&format!("Rust panic caught at FFI boundary: {msg}"));
+        Err(payload) => {
+            log_panic(&*payload);
             -1
         }
     }

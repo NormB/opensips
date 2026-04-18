@@ -169,8 +169,8 @@ unsafe extern "C" fn w_http_query(
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let mut sip_msg = opensips_rs::SipMessage::from_raw(msg);
         let url = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust", "http_query: missing or invalid URL");
                 return -1;
             }
@@ -197,15 +197,15 @@ unsafe extern "C" fn w_rust_exec(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let func_name = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) if !s.is_empty() => s,
+            Ok(s) if !s.is_empty() => s,
             _ => {
                 opensips_log!(ERR, "rust", "rust_exec: missing or invalid function name");
                 return -1;
             }
         };
         let param = match <Option<&str> as CommandFunctionParam>::from_raw(p1) {
-            Some(opt) => opt,
-            None => {
+            Ok(opt) => opt,
+            Err(_) => {
                 opensips_log!(ERR, "rust", "rust_exec: invalid UTF-8 in parameter");
                 return -1;
             }
@@ -222,15 +222,15 @@ unsafe extern "C" fn w_async_rust_exec(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let func_name = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) if !s.is_empty() => s,
+            Ok(s) if !s.is_empty() => s,
             _ => {
                 opensips_log!(ERR, "rust", "async rust_exec: missing or invalid function name");
                 return -1;
             }
         };
         let param = match <Option<&str> as CommandFunctionParam>::from_raw(p1) {
-            Some(opt) => opt,
-            None => {
+            Ok(opt) => opt,
+            Err(_) => {
                 opensips_log!(ERR, "rust", "async rust_exec: invalid UTF-8 in parameter");
                 return -1;
             }
@@ -259,7 +259,7 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
 /// at compile time. The remaining 8 entries stay zeroed (null terminator).
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
@@ -267,8 +267,8 @@ const ONE_STR_PARAM: [sys::cmd_param; 9] = {
 /// Bitwise OR: `2 | 16` = CMD_PARAM_STR | CMD_PARAM_OPT.
 const TWO_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2;       // CMD_PARAM_STR
-    arr[1].flags = 2 | 16;  // CMD_PARAM_STR | CMD_PARAM_OPT
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    arr[1].flags = opensips_rs::command::CMD_PARAM_STR | opensips_rs::command::CMD_PARAM_OPT;  // CMD_PARAM_STR | CMD_PARAM_OPT
     arr
 };
 
@@ -286,37 +286,37 @@ static CMDS: SyncArray<sys::cmd_export_, 7> = SyncArray([
         name: cstr_lit!("check_rate"),
         function: Some(w_check_rate),
         params: EMPTY_PARAMS,
-        flags: 1 | 2, // REQUEST_ROUTE | FAILURE_ROUTE
+        flags: opensips_rs::route::REQ_FAIL,
     },
     sys::cmd_export_ {
         name: cstr_lit!("cache_lookup"),
         function: Some(w_cache_lookup),
         params: EMPTY_PARAMS,
-        flags: 1, // REQUEST_ROUTE
+        flags: opensips_rs::route_flags::REQUEST,
     },
     sys::cmd_export_ {
         name: cstr_lit!("cache_store"),
         function: Some(w_cache_store),
         params: EMPTY_PARAMS,
-        flags: 1, // REQUEST_ROUTE
+        flags: opensips_rs::route_flags::REQUEST,
     },
     sys::cmd_export_ {
         name: cstr_lit!("http_query"),
         function: Some(w_http_query),
         params: ONE_STR_PARAM,
-        flags: 1, // REQUEST_ROUTE
+        flags: opensips_rs::route_flags::REQUEST,
     },
     sys::cmd_export_ {
         name: cstr_lit!("counter_inc"),
         function: Some(w_counter_inc),
         params: EMPTY_PARAMS,
-        flags: 1 | 4, // REQUEST_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route_flags::REQUEST | opensips_rs::route_flags::ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("rust_exec"),
         function: Some(w_rust_exec),
         params: TWO_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -344,32 +344,32 @@ static ACMDS: SyncArray<sys::acmd_export_, 2> = SyncArray([
 static PARAMS: SyncArray<sys::param_export_, 7> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("max_rate"),
-        type_: 2, // INT_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: MAX_RATE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("window_seconds"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: WINDOW_SECONDS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("cache_ttl"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: CACHE_TTL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("http_timeout"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: HTTP_TIMEOUT.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("pool_size"),
-        type_: 2,
+        type_: opensips_rs::param_type::INT,
         param_pointer: POOL_SIZE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("script_name"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: SCRIPT_NAME.as_ptr(),
     },
     // Null terminator
@@ -390,7 +390,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),

@@ -16,6 +16,84 @@ pub const CMD_PARAM_FIX_NULL: c_int = 1 << 5;
 pub const CMD_PARAM_NO_EXPAND: c_int = 1 << 6;
 pub const CMD_PARAM_STATIC: c_int = 1 << 7;
 
+/// Why a parameter could not be extracted from its raw FFI pointer.
+///
+/// `as_str()` returns a `&'static str` so callers can log the cause
+/// without triggering the `Display`/`Debug` trait vtable on aarch64
+/// (see rustc 1.94 cdylib vtable bug).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ParamError {
+    /// Required pointer was null.
+    NullPointer,
+    /// OpenSIPS `str` length was <= 0.
+    EmptyOrNegativeLength,
+    /// Bytes were not valid UTF-8.
+    InvalidUtf8,
+}
+
+impl ParamError {
+    /// Stable, non-allocating message for logging.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NullPointer => "null pointer",
+            Self::EmptyOrNegativeLength => "empty or negative length",
+            Self::InvalidUtf8 => "invalid UTF-8",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn param_error_as_str_is_static() {
+        // `as_str` must return a reference with static lifetime so callers
+        // can stash it without allocation (aarch64 safety).
+        let _: &'static str = ParamError::NullPointer.as_str();
+        let _: &'static str = ParamError::EmptyOrNegativeLength.as_str();
+        let _: &'static str = ParamError::InvalidUtf8.as_str();
+    }
+
+    #[test]
+    fn param_error_messages_distinct() {
+        let msgs = [
+            ParamError::NullPointer.as_str(),
+            ParamError::EmptyOrNegativeLength.as_str(),
+            ParamError::InvalidUtf8.as_str(),
+        ];
+        for i in 0..msgs.len() {
+            for j in (i + 1)..msgs.len() {
+                assert_ne!(msgs[i], msgs[j], "duplicate error message");
+            }
+        }
+    }
+
+    #[test]
+    fn param_error_copy_and_eq() {
+        // Copy + PartialEq are required by the trait contract;
+        // callers rely on `error == ParamError::NullPointer` style matches.
+        let a = ParamError::NullPointer;
+        let b = a;  // Copy
+        assert_eq!(a, b);
+        assert_eq!(a, ParamError::NullPointer);
+        assert_ne!(a, ParamError::InvalidUtf8);
+    }
+
+    #[test]
+    fn cmd_param_flags_are_bits() {
+        // Each flag occupies a distinct bit — verifies no overlap.
+        let all = [
+            CMD_PARAM_INT, CMD_PARAM_STR, CMD_PARAM_VAR, CMD_PARAM_REGEX,
+            CMD_PARAM_OPT, CMD_PARAM_FIX_NULL, CMD_PARAM_NO_EXPAND, CMD_PARAM_STATIC,
+        ];
+        for f in &all {
+            assert!(f.count_ones() == 1, "not single-bit: {}", f);
+        }
+    }
+}
+
 /// Trait for types that can appear as command function parameters.
 pub trait CommandFunctionParam {
     /// The CMD_PARAM_* flags for this parameter type.
@@ -23,49 +101,53 @@ pub trait CommandFunctionParam {
 
     /// Extract the parameter from the raw void pointer passed by `OpenSIPS`.
     ///
-    /// Returns `None` if the pointer is null or the data is invalid
-    /// (e.g. invalid UTF-8). Callers must handle the failure explicitly.
+    /// Returns `Err(ParamError)` when the pointer is null, the data is
+    /// malformed (negative or zero length), or contents are not valid for
+    /// this param type. Callers must handle the failure explicitly.
     ///
     /// # Safety
     /// The pointer must point to the correct type when non-null.
-    unsafe fn from_raw(ptr: *mut c_void) -> Option<Self> where Self: Sized;
+    unsafe fn from_raw(ptr: *mut c_void) -> Result<Self, ParamError>
+    where
+        Self: Sized;
 }
 
 impl CommandFunctionParam for &str {
     const FLAGS: c_int = CMD_PARAM_STR;
 
-    unsafe fn from_raw(ptr: *mut c_void) -> Option<Self> {
-        if ptr.is_null() { return None; }
+    unsafe fn from_raw(ptr: *mut c_void) -> Result<Self, ParamError> {
+        if ptr.is_null() { return Err(ParamError::NullPointer); }
         let osips_str = &*(ptr as *const crate::sys::__str);
-        if osips_str.s.is_null() || osips_str.len <= 0 { return None; }
+        if osips_str.s.is_null() || osips_str.len <= 0 {
+            return Err(ParamError::EmptyOrNegativeLength);
+        }
         let slice = std::slice::from_raw_parts(
             osips_str.s as *const u8, osips_str.len as usize);
-        std::str::from_utf8(slice).ok()
+        std::str::from_utf8(slice).map_err(|_| ParamError::InvalidUtf8)
     }
 }
 
 impl CommandFunctionParam for i32 {
     const FLAGS: c_int = CMD_PARAM_INT;
 
-    unsafe fn from_raw(ptr: *mut c_void) -> Option<Self> {
-        if ptr.is_null() { return None; }
-        Some(*(ptr as *const c_int))
+    unsafe fn from_raw(ptr: *mut c_void) -> Result<Self, ParamError> {
+        if ptr.is_null() { return Err(ParamError::NullPointer); }
+        Ok(*(ptr as *const c_int))
     }
 }
 
 impl CommandFunctionParam for Option<&str> {
     const FLAGS: c_int = CMD_PARAM_STR | CMD_PARAM_OPT;
 
-    unsafe fn from_raw(ptr: *mut c_void) -> Option<Self> {
-        if ptr.is_null() { return Some(None); }
+    /// Optional string: a null pointer or empty `str` is `Ok(None)`;
+    /// only invalid UTF-8 is an error.
+    unsafe fn from_raw(ptr: *mut c_void) -> Result<Self, ParamError> {
+        if ptr.is_null() { return Ok(None); }
         let osips_str = &*(ptr as *const crate::sys::__str);
-        if osips_str.s.is_null() || osips_str.len <= 0 { return Some(None); }
+        if osips_str.s.is_null() || osips_str.len <= 0 { return Ok(None); }
         let slice = std::slice::from_raw_parts(
             osips_str.s as *const u8, osips_str.len as usize);
-        match std::str::from_utf8(slice) {
-            Ok(s) => Some(Some(s)),
-            Err(_) => None,
-        }
+        std::str::from_utf8(slice).map(Some).map_err(|_| ParamError::InvalidUtf8)
     }
 }
 
@@ -152,10 +234,10 @@ macro_rules! _gen_cmd_shim {
                 opensips_rs::ffi::catch_unwind_ffi_mut(|| {
                     let mut sip_msg = opensips_rs::SipMessage::from_raw(msg);
                     let a0 = match <$t0 as opensips_rs::command::CommandFunctionParam>::from_raw(p0) {
-                        Some(v) => v,
-                        None => {
+                        Ok(v) => v,
+                        Err(e) => {
                             opensips_rs::opensips_log!(ERR, "rust",
-                                "{}: invalid or missing parameter", stringify!($func));
+                                "{}: param 0: {}", stringify!($func), e.as_str());
                             return -1;
                         }
                     };
@@ -182,18 +264,18 @@ macro_rules! _gen_cmd_shim {
                 opensips_rs::ffi::catch_unwind_ffi_mut(|| {
                     let mut sip_msg = opensips_rs::SipMessage::from_raw(msg);
                     let a0 = match <$t0 as opensips_rs::command::CommandFunctionParam>::from_raw(p0) {
-                        Some(v) => v,
-                        None => {
+                        Ok(v) => v,
+                        Err(e) => {
                             opensips_rs::opensips_log!(ERR, "rust",
-                                "{}: invalid or missing parameter 0", stringify!($func));
+                                "{}: param 0: {}", stringify!($func), e.as_str());
                             return -1;
                         }
                     };
                     let a1 = match <$t1 as opensips_rs::command::CommandFunctionParam>::from_raw(p1) {
-                        Some(v) => v,
-                        None => {
+                        Ok(v) => v,
+                        Err(e) => {
                             opensips_rs::opensips_log!(ERR, "rust",
-                                "{}: invalid or missing parameter 1", stringify!($func));
+                                "{}: param 1: {}", stringify!($func), e.as_str());
                             return -1;
                         }
                     };

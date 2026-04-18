@@ -793,6 +793,38 @@ if ($retcode == 1) {
 		<varname>cachedb_url</varname> (default: <emphasis>nats</emphasis>).
 	</para>
 
+	<section id="kv_key_validation" xreflabel="KV Key Validation">
+	<title>KV Key Validation</title>
+	<para>
+		Every KV operation (<function>cache_store</function>,
+		<function>cache_fetch</function>, <function>cache_remove</function>,
+		<function>cache_add</function>, <function>cache_sub</function>) passes
+		its key through <varname>validate_kv_key()</varname> before reaching
+		the NATS server. Invalid keys are rejected with -1 at the module
+		layer (surfacing to scripts as the standard cachedb failure code)
+		rather than being delegated to NATS, which would otherwise fail
+		silently or return opaque protocol errors.
+	</para>
+	<para>
+		A key is considered invalid if it is empty, or contains any of
+		the following:
+	</para>
+	<itemizedlist>
+		<listitem><para>control characters (&lt; 0x20 or 0x7f DEL)</para></listitem>
+		<listitem><para>whitespace (space or tab)</para></listitem>
+		<listitem><para>NATS subject wildcards (<literal>*</literal>, <literal>&gt;</literal>)</para></listitem>
+		<listitem><para>the <literal>:</literal> character (reserved by the
+		<literal>$KV.&lt;bucket&gt;.&lt;key&gt;</literal> subject mapping)</para></listitem>
+	</itemizedlist>
+	<para>
+		Dots, hyphens, underscores, slashes, equals signs, and backslashes
+		are allowed — dots separate subject tokens in the underlying NATS
+		representation. Use dots or dashes when composing structured keys
+		(e.g. <literal>call.abc123</literal>, <literal>user-alice</literal>).
+	</para>
+	</section>
+
+
 	<section id="cachedb_store" xreflabel="cache_store">
 	<title>cache_store — KV put</title>
 	<para>

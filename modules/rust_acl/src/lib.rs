@@ -91,7 +91,7 @@
 #![allow(clippy::or_fun_call)]
 
 use opensips_rs::command::CommandFunctionParam;
-use opensips_rs::param::ModString;
+use opensips_rs::param::{Integer, ModString};
 use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::cidr::CidrRange;
@@ -119,7 +119,7 @@ static STAT_ENTRIES_BLOCKLIST: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::pt
 static STAT_ENTRIES_ALLOWLIST: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
-const STAT_NO_RESET: u16 = 1;
+use opensips_rs::stat_flags::NO_RESET as STAT_NO_RESET;
 
 use regex::Regex;
 
@@ -152,8 +152,10 @@ static ALLOWLIST_DOMAIN_FILE: ModString = ModString::new();
 /// Enable per-entry match counters (0=off, 1=on, default: 0).
 static TRACK_COUNTERS: ModString = ModString::new();
 
-/// Enable event publishing (0=off, 1=on, default 0).
-static PUBLISH_EVENTS: ModString = ModString::new();
+/// Enable event publishing (0=off, 1=on, default 0). Standardized to
+/// INT_PARAM 2026-04-17 to match rust_concurrent_calls / rust_sst /
+/// rust_http_webhook / rust_refer_handler. Config must be unquoted: `1`, not `"1"`.
+static PUBLISH_EVENTS: Integer = Integer::with_default(0);
 
 /// Access policy for check_access(): "allowlist-first", "blocklist-first",
 /// "allowlist-only", or "blocklist-only" (default: "allowlist-first").
@@ -1025,8 +1027,8 @@ unsafe extern "C" fn w_check_blocklist(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_blocklist: missing or invalid parameter");
                 return -2;
@@ -1091,8 +1093,8 @@ unsafe extern "C" fn w_check_blocklist_ip(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_blocklist_ip: missing or invalid parameter");
                 return -2;
@@ -1140,8 +1142,8 @@ unsafe extern "C" fn w_check_blocklist_ua(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_blocklist_ua: missing or invalid parameter");
                 return -2;
@@ -1189,8 +1191,8 @@ unsafe extern "C" fn w_check_blocklist_domain(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_blocklist_domain: missing or invalid parameter");
                 return -2;
@@ -1238,8 +1240,8 @@ unsafe extern "C" fn w_check_allowlist(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_allowlist: missing or invalid parameter");
                 return -2;
@@ -1290,8 +1292,8 @@ unsafe extern "C" fn w_check_allowlist_ip(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_allowlist_ip: missing or invalid parameter");
                 return -2;
@@ -1329,8 +1331,8 @@ unsafe extern "C" fn w_check_allowlist_ua(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_allowlist_ua: missing or invalid parameter");
                 return -2;
@@ -1368,8 +1370,8 @@ unsafe extern "C" fn w_check_allowlist_domain(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_allowlist_domain: missing or invalid parameter");
                 return -2;
@@ -1490,8 +1492,8 @@ unsafe extern "C" fn w_check_access(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "check_access: missing or invalid parameter");
                 return -2;
@@ -1706,16 +1708,16 @@ unsafe extern "C" fn w_auto_block(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "auto_block: missing or invalid value parameter");
                 return -2;
             }
         };
         let ttl_str = match <&str as CommandFunctionParam>::from_raw(p1) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "auto_block: missing or invalid ttl_secs parameter");
                 return -2;
@@ -1762,16 +1764,16 @@ unsafe extern "C" fn w_auto_allow(
 ) -> c_int {
     opensips_rs::ffi::catch_unwind_ffi_mut(|| {
         let value = match <&str as CommandFunctionParam>::from_raw(p0) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "auto_allow: missing or invalid value parameter");
                 return -2;
             }
         };
         let ttl_str = match <&str as CommandFunctionParam>::from_raw(p1) {
-            Some(s) => s,
-            None => {
+            Ok(s) => s,
+            Err(_) => {
                 opensips_log!(ERR, "rust_acl",
                     "auto_allow: missing or invalid ttl_secs parameter");
                 return -2;
@@ -1957,14 +1959,14 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
 
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
 const TWO_STR_PARAM: [sys::cmd_param; 9] = {
     let mut arr: [sys::cmd_param; 9] = unsafe { std::mem::zeroed() };
-    arr[0].flags = 2; // CMD_PARAM_STR
-    arr[1].flags = 2; // CMD_PARAM_STR
+    arr[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    arr[1].flags = opensips_rs::command::CMD_PARAM_STR;
     arr
 };
 
@@ -2196,103 +2198,103 @@ static CMDS: SyncArray<sys::cmd_export_, 18> = SyncArray([
         name: cstr_lit!("check_blocklist"),
         function: Some(w_check_blocklist),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist_ip"),
         function: Some(w_check_blocklist_ip),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist_ua"),
         function: Some(w_check_blocklist_ua),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_blocklist_domain"),
         function: Some(w_check_blocklist_domain),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_allowlist"),
         function: Some(w_check_allowlist),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_allowlist_ip"),
         function: Some(w_check_allowlist_ip),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_allowlist_ua"),
         function: Some(w_check_allowlist_ua),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_allowlist_domain"),
         function: Some(w_check_allowlist_domain),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_access"),
         function: Some(w_check_access),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("blocklist_reload"),
         function: Some(w_blocklist_reload),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("allowlist_reload"),
         function: Some(w_allowlist_reload),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("auto_block"),
         function: Some(w_auto_block),
         params: TWO_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("auto_allow"),
         function: Some(w_auto_allow),
         params: TWO_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("access_stats"),
         function: Some(w_access_stats),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("access_entry_stats"),
         function: Some(w_access_entry_stats),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("access_prometheus"),
         function: Some(w_access_prometheus),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4, // REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("acl_db_reload"),
         function: Some(w_acl_db_reload),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -2315,92 +2317,92 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 static PARAMS: SyncArray<sys::param_export_, 19> = SyncArray([
     sys::param_export_ {
         name: cstr_lit!("blocklist_file"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: BLOCKLIST_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("allowlist_file"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: ALLOWLIST_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("match_mode"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: MATCH_MODE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("blocklist_ip_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: BLOCKLIST_IP_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("blocklist_ua_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: BLOCKLIST_UA_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("blocklist_domain_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: BLOCKLIST_DOMAIN_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("allowlist_ip_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: ALLOWLIST_IP_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("allowlist_ua_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: ALLOWLIST_UA_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("allowlist_domain_file"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: ALLOWLIST_DOMAIN_FILE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("track_counters"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: TRACK_COUNTERS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("access_policy"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::STR,
         param_pointer: ACCESS_POLICY.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("publish_events"),
-        type_: 1, // STR_PARAM
+        type_: opensips_rs::param_type::INT,
         param_pointer: PUBLISH_EVENTS.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_url"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_URL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_table"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_TABLE.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_group"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_GROUP.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_reload_interval"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_RELOAD_INTERVAL.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_blocklist_group"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_BLOCKLIST_GROUP.as_ptr(),
     },
     sys::param_export_ {
         name: cstr_lit!("db_allowlist_group"),
-        type_: 1,
+        type_: opensips_rs::param_type::STR,
         param_pointer: DB_ALLOWLIST_GROUP.as_ptr(),
     },
     // Null terminator
@@ -2421,7 +2423,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_acl"),
-    type_: 1, // MOD_TYPE_DEFAULT
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),

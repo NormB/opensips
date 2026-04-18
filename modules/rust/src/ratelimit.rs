@@ -44,6 +44,37 @@ struct RateEntry {
     window_start: Instant, // when this window opened (monotonic)
 }
 
+/// Outcome of a rate-limit check against one entry. Pure-logic helper
+/// extracted so it can be unit-tested independent of FFI / IO.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WindowOutcome {
+    /// Window expired — entry was reset and request counted.
+    Reset,
+    /// Within window, under limit — count incremented.
+    Incremented,
+    /// Within window, at or over limit — request rejected.
+    Rejected,
+}
+
+/// Evaluate one rate-limit entry without touching global state.
+/// `elapsed_within_limit` encodes whether `elapsed < window`.
+///
+/// Returns the outcome; caller mutates `count`/`window_start`
+/// accordingly (see `WindowOutcome`).
+pub(crate) fn evaluate_window(
+    count: u32,
+    max_rate: u32,
+    elapsed_within_limit: bool,
+) -> WindowOutcome {
+    if !elapsed_within_limit {
+        WindowOutcome::Reset
+    } else if count < max_rate {
+        WindowOutcome::Incremented
+    } else {
+        WindowOutcome::Rejected
+    }
+}
+
 // thread_local! creates per-worker state. Each forked OpenSIPS process
 // gets its own RATES HashMap — completely independent, no sharing.
 // The RefCell wrapper enables mutation through the shared reference
@@ -86,19 +117,20 @@ pub fn check_rate(msg: &mut SipMessage, max_rate: c_int, window_seconds: c_int) 
         });
 
         // Duration arithmetic: duration_since() returns how much time
-        // has elapsed. The >= comparison is natural and readable.
-        let result = if now.duration_since(entry.window_start) >= window {
-            // Window expired — reset counter and start a new window.
-            entry.count = 1;
-            entry.window_start = now;
-            true
-        } else if entry.count < max_rate {
-            // Within window and under limit — increment and allow.
-            entry.count += 1;
-            true
-        } else {
-            // Within window but over limit — reject.
-            false
+        // has elapsed. Delegate the decision to the pure helper (unit-tested
+        // separately) and apply its outcome by mutating the entry.
+        let elapsed_within = now.duration_since(entry.window_start) < window;
+        let result = match evaluate_window(entry.count, max_rate, elapsed_within) {
+            WindowOutcome::Reset => {
+                entry.count = 1;
+                entry.window_start = now;
+                true
+            }
+            WindowOutcome::Incremented => {
+                entry.count += 1;
+                true
+            }
+            WindowOutcome::Rejected => false,
         };
 
         // Evict expired entries when the table grows too large.
@@ -124,5 +156,39 @@ pub fn check_rate(msg: &mut SipMessage, max_rate: c_int, window_seconds: c_int) 
         }
 
         -1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_reset_on_expiry() {
+        // elapsed >= window → reset, regardless of count
+        assert_eq!(evaluate_window(9999, 100, false), WindowOutcome::Reset);
+        assert_eq!(evaluate_window(0, 100, false), WindowOutcome::Reset);
+    }
+
+    #[test]
+    fn window_incremented_under_limit() {
+        assert_eq!(evaluate_window(0, 100, true), WindowOutcome::Incremented);
+        assert_eq!(evaluate_window(99, 100, true), WindowOutcome::Incremented);
+    }
+
+    #[test]
+    fn window_rejected_at_or_over_limit() {
+        // count == max_rate → reject. This is the boundary; the caller
+        // passes count-so-far, and the limit is inclusive.
+        assert_eq!(evaluate_window(100, 100, true), WindowOutcome::Rejected);
+        assert_eq!(evaluate_window(999, 100, true), WindowOutcome::Rejected);
+    }
+
+    #[test]
+    fn zero_limit_always_rejects_until_reset() {
+        // max_rate = 0 is a degenerate config (no requests allowed within window).
+        assert_eq!(evaluate_window(0, 0, true), WindowOutcome::Rejected);
+        // But still allows reset when the window has elapsed.
+        assert_eq!(evaluate_window(0, 0, false), WindowOutcome::Reset);
     }
 }

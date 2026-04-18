@@ -248,6 +248,47 @@ static inline int str_to_buf(const str *s, char *buf, size_t buf_size)
 	return 0;
 }
 
+/**
+ * validate_kv_key() — reject keys NATS KV cannot represent as a subject token.
+ *
+ * NATS JetStream KV maps keys onto a subject of the form "$KV.<bucket>.<key>",
+ * so the key must be a valid subject token: alphanumeric plus `_`, `-`, `=`,
+ * `/`, `\`, `.` (dots split into sub-tokens), no whitespace, no control chars,
+ * and no wildcard chars (`*`, `>`). An empty key is rejected by NATS too.
+ *
+ * Returns 0 if key is valid, -1 otherwise.
+ */
+static inline int validate_kv_key(const str *s)
+{
+	int i;
+	unsigned char c;
+	if (!s || !s->s || s->len <= 0) {
+		LM_ERR("KV key empty or NULL\n");
+		return -1;
+	}
+	for (i = 0; i < s->len; i++) {
+		c = (unsigned char)s->s[i];
+		if (c < 0x20 || c == 0x7f) {
+			LM_ERR("KV key contains control char 0x%02x at offset %d\n",
+				c, i);
+			return -1;
+		}
+		if (c == ' ' || c == '\t') {
+			LM_ERR("KV key contains whitespace at offset %d\n", i);
+			return -1;
+		}
+		if (c == '*' || c == '>') {
+			LM_ERR("KV key contains wildcard '%c' at offset %d\n", c, i);
+			return -1;
+		}
+		if (c == ':') {
+			LM_ERR("KV key contains ':' at offset %d (reserved)\n", i);
+			return -1;
+		}
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*                       cachedb API operations                       */
 /* ------------------------------------------------------------------ */
@@ -291,6 +332,8 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 		return -1;
 	}
 
+	if (validate_kv_key(attr) < 0)
+		return -1;
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
@@ -380,6 +423,8 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 		return -1;
 	}
 
+	if (validate_kv_key(attr) < 0)
+		return -1;
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
@@ -448,6 +493,8 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 		return -1;
 	}
 
+	if (validate_kv_key(attr) < 0)
+		return -1;
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
@@ -513,6 +560,8 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 		return -1;
 	}
 
+	if (validate_kv_key(attr) < 0)
+		return -1;
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
@@ -653,6 +702,8 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 		return -1;
 	}
 
+	if (validate_kv_key(attr) < 0)
+		return -1;
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 

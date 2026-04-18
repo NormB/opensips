@@ -45,7 +45,7 @@ static STAT_EXPIRED: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mu
 static STAT_PENDING: AtomicPtr<StatVarOpaque> = AtomicPtr::new(std::ptr::null_mut());
 
 /// STAT_NO_RESET flag value (from OpenSIPS statistics.h).
-const STAT_NO_RESET: u16 = 1;
+use opensips_rs::stat_flags::NO_RESET as STAT_NO_RESET;
 
 // ── Module parameters ────────────────────────────────────────────
 
@@ -414,8 +414,8 @@ unsafe extern "C" fn w_handle_refer(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let refer_to = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             opensips_log!(ERR, "rust_refer_handler", "handle_refer: missing refer_to parameter");
             return -2;
         }
@@ -457,16 +457,16 @@ unsafe extern "C" fn w_handle_notify(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let call_id = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             opensips_log!(ERR, "rust_refer_handler", "handle_notify: missing call_id");
             return -2;
         }
     };
 
     let status_str_param = match unsafe { <&str as CommandFunctionParam>::from_raw(p1) } {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             opensips_log!(ERR, "rust_refer_handler", "handle_notify: missing status_code");
             return -2;
         }
@@ -532,8 +532,8 @@ unsafe extern "C" fn w_refer_status(
     _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
 ) -> c_int {
     let call_id = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             opensips_log!(ERR, "rust_refer_handler", "refer_status: missing call_id");
             return -2;
         }
@@ -617,14 +617,14 @@ const EMPTY_PARAMS: [sys::cmd_param; 9] = [sys::cmd_param { flags: 0, fixup: Non
 
 const ONE_STR_PARAM: [sys::cmd_param; 9] = {
     let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
-    p[0].flags = 2; // CMD_PARAM_STR
+    p[0].flags = opensips_rs::command::CMD_PARAM_STR;
     p
 };
 
 const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
     let mut p = [sys::cmd_param { flags: 0, fixup: None, free_fixup: None }; 9];
-    p[0].flags = 2; // CMD_PARAM_STR
-    p[1].flags = 2; // CMD_PARAM_STR
+    p[0].flags = opensips_rs::command::CMD_PARAM_STR;
+    p[1].flags = opensips_rs::command::CMD_PARAM_STR;
     p
 };
 
@@ -633,49 +633,49 @@ static CMDS: SyncArray<sys::cmd_export_, 9> = SyncArray([
         name: cstr_lit!("handle_refer"),
         function: Some(w_handle_refer),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("handle_notify"),
         function: Some(w_handle_notify),
         params: TWO_STR_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("refer_status"),
         function: Some(w_refer_status),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("send_refer_notify"),
         function: Some(w_noop_str),
         params: TWO_STR_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("check_transfer_target"),
         function: Some(w_noop_str),
         params: ONE_STR_PARAM,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("refer_stats"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("refer_prometheus"),
         function: Some(w_noop),
         params: EMPTY_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     sys::cmd_export_ {
         name: cstr_lit!("handle_attended_refer"),
         function: Some(w_noop_str),
         params: TWO_STR_PARAMS,
-        flags: 1 | 2 | 4,
+        flags: opensips_rs::route::REQ_FAIL_ONREPLY,
     },
     // Null terminator
     sys::cmd_export_ {
@@ -691,12 +691,12 @@ static ACMDS: SyncArray<sys::acmd_export_, 1> = SyncArray([
 ]);
 
 static PARAMS: SyncArray<sys::param_export_, 8> = SyncArray([
-    sys::param_export_ { name: cstr_lit!("max_pending"), type_: 2, param_pointer: MAX_PENDING.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("expire_secs"), type_: 2, param_pointer: EXPIRE_SECS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("auto_process"), type_: 2, param_pointer: AUTO_PROCESS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("publish_events"), type_: 2, param_pointer: PUBLISH_EVENTS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("transfer_timeout_secs"), type_: 2, param_pointer: TRANSFER_TIMEOUT_SECS.as_ptr() },
-    sys::param_export_ { name: cstr_lit!("reconnect_on_failure"), type_: 2, param_pointer: RECONNECT_ON_FAILURE.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("max_pending"), type_: opensips_rs::param_type::INT, param_pointer: MAX_PENDING.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("expire_secs"), type_: opensips_rs::param_type::INT, param_pointer: EXPIRE_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("auto_process"), type_: opensips_rs::param_type::INT, param_pointer: AUTO_PROCESS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("publish_events"), type_: opensips_rs::param_type::INT, param_pointer: PUBLISH_EVENTS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("transfer_timeout_secs"), type_: opensips_rs::param_type::INT, param_pointer: TRANSFER_TIMEOUT_SECS.as_ptr() },
+    sys::param_export_ { name: cstr_lit!("reconnect_on_failure"), type_: opensips_rs::param_type::INT, param_pointer: RECONNECT_ON_FAILURE.as_ptr() },
     // Note: allowed_targets param removed (was STR_PARAM, used Vec<String> internally)
     // Null terminator
     sys::param_export_ { name: ptr::null(), type_: 0, param_pointer: ptr::null_mut() },
@@ -726,7 +726,7 @@ static DEPS: opensips_rs::ffi::DepExportConcrete<1> = opensips_rs::ffi::DepExpor
 #[no_mangle]
 pub static exports: sys::module_exports = sys::module_exports {
     name: cstr_lit!("rust_refer_handler"),
-    type_: 1,
+    type_: opensips_rs::module_type::DEFAULT,
     ver_info: sys::module_exports__bindgen_ty_1 {
         version: cstr_lit!(env!("OPENSIPS_FULL_VERSION")),
         compile_flags: cstr_lit!(env!("OPENSIPS_COMPILE_FLAGS")),
