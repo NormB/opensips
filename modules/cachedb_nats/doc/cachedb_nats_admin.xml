@@ -1,0 +1,1355 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>cachedb_nats</emphasis> module implements the &osips; CacheDB
+		engine interface on top of <emphasis>NATS JetStream Key-Value</emphasis> stores.
+		It provides persistent, replicated, cluster-aware key-value storage accessible
+		from &osips; routing scripts via the standard
+		<function>cache_store</function>/<function>cache_fetch</function>/<function>cache_remove</function>
+		operations, together with several NATS-native extensions.
+	</para>
+	<para>
+		The module connects to a NATS JetStream-enabled server or cluster, creates a
+		named KV bucket on first use, and maps all CacheDB operations onto NATS KV
+		primitives.  Reconnection and bucket handle refresh are fully automatic:
+		an epoch-based staleness check at the top of every operation transparently
+		re-opens the KV handle after any NATS disconnect/reconnect cycle.
+	</para>
+	<para>
+		Beyond the standard CacheDB API the module provides:
+	</para>
+	<para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis role="bold">Atomic CAS counters</emphasis> —
+				<function>cache_add</function> and <function>cache_sub</function>
+				use compare-and-swap with up to three retries, giving safe concurrent
+				counter increments from multiple &osips; worker processes.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">JSON full-text search index</emphasis> —
+				keys whose names begin with <varname>fts_json_prefix</varname> are
+				automatically parsed and indexed in a process-local hash table.
+				<function>cache_query</function> performs O(1) equality lookups
+				against this index without scanning the KV bucket.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">Live KV watcher</emphasis> —
+				a self-healing pthread watches the KV bucket in real time, updating
+				the search index on every put/delete/purge and raising the
+				<emphasis>E_NATS_KV_CHANGE</emphasis> EVI event for script reaction.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">nats_request()</emphasis> —
+				synchronous NATS request/reply (RPC) callable from routing scripts.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">nats_kv_history()</emphasis> —
+				retrieves the full version history of a KV key as a JSON array.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">Raw query commands</emphasis> —
+				<emphasis>KV KEYS</emphasis>, <emphasis>KV PURGE</emphasis>, and
+				<emphasis>KV BUCKET INFO</emphasis> via
+				<function>cache_raw_query</function>.
+			</para></listitem>
+			<listitem><para>
+				<emphasis role="bold">Map operations</emphasis> —
+				composite <emphasis>key:subkey</emphasis> addressing for get, set,
+				and remove of individual fields within JSON documents.
+			</para></listitem>
+		</itemizedlist>
+	</para>
+	</section>
+
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+			The following modules must be loaded before this module:
+		</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>None are required.</emphasis>
+				The module links dynamically against
+				<emphasis>libnats_pool.so</emphasis> in
+				<emphasis>lib/nats</emphasis> (installed alongside the module
+				<emphasis>.so</emphasis> files and located at load time via an
+				<emphasis>$ORIGIN</emphasis> RUNPATH), and registers directly
+				with the &osips; CacheDB and EVI subsystems in the core.  No
+				other &osips; module needs to be loaded first.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+			The following modules are only needed for specific script-level
+			uses:
+		</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>event_nats</emphasis> — required only if a script
+				forwards <emphasis>E_NATS_KV_CHANGE</emphasis> (or any other
+				event) to a NATS subject via <function>subscribe_event</function>
+				with a <emphasis>nats:</emphasis> transport.  For purely local
+				consumption through an <emphasis>event_route</emphasis> block
+				the core EVI subsystem handles dispatch and
+				<emphasis>event_nats</emphasis> is not needed.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+			When more than one NATS module
+			(<emphasis>cachedb_nats</emphasis>, <emphasis>event_nats</emphasis>,
+			<emphasis>nats_consumer</emphasis>, ...) is loaded in the same
+			&osips; instance, they all share a single
+			<emphasis>libnats_pool.so</emphasis> instance and therefore a
+			single set of pool globals (<varname>pool_cfg</varname>,
+			<varname>_nc</varname>, <varname>_js</varname>, KV handle cache).
+			The first <function>nats_pool_register</function> call at
+			<function>mod_init</function> time seeds the connection parameters
+			(seed URL list, TLS options, reconnection tuning); subsequent
+			calls from other modules only append any additional seed URLs and
+			otherwise do not override the configuration.  Load the module
+			whose <emphasis>nats_url</emphasis> / TLS parameters you want to
+			take effect <emphasis>first</emphasis> in
+			<filename>opensips.cfg</filename>.
+		</para>
+	</section>
+
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+			The following libraries must be installed before running &osips; with
+			this module loaded:
+		</para>
+		<itemizedlist>
+			<listitem>
+			<para>
+				<emphasis>nats.c v3.13 or later</emphasis> (<emphasis>libnats.so</emphasis>):
+			</para>
+			<para>
+				The official C client library for NATS, available at
+				<emphasis>https://github.com/nats-io/nats.c</emphasis>.
+				Build with CMake and install to a standard library path (e.g.
+				<emphasis>/usr/local/lib/libnats.so</emphasis>).  Version 3.13 or
+				later is required for JetStream KV support.
+			</para>
+			<para>
+				For TLS connections, nats.c must be built against OpenSSL.
+				OpenSSL is the only TLS backend supported by upstream nats.c:
+				WolfSSL, mbedTLS, and other TLS libraries are not supported by
+				the library's build system.  The same OpenSSL installation used
+				by &osips; must be present at runtime to avoid library version
+				conflicts.
+			</para>
+			</listitem>
+			<listitem>
+			<para>
+				<emphasis>NATS Server with JetStream enabled:</emphasis>
+			</para>
+			<para>
+				NATS Server 2.9 or later with JetStream enabled
+				(<emphasis>jetstream: {}</emphasis> in the server configuration).
+				For production deployments a three-node JetStream cluster is
+				recommended to survive single-node failures with
+				<varname>kv_replicas</varname> set to 3.
+			</para>
+			</listitem>
+		</itemizedlist>
+	</section>
+	</section>
+
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_cachedb_url" xreflabel="cachedb_url">
+	<title><varname>cachedb_url</varname> (string)</title>
+	<para>
+		The CacheDB URL that associates this module with a named cache group
+		in the &osips; script.  The URL format follows the standard &osips;
+		CacheDB convention:
+	</para>
+	<para>
+		<emphasis role="bold">nats[:<replaceable>group</replaceable>]://[<replaceable>user</replaceable>[:<replaceable>password</replaceable>]@]<replaceable>host</replaceable>[:<replaceable>port</replaceable>][,<replaceable>host</replaceable>[:<replaceable>port</replaceable>]]*/</emphasis>
+	</para>
+	<para>
+		The optional <replaceable>group</replaceable> label (e.g.
+		<emphasis>nats:mycluster://</emphasis>) distinguishes multiple cache
+		namespaces in the same script.  Multiple comma-separated
+		<replaceable>host[:port]</replaceable> pairs may be supplied as a
+		bootstrap seed list; nats.c discovers the remainder of the cluster via
+		INFO gossip.  An optional <replaceable>user[:password]</replaceable>
+		section supplies NATS user/password authentication credentials which
+		are passed through verbatim to the nats.c client (for token-based
+		authentication, place the token in the <replaceable>user</replaceable>
+		field with no password).
+	</para>
+	<para>
+		When <varname>nats_url</varname> is also set it takes precedence over
+		the host/credentials portion of this URL for the actual NATS
+		connection; the URL is then used solely for group registration.
+	</para>
+	<para>
+		This parameter may be set more than once to register multiple cache
+		group names backed by the same NATS connection.
+	</para>
+	<example>
+	<title>Set <varname>cachedb_url</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+# Plain, single node
+modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:4222/")
+
+# Named group
+modparam("cachedb_nats", "cachedb_url", "nats:calls://127.0.0.1:4222/")
+
+# User/password authentication
+modparam("cachedb_nats", "cachedb_url", "nats://alice:s3cret@nats.example.com:4222/")
+
+# Multi-host seed list
+modparam("cachedb_nats", "cachedb_url",
+    "nats://nats-1:4222,nats-2:4222,nats-3:4222/")
+...
+	</programlisting>
+	</example>
+	<example>
+	<title>Use the nats cache group in a routing script</title>
+	<programlisting format="linespecific">
+...
+cache_store("nats", "call:$ci", "$fu");
+cache_fetch("nats:calls", "call:$ci", $var(caller));
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_nats_url" xreflabel="nats_url">
+	<title><varname>nats_url</varname> (string)</title>
+	<para>
+		Comma-separated list of NATS server URLs used as the bootstrap seed
+		list for the connection pool.  Each entry follows the native nats.c
+		URL form
+		<emphasis>nats://[<replaceable>user</replaceable>[:<replaceable>password</replaceable>]@]<replaceable>host</replaceable>[:<replaceable>port</replaceable>]</emphasis>
+		(or <emphasis>tls://...</emphasis> to request TLS explicitly).  Token
+		authentication is expressed as a user without a password.  After the
+		initial connection is established, nats.c discovers all cluster peers
+		via the INFO protocol gossip mechanism and maintains the full topology
+		automatically, so this parameter only needs to contain enough servers
+		to bootstrap.
+	</para>
+	<para>
+		Use DNS hostnames rather than IP addresses so that
+		<function>getaddrinfo</function> re-resolves on each reconnect attempt,
+		automatically following topology changes in the cluster.
+	</para>
+	<para>
+		When this parameter is set it takes precedence over the host and
+		credentials portion of <varname>cachedb_url</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>nats://127.0.0.1:4222</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>nats_url</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+# Three-node cluster seed list
+modparam("cachedb_nats", "nats_url",
+    "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")
+
+# User/password authentication
+modparam("cachedb_nats", "nats_url",
+    "nats://alice:s3cret@nats.example.com:4222")
+
+# Token authentication (user field only, no password)
+modparam("cachedb_nats", "nats_url",
+    "nats://s3cret-token@nats.example.com:4222")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_kv_bucket" xreflabel="kv_bucket">
+	<title><varname>kv_bucket</varname> (string)</title>
+	<para>
+		The name of the NATS JetStream KV bucket that this module will use
+		for all key-value operations.  If the bucket does not yet exist it
+		will be created during <function>child_init</function> with the
+		replication, history, and TTL settings defined by the
+		<varname>kv_replicas</varname>, <varname>kv_history</varname>, and
+		<varname>kv_ttl</varname> parameters.
+	</para>
+	<para>
+		If the bucket already exists the creation parameters are ignored and
+		the existing bucket configuration is used as-is.  To change
+		replication on an existing bucket use the NATS CLI:
+		<emphasis>nats kv update &lt;bucket&gt; --replicas=N</emphasis>.
+	</para>
+	<para>
+		Bucket names must be valid NATS subject tokens (alphanumeric, hyphens,
+		and underscores; no spaces or dots).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>opensips</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_bucket</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_bucket", "opensips-prod")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_kv_replicas" xreflabel="kv_replicas">
+	<title><varname>kv_replicas</varname> (integer)</title>
+	<para>
+		The JetStream replication factor for the KV bucket.  A value of 3
+		means every key-value entry is replicated to three NATS nodes,
+		tolerating single-node failure without data loss.  This parameter
+		only takes effect when the bucket is first created; it is ignored
+		if the bucket already exists.
+	</para>
+	<para>
+		For development or single-node deployments use a value of 1.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>3</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_replicas</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_replicas", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_kv_history" xreflabel="kv_history">
+	<title><varname>kv_history</varname> (integer)</title>
+	<para>
+		The number of value revisions to retain per key.  A higher value
+		allows <function>nats_kv_history</function> to return more historical
+		entries and enables the CAS retry loop in atomic counter operations
+		to succeed under higher write contention.  This parameter only takes
+		effect when the bucket is first created.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>5</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_history</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_history", 10)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_kv_ttl" xreflabel="kv_ttl">
+	<title><varname>kv_ttl</varname> (integer)</title>
+	<para>
+		Bucket-level TTL in seconds.  When greater than zero, all keys in the
+		bucket automatically expire after this many seconds since their last
+		modification.  A value of zero disables expiry.
+	</para>
+	<para>
+		Note: NATS KV TTL is bucket-wide.  Per-key TTL is not supported by
+		the NATS JetStream KV API.  The <emphasis>expires</emphasis> argument
+		to <function>cache_store</function> and <function>cache_add</function>
+		is accepted for API compatibility but does not set a per-key TTL.
+		This parameter only takes effect when the bucket is first created.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote> (no expiry).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_ttl</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_ttl", 3600)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_fts_json_prefix" xreflabel="fts_json_prefix">
+	<title><varname>fts_json_prefix</varname> (string)</title>
+	<para>
+		Key name prefix that marks documents for inclusion in the in-process
+		JSON full-text search index.  Any key stored via
+		<function>cache_store</function> whose name begins with this prefix
+		is parsed as a JSON object and indexed for equality queries via
+		<function>cache_query</function>.
+	</para>
+	<para>
+		The index maps every top-level string and integer field of the JSON
+		document to the document key, enabling O(1) hash lookups.  Documents
+		stored without this prefix are still accessible via the standard KV
+		operations but are not indexed.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>json:</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>fts_json_prefix</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "fts_json_prefix", "usrloc.")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_fts_max_results" xreflabel="fts_max_results">
+	<title><varname>fts_max_results</varname> (integer)</title>
+	<para>
+		The maximum number of documents returned by a single
+		<function>cache_query</function> call.  Limits memory consumption
+		for broad queries that would otherwise match a large fraction of the
+		index.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>100</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>fts_max_results</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "fts_max_results", 500)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_kv_watch" xreflabel="kv_watch">
+	<title><varname>kv_watch</varname> (string)</title>
+	<para>
+		A NATS subject pattern that restricts the KV watcher to a subset of
+		keys.  NATS wildcard tokens are supported:
+		<emphasis>&gt;</emphasis> matches any remaining subject tokens
+		(e.g. <emphasis>usrloc.&gt;</emphasis> watches all keys under
+		<emphasis>usrloc.</emphasis>), and <emphasis>*</emphasis> matches
+		exactly one token.  When this parameter is not set, the watcher
+		subscribes to all keys in the bucket.
+	</para>
+	<para>
+		This parameter may be set more than once to watch multiple disjoint
+		key patterns simultaneously.  Each call adds one pattern to the watch
+		list; all patterns are passed to <function>kvStore_WatchMulti</function>
+		as a combined subscription.  If no <varname>kv_watch</varname>
+		parameters are set, the watcher is not started.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>NULL</quote> (watcher disabled unless
+			at least one kv_watch pattern is configured).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_watch</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_watch", "usrloc.>")
+modparam("cachedb_nats", "kv_watch", "json:>")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_tls_ca" xreflabel="tls_ca">
+	<title><varname>tls_ca</varname> (string)</title>
+	<para>
+		Path to a PEM-encoded CA certificate file used to verify the NATS
+		server's TLS certificate.  When this parameter is set, the module
+		automatically upgrades the NATS connection URL from
+		<emphasis>nats://</emphasis> to <emphasis>tls://</emphasis>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>NULL</quote> (TLS disabled).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>tls_ca</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "tls_ca",   "/etc/ssl/certs/ca.pem")
+modparam("cachedb_nats", "tls_cert", "/etc/opensips/nats-client.crt")
+modparam("cachedb_nats", "tls_key",  "/etc/opensips/nats-client.key")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_tls_cert" xreflabel="tls_cert">
+	<title><varname>tls_cert</varname> (string)</title>
+	<para>
+		Path to the PEM-encoded client certificate for mutual TLS
+		authentication with the NATS server.  Required only when the NATS
+		server is configured to demand client certificates
+		(<emphasis>verify: true</emphasis>).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>NULL</quote>.
+		</emphasis>
+	</para>
+	</section>
+
+	<section id="param_tls_key" xreflabel="tls_key">
+	<title><varname>tls_key</varname> (string)</title>
+	<para>
+		Path to the PEM-encoded private key corresponding to
+		<varname>tls_cert</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>NULL</quote>.
+		</emphasis>
+	</para>
+	</section>
+
+	<section id="param_tls_hostname" xreflabel="tls_hostname">
+	<title><varname>tls_hostname</varname> (string)</title>
+	<para>
+		Override the expected TLS server hostname for certificate verification.
+		Required when connecting to a NATS server by IP address, since
+		nats.c has <emphasis>NATS_FORCE_HOST_VERIFICATION</emphasis> enabled
+		by default and the server certificate typically has DNS Subject
+		Alternative Names only (no IP SANs).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>NULL</quote> (use the hostname from the URL).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>tls_hostname</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "nats_url",      "tls://172.20.0.50:4222")
+modparam("cachedb_nats", "tls_hostname",  "nats-1.example.com")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_tls_skip_verify" xreflabel="tls_skip_verify">
+	<title><varname>tls_skip_verify</varname> (integer)</title>
+	<para>
+		When set to <emphasis role="bold">1</emphasis>, disables TLS server
+		certificate verification.  Useful for development environments with
+		self-signed certificates.  Do not use in production.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote> (verification enabled).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>tls_skip_verify</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "tls_skip_verify", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_reconnect_wait" xreflabel="reconnect_wait">
+	<title><varname>reconnect_wait</varname> (integer)</title>
+	<para>
+		The time in milliseconds to wait between reconnection attempts when
+		the NATS connection is lost.  Applies to the shared connection pool
+		managed by <emphasis>lib/nats</emphasis>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>2000</quote> ms.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>reconnect_wait</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "reconnect_wait", 1000)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_max_reconnect" xreflabel="max_reconnect">
+	<title><varname>max_reconnect</varname> (integer)</title>
+	<para>
+		Maximum number of reconnection attempts during
+		<function>child_init</function>.  Once the initial connection is
+		established, the nats.c library handles runtime reconnection
+		autonomously with no limit.  This parameter affects only the startup
+		retry loop, not runtime resilience.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>60</quote> attempts.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>max_reconnect</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "max_reconnect", 30)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_skip_openssl_init" xreflabel="skip_openssl_init">
+	<title><varname>skip_openssl_init</varname> (integer)</title>
+	<para>
+		When set to <emphasis role="bold">1</emphasis>, instructs nats.c not
+		to call <function>SSL_library_init</function> and related OpenSSL
+		global initialisation functions.  This prevents double-initialisation
+		conflicts between nats.c and the OpenSIPS TLS subsystem, which also
+		manages OpenSSL.  This flag should remain enabled (the default) in
+		all deployments where &osips; is compiled with TLS support.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>1</quote> (OpenSSL init skipped).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>skip_openssl_init</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "skip_openssl_init", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="exported_functions" xreflabel="Exported Functions">
+	<title>Exported Functions</title>
+
+	<section id="func_nats_request" xreflabel="nats_request()">
+	<title>
+		<function moreinfo="none">nats_request(subject, payload, timeout_ms, result_pvar)</function>
+	</title>
+	<para>
+		Performs a synchronous NATS request/reply operation.  Publishes
+		<emphasis>payload</emphasis> to the NATS subject
+		<emphasis>subject</emphasis> and waits up to
+		<emphasis>timeout_ms</emphasis> milliseconds for a reply.  When a
+		reply arrives the payload is stored in
+		<emphasis>result_pvar</emphasis>.
+	</para>
+	<para>
+		This function implements the standard NATS request/reply pattern:
+		the sender publishes to a subject and includes a unique reply-to
+		inbox.  A responding service publishes to that inbox.  This is
+		suitable for synchronous RPC calls to external services such as
+		authentication validators, fraud scoring engines, or routing
+		decision services.
+	</para>
+	<para>
+		This function can be used from any route.
+	</para>
+	<para>Parameters:</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis role="bold">subject</emphasis> (string) —
+			NATS subject to send the request to.  May contain &osips;
+			pseudo-variables.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">payload</emphasis> (string) —
+			Request payload, typically a JSON string.  May contain
+			pseudo-variables.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">timeout_ms</emphasis> (integer) —
+			Maximum wait time in milliseconds.  If no reply is received
+			within this window the function returns -2.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">result_pvar</emphasis> (writable pvar) —
+			Pseudo-variable to receive the reply payload string.
+		</para></listitem>
+	</itemizedlist>
+	<para>Return values:</para>
+	<itemizedlist>
+		<listitem><para><emphasis role="bold">1</emphasis> — reply received successfully.</para></listitem>
+		<listitem><para><emphasis role="bold">-1</emphasis> — error (NATS connection failure or publish error).</para></listitem>
+		<listitem><para><emphasis role="bold">-2</emphasis> — timeout, no reply received within <emphasis>timeout_ms</emphasis>.</para></listitem>
+	</itemizedlist>
+	<example>
+	<title><function>nats_request</function> usage</title>
+	<programlisting format="linespecific">
+...
+$var(req) = "{\"user\":\"" + $fU + "\",\"domain\":\"" + $fd + "\"}";
+nats_request("auth.check", $var(req), 2000, $var(reply));
+if ($retcode == 1) {
+    xlog("auth service replied: $var(reply)\n");
+} else if ($retcode == -2) {
+    xlog("auth service timed out\n");
+    sl_send_reply(503, "Service Unavailable");
+    exit;
+}
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="func_nats_kv_history" xreflabel="nats_kv_history()">
+	<title>
+		<function moreinfo="none">nats_kv_history(key, result_pvar)</function>
+	</title>
+	<para>
+		Retrieves the revision history for a KV key and stores it as a JSON
+		array string in <emphasis>result_pvar</emphasis>.  Each array element
+		is an object with the fields <emphasis>rev</emphasis> (revision
+		number, integer), <emphasis>value</emphasis> (the stored string at
+		that revision), and <emphasis>ts</emphasis> (Unix timestamp of the
+		revision in nanoseconds).
+	</para>
+	<para>
+		The depth of history available depends on the
+		<varname>kv_history</varname> bucket setting.  With the default of
+		5, up to five past values are returned per key in reverse
+		chronological order (most recent first).
+	</para>
+	<para>
+		This function can be used from any route.
+	</para>
+	<para>Parameters:</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis role="bold">key</emphasis> (string) —
+			KV key to retrieve history for.  May contain pseudo-variables.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">result_pvar</emphasis> (writable pvar) —
+			Pseudo-variable to receive the JSON history array.
+		</para></listitem>
+	</itemizedlist>
+	<para>Return values:</para>
+	<itemizedlist>
+		<listitem><para><emphasis role="bold">1</emphasis> — history retrieved successfully.</para></listitem>
+		<listitem><para><emphasis role="bold">-1</emphasis> — error (NATS failure or allocation error).</para></listitem>
+		<listitem><para><emphasis role="bold">-2</emphasis> — key not found or no history available.</para></listitem>
+	</itemizedlist>
+	<example>
+	<title><function>nats_kv_history</function> usage</title>
+	<programlisting format="linespecific">
+...
+nats_kv_history("usrloc.alice", $var(hist));
+if ($retcode == 1) {
+    # $var(hist) = [{"rev":3,"value":"sip:alice@192.0.2.1","ts":1700000003},
+    #               {"rev":2,"value":"sip:alice@192.0.2.2","ts":1700000002},
+    #               {"rev":1,"value":"sip:alice@192.0.2.3","ts":1700000001}]
+    xlog("history for alice: $var(hist)\n");
+}
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="cachedb_operations" xreflabel="CacheDB Operations">
+	<title>CacheDB Operations</title>
+	<para>
+		All standard &osips; CacheDB script functions are supported.  The
+		engine identifier in every call must match the group name used in
+		<varname>cachedb_url</varname> (default: <emphasis>nats</emphasis>).
+	</para>
+
+	<section id="cachedb_store" xreflabel="cache_store">
+	<title>cache_store — KV put</title>
+	<para>
+		Stores a string value under the given key in the NATS KV bucket.
+		The key must consist of valid NATS subject tokens (alphanumeric,
+		hyphens, underscores, and dots as separators; no spaces or colons).
+		If the key already exists it is overwritten.
+	</para>
+	<para>
+		When the key begins with <varname>fts_json_prefix</varname> and the
+		value is a valid JSON object, the document is parsed and added to the
+		in-process search index so that it becomes immediately queryable via
+		<function>cache_query</function>.
+	</para>
+	<example>
+	<title><function>cache_store</function> with nats</title>
+	<programlisting format="linespecific">
+...
+# Plain key-value
+cache_store("nats", "call.$ci", "$fu|$tu");
+
+# JSON document (auto-indexed because key starts with "json:")
+cache_store("nats", "json.user.alice",
+    "{\"name\":\"alice\",\"domain\":\"example.com\",\"status\":\"active\"}");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="cachedb_fetch" xreflabel="cache_fetch">
+	<title>cache_fetch — KV get</title>
+	<para>
+		Retrieves the current value of a key from the NATS KV bucket and
+		stores it in the given pseudo-variable.  Returns 1 on success, -2
+		if the key does not exist, and -1 on error.
+	</para>
+	<example>
+	<title><function>cache_fetch</function> with nats</title>
+	<programlisting format="linespecific">
+...
+cache_fetch("nats", "call.$ci", $var(call_info));
+if ($retcode == -2) {
+    xlog("no active call record for $ci\n");
+}
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="cachedb_remove" xreflabel="cache_remove">
+	<title>cache_remove — KV delete</title>
+	<para>
+		Removes a key from the NATS KV bucket.  The operation is a soft
+		delete that creates a deletion tombstone while preserving revision
+		history.  Use the <emphasis>KV PURGE</emphasis> raw query command to
+		permanently remove a key and its full history.
+	</para>
+	<example>
+	<title><function>cache_remove</function> with nats</title>
+	<programlisting format="linespecific">
+...
+cache_remove("nats", "call.$ci");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="cachedb_add" xreflabel="cache_add">
+	<title>cache_add — atomic counter increment</title>
+	<para>
+		Atomically increments an integer counter stored in the KV bucket.
+		The operation uses compare-and-swap (CAS) with up to three retry
+		attempts, safely handling concurrent increments from multiple &osips;
+		worker processes.  If the key does not yet exist it is created with
+		an initial value equal to <emphasis>increment</emphasis>.
+	</para>
+	<para>
+		The counter is stored as a plain decimal integer string in the KV
+		bucket.  The <emphasis>expires</emphasis> argument is accepted for
+		API compatibility but does not set a per-key TTL (NATS KV TTL is
+		bucket-wide; see <varname>kv_ttl</varname>).
+	</para>
+	<example>
+	<title><function>cache_add</function> with nats</title>
+	<programlisting format="linespecific">
+...
+cache_add("nats", "counter.calls.$fU", 1, 0);
+cache_counter_fetch("nats", "counter.calls.$fU", $var(call_count));
+xlog("$fU has $var(call_count) active calls\n");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="cachedb_sub" xreflabel="cache_sub">
+	<title>cache_sub — atomic counter decrement</title>
+	<para>
+		Atomically decrements an integer counter.  Equivalent to
+		<function>cache_add</function> with a negated increment value.
+		Uses CAS with three retries.
+	</para>
+	<example>
+	<title><function>cache_sub</function> with nats</title>
+	<programlisting format="linespecific">
+...
+cache_sub("nats", "counter.calls.$fU", 1, 0);
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="cachedb_counter_fetch" xreflabel="cache_counter_fetch">
+	<title>cache_counter_fetch — read counter value</title>
+	<para>
+		Reads the current integer value of a counter key.  Returns 1 on
+		success (counter value in pvar), -2 if the key does not exist, and
+		-1 on error.
+	</para>
+	<example>
+	<title><function>cache_counter_fetch</function> with nats</title>
+	<programlisting format="linespecific">
+...
+cache_counter_fetch("nats", "counter.calls.$fU", $var(n));
+if ($var(n) > 5) {
+    sl_send_reply(503, "Too Many Calls");
+    exit;
+}
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="json_fts_index" xreflabel="JSON Full-Text Search Index">
+	<title>JSON Full-Text Search Index</title>
+	<para>
+		The <emphasis>cachedb_nats</emphasis> module maintains a process-local
+		hash-based search index over JSON documents stored in the KV bucket.
+		Documents are included in the index when their key begins with the
+		string defined by <varname>fts_json_prefix</varname> (default:
+		<emphasis>json:</emphasis>).  All top-level string and integer fields
+		of each document are indexed as <emphasis>field:value</emphasis>
+		entries mapping to the document key.
+	</para>
+	<para>
+		The index supports equality queries via the standard CacheDB
+		<function>cache_query</function> call:
+	</para>
+	<example>
+	<title><function>cache_query</function> — JSON equality search</title>
+	<programlisting format="linespecific">
+...
+# Find all documents where the "domain" field equals "example.com"
+cache_query("nats", "domain", "example.com", $var(results));
+if ($retcode == 1) {
+    xlog("matched documents: $var(results)\n");
+}
+...
+	</programlisting>
+	</example>
+	<para>
+		<emphasis role="bold">Index lifecycle:</emphasis>
+	</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis>Startup:</emphasis> the index is built by scanning the
+			entire KV bucket during <function>child_init</function>.  Every
+			key matching <varname>fts_json_prefix</varname> is fetched and
+			parsed.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Live updates:</emphasis> the KV watcher thread calls
+			<function>nats_json_index_add</function> or
+			<function>nats_json_index_remove</function> for every put,
+			delete, or purge event received from the NATS server.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Reconnection:</emphasis> when the watcher detects that
+			a reconnect epoch change has occurred, it performs a full
+			<function>nats_json_index_rebuild</function> — clearing all
+			existing entries and repopulating from the current KV state.
+			This guarantees the index never drifts after a disconnect.
+		</para></listitem>
+	</itemizedlist>
+	<para>
+		<emphasis role="bold">Thread safety:</emphasis>
+		all index operations acquire a dedicated <emphasis>pthread_mutex_t</emphasis>.
+		The KV watcher thread (writer) and &osips; SIP worker processes
+		(readers via <function>cache_query</function>) contend on this mutex.
+		Index memory is managed with raw <function>malloc</function> and
+		<function>free</function> rather than &osips;
+		<function>pkg_malloc</function>, because the watcher pthread and SIP
+		worker thread share the same process address space and
+		<function>pkg_malloc</function> is not thread-safe across pthreads.
+		Statistics counters use <function>__atomic_fetch_add</function> for
+		lock-free cross-thread accumulation.
+	</para>
+	<para>
+		The maximum number of results returned per query is controlled by
+		<varname>fts_max_results</varname>.
+	</para>
+	</section>
+
+
+	<section id="kv_watcher" xreflabel="KV Watcher">
+	<title>KV Watcher</title>
+	<para>
+		The KV watcher is a self-healing pthread that runs inside the first
+		&osips; SIP worker process (rank 1) and monitors the NATS KV bucket
+		for real-time mutations.  It is started by
+		<function>nats_watch_start</function> during
+		<function>child_init</function> when at least one
+		<varname>kv_watch</varname> pattern is configured.
+	</para>
+	<para>
+		Only a single watcher per &osips; instance is started (on rank 1)
+		to minimise JetStream ordered consumer count.  Each watcher creates
+		one JetStream ordered push consumer in the NATS server; during
+		cluster topology changes nats.c rebalances these consumers
+		internally, and fewer consumers reduce the window for race conditions
+		during failover.
+	</para>
+	<para>
+		The watcher follows a four-phase loop:
+	</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis role="bold">Phase 1 — Wait for connectivity:</emphasis>
+			polls <function>nats_pool_is_connected</function> until the NATS
+			connection is established.  Sleeps briefly between polls to avoid
+			busy-waiting.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">Phase 2 — Rebuild index:</emphasis>
+			acquires a fresh KV handle from the pool and calls
+			<function>nats_json_index_rebuild</function> to repopulate the
+			search index from the current bucket contents.  This is the
+			crash-recovery path that ensures the index is consistent after
+			any disconnect.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">Phase 3 — Create watcher:</emphasis>
+			calls <function>kvStore_WatchMulti</function> with the configured
+			key patterns to create a <emphasis>kvWatcher</emphasis> handle.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">Phase 4 — Process updates:</emphasis>
+			calls <function>kvWatcher_Next</function> in a loop.  For each
+			received <emphasis>kvEntry</emphasis> the watcher:
+			<itemizedlist>
+				<listitem><para>
+					Updates the JSON search index
+					(<function>nats_json_index_add</function> for put,
+					<function>nats_json_index_remove</function> for delete
+					or purge).
+				</para></listitem>
+				<listitem><para>
+					Raises an <emphasis>E_NATS_KV_CHANGE</emphasis> EVI
+					event carrying the key, operation type, value (on puts),
+					and NATS revision number.
+				</para></listitem>
+			</itemizedlist>
+			If a reconnect epoch change is detected the loop exits back to
+			Phase 1.
+		</para></listitem>
+	</itemizedlist>
+	<para>
+		The <varname>_watcher_running</varname> flag is an
+		<emphasis>atomic_int</emphasis> accessed via
+		<function>atomic_load</function> and
+		<function>atomic_store</function>.  The
+		<function>nats_watch_stop</function> function signals the thread to
+		exit, stops the kvWatcher to unblock
+		<function>kvWatcher_Next</function>, then joins the thread.  It is
+		safe to call during &osips; shutdown regardless of whether the
+		watcher was ever started.
+	</para>
+	</section>
+
+
+	<section id="raw_query_commands" xreflabel="Raw Query Commands">
+	<title>Raw Query Commands</title>
+	<para>
+		The module exposes NATS KV administrative operations via the standard
+		CacheDB <function>cache_raw_query</function> interface.  The
+		following commands are supported:
+	</para>
+
+	<section id="raw_query_kv_keys" xreflabel="KV KEYS">
+	<title>KV KEYS</title>
+	<para>
+		Lists all keys currently present in the KV bucket.  The result is
+		stored in the provided pseudo-variable as a comma-separated string
+		of key names.
+	</para>
+	<example>
+	<title><emphasis>KV KEYS</emphasis> raw query</title>
+	<programlisting format="linespecific">
+...
+cache_raw_query("nats", "KV KEYS", $var(keys));
+xlog("all KV keys: $var(keys)\n");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="raw_query_kv_purge" xreflabel="KV PURGE">
+	<title>KV PURGE &lt;key&gt;</title>
+	<para>
+		Permanently removes a key and its entire revision history from the
+		KV bucket.  Unlike a soft delete (which leaves a deletion tombstone),
+		a purge is irreversible and frees the storage used by all historical
+		revisions.
+	</para>
+	<example>
+	<title><emphasis>KV PURGE</emphasis> raw query</title>
+	<programlisting format="linespecific">
+...
+cache_raw_query("nats", "KV PURGE json.user.alice");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="raw_query_kv_bucket_info" xreflabel="KV BUCKET INFO">
+	<title>KV BUCKET INFO</title>
+	<para>
+		Returns a JSON object describing the KV bucket configuration:
+		bucket name, replication factor, history depth, TTL, and the
+		backing JetStream stream name.
+	</para>
+	<example>
+	<title><emphasis>KV BUCKET INFO</emphasis> raw query</title>
+	<programlisting format="linespecific">
+...
+cache_raw_query("nats", "KV BUCKET INFO", $var(info));
+xlog("bucket info: $var(info)\n");
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="map_operations" xreflabel="Map Operations">
+	<title>Map Operations</title>
+	<para>
+		The module supports composite <emphasis>key:subkey</emphasis>
+		addressing for reading and writing individual fields of JSON
+		documents stored in the KV bucket.  These operations are accessible
+		via the column-oriented CacheDB API functions
+		(<function>map_get</function>, <function>map_set</function>,
+		<function>map_remove</function>) which are used internally by
+		&osips; modules such as <emphasis>usrloc</emphasis> when configured
+		with a CacheDB backend.
+	</para>
+	<para>
+		<emphasis role="bold">map_get</emphasis> — retrieves the JSON
+		document at <emphasis>key</emphasis> and returns its top-level
+		fields as separate columns in a <emphasis>cdb_res_t</emphasis>
+		result set.
+	</para>
+	<para>
+		<emphasis role="bold">map_set</emphasis> — reads the existing JSON
+		document at <emphasis>key</emphasis> (or starts from an empty
+		object), merges the provided field-value pairs, and writes the
+		result back using CAS for consistency.
+	</para>
+	<para>
+		<emphasis role="bold">map_remove</emphasis> — reads the existing
+		JSON document, removes the named field (subkey), and writes the
+		result back.  If no fields remain after removal the entire key is
+		deleted from the bucket.
+	</para>
+	</section>
+
+
+	<section id="exported_mi" xreflabel="Exported MI Functions">
+	<title>Exported MI Functions</title>
+
+	<section id="mi_nats_kv_status" xreflabel="nats_kv_status">
+	<title><function moreinfo="none">nats_kv_status</function></title>
+	<para>
+		Returns a JSON object with the current KV bucket configuration
+		and NATS connection state.  Useful for monitoring and diagnostics.
+	</para>
+	<para>Response fields:</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis role="bold">bucket</emphasis> (string) —
+			name of the configured KV bucket.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">replicas</emphasis> (integer) —
+			configured replication factor.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">history</emphasis> (integer) —
+			configured history depth per key.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">ttl</emphasis> (integer) —
+			configured bucket TTL in seconds (0 = no expiry).
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">connected</emphasis> (string) —
+			<emphasis>yes</emphasis> if the NATS connection pool is currently
+			connected, <emphasis>no</emphasis> otherwise.
+		</para></listitem>
+	</itemizedlist>
+	<example>
+	<title><function>nats_kv_status</function> MI call</title>
+	<programlisting format="linespecific">
+## opensipsctl mi nats_kv_status
+{
+    "bucket": "opensips",
+    "replicas": 3,
+    "history": 5,
+    "ttl": 0,
+    "connected": "yes"
+}
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="exported_events" xreflabel="Exported Events">
+	<title>Exported Events</title>
+
+	<section id="event_nats_kv_change" xreflabel="E_NATS_KV_CHANGE">
+	<title><varname>E_NATS_KV_CHANGE</varname></title>
+	<para>
+		Raised by the KV watcher thread for every mutation received from
+		the NATS KV bucket.  This event allows &osips; routing scripts to
+		react to changes made by any client in the cluster — not just
+		changes made through &osips; itself.
+	</para>
+	<para>
+		The event is raised with the following parameters:
+	</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis role="bold">key</emphasis> (string) —
+			the KV key that was modified.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">operation</emphasis> (string) —
+			the type of mutation: <emphasis>put</emphasis> (value created or
+			updated), <emphasis>delete</emphasis> (soft delete tombstone), or
+			<emphasis>purge</emphasis> (hard delete with history removal).
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">value</emphasis> (string) —
+			the new value of the key.  Only present for
+			<emphasis>put</emphasis> operations; absent for
+			<emphasis>delete</emphasis> and <emphasis>purge</emphasis>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis role="bold">revision</emphasis> (integer) —
+			the NATS JetStream sequence number (revision) of this mutation.
+			Revisions are monotonically increasing and globally ordered
+			within the KV bucket.
+		</para></listitem>
+	</itemizedlist>
+	<example>
+	<title>Subscribing to <varname>E_NATS_KV_CHANGE</varname> in opensips.cfg</title>
+	<programlisting format="linespecific">
+...
+startup_route {
+    subscribe_event("E_NATS_KV_CHANGE", "nats:opensips-events");
+}
+
+event_route[E_NATS_KV_CHANGE] {
+    xlog("KV change: key=$param(key) op=$param(operation) rev=$param(revision)\n");
+    if ($param(operation) == "put") {
+        xlog("  new value: $param(value)\n");
+    }
+}
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+
+	<section id="cluster_configuration" xreflabel="Cluster Configuration">
+	<title>Cluster Configuration</title>
+	<para>
+		For production deployments a three-node NATS JetStream cluster is
+		recommended.  The <varname>nats_url</varname> parameter is a seed
+		list used only for the initial bootstrap connection.  After the first
+		connection is established, nats.c discovers all cluster peers via
+		the INFO protocol gossip mechanism
+		(<emphasis>connect_urls</emphasis>) and maintains the full topology
+		automatically.  Adding or removing nodes from the cluster is
+		transparent to the &osips; module.
+	</para>
+	<para>
+		Use DNS hostnames rather than IP addresses in
+		<varname>nats_url</varname>.  The nats.c library calls
+		<function>getaddrinfo</function> on each reconnection attempt,
+		so DNS-based hostnames automatically pick up topology changes such
+		as node replacement or IP address reassignment.
+	</para>
+	<para>
+		The <varname>kv_replicas</varname> parameter controls the JetStream
+		replication factor and only takes effect when the KV bucket is first
+		created.  A value of 3 on a three-node cluster tolerates one-node
+		failure without data loss or availability impact.  To change the
+		replication factor on an existing bucket use the NATS CLI:
+	</para>
+	<programlisting format="linespecific">
+nats kv update opensips --replicas=3
+	</programlisting>
+	<para>
+		The internal reconnection loop is unlimited at runtime: nats.c will
+		never permanently remove a server from its routing pool.  The
+		<varname>max_reconnect</varname> parameter only limits the number of
+		retries during the initial connection phase in
+		<function>child_init</function>.
+	</para>
+	<example>
+	<title>Three-node cluster configuration</title>
+	<programlisting format="linespecific">
+...
+loadmodule "cachedb_nats.so"
+
+modparam("cachedb_nats", "cachedb_url", "nats://nats-1:4222/")
+modparam("cachedb_nats", "nats_url",
+    "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")
+modparam("cachedb_nats", "kv_bucket",   "opensips")
+modparam("cachedb_nats", "kv_replicas", 3)
+modparam("cachedb_nats", "kv_history",  5)
+modparam("cachedb_nats", "kv_ttl",      0)
+modparam("cachedb_nats", "kv_watch",    "usrloc.>")
+modparam("cachedb_nats", "kv_watch",    "json.>")
+...
+	</programlisting>
+	</example>
+	<example>
+	<title>Single-node development configuration</title>
+	<programlisting format="linespecific">
+...
+loadmodule "cachedb_nats.so"
+
+modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:4222/")
+modparam("cachedb_nats", "kv_replicas", 1)
+modparam("cachedb_nats", "kv_watch",    ">")
+...
+	</programlisting>
+	</example>
+	</section>
+
+</chapter>

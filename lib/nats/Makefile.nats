@@ -1,0 +1,20 @@
+# lib/nats/Makefile.nats — shared NATS dependency detection
+# Include this from any module that needs libnats (event_nats, cachedb_nats)
+# Follows the same pattern as Makefile.openssl
+
+ifeq ($(CROSS_COMPILE),)
+NATS_BUILDER := $(shell \
+	if pkg-config --exists libnats; then \
+		echo 'pkg-config libnats'; \
+	elif pkg-config --exists nats; then \
+		echo 'pkg-config nats'; \
+	fi)
+endif
+
+ifneq ($(NATS_BUILDER),)
+	DEFS += $(shell $(NATS_BUILDER) --cflags)
+	LIBS += $(shell $(NATS_BUILDER) --libs)
+else
+	DEFS += -I$(LOCALBASE)/include
+	LIBS += -L$(LOCALBASE)/lib -lnats
+endif

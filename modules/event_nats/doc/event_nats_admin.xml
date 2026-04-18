@@ -1,0 +1,987 @@
+<?xml version="1.0" encoding='UTF-8'?>
+<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
+"http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd" [
+<!ENTITY % docentities SYSTEM "../../../doc/entities.xml">
+%docentities;
+]>
+
+<chapter>
+
+    <title>&osips; event_nats Module</title>
+
+    <!-- ============================================================ -->
+    <section id="event_nats-overview">
+        <title>Overview</title>
+        <para>
+            The <emphasis>event_nats</emphasis> module implements a
+            <ulink url="https://nats.io">NATS</ulink> transport for the
+            &osips; Event Interface (EVI).  It registers the
+            <varname>nats</varname> transport protocol with the EVI subsystem,
+            enabling any &osips; event to be published to a NATS subject by
+            subscribing it with a <varname>nats:&lt;subject&gt;</varname> socket
+            URI.  Events are delivered as JSON payloads containing the event
+            name and all associated parameters.
+        </para>
+        <para>
+            In addition to the EVI transport, the module exports the
+            <function>nats_publish()</function> script function for direct
+            publishing from <filename>opensips.cfg</filename> routing blocks.
+            This allows arbitrary JSON (or other text) payloads to be pushed
+            to any NATS subject at any point in call processing, independent
+            of the event system.
+        </para>
+        <para>
+            Optional <emphasis>JetStream</emphasis> support is available via
+            the <varname>jetstream</varname> module parameter.  When enabled,
+            both EVI and script publishes use the nats.c async JetStream
+            publish API with server-side ack tracking, providing at-least-once
+            delivery guarantees for streams configured in the NATS cluster.
+        </para>
+        <para>
+            NATS connections are managed by the shared
+            <varname>lib/nats</varname> connection pool
+            (<filename>libnats_pool.so</filename>) — a dynamic library
+            installed alongside the module <filename>.so</filename> files
+            and resolved at load time via an <emphasis>$ORIGIN</emphasis>
+            RUNPATH.  Each qualifying worker process obtains its own
+            connection from the pool during <function>child_init()</function>.
+            The pool handles startup retries (bounded by
+            <varname>max_reconnect</varname>) and runtime reconnection
+            (unlimited) automatically.
+        </para>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="event_nats-dependencies">
+        <title>Dependencies</title>
+
+        <section id="event_nats-deps-opensips">
+            <title>&osips; Modules</title>
+            <para>
+                The <emphasis>event_nats</emphasis> module has no mandatory
+                dependency on any other &osips; module.  It links dynamically
+                against the shared NATS connection pool
+                (<filename>lib/nats/libnats_pool.so</filename>), which is
+                installed alongside the module <filename>.so</filename> files
+                and resolved at load time via an <emphasis>$ORIGIN</emphasis>
+                RUNPATH; no separate &osips; module exports the pool.
+            </para>
+            <para>
+                When more than one NATS module
+                (<emphasis>event_nats</emphasis>,
+                <emphasis>cachedb_nats</emphasis>,
+                <emphasis>nats_consumer</emphasis>, ...) is loaded in the same
+                &osips; instance they all share one
+                <filename>libnats_pool.so</filename> and therefore one copy of
+                the pool globals
+                (<varname>pool_cfg</varname>, <varname>_nc</varname>,
+                <varname>_js</varname>, KV handle cache).  The first module to
+                call <function>nats_pool_register</function> at
+                <function>mod_init</function> time seeds the connection
+                parameters (seed URL list, TLS options, reconnect tuning);
+                later calls from other modules only append any additional
+                seed URLs.  <function>loadmodule</function> the module whose
+                <varname>nats_url</varname> and TLS parameters should take
+                effect <emphasis>first</emphasis> in
+                <filename>opensips.cfg</filename>.
+            </para>
+            <para>
+                When TLS is used, the <emphasis>tls_openssl</emphasis> module
+                must be loaded <emphasis>before</emphasis>
+                <emphasis>event_nats</emphasis> in
+                <filename>opensips.cfg</filename>.  In that configuration,
+                <varname>skip_openssl_init</varname> must be set to
+                <varname>1</varname> (the default) so that nats.c defers
+                OpenSSL lifecycle management to &osips;.
+            </para>
+        </section>
+
+        <section id="event_nats-deps-external">
+            <title>External Libraries</title>
+            <para>
+                The following external library is required:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <emphasis>nats.c</emphasis> v3.13 or later
+                        (<filename>libnats.so</filename>) — the official C
+                        client library for NATS, available from
+                        <ulink url="https://github.com/nats-io/nats.c">
+                        github.com/nats-io/nats.c</ulink>.  For TLS support,
+                        nats.c must be built against OpenSSL; WolfSSL,
+                        mbedTLS, and other TLS libraries are not supported by
+                        the nats.c build system.  Build nats.c against the
+                        same OpenSSL installation used by &osips; to avoid
+                        symbol conflicts at runtime.
+                    </para>
+                </listitem>
+            </itemizedlist>
+        </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="event_nats-parameters">
+        <title>Exported Parameters</title>
+
+        <!-- nats_url -->
+        <section id="param_nats_url">
+            <title><varname>nats_url</varname> (string)</title>
+            <para>
+                Comma-separated list of NATS server seed URLs used for the
+                initial connection.  Each entry must include the scheme
+                (<varname>nats://</varname> for plain TCP or
+                <varname>tls://</varname> for TLS) and may specify either an
+                IP address or a DNS hostname.
+            </para>
+            <para>
+                <emphasis>Cluster topology is auto-discovered</emphasis> via
+                the NATS INFO gossip protocol.  After the first successful
+                connection the nats.c library receives a
+                <varname>connect_urls</varname> list from the server and adds
+                all cluster peers to its internal pool automatically.  The
+                value of <varname>nats_url</varname> is therefore a
+                <emphasis>bootstrap seed list only</emphasis> — it does not
+                need to enumerate every cluster node.
+            </para>
+            <para>
+                Use DNS hostnames rather than bare IP addresses where possible.
+                nats.c re-invokes <function>getaddrinfo()</function> on each
+                reconnect attempt, allowing the hostname to resolve to a
+                different IP if the original server has been replaced or
+                renumbered.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>"nats://127.0.0.1:4222"</varname>
+            </para>
+            <example>
+                <title>Single server</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "nats_url", "nats://127.0.0.1:4222")
+                </programlisting>
+            </example>
+            <example>
+                <title>Three-node cluster seed list with DNS hostnames</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "nats_url",
+    "nats://nats-1.example.com:4222,nats://nats-2.example.com:4222,nats://nats-3.example.com:4222")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- jetstream -->
+        <section id="param_jetstream">
+            <title><varname>jetstream</varname> (integer)</title>
+            <para>
+                Enable JetStream async publish for both EVI events and
+                <function>nats_publish()</function> script calls.
+            </para>
+            <para>
+                When set to <varname>1</varname>, all publishes use the
+                nats.c <function>js_PublishAsync()</function> API.  The NATS
+                server acknowledges each message asynchronously; ack results
+                are tracked in the module statistics counters
+                <varname>js_ack_ok</varname> and
+                <varname>js_ack_failed</varname>.  JetStream provides
+                at-least-once delivery when the target subject is covered by a
+                persistent stream configured in the NATS cluster.
+            </para>
+            <para>
+                When set to <varname>0</varname> (the default), core NATS
+                publish (<function>natsConnection_Publish()</function>) is
+                used.  Core publish is fire-and-forget with no server
+                acknowledgement.
+            </para>
+            <para>
+                JetStream requires the NATS server to have JetStream enabled
+                (<varname>jetstream: true</varname> in
+                <filename>nats-server.conf</filename>) and at least one
+                matching stream defined for the target subjects.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>0</varname>
+                (disabled)
+            </para>
+            <example>
+                <title>Enable JetStream publish</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "jetstream", 1)
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- reconnect_wait -->
+        <section id="param_reconnect_wait">
+            <title><varname>reconnect_wait</varname> (integer)</title>
+            <para>
+                Time in milliseconds to wait between consecutive connection
+                attempts during <function>child_init()</function> startup.
+                This parameter governs only the bounded startup retry loop;
+                runtime reconnection (after a connection drop) is handled
+                automatically by the nats.c library using its own internal
+                backoff and is not limited by this value.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>2000</varname>
+                (2 seconds)
+            </para>
+            <example>
+                <title>Set reconnect wait to 1 second</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "reconnect_wait", 1000)
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- max_reconnect -->
+        <section id="param_max_reconnect">
+            <title><varname>max_reconnect</varname> (integer)</title>
+            <para>
+                Maximum number of connection attempts made during
+                <function>child_init()</function> startup before the worker
+                process gives up and fails to initialize.  If the NATS server
+                is not reachable within
+                <varname>max_reconnect</varname> * <varname>reconnect_wait</varname>
+                milliseconds, <function>child_init()</function> returns
+                <varname>-1</varname> and the worker process exits.
+            </para>
+            <para>
+                This limit applies only to the <emphasis>startup</emphasis>
+                connection phase.  Once a worker is running, runtime
+                reconnection is unlimited — nats.c will continue retrying
+                indefinitely and will never permanently drop a server from its
+                candidate pool.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>60</varname>
+            </para>
+            <example>
+                <title>Allow up to 30 startup attempts</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "max_reconnect", 30)
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_skip_verify -->
+        <section id="param_tls_skip_verify">
+            <title><varname>tls_skip_verify</varname> (integer)</title>
+            <para>
+                Skip server TLS certificate verification.  When set to
+                <varname>1</varname> (the default), nats.c does not verify
+                the server's certificate chain or hostname.  This is
+                appropriate for internal cluster networks where the NATS
+                servers use self-signed certificates.
+            </para>
+            <para>
+                Set to <varname>0</varname> to enable full certificate
+                verification.  In that case <varname>tls_ca</varname> must be
+                configured with the CA certificate that signed the server
+                certificate, and <varname>tls_hostname</varname> must be set
+                if connecting by IP address (since nats.c enforces hostname
+                verification by default via
+                <varname>NATS_FORCE_HOST_VERIFICATION</varname>).
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>1</varname>
+                (skip verification)
+            </para>
+            <example>
+                <title>Enable full TLS certificate verification</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_skip_verify", 0)
+modparam("event_nats", "tls_ca",          "/etc/ssl/certs/nats-ca.pem")
+modparam("event_nats", "tls_hostname",    "nats-1.example.com")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_ca -->
+        <section id="param_tls_ca">
+            <title><varname>tls_ca</varname> (string)</title>
+            <para>
+                Path to the PEM-encoded CA certificate file used to verify
+                the NATS server's certificate.  Required when
+                <varname>tls_skip_verify</varname> is set to
+                <varname>0</varname>.  Has no effect when certificate
+                verification is skipped.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>NULL</varname>
+                (not set)
+            </para>
+            <example>
+                <title>Set CA certificate</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_ca", "/etc/ssl/certs/nats-ca.pem")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_cert -->
+        <section id="param_tls_cert">
+            <title><varname>tls_cert</varname> (string)</title>
+            <para>
+                Path to the PEM-encoded client certificate file for mutual
+                TLS (mTLS) authentication.  When set, the module presents
+                this certificate to the NATS server during the TLS handshake.
+                <varname>tls_key</varname> must also be configured.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>NULL</varname>
+                (not set; client certificate not presented)
+            </para>
+            <example>
+                <title>Configure mutual TLS</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_cert", "/etc/opensips/nats-client.crt")
+modparam("event_nats", "tls_key",  "/etc/opensips/nats-client.key")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_key -->
+        <section id="param_tls_key">
+            <title><varname>tls_key</varname> (string)</title>
+            <para>
+                Path to the PEM-encoded private key file corresponding to
+                <varname>tls_cert</varname>.  Required when
+                <varname>tls_cert</varname> is configured.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>NULL</varname>
+                (not set)
+            </para>
+            <example>
+                <title>Set client private key</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_key", "/etc/opensips/nats-client.key")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_hostname -->
+        <section id="param_tls_hostname">
+            <title><varname>tls_hostname</varname> (string)</title>
+            <para>
+                Expected hostname in the NATS server's TLS certificate,
+                used for SNI and hostname verification.  This parameter is
+                necessary when connecting to a NATS server by IP address and
+                <varname>tls_skip_verify</varname> is <varname>0</varname>,
+                because nats.c enforces hostname verification
+                (<varname>NATS_FORCE_HOST_VERIFICATION</varname> is
+                <varname>ON</varname> by default) and an IP address will not
+                match the certificate's DNS Subject Alternative Names.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>NULL</varname>
+                (derived from the URL hostname)
+            </para>
+            <example>
+                <title>Set expected hostname when connecting by IP</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "nats_url",      "tls://10.0.0.50:4222")
+modparam("event_nats", "tls_skip_verify", 0)
+modparam("event_nats", "tls_ca",        "/etc/ssl/certs/nats-ca.pem")
+modparam("event_nats", "tls_hostname",  "nats-1.example.com")
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- skip_openssl_init -->
+        <section id="param_skip_openssl_init">
+            <title><varname>skip_openssl_init</varname> (integer)</title>
+            <para>
+                Instruct nats.c to skip its own OpenSSL initialization and
+                cleanup.  When set to <varname>1</varname> (the default),
+                nats.c calls <function>nats_Open(-1)</function> before
+                establishing connections but does not call
+                <function>SSL_library_init()</function>,
+                <function>SSL_load_error_strings()</function>, or
+                <function>EVP_cleanup()</function>.  &osips; (via the
+                <emphasis>tls_openssl</emphasis> module) manages the OpenSSL
+                lifecycle.
+            </para>
+            <para>
+                Set to <varname>0</varname> only in configurations where no
+                other &osips; module initializes OpenSSL.  In practice this
+                situation does not arise — any deployment using TLS will have
+                <emphasis>tls_openssl</emphasis> loaded, and even non-TLS
+                deployments may have modules that depend indirectly on OpenSSL.
+                Allowing nats.c to initialize OpenSSL concurrently with &osips;
+                can cause double-initialization and subsequent heap corruption
+                at shutdown.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>1</varname>
+                (skip nats.c OpenSSL init)
+            </para>
+            <example>
+                <title>Default: skip nats.c OpenSSL init (tls_openssl loaded)</title>
+                <programlisting format="linespecific">
+loadmodule "tls_openssl.so"
+loadmodule "event_nats.so"
+modparam("event_nats", "skip_openssl_init", 1)
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="param_subscribe">
+            <title><varname>subscribe</varname> (string, multiple)</title>
+            <para>
+                Configures a NATS subscription that dispatches received
+                messages to an <literal>event_route</literal> handler.
+                A dedicated consumer process subscribes to the specified
+                NATS subject and dispatches messages to SIP workers via
+                IPC, which then call <function>evi_raise_event()</function>
+                to trigger the corresponding <literal>event_route</literal>.
+            </para>
+            <para>
+                Format: <literal>subject=&lt;pattern&gt;;event=&lt;name&gt;[;queue=&lt;group&gt;]</literal>
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis>subject</emphasis> — NATS subject pattern
+                    (wildcards <literal>*</literal> and <literal>&gt;</literal>
+                    are supported).
+                </para></listitem>
+                <listitem><para>
+                    <emphasis>event</emphasis> — EVI event name to raise.
+                    The corresponding <literal>event_route[&lt;name&gt;]</literal>
+                    must exist in <filename>opensips.cfg</filename>.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis>queue</emphasis> (optional) — NATS queue group
+                    for load-balanced consumption. When set, only one
+                    subscriber in the group receives each message.
+                </para></listitem>
+            </itemizedlist>
+            <para>
+                This parameter can be set multiple times to configure
+                multiple subscriptions (up to 32).
+            </para>
+            <para>
+                Inside the <literal>event_route</literal>, these parameters
+                are available via <literal>$param()</literal>:
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <literal>$param(subject)</literal> — the NATS subject
+                    the message arrived on.
+                </para></listitem>
+                <listitem><para>
+                    <literal>$param(data)</literal> — the message payload.
+                </para></listitem>
+            </itemizedlist>
+            <example>
+                <title><varname>subscribe</varname> usage</title>
+                <programlisting format="linespecific">
+# opensips.cfg:
+loadmodule "event_nats.so"
+
+# Subscribe to call events and ASR results
+modparam("event_nats", "subscribe",
+    "subject=opensips.calls.>;event=E_NATS_CALL")
+modparam("event_nats", "subscribe",
+    "subject=ai.asr.>;event=E_NATS_ASR")
+
+# Load-balanced subscription with queue group
+modparam("event_nats", "subscribe",
+    "subject=jobs.>;event=E_NATS_JOB;queue=workers")
+
+# Event route handlers:
+event_route[E_NATS_CALL] {
+    xlog("L_INFO", "Call event: subject=$param(subject) data=$param(data)\n");
+}
+
+event_route[E_NATS_ASR] {
+    xlog("L_INFO", "ASR result: $param(data)\n");
+}
+
+event_route[E_NATS_JOB] {
+    xlog("L_INFO", "Job: $param(data)\n");
+}
+                </programlisting>
+            </example>
+        </section>
+
+    </section><!-- /parameters -->
+
+    <!-- ============================================================ -->
+    <section id="event_nats-functions">
+        <title>Exported Functions</title>
+
+        <section id="func_nats_publish">
+            <title>
+                <function moreinfo="none">nats_publish(subject, payload)</function>
+            </title>
+            <para>
+                Publish a message to a NATS subject directly from an
+                &osips; routing script.  This function operates independently
+                of the EVI subsystem and can be called at any point in script
+                execution to push arbitrary content to NATS.
+            </para>
+            <para>
+                The <emphasis>subject</emphasis> must be a valid NATS subject
+                token string and must not exceed 512 bytes.  If the subject
+                is longer than 511 bytes the function logs an error and
+                returns <varname>-1</varname> without publishing.
+            </para>
+            <para>
+                The <emphasis>payload</emphasis> is published as-is with no
+                transformation.  By convention JSON is used, but any binary
+                or text content accepted by nats.c is valid.
+            </para>
+            <para>
+                When the <varname>jetstream</varname> module parameter is
+                <varname>1</varname>, the publish uses the nats.c
+                JetStream async API
+                (<function>js_PublishAsync()</function>); otherwise core NATS
+                publish (<function>natsConnection_Publish()</function>) is
+                used.
+            </para>
+            <para>
+                Both <emphasis>subject</emphasis> and
+                <emphasis>payload</emphasis> may contain &osips; pseudo-variable
+                references, which are expanded at call time.
+            </para>
+            <para>Meaning of the parameters:</para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <emphasis>subject</emphasis> (string) — NATS subject
+                        to publish to.  Maximum 511 bytes.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <emphasis>payload</emphasis> (string) — Message
+                        payload.  Typically a JSON object.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <para>
+                Return values:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <varname>1</varname> — publish succeeded (message
+                        handed to nats.c; for JetStream, ack is tracked
+                        asynchronously).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>-1</varname> — publish failed (subject too
+                        long, missing parameter, or nats.c error).
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <para>
+                This function can be used from any route type
+                (<emphasis>ANY_ROUTE</emphasis>).
+            </para>
+            <example>
+                <title>Publish a SIP registration event to NATS</title>
+                <programlisting format="linespecific">
+route[ON_REGISTER] {
+    $var(payload) = "{\"event\":\"register\",\"call_id\":\"" + $ci
+        + "\",\"from\":\"" + $fu + "\"}";
+    nats_publish("sip.registrations", $var(payload));
+}
+                </programlisting>
+            </example>
+            <example>
+                <title>Publish call-setup notification with JetStream</title>
+                <programlisting format="linespecific">
+# In opensips.cfg modparams section:
+modparam("event_nats", "jetstream", 1)
+
+# In routing script:
+route[CALL_SETUP] {
+    $var(evt) = "{\"event\":\"call_setup\",\"call_id\":\"" + $ci
+        + "\",\"caller\":\"" + $fu
+        + "\",\"callee\":\"" + $ru + "\"}";
+    if (!nats_publish("sip.calls.setup", $var(evt))) {
+        xlog("L_WARN", "NATS publish failed for call $ci\n");
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+    </section><!-- /functions -->
+
+    <!-- ============================================================ -->
+    <section id="event_nats-mi">
+        <title>Exported MI Functions</title>
+
+        <section id="mi_nats_status">
+            <title><function moreinfo="none">nats_status</function></title>
+            <para>
+                Returns the current NATS connection state and server
+                information for the calling worker process.
+            </para>
+            <para>Parameters: none.</para>
+            <para>
+                Response fields:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <varname>server</varname> — URL or hostname of the
+                        currently connected NATS server, as reported by
+                        <function>nats_pool_get_server_info()</function>.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>connected</varname> — <varname>"yes"</varname>
+                        if the connection is in the CONNECTED state,
+                        <varname>"no"</varname> otherwise.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>jetstream</varname> —
+                        <varname>"enabled"</varname> or
+                        <varname>"disabled"</varname> reflecting the
+                        <varname>jetstream</varname> module parameter.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <example>
+                <title>Query NATS connection status via opensips-cli</title>
+                <programlisting format="linespecific">
+opensips-cli -x mi nats_status
+{
+    "server": "nats://nats-1.example.com:4222",
+    "connected": "yes",
+    "jetstream": "enabled"
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="mi_nats_stats">
+            <title><function moreinfo="none">nats_stats</function></title>
+            <para>
+                Returns cumulative publish statistics from the shared-memory
+                statistics block.  Counters are incremented atomically across
+                all worker processes and accumulate until &osips; is restarted.
+            </para>
+            <para>Parameters: none.</para>
+            <para>
+                Response fields:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <varname>published</varname> — total messages
+                        published successfully (EVI + script combined).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>evi_published</varname> — messages published
+                        via the EVI transport (from event subscriptions).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>script_published</varname> — messages
+                        published via <function>nats_publish()</function>
+                        script calls.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>failed</varname> — publish attempts that
+                        returned an error from nats.c.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>reconnects</varname> — number of times the
+                        nats.c reconnect callback fired (connection was
+                        re-established after a drop).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>js_ack_ok</varname> — JetStream acks received
+                        with a success status (only meaningful when
+                        <varname>jetstream=1</varname>).
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <varname>js_ack_failed</varname> — JetStream acks
+                        received with an error status, or acks that timed out
+                        (only meaningful when <varname>jetstream=1</varname>).
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <example>
+                <title>Query publish statistics</title>
+                <programlisting format="linespecific">
+opensips-cli -x mi nats_stats
+{
+    "published": 14823,
+    "evi_published": 12401,
+    "script_published": 2422,
+    "failed": 3,
+    "reconnects": 1,
+    "js_ack_ok": 14820,
+    "js_ack_failed": 3
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="mi_nats_reconnect">
+            <title><function moreinfo="none">nats_reconnect</function></title>
+            <para>
+                Reports the auto-reconnect status.  NATS runtime reconnection
+                is handled entirely by the nats.c library, which monitors the
+                connection state and reconnects automatically with no
+                intervention from &osips;.  This MI command confirms that
+                auto-reconnect is active and provides a hook for operator
+                awareness without requiring a manual reconnect mechanism.
+            </para>
+            <para>Parameters: none.</para>
+            <para>
+                Response fields:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <varname>status</varname> — human-readable string
+                        confirming that NATS auto-reconnect is active.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <example>
+                <title>Check reconnect status</title>
+                <programlisting format="linespecific">
+opensips-cli -x mi nats_reconnect
+{
+    "status": "NATS auto-reconnect is active"
+}
+                </programlisting>
+            </example>
+        </section>
+
+    </section><!-- /mi -->
+
+    <!-- ============================================================ -->
+    <section id="event_nats-evi-transport">
+        <title>EVI Transport</title>
+        <para>
+            The <emphasis>event_nats</emphasis> module registers a transport
+            named <varname>nats</varname> with the &osips; Event Interface.
+            Once registered, event subscriptions in
+            <filename>opensips.cfg</filename> can route any &osips; event to
+            a NATS subject by using the socket syntax:
+        </para>
+        <programlisting format="linespecific">
+nats:&lt;subject&gt;
+        </programlisting>
+        <para>
+            The subject is any valid NATS token string (dot-separated
+            hierarchy tokens, no wildcards at publish time).  The module
+            publishes events as JSON objects built by the EVI payload
+            serialiser, containing the event name and all event parameters as
+            key-value pairs.
+        </para>
+
+        <section id="event_nats-evi-subscribe">
+            <title>Subscribing Events</title>
+            <para>
+                Use <function>subscribe_event()</function> inside a
+                <varname>startup_route</varname> block to bind &osips; events
+                to NATS subjects.  Multiple events can be subscribed to
+                different subjects, and multiple subscriptions can target the
+                same subject.
+            </para>
+            <example>
+                <title>Subscribing multiple events in startup_route</title>
+                <programlisting format="linespecific">
+startup_route {
+    /* Publish user location events to NATS */
+    subscribe_event("E_UL_CONTACT_INSERT", "nats:usrloc.contact.insert");
+    subscribe_event("E_UL_CONTACT_DELETE", "nats:usrloc.contact.delete");
+
+    /* Publish pike (flood detection) blocks */
+    subscribe_event("E_PIKE_BLOCKED",      "nats:opensips.pike.blocked");
+
+    /* Publish all dialog events under a common prefix */
+    subscribe_event("E_DLG_STATE_CHANGED", "nats:opensips.dialog.state");
+    subscribe_event("E_DLG_CREATE",        "nats:opensips.dialog.create");
+    subscribe_event("E_DLG_DELETE",        "nats:opensips.dialog.delete");
+}
+                </programlisting>
+            </example>
+            <para>
+                Each event fires independently; the EVI subsystem calls the
+                <function>nats_evi_raise()</function> transport callback for
+                every event occurrence.  If <varname>jetstream=1</varname>
+                is configured, each EVI publish uses the JetStream async API.
+            </para>
+        </section>
+
+        <section id="event_nats-evi-payload">
+            <title>JSON Payload Format</title>
+            <para>
+                Events are serialised by the &osips; EVI payload builder
+                (<function>evi_build_payload()</function>).  The resulting
+                JSON object includes the event name and all parameters
+                registered by the event source module.
+            </para>
+            <para>
+                Example payload for <varname>E_UL_CONTACT_INSERT</varname>:
+            </para>
+            <programlisting format="linespecific">
+{
+    "event": "E_UL_CONTACT_INSERT",
+    "aor": "sip:alice@example.com",
+    "uri": "sip:alice@192.168.1.100:5060;transport=udp",
+    "received": "sip:192.168.1.100:5060",
+    "path": "",
+    "qvalue": -1,
+    "expires": 3600,
+    "flags": 0,
+    "cflags": 0,
+    "socket": "udp:10.0.0.1:5060",
+    "callid": "abc123@192.168.1.100",
+    "cseq": 1
+}
+            </programlisting>
+        </section>
+    </section><!-- /evi-transport -->
+
+    <!-- ============================================================ -->
+    <section id="event_nats-cluster">
+        <title>Cluster Configuration</title>
+        <para>
+            The <emphasis>event_nats</emphasis> module is designed for use
+            with multi-node NATS JetStream clusters.  The
+            <varname>nats_url</varname> parameter provides a
+            <emphasis>seed list</emphasis> of one or more bootstrap servers;
+            the full cluster topology is discovered automatically via the
+            NATS INFO gossip protocol.
+        </para>
+
+        <section id="event_nats-cluster-seed">
+            <title>Seed List and Auto-Discovery</title>
+            <para>
+                When nats.c connects to any seed server, the server responds
+                with a <varname>connect_urls</varname> field in its INFO
+                message listing all current cluster members.  The nats.c
+                library adds these URLs to its internal candidate pool and
+                will try them in rotation during reconnect.  Servers added
+                or removed from the cluster are reflected in subsequent INFO
+                gossip messages and picked up automatically without requiring
+                any &osips; restart or configuration change.
+            </para>
+            <para>
+                Because topology is self-updating, the seed list only needs
+                to contain enough nodes to guarantee at least one is reachable
+                at startup.  A three-node cluster typically uses all three as
+                seeds for maximum bootstrap resilience.
+            </para>
+        </section>
+
+        <section id="event_nats-cluster-dns">
+            <title>DNS Hostnames for Resilience</title>
+            <para>
+                Using DNS hostnames in <varname>nats_url</varname> instead of
+                IP addresses provides an additional layer of resilience.  On
+                each reconnect attempt, nats.c resolves the hostname via
+                <function>getaddrinfo()</function>, which allows the DNS record
+                to be updated to point to a replacement server if the original
+                has been replaced or its IP changed.  IP addresses are resolved
+                once at connection time and will not reflect infrastructure
+                changes.
+            </para>
+            <example>
+                <title>Three-node JetStream cluster configuration</title>
+                <programlisting format="linespecific">
+# opensips.cfg
+loadmodule "event_nats.so"
+
+modparam("event_nats", "nats_url",
+    "nats://nats-1.example.com:4222,nats://nats-2.example.com:4222,nats://nats-3.example.com:4222")
+modparam("event_nats", "jetstream",       1)
+modparam("event_nats", "reconnect_wait",  2000)
+modparam("event_nats", "max_reconnect",   60)
+                </programlisting>
+            </example>
+        </section>
+    </section><!-- /cluster -->
+
+    <!-- ============================================================ -->
+    <section id="event_nats-rank-filtering">
+        <title>Rank Filtering</title>
+        <para>
+            The <emphasis>event_nats</emphasis> module does not initialize a
+            NATS connection in every &osips; child process.  The
+            <function>child_init()</function> function applies rank-based
+            filtering before connecting to NATS:
+        </para>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    <emphasis>UDP SIP workers</emphasis> (rank 1 through
+                    <varname>udp_workers_no</varname>) — NATS is initialized.
+                    These are the processes that handle SIP request routing
+                    and fire EVI events; they must be able to publish.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <emphasis>MI / HTTPD process</emphasis>
+                    (<varname>PROC_MODULE</varname>) — NATS is initialized.
+                    This process handles MI command responses, including the
+                    <varname>nats_status</varname>,
+                    <varname>nats_stats</varname>, and
+                    <varname>nats_reconnect</varname> MI commands.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <emphasis>TCP / WSS receiver processes</emphasis> (ranks
+                    above <varname>udp_workers_no</varname>, excluding
+                    <varname>PROC_MODULE</varname>) — NATS is
+                    <emphasis>not</emphasis> initialized.  These processes
+                    run the OpenSSL stack for WebSocket-Secure (WSS) and SIP
+                    over TLS.  The nats.c library creates internal I/O threads
+                    at connection time that may call OpenSSL functions
+                    concurrently, which conflicts with the &osips; TLS
+                    module's management of OpenSSL shared state and leads to
+                    heap corruption.  Excluding TCP/WSS receiver ranks avoids
+                    this conflict entirely.
+                </para>
+            </listitem>
+        </itemizedlist>
+        <para>
+            This design means that call-processing events originating in TCP
+            or WSS worker contexts are still published to NATS — the EVI
+            subsystem delivers events asynchronously through the UDP worker
+            pool, which holds valid NATS connections.
+        </para>
+        <example>
+            <title>Effect of rank filtering in a mixed UDP/WSS deployment</title>
+            <programlisting format="linespecific">
+# opensips.cfg
+children = 8          # 8 UDP SIP workers (ranks 1-8) — NATS initialized
+tcp_workers = 4       # 4 TCP/WSS receivers — NATS NOT initialized
+
+# The MI process (PROC_MODULE) also gets a NATS connection.
+# Total NATS connections from this instance: 9 (8 UDP + 1 MI).
+            </programlisting>
+        </example>
+    </section><!-- /rank-filtering -->
+
+</chapter>
