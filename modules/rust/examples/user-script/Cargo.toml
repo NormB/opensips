@@ -1,0 +1,12 @@
+[package]
+name = "my-opensips-handler"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opensips-rs = { path = "../../sdk" }
+serde_json = "1"

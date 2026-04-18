@@ -1,0 +1,1206 @@
+<!-- Module User's Guide -->
+
+<chapter>
+
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		The <emphasis>rust_credit_check</emphasis> module provides
+		prepaid credit/balance checking with a per-worker &http; cache.
+		It queries an external billing API for account balances, caches
+		results with a configurable TTL, and computes maximum call
+		duration based on the balance and a per-minute rate.
+	</para>
+	<para>
+		This module is useful for prepaid VoIP services where call
+		authorization depends on available credit.
+	</para>
+	<para>
+		Key features include:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>Debit on call end</emphasis>: POST the call
+			duration and cost to a billing API when a call terminates,
+			using non-blocking fire-and-forget delivery.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Configurable JSON parsing</emphasis>: Extract
+			balance from any JSON response structure using dot-notation
+			field paths (e.g., <quote>data.account.balance</quote>).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Billing failover</emphasis>: Primary and backup
+			billing URLs with automatic failover and timed recovery.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Per-prefix rate table</emphasis>: Load
+			destination-based rates from a CSV file for accurate
+			per-call duration limits.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Mid-call recheck</emphasis>: Re-query the billing
+			API during long calls to verify remaining credit and
+			adjust call duration limits.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>Cache-first async</emphasis>: A cache-optimized
+			variant of credit_check that returns instantly on cache
+			hits, plus optional cache warmup at startup.
+		</para></listitem>
+		</itemizedlist>
+	</para>
+	</section>
+
+	<section>
+	<title>How it works</title>
+	<para>
+		When <function>credit_check()</function> is called, the
+		module first checks the per-worker cache for a valid
+		(non-expired) balance entry for the account. On a cache hit,
+		the cached balance is used immediately without any &http;
+		request.
+	</para>
+	<para>
+		On a cache miss or expiry, the module sends a synchronous
+		&http; GET request to the billing API:
+	</para>
+	<programlisting format="linespecific">
+GET {billing_url}?account={account}
+</programlisting>
+	<para>
+		The API must return a JSON response containing the account
+		balance. By default, the module expects a top-level
+		<quote>balance</quote> field, but this is configurable via
+		the <varname>balance_field</varname> parameter:
+	</para>
+	<programlisting format="linespecific">
+{"balance": 42.50}
+{"data": {"account": {"balance": 42.50}}}
+</programlisting>
+	<para>
+		The balance is cached and then evaluated:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>balance &gt; 0</emphasis>: call is allowed.
+			Max call duration is computed as
+			<literal>(balance / rate_per_min) * 60</literal> seconds.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>balance &lt;= 0</emphasis>: call is denied.
+		</para></listitem>
+		</itemizedlist>
+	</para>
+	<para>
+		On &http; errors or unparseable responses, the
+		<varname>on_error</varname> parameter controls whether the call
+		is allowed or denied (fail-open vs fail-closed).
+	</para>
+	<para>
+		If a <varname>billing_url_backup</varname> is configured and
+		the primary returns a 5xx error, the module automatically
+		fails over to the backup URL. After
+		<varname>failover_timeout_secs</varname> seconds, the module
+		retries the primary.
+	</para>
+	<para>
+		The pseudo-variables <literal>$var(credit_balance)</literal>
+		(string, 2 decimal places) and
+		<literal>$var(credit_max_duration)</literal> (integer, seconds)
+		are set on every call to
+		<function>credit_check()</function>.
+	</para>
+	</section>
+
+	<section>
+	<title>Debit on call end</title>
+	<para>
+		When <varname>debit_url</varname> is configured and
+		<varname>debit_on_end</varname> is set to 1, the module tracks
+		call start times. When <function>credit_end()</function> is
+		called (typically on BYE), the module computes the call duration
+		and cost, then POSTs a JSON debit record to the billing API:
+	</para>
+	<programlisting format="linespecific">
+POST {debit_url}
+Content-Type: application/json
+
+{"account":"alice","duration_secs":180,"cost":3.00}
+</programlisting>
+	<para>
+		The debit is sent asynchronously via a fire-and-forget queue, so
+		BYE processing is never delayed by the billing API. If the queue
+		is full, the debit is dropped and logged. For manual control, use
+		<function>credit_debit()</function> to send a debit for an
+		arbitrary account and duration.
+	</para>
+	</section>
+
+	<section>
+	<title>Per-prefix rate table</title>
+	<para>
+		When <varname>rate_file</varname> is configured, the module loads
+		a CSV file containing destination prefix to rate mappings. The
+		file format is:
+	</para>
+	<programlisting format="linespecific">
+# prefix,rate_per_min
+1,0.50
+44,1.00
+4420,0.80
+33,1.50
+</programlisting>
+	<para>
+		Lines starting with <quote>#</quote> are comments. Prefixes are
+		matched longest-first against the destination number. Use
+		<function>credit_check_dest()</function> to specify a destination
+		number for rate lookup. The matched rate is available in
+		<literal>$var(credit_rate)</literal>.
+	</para>
+	</section>
+
+	<section>
+	<title>Mid-call recheck</title>
+	<para>
+		For long calls, the operator can set a shorter initial
+		<literal>$DLG_timeout</literal> and use the dialog on_timeout
+		route to re-check the balance:
+	</para>
+	<programlisting format="linespecific">
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        credit_check("$fU");
+        # Set initial timeout to recheck_interval_secs
+        $DLG_timeout = 60;
+    }
+}
+route[on_timeout] {
+    credit_recheck("$fU");
+    if ($var(credit_max_duration) > 0) {
+        # Extend the call
+        set_dlg_timeout($var(credit_max_duration));
+    }
+    # else: credit exhausted, dialog expires naturally
+}
+</programlisting>
+	<para>
+		<function>credit_recheck()</function> always bypasses the cache,
+		querying the billing API directly for a fresh balance.
+	</para>
+	</section>
+
+	<section>
+	<title>Cache-first async and warmup</title>
+	<para>
+		<function>credit_check_async()</function> is optimized for the
+		common case where the cache is warm. On a cache hit, it returns
+		instantly with no &http; request. On a cache miss, it falls back
+		to a blocking query (same as <function>credit_check()</function>).
+	</para>
+	<para>
+		To ensure the cache is warm from the start, configure
+		<varname>cache_warmup_url</varname> to an endpoint that returns
+		all account balances as a JSON array:
+	</para>
+	<programlisting format="linespecific">
+[{"account":"alice","balance":42.5},{"account":"bob","balance":10.0}]
+</programlisting>
+	<para>
+		The warmup URL is queried once per worker at startup. The
+		<varname>balance_field</varname> path is used to extract the
+		balance from each array element.
+	</para>
+	</section>
+
+	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	<section>
+		<title>External Libraries or Applications</title>
+		<para>
+		The following libraries or applications must be installed
+		before running &osips; with this module loaded:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>None</emphasis>. &http; client functionality is
+			compiled into the Rust shared library.
+		</para></listitem>
+		<listitem><para>
+			An external billing API must be reachable at the configured
+			<varname>billing_url</varname>.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+
+	<section id="param_billing_url" xreflabel="billing_url">
+		<title><varname>billing_url</varname> (string)</title>
+		<para>
+		The base &url; of the billing/balance API. The module appends
+		<quote>?account={account}</quote> to form the full request
+		&url;. This parameter is required. The module will fail to
+		load if this parameter is not set or is empty.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (must be set).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>billing_url</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "billing_url", "http://billing:8080/balance")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cache_ttl" xreflabel="cache_ttl">
+		<title><varname>cache_ttl</varname> (integer)</title>
+		<para>
+		Time-to-live in seconds for cached balance entries. After this
+		period, the next <function>credit_check()</function> call
+		for the account will trigger a fresh &http; query. Set to 0 to
+		disable caching (not recommended for production).
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>300</quote> (5 minutes).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cache_ttl</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "cache_ttl", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_credit_http_timeout" xreflabel="http_timeout">
+		<title><varname>http_timeout</varname> (integer)</title>
+		<para>
+		&http; request timeout in seconds for billing API queries.
+		If the API does not respond within this time, the
+		<varname>on_error</varname> policy is applied. Must be at
+		least 1; values below 1 are clamped to 1 at module load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>2</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>http_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "http_timeout", 5)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_pool_size" xreflabel="pool_size">
+		<title><varname>pool_size</varname> (integer)</title>
+		<para>
+		Number of &http; connections to maintain per worker process.
+		Connections are reused (keep-alive) for better performance.
+		Must be at least 1; values below 1 are clamped to 1 at module
+		load.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>4</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>pool_size</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "pool_size", 8)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_rate_per_min" xreflabel="rate_per_min">
+		<title><varname>rate_per_min</varname> (integer)</title>
+		<para>
+		Default cost units consumed per minute of call time. Used to
+		compute the maximum call duration:
+		<literal>max_duration = (balance / rate) * 60</literal>
+		seconds. The result is set in
+		<literal>$var(credit_max_duration)</literal>. Must be at least
+		1; values below 1 are clamped to 1 at module load. This
+		value is used as the fallback when no prefix match is found
+		in the <varname>rate_file</varname>.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>rate_per_min</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "rate_per_min", 2)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_on_error" xreflabel="on_error">
+		<title><varname>on_error</varname> (string)</title>
+		<para>
+		Behavior when the billing API is unreachable, returns a
+		non-200 status, or returns unparseable JSON:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis><quote>deny</quote></emphasis>  - reject
+			the call (return -2). Fail-closed.
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>allow</quote></emphasis>  - allow
+			the call (return 1). Fail-open.
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		Case-insensitive comparison.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>deny</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>on_error</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "on_error", "allow")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_credit_tls_ca_file" xreflabel="tls_ca_file">
+		<title><varname>tls_ca_file</varname> (string)</title>
+		<para>
+		Path to a custom CA certificate file (PEM format) for TLS
+		verification of the billing API endpoint. If not set, the
+		system default CA bundle is used.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (system defaults).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_ca_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "tls_ca_file", "/etc/ssl/certs/billing-ca.pem")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_debit_url" xreflabel="debit_url">
+		<title><varname>debit_url</varname> (string)</title>
+		<para>
+		The &url; for debit POST requests. When a call ends and
+		<varname>debit_on_end</varname> is enabled, the module sends
+		a JSON payload to this &url; with the account, call duration,
+		and computed cost. If not set, no debit is sent.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (debit disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>debit_url</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "debit_url", "http://billing:8080/debit")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_debit_on_end" xreflabel="debit_on_end">
+		<title><varname>debit_on_end</varname> (integer)</title>
+		<para>
+		Enable automatic call start tracking for debit calculation.
+		When set to 1, <function>credit_check()</function> records
+		the call start time. Call
+		<function>credit_end()</function> on BYE to compute duration
+		and send the debit.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>debit_on_end</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "debit_on_end", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_balance_field" xreflabel="balance_field">
+		<title><varname>balance_field</varname> (string)</title>
+		<para>
+		JSON field name (or dot-separated path) to extract the balance
+		from the billing API response. Supports nested field access
+		using dot notation. For example:
+		<itemizedlist>
+		<listitem><para>
+			<emphasis><quote>balance</quote></emphasis> matches
+			<literal>{"balance": 42.5}</literal>
+		</para></listitem>
+		<listitem><para>
+			<emphasis><quote>data.account.balance</quote></emphasis>
+			matches
+			<literal>{"data":{"account":{"balance":42.5}}}</literal>
+		</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>balance</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>balance_field</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "balance_field", "data.account.balance")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_billing_url_backup" xreflabel="billing_url_backup">
+		<title><varname>billing_url_backup</varname> (string)</title>
+		<para>
+		Backup billing API &url;. If the primary
+		<varname>billing_url</varname> returns a 5xx error or times
+		out, the module automatically switches to this backup. After
+		<varname>failover_timeout_secs</varname> seconds, the module
+		retries the primary.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (no failover).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>billing_url_backup</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "billing_url_backup", "http://billing-backup:8080/balance")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_failover_timeout_secs" xreflabel="failover_timeout_secs">
+		<title><varname>failover_timeout_secs</varname> (integer)</title>
+		<para>
+		Number of seconds to continue using the backup billing &url;
+		after the primary fails. After this period, the next billing
+		query will retry the primary &url;. Only relevant when
+		<varname>billing_url_backup</varname> is configured.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>30</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>failover_timeout_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "failover_timeout_secs", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_rate_file" xreflabel="rate_file">
+		<title><varname>rate_file</varname> (string)</title>
+		<para>
+		Path to a CSV file containing per-prefix rate mappings. Each
+		line has the format <literal>prefix,rate_per_min</literal>.
+		Lines starting with <quote>#</quote> are comments. Prefixes
+		are matched longest-first against the destination number.
+		If no prefix matches, the global
+		<varname>rate_per_min</varname> is used as fallback.
+		</para>
+		<para>
+		Use <function>credit_check_dest()</function> to trigger
+		prefix-based rate lookup.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (use global rate).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>rate_file</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "rate_file", "/etc/opensips/rates.csv")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_recheck_interval_secs" xreflabel="recheck_interval_secs">
+		<title><varname>recheck_interval_secs</varname> (integer)</title>
+		<para>
+		Suggested interval in seconds for mid-call balance re-checks.
+		A value of 0 disables re-checking. When greater than 0, the
+		operator should set <literal>$DLG_timeout</literal> to this
+		value and call <function>credit_recheck()</function> from
+		the on_timeout route to extend the call if credit remains.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>recheck_interval_secs</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "recheck_interval_secs", 60)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cache_warmup_url" xreflabel="cache_warmup_url">
+		<title><varname>cache_warmup_url</varname> (string)</title>
+		<para>
+		&url; to pre-load the per-worker cache at startup. The
+		endpoint must return a JSON array of objects with
+		<quote>account</quote> and the configured
+		<varname>balance_field</varname>:
+		</para>
+		<programlisting format="linespecific">
+[{"account":"alice","balance":42.5},{"account":"bob","balance":10.0}]
+</programlisting>
+		<para>
+		Each worker queries this &url; once during child_init. Combined
+		with <function>credit_check_async()</function>, this eliminates
+		blocking &http; requests for the common case.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>None</quote> (no warmup).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cache_warmup_url</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "cache_warmup_url", "http://billing:8080/all_accounts")
+...
+</programlisting>
+		</example>
+	</section>
+	
+	<section id="param_publish_events" xreflabel="publish_events">
+		<title><varname>publish_events</varname> (integer)</title>
+		<para>
+		Enable event publishing. When set to 1, the module publishes
+		significant events as NOTICE-level structured log messages
+		that operators can consume via syslog or log aggregation.
+		If the NATS module is loaded, events are also published to
+		NATS subjects under <literal>opensips.events.*</literal>.
+		</para>
+		<para>
+		Events published by this module: E_CREDIT_DENIED (when credit check fails) and E_CREDIT_DEBIT (when a debit is posted).
+		Each event includes a JSON payload with relevant details.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>publish_events</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "publish_events", 1)
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_functions" xreflabel="exported_functions">
+	<title>Exported Functions</title>
+
+	<section id="func_credit_check" xreflabel="credit_check()">
+		<title>
+		<function moreinfo="none">credit_check(account)</function>
+		</title>
+		<para>
+		Query the billing API (or per-worker cache) for the given
+		account balance. On return, sets
+		<literal>$var(credit_balance)</literal> and
+		<literal>$var(credit_max_duration)</literal>.
+		</para>
+		<para>
+		If <varname>debit_on_end</varname> is enabled and the call
+		is allowed, the call start time is recorded for later debit
+		computation via <function>credit_end()</function>.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. Typically <literal>$fU</literal>
+			(From-&uri; username). This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - account has positive credit
+			(call allowed).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1 (denied)</emphasis>  - account has zero
+			or negative credit (call denied).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - &http; error,
+			missing parameter, or uninitialized worker. Subject to
+			<varname>on_error</varname> policy.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_check</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!credit_check("$fU")) {
+            sl_send_reply(402, "Insufficient Credit");
+            exit;
+        }
+        xlog("L_INFO", "$fU: balance=$var(credit_balance) max=$var(credit_max_duration)s\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_check_dest" xreflabel="credit_check_dest()">
+		<title>
+		<function moreinfo="none">credit_check_dest(account, destination)</function>
+		</title>
+		<para>
+		Like <function>credit_check()</function>, but uses the
+		destination number for per-prefix rate lookup. The matched
+		rate is set in <literal>$var(credit_rate)</literal>.
+		Requires a <varname>rate_file</varname> to be configured
+		for prefix matching; otherwise the global
+		<varname>rate_per_min</varname> is used.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>destination</emphasis> (string)  - The
+			destination number for rate lookup (typically
+			<literal>$rU</literal>). This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes: same as <function>credit_check()</function>.</para>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_check_dest</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        if (!credit_check_dest("$fU", "$rU")) {
+            sl_send_reply(402, "Insufficient Credit");
+            exit;
+        }
+        xlog("L_INFO", "rate=$var(credit_rate) max=$var(credit_max_duration)s\n");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_check_async" xreflabel="credit_check_async()">
+		<title>
+		<function moreinfo="none">credit_check_async(account)</function>
+		</title>
+		<para>
+		Cache-optimized variant of <function>credit_check()</function>.
+		On a cache hit, returns instantly with no &http; request. On
+		a cache miss, falls back to blocking &http;. Combine with
+		<varname>cache_warmup_url</varname> for best results.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to check. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes: same as <function>credit_check()</function>.</para>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_check_async</function> usage</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "cache_warmup_url", "http://billing:8080/all_accounts")
+
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        # Instant on cache hit (most calls after startup)
+        if (!credit_check_async("$fU")) {
+            sl_send_reply(402, "Insufficient Credit");
+            exit;
+        }
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_debit" xreflabel="credit_debit()">
+		<title>
+		<function moreinfo="none">credit_debit(account, duration_secs)</function>
+		</title>
+		<para>
+		Manually trigger a debit POST for the given account and call
+		duration. Computes cost as
+		<literal>(duration_secs * rate_per_min / 60)</literal> and
+		sends a JSON payload to <varname>debit_url</varname>.
+		Requires <varname>debit_url</varname> to be configured.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			to debit. This parameter is mandatory.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>duration_secs</emphasis> (integer)  - Call
+			duration in seconds. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - debit enqueued for delivery.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - debit_url not
+			configured, queue full, or uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_debit</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("BYE")) {
+        credit_debit("$fU", 180);
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_end" xreflabel="credit_end()">
+		<title>
+		<function moreinfo="none">credit_end(account)</function>
+		</title>
+		<para>
+		End a tracked call for the given account. Computes the
+		actual call duration from the start time recorded by
+		<function>credit_check()</function> (when
+		<varname>debit_on_end</varname> is enabled), calculates the
+		cost, and sends a debit POST. If no call is being tracked
+		for this account, returns -1.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			whose call has ended. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - debit enqueued (or logged if
+			debit_url not configured).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-1</emphasis>  - no active call tracked for
+			this account.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - debit queue full or
+			uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_end</function> usage</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "debit_url", "http://billing:8080/debit")
+modparam("rust_credit_check", "debit_on_end", 1)
+
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        credit_check("$fU");  # records call start
+    }
+    if (is_method("BYE")) {
+        credit_end("$fU");    # computes duration, sends debit
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_recheck" xreflabel="credit_recheck()">
+		<title>
+		<function moreinfo="none">credit_recheck(account)</function>
+		</title>
+		<para>
+		Re-query the billing API for the account balance, bypassing
+		the cache. Sets <literal>$var(credit_balance)</literal> and
+		<literal>$var(credit_max_duration)</literal> with fresh values.
+		Intended for use in dialog on_timeout routes to extend calls
+		when credit remains.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier to re-check. This parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes: same as <function>credit_check()</function>.</para>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_recheck</function> usage</title>
+		<programlisting format="linespecific">
+...
+modparam("rust_credit_check", "recheck_interval_secs", 60)
+
+route {
+    if (is_method("INVITE") &amp;&amp; !has_totag()) {
+        credit_check("$fU");
+        $DLG_timeout = 60;  # re-check every 60 seconds
+    }
+}
+route[on_timeout] {
+    credit_recheck("$fU");
+    if ($var(credit_max_duration) > 0) {
+        set_dlg_timeout($var(credit_max_duration));
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_clear" xreflabel="credit_clear()">
+		<title>
+		<function moreinfo="none">credit_clear(account)</function>
+		</title>
+		<para>
+		Clear the cached balance entry for the given account. The next
+		call to <function>credit_check()</function> for this
+		account will trigger a fresh &http; query to the billing API.
+		</para>
+		<para>
+		This is useful after a call ends to force a balance refresh,
+		or when the billing system signals a balance change.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>account</emphasis> (string)  - The account
+			identifier whose cache entry should be cleared. This
+			parameter is mandatory.
+		</para></listitem>
+		</itemizedlist>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - cache entry cleared (or
+			was not present).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>-2 (error)</emphasis>  - missing parameter
+			or uninitialized worker.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_clear</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    if (is_method("BYE")) {
+        # Force balance refresh after call ends
+        credit_clear("$fU");
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_stats" xreflabel="credit_stats()">
+		<title>
+		<function moreinfo="none">credit_stats()</function>
+		</title>
+		<para>
+		Retrieve module statistics as a JSON string. Sets
+		<literal>$var(credit_stats)</literal> with a JSON object
+		containing all tracked counters for the current worker process.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_stats</function> usage</title>
+		<programlisting format="linespecific">
+...
+route {
+    credit_stats();
+    xlog("L_INFO", "Credit stats: $var(credit_stats)\n");
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_credit_prometheus" xreflabel="credit_prometheus()">
+		<title>
+		<function moreinfo="none">credit_prometheus()</function>
+		</title>
+		<para>
+		Retrieve module statistics in Prometheus text exposition format.
+		Sets <literal>$var(credit_prom)</literal> with a multi-line string
+		containing all counters formatted with <literal># HELP</literal>,
+		<literal># TYPE</literal>, and metric value lines suitable for
+		scraping by a Prometheus server.
+		</para>
+		<para>Return codes:</para>
+		<itemizedlist>
+		<listitem><para>
+			<emphasis>1</emphasis>  - always succeeds.
+		</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
+		and ONREPLY_ROUTE.
+		</para>
+		<example>
+		<title><function>credit_prometheus</function> usage</title>
+		<programlisting format="linespecific">
+...
+credit_prometheus();
+# $var(credit_prom) now contains Prometheus text format
+...
+</programlisting>
+		</example>
+	</section>
+	</section>
+
+	<section id="exported_pseudo_variables" xreflabel="Exported Pseudo-Variables">
+	<title>Exported Pseudo-Variables</title>
+	<section>
+		<title>$var(credit_balance)</title>
+		<para>
+		The account balance as a string with 2 decimal places (e.g.,
+		<quote>42.50</quote> or <quote>0.00</quote>). Set by
+		<function>credit_check()</function>,
+		<function>credit_check_dest()</function>,
+		<function>credit_check_async()</function>, and
+		<function>credit_recheck()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_max_duration)</title>
+		<para>
+		The maximum call duration in seconds, computed as
+		<literal>(balance / rate) * 60</literal>. Set as an
+		integer. A value of 0 means no credit available. The rate
+		used depends on whether a prefix match was found in the
+		<varname>rate_file</varname>.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_rate)</title>
+		<para>
+		The per-minute rate used for the max duration computation.
+		Set by <function>credit_check_dest()</function> as a string
+		with 4 decimal places. Useful for logging which rate was
+		applied for a given destination.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_stats)</title>
+		<para>
+		JSON string containing the module statistics for the current
+		worker process. Set by
+		<function>credit_stats()</function>.
+		</para>
+	</section>
+	<section>
+		<title>$var(credit_prom)</title>
+		<para>
+		Prometheus text exposition format string containing all module
+		statistics. Set by <function>credit_prometheus()</function>.
+		</para>
+	</section>
+	</section>
+
+	<section id="exported_statistics" xreflabel="Exported Statistics">
+	<title>Exported Statistics</title>
+	<section>
+		<title><varname>checked</varname></title>
+		<para>
+		Total number of credit checks performed.
+		</para>
+	</section>
+	<section>
+		<title><varname>allowed</varname></title>
+		<para>
+		Number of checks where the account had positive credit.
+		</para>
+	</section>
+	<section>
+		<title><varname>denied</varname></title>
+		<para>
+		Number of checks where the account had zero or negative credit.
+		</para>
+	</section>
+	<section>
+		<title><varname>errors</varname></title>
+		<para>
+		Number of &http; errors or unparseable responses from the
+		billing API.
+		</para>
+	</section>
+	<section>
+		<title><varname>cache_hits</varname></title>
+		<para>
+		Number of balance lookups served from the per-worker cache.
+		</para>
+	</section>
+	<section>
+		<title><varname>cache_misses</varname></title>
+		<para>
+		Number of balance lookups that required an &http; query to the
+		billing API.
+		</para>
+	</section>
+	<section>
+		<title><varname>debits_sent</varname></title>
+		<para>
+		Number of debit payloads successfully enqueued for delivery.
+		</para>
+	</section>
+	<section>
+		<title><varname>debits_dropped</varname></title>
+		<para>
+		Number of debit payloads dropped because the queue was full.
+		</para>
+	</section>
+	<section>
+		<title><varname>failovers</varname></title>
+		<para>
+		Number of times the module switched from primary to backup
+		billing &url;.
+		</para>
+	</section>
+	<section>
+		<title><varname>rechecks</varname></title>
+		<para>
+		Number of mid-call balance re-checks performed via
+		<function>credit_recheck()</function>.
+		</para>
+	</section>
+	</section>
+
+</chapter>

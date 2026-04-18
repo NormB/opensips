@@ -23,7 +23,7 @@ lib/wolfssl/Makefile: lib/wolfssl/configure
 		--prefix=$(MOD_DIR)/lib \
 		--exec-prefix=$(MOD_DIR)/lib \
 		C_EXTRA_FLAGS="-fPIC" \
-		CFLAGS="-DWOLFSSL_STATIC_RSA -DOPENSSL_EXTRA"
+		CFLAGS="-DWOLFSSL_STATIC_RSA -DOPENSSL_EXTRA -Wno-error=stringop-overflow $(WOLFSSL_EXTRA_CFLAGS)"
 
 lib/lib/libwolfssl.a: lib/wolfssl/Makefile
 	$(Q)$(MAKE) -C ./lib/wolfssl install
