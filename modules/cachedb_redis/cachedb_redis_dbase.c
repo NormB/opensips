@@ -106,11 +106,118 @@ static void tls_print_errstack(void)
 	}
 }
 
+/* Per-process cache of SSL_CTX objects, keyed by tls_domain pointer.
+ *
+ * tls_mgm builds its SSL_CTX in init_tls_domains() from
+ * child_init(PROC_TCP_MAIN). SIP workers and the MI process fork
+ * before TCP_MAIN runs that init, so when they enter
+ * cachedb_redis's child_init -> redis_init_ssl path, d->ctx is
+ * still NULL -- and even once populated, the SSL_CTX object lives
+ * in TCP_MAIN's heap (OpenSSL embeds pointers into per-process
+ * state) and is not safe to use from sibling workers.
+ *
+ * Each worker builds its own SSL_CTX from the static configuration
+ * carried on the tls_domain (cert, pkey, ca, verify_cert). The CTX
+ * is cached per-worker so multiple connections sharing a tls_domain
+ * share one CTX inside that worker.
+ */
+struct cachedb_redis_tls_ctx {
+	struct tls_domain *dom;
+	SSL_CTX *ctx;
+	struct cachedb_redis_tls_ctx *next;
+};
+static struct cachedb_redis_tls_ctx *cachedb_redis_tls_ctx_list;
+
+static SSL_CTX *cachedb_redis_get_ssl_ctx(struct tls_domain *d)
+{
+	struct cachedb_redis_tls_ctx *e;
+	SSL_CTX *ctx;
+
+	for (e = cachedb_redis_tls_ctx_list; e; e = e->next)
+		if (e->dom == d)
+			return e->ctx;
+
+	ctx = SSL_CTX_new(TLS_client_method());
+	if (!ctx) {
+		LM_ERR("SSL_CTX_new(TLS_client_method) failed\n");
+		tls_print_errstack();
+		return NULL;
+	}
+
+	/* Floor at TLS 1.2 -- matches Valkey/Redis 7+ defaults and
+	 * aligns with tls_method=TLSv1_2 on tls_mgm. */
+	if (!SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)) {
+		LM_ERR("SSL_CTX_set_min_proto_version(TLS1_2) failed\n");
+		tls_print_errstack();
+		SSL_CTX_free(ctx);
+		return NULL;
+	}
+
+	/* Mirror tls_mgm's verify_cert toggle. require_client_cert is a
+	 * server-side knob; on the client we only care whether to verify
+	 * the server cert. */
+	SSL_CTX_set_verify(ctx,
+		d->verify_cert ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
+
+	if (d->cert.s && d->cert.len) {
+		if (SSL_CTX_use_certificate_chain_file(ctx, d->cert.s) != 1) {
+			LM_ERR("SSL_CTX_use_certificate_chain_file(%s) failed\n",
+				d->cert.s);
+			tls_print_errstack();
+			SSL_CTX_free(ctx);
+			return NULL;
+		}
+	}
+	if (d->pkey.s && d->pkey.len) {
+		if (SSL_CTX_use_PrivateKey_file(ctx, d->pkey.s,
+				SSL_FILETYPE_PEM) != 1) {
+			LM_ERR("SSL_CTX_use_PrivateKey_file(%s) failed\n", d->pkey.s);
+			tls_print_errstack();
+			SSL_CTX_free(ctx);
+			return NULL;
+		}
+	}
+	if (d->ca.s && d->ca.len) {
+		if (SSL_CTX_load_verify_locations(ctx, d->ca.s, NULL) != 1) {
+			LM_ERR("SSL_CTX_load_verify_locations(%s) failed\n", d->ca.s);
+			tls_print_errstack();
+			SSL_CTX_free(ctx);
+			return NULL;
+		}
+	}
+	if (d->ca_directory) {
+		if (SSL_CTX_load_verify_locations(ctx, NULL, d->ca_directory) != 1) {
+			LM_WARN("SSL_CTX_load_verify_locations(dir=%s) failed,"
+				" continuing without CA dir\n", d->ca_directory);
+			tls_print_errstack();
+		}
+	}
+
+	e = pkg_malloc(sizeof(*e));
+	if (!e) {
+		LM_ERR("pkg_malloc failed for cachedb_redis_tls_ctx cache entry\n");
+		SSL_CTX_free(ctx);
+		return NULL;
+	}
+	e->dom = d;
+	e->ctx = ctx;
+	e->next = cachedb_redis_tls_ctx_list;
+	cachedb_redis_tls_ctx_list = e;
+
+	LM_DBG("created per-worker SSL_CTX %p for tls_domain '%.*s'"
+		" (verify=%d cert=%s pkey=%s)\n",
+		ctx, d->name.len, ZSW(d->name.s), d->verify_cert,
+		d->cert.s ? d->cert.s : "(none)",
+		d->pkey.s ? d->pkey.s : "(none)");
+	return ctx;
+}
+
 static int redis_init_ssl(char *url_extra_opts, redisContext *ctx,
 	struct tls_domain **tls_dom)
 {
 	str tls_dom_name;
 	SSL *ssl;
+	SSL_CTX *ssl_ctx;
 	struct tls_domain *d;
 
 	if (tls_dom == NULL || *tls_dom == NULL) {
@@ -139,7 +246,17 @@ static int redis_init_ssl(char *url_extra_opts, redisContext *ctx,
 		d = *tls_dom;
 	}
 
-	ssl = SSL_new(((void**)d->ctx)[process_no]);
+	/* Use a per-worker SSL_CTX rather than d->ctx -- d->ctx may be
+	 * NULL when this worker forked before TCP_MAIN ran tls_mgm's
+	 * child_init, and even when set it lives in TCP_MAIN's address
+	 * space. */
+	ssl_ctx = cachedb_redis_get_ssl_ctx(d);
+	if (!ssl_ctx) {
+		tls_api.release_domain(*tls_dom);
+		return -1;
+	}
+
+	ssl = SSL_new(ssl_ctx);
 	if (!ssl) {
 		LM_ERR("failed to create SSL structure (%d:%s)\n", errno, strerror(errno));
 		tls_print_errstack();
@@ -148,7 +265,8 @@ static int redis_init_ssl(char *url_extra_opts, redisContext *ctx,
 	}
 
 	if (redisInitiateSSL(ctx, ssl) != REDIS_OK) {
-		printf("Failed to init Redis SSL: %s\n", ctx->errstr);
+		LM_ERR("Failed to init Redis SSL: %s\n", ctx->errstr);
+		SSL_free(ssl);
 		tls_api.release_domain(*tls_dom);
 		return -1;
 	}
