@@ -29,6 +29,7 @@
 #include <dirent.h>
 
 #include "../../pt.h"
+#include "../../globals.h"
 #include "../tls_mgm/tls_helper.h"
 
 #include "openssl_api.h"
@@ -890,7 +891,20 @@ int openssl_load_priv_key(struct tls_domain *tls_dom, int from_file)
 void openssl_destroy_tls_dom(struct tls_domain *tls_dom)
 {
 	if (tls_dom->ctx) {
-		SSL_CTX_free((SSL_CTX *)tls_dom->ctx);
+		/* The SSL_CTX was created by openssl_init_tls_dom in TCP_MAIN's
+		 * child_init (per the single-process refactor). When mod_destroy
+		 * runs in the attendant (is_main=1), that process never touched
+		 * OpenSSL after CRYPTO_set_mem_functions reclaimed its mem pool,
+		 * and walking SSL_CTX's internal lists from the wrong process
+		 * crashes inside libc free() -- the object lives in SHM but
+		 * holds embedded pointers into TCP_MAIN's per-process heap
+		 * (method tables, providers, OSSL_LIB_CTX). Skipping the free
+		 * in the attendant avoids the shutdown SIGABRT; the OS reclaims
+		 * SHM on process exit anyway. From any other process (TCP_MAIN's
+		 * own teardown path, hot-reload, etc.) we still call
+		 * SSL_CTX_free as before. */
+		if (!is_main)
+			SSL_CTX_free((SSL_CTX *)tls_dom->ctx);
 		tls_dom->ctx = NULL;
 	}
 }
