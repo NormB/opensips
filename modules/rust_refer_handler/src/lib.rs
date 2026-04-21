@@ -20,15 +20,19 @@ use opensips_rs::sys;
 use opensips_rs::{cstr_lit, opensips_log};
 use rust_common::stat::{StatVar, StatVarOpaque};
 
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_int, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 extern "C" {
     fn calloc(nmemb: usize, size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
     fn time(tloc: *mut i64) -> i64;
+    // OpenSIPS shared memory allocator. See rust_concurrent_calls for
+    // why this matters: per-worker thread_local state is invisible to
+    // the MI process, so `refer_show` reads a shared shm-backed table.
+    fn opensips_rs_shm_malloc(size: std::ffi::c_ulong) -> *mut c_void;
 }
 
 // SyncArray: wrapper to satisfy Rust's Sync trait requirement for
@@ -92,27 +96,51 @@ fn status_str(s: u8) -> &'static str {
     }
 }
 
+// Shm slot state machine: EMPTY → WRITING → READY → TOMBSTONE.
+// Workers insert by claiming EMPTY/TOMBSTONE → WRITING via
+// compare_exchange, write the payload, then publish READY. Tombstones
+// mark logical deletes; probes skip them but inserters can reclaim.
+const SLOT_EMPTY: u8 = 0;
+const SLOT_WRITING: u8 = 1;
+const SLOT_READY: u8 = 2;
+const SLOT_TOMBSTONE: u8 = 3;
+
 #[repr(C)]
 struct ReferSlot {
-    key: [u8; MAX_KEY_LEN],        // call-id
-    key_len: u8,
-    occupied: bool,
-    status: u8,
-    _pad: u8,
-    notify_count: u32,
-    created: i64,                   // unix timestamp from libc::time
-    uri: [u8; MAX_URI_LEN],        // refer-to URI
-    uri_len: u8,
-    _pad2: [u8; 7],
+    state: AtomicU8,
+    status: AtomicU8,
+    key_len: AtomicU8,
+    uri_len: AtomicU8,
+    _pad: [u8; 4],
+    notify_count: AtomicU32,
+    created: AtomicI64,
+    // Interior-mutable byte storage. Writes are gated by the slot
+    // state machine; readers obtain bytes via `.get()` after observing
+    // the Release store on `state`.
+    key: UnsafeCell<[u8; MAX_KEY_LEN]>,   // call-id
+    uri: UnsafeCell<[u8; MAX_URI_LEN]>,   // refer-to URI
 }
 
+// Safety: interior-mutable fields are synchronised by the Acquire/
+// Release ordering on `state` (and on `key_len`/`uri_len`).
+unsafe impl Sync for ReferSlot {}
+
+#[repr(C)]
 struct ReferMap {
-    slots: *mut ReferSlot,
-    capacity: usize,
-    len: usize,
+    slots: [ReferSlot; MAP_CAPACITY],
 }
 
 unsafe impl Send for ReferMap {}
+unsafe impl Sync for ReferMap {}
+
+static REFER_MAP: AtomicPtr<ReferMap> = AtomicPtr::new(ptr::null_mut());
+/// Approximate count of READY slots, atomically maintained by insert/sweep.
+static REFER_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn refer_map() -> Option<&'static ReferMap> {
+    let p = REFER_MAP.load(Ordering::Acquire);
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
 
 #[inline(always)]
 fn fnv1a(key: &[u8]) -> u64 {
@@ -124,167 +152,181 @@ fn fnv1a(key: &[u8]) -> u64 {
     h
 }
 
-impl ReferMap {
-    fn new() -> Self {
-        let slots = unsafe { calloc(MAP_CAPACITY, core::mem::size_of::<ReferSlot>()) } as *mut ReferSlot;
-        assert!(!slots.is_null(), "calloc failed for ReferMap");
-        ReferMap { slots, capacity: MAP_CAPACITY, len: 0 }
-    }
+#[inline]
+unsafe fn slot_key_bytes(slot: &ReferSlot) -> &[u8] {
+    let kl = slot.key_len.load(Ordering::Acquire) as usize;
+    let p = slot.key.get() as *const u8;
+    core::slice::from_raw_parts(p, kl.min(MAX_KEY_LEN))
+}
 
-    fn find_slot(&self, key: &[u8]) -> Option<usize> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &*self.slots.add(idx) };
-            if !slot.occupied { return None; }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                return Some(idx);
-            }
-            idx = (idx + 1) % self.capacity;
+#[inline]
+unsafe fn slot_uri_bytes(slot: &ReferSlot) -> &[u8] {
+    let ul = slot.uri_len.load(Ordering::Acquire) as usize;
+    let p = slot.uri.get() as *const u8;
+    core::slice::from_raw_parts(p, ul.min(MAX_URI_LEN))
+}
+
+fn refer_find(key: &[u8]) -> Option<&'static ReferSlot> {
+    let map = refer_map()?;
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_EMPTY { return None; }
+        if st == SLOT_READY && unsafe { slot_key_bytes(slot) } == key {
+            return Some(slot);
         }
-        None
+        // SLOT_TOMBSTONE + SLOT_WRITING: keep probing.
+        idx = (idx + 1) % cap;
     }
+    None
+}
 
-    fn get(&self, key: &[u8]) -> Option<&ReferSlot> {
-        self.find_slot(key).map(|idx| unsafe { &*self.slots.add(idx) })
-    }
+fn refer_insert(key: &[u8], uri: &[u8]) -> bool {
+    let Some(map) = refer_map() else { return false; };
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
+    let uri_len = uri.len().min(MAX_URI_LEN);
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    let mut first_reusable: Option<usize> = None;
 
-    fn get_mut(&mut self, key: &[u8]) -> Option<&mut ReferSlot> {
-        self.find_slot(key).map(|idx| unsafe { &mut *self.slots.add(idx) })
-    }
+    // Write the full payload into a slot we own (state == WRITING).
+    let write_slot = |slot: &ReferSlot| unsafe {
+        let kp = slot.key.get() as *mut u8;
+        ptr::copy_nonoverlapping(key.as_ptr(), kp, key.len());
+        slot.key_len.store(key.len() as u8, Ordering::Release);
 
-    /// Insert or overwrite a refer entry. Returns true on success.
-    fn insert(&mut self, key: &[u8], uri: &[u8]) -> bool {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
-        let uri_len = uri.len().min(MAX_URI_LEN);
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &mut *self.slots.add(idx) };
-            if !slot.occupied {
-                // New entry
-                slot.key[..key.len()].copy_from_slice(key);
-                slot.key_len = key.len() as u8;
-                slot.uri[..uri_len].copy_from_slice(&uri[..uri_len]);
-                slot.uri_len = uri_len as u8;
-                slot.status = STATUS_PENDING;
-                slot.notify_count = 0;
-                slot.created = unsafe { time(ptr::null_mut()) };
-                slot.occupied = true;
-                self.len += 1;
-                return true;
-            }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                // Overwrite existing
-                slot.uri[..uri_len].copy_from_slice(&uri[..uri_len]);
-                slot.uri_len = uri_len as u8;
-                slot.status = STATUS_PENDING;
-                slot.notify_count = 0;
-                slot.created = unsafe { time(ptr::null_mut()) };
-                return true;
-            }
-            idx = (idx + 1) % self.capacity;
+        let up = slot.uri.get() as *mut u8;
+        ptr::copy_nonoverlapping(uri.as_ptr(), up, uri_len);
+        slot.uri_len.store(uri_len as u8, Ordering::Release);
+
+        slot.status.store(STATUS_PENDING, Ordering::Relaxed);
+        slot.notify_count.store(0, Ordering::Relaxed);
+        slot.created.store(time(ptr::null_mut()), Ordering::Relaxed);
+    };
+
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_READY && unsafe { slot_key_bytes(slot) } == key {
+            // Overwrite existing entry: briefly re-enter WRITING.
+            slot.state.store(SLOT_WRITING, Ordering::Release);
+            write_slot(slot);
+            slot.state.store(SLOT_READY, Ordering::Release);
+            return true;
         }
-        false // table full
-    }
-
-    /// Remove a single slot by index (swap with tombstone approach: just clear it
-    /// and re-insert any displaced entries in the probe chain).
-    fn remove_idx(&mut self, idx: usize) {
-        unsafe { &mut *self.slots.add(idx) }.occupied = false;
-        self.len -= 1;
-
-        // Re-insert displaced entries in the probe chain
-        let mut check = (idx + 1) % self.capacity;
-        loop {
-            let slot = unsafe { &*self.slots.add(check) };
-            if !slot.occupied { break; }
-
-            // Copy data, clear, re-insert
-            let mut tmp_key = [0u8; MAX_KEY_LEN];
-            let mut tmp_uri = [0u8; MAX_URI_LEN];
-            let kl = slot.key_len as usize;
-            let ul = slot.uri_len as usize;
-            tmp_key[..kl].copy_from_slice(&slot.key[..kl]);
-            tmp_uri[..ul].copy_from_slice(&slot.uri[..ul]);
-            let tmp_status = slot.status;
-            let tmp_nc = slot.notify_count;
-            let tmp_created = slot.created;
-
-            unsafe { &mut *self.slots.add(check) }.occupied = false;
-            self.len -= 1;
-
-            // Re-insert (find new home)
-            let mut new_idx = (fnv1a(&tmp_key[..kl]) as usize) % self.capacity;
-            for _ in 0..self.capacity {
-                let s = unsafe { &mut *self.slots.add(new_idx) };
-                if !s.occupied {
-                    s.key[..kl].copy_from_slice(&tmp_key[..kl]);
-                    s.key_len = kl as u8;
-                    s.uri[..ul].copy_from_slice(&tmp_uri[..ul]);
-                    s.uri_len = ul as u8;
-                    s.status = tmp_status;
-                    s.notify_count = tmp_nc;
-                    s.created = tmp_created;
-                    s.occupied = true;
-                    self.len += 1;
-                    break;
-                }
-                new_idx = (new_idx + 1) % self.capacity;
-            }
-
-            check = (check + 1) % self.capacity;
-        }
-    }
-
-    /// Sweep entries older than expire_secs. Returns count removed.
-    fn sweep_expired(&mut self, expire_secs: i64) -> usize {
-        let now = unsafe { time(ptr::null_mut()) };
-        let mut removed = 0usize;
-        let mut idx = 0usize;
-        while idx < self.capacity {
-            let slot = unsafe { &*self.slots.add(idx) };
-            if slot.occupied && (now - slot.created) >= expire_secs {
-                self.remove_idx(idx);
-                removed += 1;
-                // Don't advance idx — remove_idx may have moved an entry here
+        if st == SLOT_EMPTY {
+            let target = first_reusable.unwrap_or(idx);
+            let target_slot = &map.slots[target];
+            let claim = if target == idx {
+                target_slot.state.compare_exchange(
+                    SLOT_EMPTY, SLOT_WRITING, Ordering::AcqRel, Ordering::Acquire,
+                ).is_ok()
             } else {
-                idx += 1;
+                target_slot.state.compare_exchange(
+                    SLOT_TOMBSTONE, SLOT_WRITING, Ordering::AcqRel, Ordering::Acquire,
+                ).is_ok()
+            };
+            if !claim {
+                std::hint::spin_loop();
+                continue;
+            }
+            write_slot(target_slot);
+            target_slot.state.store(SLOT_READY, Ordering::Release);
+            REFER_LEN.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        if st == SLOT_TOMBSTONE && first_reusable.is_none() {
+            first_reusable = Some(idx);
+        }
+        idx = (idx + 1) % cap;
+    }
+    // Capacity exhausted; fall back to the first tombstone we saw.
+    if let Some(target) = first_reusable {
+        let slot = &map.slots[target];
+        if slot.state.compare_exchange(
+            SLOT_TOMBSTONE, SLOT_WRITING, Ordering::AcqRel, Ordering::Acquire,
+        ).is_ok() {
+            write_slot(slot);
+            slot.state.store(SLOT_READY, Ordering::Release);
+            REFER_LEN.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+    }
+    false
+}
+
+/// Sweep entries older than expire_secs; mark them TOMBSTONE.
+fn refer_sweep_expired(expire_secs: i64) -> usize {
+    let Some(map) = refer_map() else { return 0; };
+    let now = unsafe { time(ptr::null_mut()) };
+    let mut removed = 0usize;
+    for slot in map.slots.iter() {
+        if slot.state.load(Ordering::Acquire) == SLOT_READY {
+            let created = slot.created.load(Ordering::Relaxed);
+            if (now - created) >= expire_secs
+                && slot.state.compare_exchange(
+                    SLOT_READY, SLOT_TOMBSTONE, Ordering::AcqRel, Ordering::Acquire,
+                ).is_ok()
+            {
+                removed += 1;
             }
         }
-        removed
     }
-
-    fn clear(&mut self) {
-        if !self.slots.is_null() {
-            unsafe { core::ptr::write_bytes(self.slots, 0, self.capacity); }
-            self.len = 0;
-        }
+    if removed > 0 {
+        REFER_LEN.fetch_sub(removed, Ordering::Relaxed);
     }
+    removed
+}
 
-    fn destroy(&mut self) {
-        if !self.slots.is_null() {
-            unsafe { free(self.slots as *mut c_void) };
-            self.slots = ptr::null_mut();
-            self.capacity = 0;
-            self.len = 0;
+fn refer_clear() {
+    let Some(map) = refer_map() else { return; };
+    for slot in map.slots.iter() {
+        slot.state.store(SLOT_EMPTY, Ordering::Release);
+    }
+    REFER_LEN.store(0, Ordering::Relaxed);
+}
+
+fn refer_len() -> usize {
+    REFER_LEN.load(Ordering::Relaxed)
+}
+
+fn refer_for_each<F: FnMut(&ReferSlot)>(mut f: F) {
+    let Some(map) = refer_map() else { return; };
+    for slot in map.slots.iter() {
+        if slot.state.load(Ordering::Acquire) == SLOT_READY {
+            f(slot);
         }
     }
 }
 
-impl Drop for ReferMap {
-    fn drop(&mut self) {
-        self.destroy();
+/// Allocate the shm-backed ReferMap. Called from mod_init (pre-fork).
+fn shm_refer_init() -> bool {
+    if !REFER_MAP.load(Ordering::Acquire).is_null() {
+        return true;
     }
+    let sz = core::mem::size_of::<ReferMap>() as std::ffi::c_ulong;
+    let raw = unsafe { opensips_rs_shm_malloc(sz) } as *mut ReferMap;
+    if raw.is_null() {
+        opensips_log!(ERR, "rust_refer_handler",
+            "shm_malloc failed for ReferMap");
+        return false;
+    }
+    // shm_malloc does not guarantee zero on all allocators.
+    unsafe { ptr::write_bytes(raw as *mut u8, 0, sz as usize); }
+    REFER_MAP.store(raw, Ordering::Release);
+    true
 }
+
 
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
-    refers: ReferMap,
+    // refers moved to shm (REFER_MAP). WorkerState now carries only
+    // per-worker config + local counters (authoritative aggregates live
+    // in STAT_HANDLED / STAT_SUCCEEDED / ... StatVars).
     max_pending: usize,
     expire_secs: i64,
     handled: Cell<u64>,
@@ -332,6 +374,14 @@ fn trim_bytes(b: &[u8]) -> &[u8] {
 // ── Module lifecycle ─────────────────────────────────────────────
 
 unsafe extern "C" fn mod_init() -> c_int {
+    // Allocate shm-backed ReferMap BEFORE fork so every worker + the
+    // MI process sees the same physical pages; without this the MI
+    // process (which never serves SIP) reads its own empty per-process
+    // copy and `refer_show` returns nothing.
+    if !shm_refer_init() {
+        return -1;
+    }
+
     let max_p = MAX_PENDING.get();
     let exp = EXPIRE_SECS.get();
     let auto_p = AUTO_PROCESS.get();
@@ -370,7 +420,6 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     if state_ptr.is_null() { return -1; }
 
     let state = unsafe { &mut *state_ptr };
-    state.refers = ReferMap::new();
     state.max_pending = max_p;
     state.expire_secs = exp;
     state.handled = Cell::new(0);
@@ -392,8 +441,10 @@ unsafe extern "C" fn mod_destroy() {
 // ── Helper: maybe sweep expired if at capacity ──────────────────
 
 fn maybe_sweep(state: &mut WorkerState) {
-    if state.refers.len >= state.max_pending {
-        let swept = state.refers.sweep_expired(state.expire_secs);
+    // Approximate shm-wide len; multiple workers may sweep concurrently
+    // (safe, idempotent).
+    if refer_len() >= state.max_pending {
+        let swept = refer_sweep_expired(state.expire_secs);
         if swept > 0 {
             state.expired.set(state.expired.get() + swept as u64);
             if let Some(sv) = StatVar::from_raw(STAT_EXPIRED.load(Ordering::Relaxed)) {
@@ -434,7 +485,7 @@ unsafe extern "C" fn w_handle_refer(
     with_worker(|state| {
         maybe_sweep(state);
 
-        if state.refers.insert(call_id.as_bytes(), refer_to.as_bytes()) {
+        if refer_insert(call_id.as_bytes(), refer_to.as_bytes()) {
             state.handled.set(state.handled.get() + 1);
             if let Some(sv) = StatVar::from_raw(STAT_HANDLED.load(Ordering::Relaxed)) { sv.inc(); }
             if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(1); }
@@ -482,7 +533,7 @@ unsafe extern "C" fn w_handle_notify(
     };
 
     with_worker(|state| {
-        let slot = match state.refers.get_mut(call_id.as_bytes()) {
+        let slot = match refer_find(call_id.as_bytes()) {
             Some(s) => s,
             None => {
                 state.unknown_notify.set(state.unknown_notify.get() + 1);
@@ -492,30 +543,42 @@ unsafe extern "C" fn w_handle_notify(
             }
         };
 
-        slot.notify_count += 1;
+        slot.notify_count.fetch_add(1, Ordering::Relaxed);
 
-        // Terminal states are sticky
-        if slot.status == STATUS_SUCCESS || slot.status == STATUS_FAILED {
+        let old_status = slot.status.load(Ordering::Relaxed);
+        // Terminal states are sticky.
+        if old_status == STATUS_SUCCESS || old_status == STATUS_FAILED {
             return 1;
         }
 
-        let old_status = slot.status;
-        match status_code {
-            100 => slot.status = STATUS_TRYING,
-            200..=299 => slot.status = STATUS_SUCCESS,
-            300..=699 => slot.status = STATUS_FAILED,
-            _ => {} // keep current
-        }
+        let new_status = match status_code {
+            100         => STATUS_TRYING,
+            200..=299   => STATUS_SUCCESS,
+            300..=699   => STATUS_FAILED,
+            _           => old_status,
+        };
 
-        // Update stats on terminal transition
-        if old_status != STATUS_SUCCESS && slot.status == STATUS_SUCCESS {
-            state.succeeded.set(state.succeeded.get() + 1);
-            if let Some(sv) = StatVar::from_raw(STAT_SUCCEEDED.load(Ordering::Relaxed)) { sv.inc(); }
-            if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
-        } else if old_status != STATUS_FAILED && slot.status == STATUS_FAILED {
-            state.failed.set(state.failed.get() + 1);
-            if let Some(sv) = StatVar::from_raw(STAT_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
-            if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
+        // Only one worker wins the terminal-transition race (CAS).
+        let terminal_ok = match new_status {
+            STATUS_SUCCESS | STATUS_FAILED => slot.status.compare_exchange(
+                old_status, new_status, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok(),
+            _ => {
+                slot.status.store(new_status, Ordering::Relaxed);
+                false
+            }
+        };
+
+        if terminal_ok {
+            if new_status == STATUS_SUCCESS {
+                state.succeeded.set(state.succeeded.get() + 1);
+                if let Some(sv) = StatVar::from_raw(STAT_SUCCEEDED.load(Ordering::Relaxed)) { sv.inc(); }
+                if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
+            } else {
+                state.failed.set(state.failed.get() + 1);
+                if let Some(sv) = StatVar::from_raw(STAT_FAILED.load(Ordering::Relaxed)) { sv.inc(); }
+                if let Some(sv) = StatVar::from_raw(STAT_PENDING.load(Ordering::Relaxed)) { sv.update(-1); }
+            }
         }
 
         opensips_log!(DBG, "rust_refer_handler",
@@ -539,11 +602,12 @@ unsafe extern "C" fn w_refer_status(
         }
     };
 
-    with_worker(|state| {
+    with_worker(|_state| {
         let mut sip_msg = unsafe { opensips_rs::SipMessage::from_raw(msg) };
-        match state.refers.get(call_id.as_bytes()) {
+        match refer_find(call_id.as_bytes()) {
             Some(slot) => {
-                let _ = sip_msg.set_pv("$var(refer_status)", status_str(slot.status));
+                let st = slot.status.load(Ordering::Relaxed);
+                let _ = sip_msg.set_pv("$var(refer_status)", status_str(st));
                 1
             }
             None => {
@@ -570,7 +634,7 @@ unsafe extern "C" fn w_noop(
 
 // ── MI commands (stubs) ─────────────────────────────────────────
 
-use rust_common::mi_resp::mi_ok;
+use rust_common::mi_resp::{mi_ok, MiObject};
 
 const NULL_RECIPE: sys::mi_recipe_ = sys::mi_recipe_ { cmd: None, params: [ptr::null_mut(); 20] };
 
@@ -600,14 +664,51 @@ unsafe extern "C" fn mi_refer_show(
     _params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    mi_ok() as *mut _
+    // Reads from the shm-backed ReferMap so the MI process (which
+    // never serves SIP traffic) still sees live REFER state written by
+    // UDP workers. Previously this handler was a no-op stub returning
+    // empty — per-worker thread_local state would have been invisible
+    // to MI anyway.
+    let Some(resp) = MiObject::new() else { return mi_ok() as *mut _; };
+
+    // Aggregate counters from the shared StatVars (not per-worker Cells).
+    fn sv_get(ptr: *mut StatVarOpaque) -> u64 {
+        StatVar::from_raw(ptr).map(|s| s.get()).unwrap_or(0)
+    }
+    resp.add_num("handled",   sv_get(STAT_HANDLED.load(Ordering::Relaxed))   as f64);
+    resp.add_num("succeeded", sv_get(STAT_SUCCEEDED.load(Ordering::Relaxed)) as f64);
+    resp.add_num("failed",    sv_get(STAT_FAILED.load(Ordering::Relaxed))    as f64);
+    resp.add_num("pending",   sv_get(STAT_PENDING.load(Ordering::Relaxed))   as f64);
+    resp.add_num("expired",   sv_get(STAT_EXPIRED.load(Ordering::Relaxed))   as f64);
+
+    if let Some(arr) = resp.add_array("transfers") {
+        refer_for_each(|slot| {
+            let k_bytes = unsafe { slot_key_bytes(slot) };
+            let u_bytes = unsafe { slot_uri_bytes(slot) };
+            let call_id = core::str::from_utf8(k_bytes).unwrap_or("?");
+            let uri     = core::str::from_utf8(u_bytes).unwrap_or("?");
+            let status  = status_str(slot.status.load(Ordering::Relaxed));
+            let nc      = slot.notify_count.load(Ordering::Relaxed);
+            let created = slot.created.load(Ordering::Relaxed);
+            if let Some(o) = arr.add_object("") {
+                o.add_str("call_id", call_id);
+                o.add_str("refer_to", uri);
+                o.add_str("status", status);
+                o.add_num("notify_count", nc as f64);
+                o.add_num("created", created as f64);
+            }
+        });
+    }
+
+    resp.into_raw() as *mut _
 }
 
 unsafe extern "C" fn mi_refer_clear(
     _params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    with_worker(|state| { state.refers.clear(); 0 }, 0);
+    // Shm-backed clear — visible to every worker immediately.
+    refer_clear();
     mi_ok() as *mut _
 }
 
