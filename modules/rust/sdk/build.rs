@@ -181,14 +181,35 @@ fn main() {
     // Compile test_stubs.c (weak symbol stubs) into a separate archive.
     // These provide stub implementations of OpenSIPS core symbols (dprint,
     // log_level, etc.) so that test binaries can link without the real core.
-    // For cdylib builds, the weak stubs are overridden by the real symbols.
     //
-    // On aarch64, the standard linker processes archives lazily and may not
-    // pull in test_stubs.o to resolve references from shim.o in another
-    // archive. We use +whole-archive (via cc's link_lib_modifier) to force
-    // all members to be included regardless of link order.
+    // CRITICAL: test_stubs.c must NOT be linked into release cdylib builds.
+    //
+    // Why: test_stubs.c defines weak function/variable symbols like
+    // `gen_shm_malloc`, `shm_block`, `mem_lock` to satisfy the linker when
+    // building test harness binaries. But OpenSIPS core's `shm_mem.h`
+    // declares `gen_shm_malloc` as an `extern void *(*gen_shm_malloc)(...)` —
+    // a function POINTER VARIABLE, not a function. test_stubs.c instead
+    // defines it as a FUNCTION. When shim.c (which includes shm_mem.h) is
+    // compiled, the call to `shm_malloc()` inlines `_shm_malloc()` which
+    // dereferences `gen_shm_malloc` as a pointer variable (double-load).
+    //
+    // At link time for a release cdylib with `strip = "symbols"` and
+    // `lto = true`, the linker:
+    //   1. Sees the weak local defn from test_stubs.o as a function,
+    //   2. Resolves shim.c's reference to it via R_AARCH64_RELATIVE
+    //      pointing at the thunk's code address,
+    //   3. Strips the dynamic symbol so OpenSIPS core's strong symbol
+    //      cannot override it at dlopen.
+    // At runtime, shim.c's `shm_malloc` loads the "pointer value" from
+    // the thunk's instruction bytes → x5 = garbage → `blr x5` → SIGSEGV.
+    //
+    // The fix: only compile test_stubs.c in debug (test) profile. In
+    // release, leave `gen_shm_malloc`/`shm_block`/`mem_lock` etc. as
+    // undefined dynamic references, resolved at dlopen from the OpenSIPS
+    // core binary (which exports them via the main binary's dynsym).
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let stubs_path = Path::new("test_stubs.c");
-    if stubs_path.exists() {
+    if stubs_path.exists() && profile != "release" {
         println!("cargo:rerun-if-changed=test_stubs.c");
         cc::Build::new()
             .file("test_stubs.c")
