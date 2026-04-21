@@ -776,4 +776,88 @@ sst_prometheus();
 	</section>
 	</section>
 
+	<section id="exported_mi_functions" xreflabel="Exported MI Functions">
+	<title>Exported MI Functions</title>
+
+	<section id="mi_sst_show" xreflabel="sst_show">
+		<title><function moreinfo="none">sst_show</function></title>
+		<para>
+		Return the per-worker table of currently tracked SST dialogs.
+		Each entry is populated by the module's
+		<literal>DLGCB_CREATED</literal> callback and removed by the
+		<literal>DLGCB_TERMINATED</literal> /
+		<literal>DLGCB_EXPIRED</literal> /
+		<literal>DLGCB_FAILED</literal> callbacks.
+		</para>
+		<para>
+		The response is a JSON object:
+		<itemizedlist>
+		<listitem><para><literal>dialogs</literal> &mdash; array of
+		per-dialog records with the following fields:
+			<itemizedlist>
+			<listitem><para><literal>callid</literal> &mdash;
+			SIP Call-ID (up to 128 bytes).</para></listitem>
+			<listitem><para><literal>se_interval</literal> &mdash;
+			negotiated Session-Expires interval in seconds (falls
+			back to <varname>default_interval</varname> when the
+			underlying dialog lifetime is unavailable).
+			</para></listitem>
+			<listitem><para><literal>min_se</literal> &mdash;
+			effective Min-SE value in seconds (minimum of 90 per
+			RFC 4028).</para></listitem>
+			<listitem><para><literal>refresher</literal> &mdash;
+			<quote>uac</quote>, <quote>uas</quote>, or
+			<quote>none</quote>.</para></listitem>
+			<listitem><para><literal>created_unix</literal> &mdash;
+			dialog start time (UNIX seconds).</para></listitem>
+			<listitem><para><literal>expires_unix</literal> &mdash;
+			expected expiry (<literal>created_unix + se_interval</literal>).
+			</para></listitem>
+			<listitem><para><literal>remaining</literal> &mdash;
+			<literal>max(0, expires_unix - now)</literal> in seconds.
+			</para></listitem>
+			<listitem><para><literal>expired</literal> &mdash;
+			<literal>true</literal> when <literal>remaining</literal>
+			reaches zero.</para></listitem>
+			</itemizedlist>
+		</para></listitem>
+		<listitem><para><literal>count</literal> &mdash; length of
+		the <literal>dialogs</literal> array.</para></listitem>
+		<listitem><para><literal>process</literal> &mdash;
+		<quote>worker</quote> when the response came from a worker
+		with a populated table; <quote>mi</quote> when it came from
+		the MI process, which runs its own (empty) per-worker table.
+		Callers that need an aggregated fleet view across all workers
+		should combine <literal>sst_show</literal> with
+		<literal>dialog:dlg_list</literal> or aggregate the module's
+		statistics counters.</para></listitem>
+		</itemizedlist>
+		</para>
+		<para>
+		The command takes no parameters.
+		</para>
+		<example>
+		<title><function>sst_show</function> example response</title>
+		<programlisting format="linespecific">
+{
+  "dialogs": [
+    {
+      "callid": "1-1104@172.20.0.63",
+      "se_interval": 15,
+      "min_se": 90,
+      "refresher": "uas",
+      "created_unix": 1714000123,
+      "expires_unix": 1714000138,
+      "remaining": 8,
+      "expired": false
+    }
+  ],
+  "count": 1,
+  "process": "worker"
+}
+</programlisting>
+		</example>
+	</section>
+	</section>
+
 </chapter>

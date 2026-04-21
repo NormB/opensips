@@ -1,5 +1,6 @@
 //! build.rs — Extract `OPENSIPS_FULL_VERSION`, `OPENSIPS_COMPILE_FLAGS`,
-//! and SCM info from the `OpenSIPS` source tree.
+//! and SCM info from the `OpenSIPS` source tree, and compile the local
+//! C shim (sst_shim.c) that exposes dlg_cell fields via plain C accessors.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -12,9 +13,16 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     println!("cargo:rerun-if-env-changed=OPENSIPS_SRC_DIR");
+    println!("cargo:rerun-if-changed=src/sst_shim.c");
 
     let dflags = opensips_build::extract_dflags(src_path);
     opensips_build::emit_scm_env(&dflags);
+
+    // Compile the local C helper. Must be built with the same -D flags
+    // that OpenSIPS core uses (HAVE_FUTEX / USE_FUTEX_LOCK / etc.) or
+    // the transitive includes from dlg_hash.h will fail at
+    // "no locking method selected".
+    compile_c_helper(&src_dir, &dflags);
 
     // version_probe.c lives in the SDK directory
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -58,4 +66,24 @@ fn main() {
 
     println!("cargo:rustc-env=OPENSIPS_FULL_VERSION=unknown");
     println!("cargo:rustc-env=OPENSIPS_COMPILE_FLAGS=unknown");
+}
+
+#[allow(dead_code)]
+fn compile_c_helper(src_dir: &str, dflags: &[(String, Option<String>)]) {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let mut build = cc::Build::new();
+    build
+        .file(manifest.join("src/sst_shim.c"))
+        .include(src_dir)
+        .warnings(false)
+        .opt_level(2);
+
+    for (name, val) in dflags {
+        match val {
+            Some(v) => { build.define(name, v.as_str()); }
+            None => { build.define(name, None); }
+        }
+    }
+
+    build.compile("sst_shim");
 }
