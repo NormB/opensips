@@ -1022,6 +1022,15 @@ unsafe extern "C" fn mod_init() -> c_int {
         }
     }
 
+    // Initialize per-entry shm hit counters (pre-fork). All UDP workers and
+    // the MI process (rank -2) inherit the same pointer after fork, so
+    // MI reads see the aggregate state that workers incremented.
+    if !shm_counters_init() {
+        opensips_log!(ERR, "rust_acl",
+            "failed to allocate shared-memory hit counter table");
+        return -1;
+    }
+
     0
 }
 
