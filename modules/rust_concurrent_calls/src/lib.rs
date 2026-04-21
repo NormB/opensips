@@ -1258,7 +1258,7 @@ unsafe extern "C" fn w_concurrent_dec(
         // there's no active count (e.g. BYE on a dialog rejected before
         // inc), skip the stat update to avoid underflowing the u64
         // active_calls stat to UINT64_MAX.
-        let had_active = state.counts.get(account.as_bytes()).unwrap_or(0) > 0;
+        let had_active = state.counts.get_count(account.as_bytes()) > 0;
         let new_count = state.counts.decrement(account.as_bytes());
         if had_active {
             state.stats.decremented.set(state.stats.decremented.get() + 1);
