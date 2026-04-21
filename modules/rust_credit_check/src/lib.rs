@@ -3,6 +3,15 @@
 //! Queries an external billing API for account balance, caches results
 //! per-worker with configurable TTL. Computes max call duration from balance.
 //!
+//! TODO (queued, module currently disabled in demo): WorkerState holds
+//! per-worker cache + rate table in thread_local storage. Same
+//! cross-process invisibility bug as rust_concurrent_calls /
+//! rust_refer_handler — when re-enabled, move the shared-state pieces
+//! (cache + any MI-visible counters not already in StatVar) into an
+//! OpenSIPS-shm-backed map following the pattern used in
+//! rust_concurrent_calls (static AtomicPtr seeded in mod_init via
+//! `opensips_rs_shm_malloc`, atomic slot state machine).
+//!
 //! # Features
 //! - **Debit on call end** (Task 45): POST debit to billing API via FireAndForget.
 //! - **Configurable JSON field** (Task 46): Dot-notation paths for balance extraction.
