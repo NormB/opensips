@@ -246,9 +246,10 @@ static int parse_urls(const char *url)
  *
  * - Consumer (OpenSIPS process thread): nats_pool_get_kv() checks this flag
  *   using atomic_exchange(&_kv_stale, 0), which atomically reads the value
- *   and clears it in one operation.  This prevents the TOCTOU race that
- *   existed with the prior volatile read-then-write pattern, where a
- *   reconnect callback could set the flag between the read and the clear.
+ *   and clears it in one operation.  This prevents the Time-Of-Check to
+ *   Time-Of-Use (TOCTOU) race that existed with the prior volatile
+ *   read-then-write pattern, where a reconnect callback could set the
+ *   flag between the read and the clear.
  *
  * Using atomic_int (C11) instead of volatile int because volatile only
  * prevents compiler reordering — it does not guarantee atomicity of
