@@ -782,12 +782,20 @@ sst_prometheus();
 	<section id="mi_sst_show" xreflabel="sst_show">
 		<title><function moreinfo="none">sst_show</function></title>
 		<para>
-		Return the per-worker table of currently tracked SST dialogs.
-		Each entry is populated by the module's
-		<literal>DLGCB_CREATED</literal> callback and removed by the
+		Return the table of currently tracked SST dialogs. Entries are
+		populated by the module's <literal>DLGCB_CREATED</literal>
+		callback (from a worker) and removed by the
 		<literal>DLGCB_TERMINATED</literal> /
 		<literal>DLGCB_EXPIRED</literal> /
 		<literal>DLGCB_FAILED</literal> callbacks.
+		</para>
+		<para>
+		The backing table lives in OpenSIPS shared memory (allocated
+		pre-fork), so every worker process and the MI process (rank
+		<literal>-2</literal>) observe the same state. Calling
+		<function>sst_show</function> via <literal>opensips-cli</literal>
+		or the MI HTTP/JSON-RPC endpoint returns the same aggregate view
+		regardless of which process handled the request.
 		</para>
 		<para>
 		The response is a JSON object:
@@ -823,14 +831,6 @@ sst_prometheus();
 		</para></listitem>
 		<listitem><para><literal>count</literal> &mdash; length of
 		the <literal>dialogs</literal> array.</para></listitem>
-		<listitem><para><literal>process</literal> &mdash;
-		<quote>worker</quote> when the response came from a worker
-		with a populated table; <quote>mi</quote> when it came from
-		the MI process, which runs its own (empty) per-worker table.
-		Callers that need an aggregated fleet view across all workers
-		should combine <literal>sst_show</literal> with
-		<literal>dialog:dlg_list</literal> or aggregate the module's
-		statistics counters.</para></listitem>
 		</itemizedlist>
 		</para>
 		<para>
@@ -852,8 +852,7 @@ sst_prometheus();
       "expired": false
     }
   ],
-  "count": 1,
-  "process": "worker"
+  "count": 1
 }
 </programlisting>
 		</example>
