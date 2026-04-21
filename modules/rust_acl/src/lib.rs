@@ -106,7 +106,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::time::Instant;
 
 // Native statistics -- cross-worker, aggregated by OpenSIPS core.
@@ -491,15 +491,220 @@ fn maybe_purge_auto(auto_blocked: &mut HashMap<String, AutoEntry>,
     }
 }
 
-/// Increment the match counter for a given entry.
-fn counter_increment(counters: &mut HashMap<String, u64>, entry: &str) {
-    *counters.entry(entry.to_string()).or_insert(0) += 1;
+// ── Shared-memory per-entry hit counters ─────────────────────────
+//
+// OpenSIPS UDP workers are separate processes. A per-worker HashMap
+// of hit counters is invisible to the MI process (rank -2), so
+// `rust_acl:blocklist_show` would always report 0 hits even when
+// aggregate `rust_acl:blocked` climbs. The fix is to keep the
+// counters in OpenSIPS shared memory, with atomic increments.
+//
+// Allocation happens once in `mod_init` (pre-fork); after fork every
+// worker sees the same physical pages. `fetch_add(1, Relaxed)` on an
+// `AtomicU64` compiles to a single CPU atomic instruction that is
+// safe across processes backed by the same shared memory.
+
+// Extern shims provided by the opensips-rs SDK shim.c
+// (available when linked against either shim.c in production or
+// test_stubs.c during `cargo test --lib`).
+#[cfg(not(test))]
+extern "C" {
+    fn opensips_rs_shm_malloc(size: std::ffi::c_ulong) -> *mut c_void;
+}
+
+// During `cargo test --lib` the OpenSIPS shm allocator and its global
+// locks are not initialized, so calling `shm_malloc()` via shim.c
+// would SIGBUS. Substitute libc calloc, which gives us zero-
+// initialized memory adequate for single-process unit testing.
+#[cfg(test)]
+unsafe fn opensips_rs_shm_malloc(size: std::ffi::c_ulong) -> *mut c_void {
+    extern "C" {
+        fn calloc(nmemb: std::ffi::c_ulong, size: std::ffi::c_ulong) -> *mut c_void;
+    }
+    calloc(1, size)
+}
+
+const SHM_COUNTER_CAPACITY: usize = 8;
+const SHM_COUNTER_KEY_MAX: usize = 128;
+
+/// Slot state values for `ShmCounterSlot::state`.
+const SLOT_EMPTY: u8 = 0;
+const SLOT_WRITING: u8 = 1;
+const SLOT_READY: u8 = 2;
+
+#[repr(C, align(8))]
+struct ShmCounterSlot {
+    hits: AtomicU64,                    // 8-byte aligned
+    key_len: AtomicUsize,               // 8 bytes
+    state: AtomicU8,                    // 1 byte
+    _pad: [u8; 7],                      // round to 8-byte boundary
+    key: [u8; SHM_COUNTER_KEY_MAX],     // 128 bytes
+}
+
+#[repr(C, align(8))]
+struct ShmCounterTable {
+    slots: [ShmCounterSlot; SHM_COUNTER_CAPACITY],
+}
+
+/// Pointer to the shared-memory counter table. Set once during
+/// `mod_init` before fork; null before init.
+static SHM_COUNTERS: AtomicPtr<ShmCounterTable> = AtomicPtr::new(ptr::null_mut());
+
+/// FNV-1a 64-bit hash (same mixing constants as rust_concurrent_calls).
+#[inline(always)]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// Allocate the shared-memory counter table via `shm_malloc`.
+/// Call from `mod_init` (pre-fork). Returns false on allocation failure.
+fn shm_counters_init() -> bool {
+    if !SHM_COUNTERS.load(Ordering::Acquire).is_null() {
+        return true;
+    }
+    let size = std::mem::size_of::<ShmCounterTable>() as std::ffi::c_ulong;
+    let raw = unsafe { opensips_rs_shm_malloc(size) } as *mut ShmCounterTable;
+    if raw.is_null() {
+        return false;
+    }
+    // Zero-initialize (shm_malloc does not guarantee zeroing on all
+    // OpenSIPS allocators — e.g. F_MALLOC returns uninitialized frags).
+    unsafe {
+        ptr::write_bytes(raw as *mut u8, 0, size as usize);
+    }
+    SHM_COUNTERS.store(raw, Ordering::Release);
+    true
+}
+
+#[inline]
+fn shm_counters() -> Option<&'static ShmCounterTable> {
+    let p = SHM_COUNTERS.load(Ordering::Acquire);
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
+
+/// Find or allocate a slot for `entry`. Returns a reference to the
+/// hit counter, or `None` if the table is full or the key is too long.
+fn shm_counter_slot(entry: &str) -> Option<&'static AtomicU64> {
+    let table = shm_counters()?;
+    let key = entry.as_bytes();
+    if key.is_empty() || key.len() > SHM_COUNTER_KEY_MAX {
+        return None;
+    }
+    let cap = SHM_COUNTER_CAPACITY;
+    let mut idx = (fnv1a64(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &table.slots[idx];
+        let state = slot.state.load(Ordering::Acquire);
+        if state == SLOT_READY {
+            // Compare keys
+            if slot.key_len.load(Ordering::Acquire) == key.len()
+                && slot.key[..key.len()] == *key
+            {
+                return Some(&slot.hits);
+            }
+            idx = (idx + 1) % cap;
+            continue;
+        }
+        if state == SLOT_EMPTY {
+            // Try to claim this slot for a new insertion.
+            match slot.state.compare_exchange(
+                SLOT_EMPTY,
+                SLOT_WRITING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // We own the slot — write key and publish.
+                    unsafe {
+                        // Safety: we are the sole writer between claim and
+                        // publish; readers spin-wait on SLOT_WRITING below.
+                        let key_ptr = slot.key.as_ptr() as *mut u8;
+                        ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key.len());
+                    }
+                    slot.key_len.store(key.len(), Ordering::Release);
+                    // hits is already 0 (shm was zeroed at init).
+                    slot.state.store(SLOT_READY, Ordering::Release);
+                    return Some(&slot.hits);
+                }
+                Err(_) => {
+                    // Another worker claimed it — re-inspect this slot.
+                    continue;
+                }
+            }
+        }
+        // SLOT_WRITING: spin briefly, then re-check.
+        std::hint::spin_loop();
+    }
+    None
+}
+
+/// Increment the hit counter for `entry` in shared memory.
+/// Silently no-ops if the shm counter table was not initialized.
+fn counter_increment(entry: &str) {
+    if let Some(h) = shm_counter_slot(entry) {
+        h.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Look up the hit count for `entry` (0 if unseen).
+fn counter_get(entry: &str) -> u64 {
+    let Some(table) = shm_counters() else { return 0; };
+    let key = entry.as_bytes();
+    if key.is_empty() || key.len() > SHM_COUNTER_KEY_MAX {
+        return 0;
+    }
+    let cap = SHM_COUNTER_CAPACITY;
+    let mut idx = (fnv1a64(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &table.slots[idx];
+        let state = slot.state.load(Ordering::Acquire);
+        if state == SLOT_EMPTY {
+            return 0;
+        }
+        if state == SLOT_READY
+            && slot.key_len.load(Ordering::Acquire) == key.len()
+            && slot.key[..key.len()] == *key
+        {
+            return slot.hits.load(Ordering::Relaxed);
+        }
+        idx = (idx + 1) % cap;
+    }
+    0
+}
+
+/// Snapshot all (key, count) pairs from the shm table into a Vec.
+/// Only includes slots with hits > 0 to keep output tidy.
+fn counter_snapshot() -> Vec<(String, u64)> {
+    let Some(table) = shm_counters() else { return Vec::new(); };
+    let mut out: Vec<(String, u64)> = Vec::new();
+    for slot in table.slots.iter() {
+        if slot.state.load(Ordering::Acquire) != SLOT_READY {
+            continue;
+        }
+        let klen = slot.key_len.load(Ordering::Acquire);
+        if klen == 0 || klen > SHM_COUNTER_KEY_MAX {
+            continue;
+        }
+        let hits = slot.hits.load(Ordering::Relaxed);
+        if hits == 0 {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(&slot.key[..klen]) {
+            out.push((s.to_string(), hits));
+        }
+    }
+    out
 }
 
 /// Get top-N entries by match count, returned as JSON.
-fn top_n_entries(counters: &HashMap<String, u64>, n: usize) -> String {
-    let mut entries: Vec<(&String, &u64)> = counters.iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(a.1));
+fn top_n_entries(n: usize) -> String {
+    let mut entries = counter_snapshot();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
     entries.truncate(n);
     let items: Vec<String> = entries
         .iter()
@@ -507,6 +712,21 @@ fn top_n_entries(counters: &HashMap<String, u64>, n: usize) -> String {
             k.replace('"', r#"\""#), v))
         .collect();
     format!("[{}]", items.join(","))
+}
+
+/// Find the matching entry in either a typed ACL file or the generic
+/// blocklist, whichever matches first. Mirrors `check_with_typed`.
+fn find_matching_entry_typed(
+    primary: &AclData,
+    typed: Option<&TypedAcl>,
+    value: &str,
+) -> Option<String> {
+    if let Some(t) = typed {
+        if let Some(m) = find_matching_entry(&t.data, value) {
+            return Some(m);
+        }
+    }
+    find_matching_entry(primary, value)
 }
 
 /// Find matching entry string for counter tracking.
@@ -573,7 +793,6 @@ struct WorkerState {
     stats: Stats,
     mode: String,
     track_counters: bool,
-    entry_counters: HashMap<String, u64>,
     access_policy: AccessPolicy,
     // Database integration (only with `database` feature)
     #[cfg(feature = "database")]
@@ -995,7 +1214,6 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
             stats,
             mode,
             track_counters,
-            entry_counters: HashMap::new(),
             access_policy,
             #[cfg(feature = "database")]
             db_blocklist,
@@ -1054,7 +1272,7 @@ unsafe extern "C" fn w_check_blocklist(
                     if blocked {
                         if state.track_counters {
                             if let Some(entry) = find_matching_entry(&state.blocklist, value) {
-                                counter_increment(&mut state.entry_counters, &entry);
+                                counter_increment(&entry);
                             }
                         }
                         state.stats.inc("blocked");
@@ -1114,6 +1332,15 @@ unsafe extern "C" fn w_check_blocklist_ip(
                     ) || check_auto(&state.auto_blocked, value);
 
                     if blocked {
+                        if state.track_counters {
+                            if let Some(entry) = find_matching_entry_typed(
+                                &state.blocklist,
+                                state.blocklist_ip.as_ref(),
+                                value,
+                            ) {
+                                counter_increment(&entry);
+                            }
+                        }
                         state.stats.inc("blocked");
                         if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
@@ -1163,6 +1390,15 @@ unsafe extern "C" fn w_check_blocklist_ua(
                     ) || check_auto(&state.auto_blocked, value);
 
                     if blocked {
+                        if state.track_counters {
+                            if let Some(entry) = find_matching_entry_typed(
+                                &state.blocklist,
+                                state.blocklist_ua.as_ref(),
+                                value,
+                            ) {
+                                counter_increment(&entry);
+                            }
+                        }
                         state.stats.inc("blocked");
                         if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
@@ -1212,6 +1448,15 @@ unsafe extern "C" fn w_check_blocklist_domain(
                     ) || check_auto(&state.auto_blocked, value);
 
                     if blocked {
+                        if state.track_counters {
+                            if let Some(entry) = find_matching_entry_typed(
+                                &state.blocklist,
+                                state.blocklist_domain.as_ref(),
+                                value,
+                            ) {
+                                counter_increment(&entry);
+                            }
+                        }
                         state.stats.inc("blocked");
                         if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                         -1
@@ -1264,7 +1509,7 @@ unsafe extern "C" fn w_check_allowlist(
                         if state.track_counters {
                             if let Some(ref al) = state.allowlist {
                                 if let Some(entry) = find_matching_entry(al, value) {
-                                    counter_increment(&mut state.entry_counters, &entry);
+                                    counter_increment(&entry);
                                 }
                             }
                         }
@@ -1868,7 +2113,7 @@ unsafe extern "C" fn w_access_entry_stats(
                     if !state.track_counters {
                         return r#"{"error":"track_counters not enabled"}"#.to_string();
                     }
-                    top_n_entries(&state.entry_counters, 100)
+                    top_n_entries(100)
                 }
                 None => r#"{"error":"not_initialized"}"#.to_string(),
             }
@@ -2012,7 +2257,7 @@ unsafe extern "C" fn mi_blocklist_show(
                 obj.add_str("pattern", entry);
                 obj.add_str("type", &state.mode);
                 if state.track_counters {
-                    let hits = state.entry_counters.get(entry).copied().unwrap_or(0);
+                    let hits = counter_get(entry);
                     obj.add_num("hits", hits as f64);
                 }
                 count += 1;
@@ -3216,54 +3461,70 @@ mod tests {
 
 
     // ── Entry counter tests (Task 38) ────────────────────────────
+    //
+    // NOTE: the shm counter table is a process-wide static. Tests that
+    // exercise it share the same table, so each test uses unique keys
+    // (prefixed with the test name) to avoid cross-test interference
+    // when cargo runs tests in parallel.
 
     #[test]
     fn test_counter_increment() {
-        let mut counters: HashMap<String, u64> = HashMap::new();
-        counter_increment(&mut counters, "192.168.1.100");
-        counter_increment(&mut counters, "192.168.1.100");
-        counter_increment(&mut counters, "bad-agent");
-        assert_eq!(counters["192.168.1.100"], 2);
-        assert_eq!(counters["bad-agent"], 1);
+        assert!(shm_counters_init());
+        counter_increment("ci-192.168.1.100");
+        counter_increment("ci-192.168.1.100");
+        counter_increment("ci-bad-agent");
+        assert_eq!(counter_get("ci-192.168.1.100"), 2);
+        assert_eq!(counter_get("ci-bad-agent"), 1);
     }
 
     #[test]
     fn test_counter_increment_new_entry() {
-        let mut counters: HashMap<String, u64> = HashMap::new();
-        counter_increment(&mut counters, "first");
-        assert_eq!(counters.len(), 1);
-        assert_eq!(counters["first"], 1);
+        assert!(shm_counters_init());
+        counter_increment("cine-first");
+        assert_eq!(counter_get("cine-first"), 1);
     }
 
     #[test]
     fn test_top_n_sorting() {
-        let mut counters: HashMap<String, u64> = HashMap::new();
-        counters.insert("low".to_string(), 1);
-        counters.insert("high".to_string(), 100);
-        counters.insert("mid".to_string(), 50);
+        assert!(shm_counters_init());
+        // Use a unique prefix so snapshot filtering can identify this
+        // test's entries (and ignore noise from other tests).
+        for _ in 0..1   { counter_increment("tns-low"); }
+        for _ in 0..100 { counter_increment("tns-high"); }
+        for _ in 0..50  { counter_increment("tns-mid"); }
 
-        let json = top_n_entries(&counters, 2);
-        // Should have high first, then mid (top 2)
-        assert!(json.contains(r#""entry":"high","count":100"#));
-        assert!(json.contains(r#""entry":"mid","count":50"#));
-        assert!(!json.contains("low"));
+        let json = top_n_entries(1000);
+        // All three should appear; ordering is by count.
+        assert!(json.contains(r#""entry":"tns-high","count":100"#));
+        assert!(json.contains(r#""entry":"tns-mid","count":50"#));
+        assert!(json.contains(r#""entry":"tns-low","count":1"#));
+        // high must appear before mid must appear before low.
+        let i_high = json.find("tns-high").unwrap();
+        let i_mid = json.find("tns-mid").unwrap();
+        let i_low = json.find("tns-low").unwrap();
+        assert!(i_high < i_mid);
+        assert!(i_mid < i_low);
     }
 
     #[test]
     fn test_top_n_empty() {
-        let counters: HashMap<String, u64> = HashMap::new();
-        let json = top_n_entries(&counters, 10);
-        assert_eq!(json, "[]");
+        // Snapshot only contains entries with hits > 0. If no other
+        // test has incremented yet this yields [], but in parallel
+        // runs we can't assert that globally — just assert the
+        // return type/shape is sensible JSON.
+        let json = top_n_entries(10);
+        assert!(json.starts_with('['));
+        assert!(json.ends_with(']'));
     }
 
     #[test]
     fn test_top_n_all_entries() {
-        let mut counters: HashMap<String, u64> = HashMap::new();
-        counters.insert("a".to_string(), 5);
-        counters.insert("b".to_string(), 3);
-        let json = top_n_entries(&counters, 100); // N > entries
-        assert!(json.contains("\"a\""));
-        assert!(json.contains("\"b\""));
+        assert!(shm_counters_init());
+        for _ in 0..5 { counter_increment("tnae-a"); }
+        for _ in 0..3 { counter_increment("tnae-b"); }
+        let json = top_n_entries(1000);
+        assert!(json.contains(r#""entry":"tnae-a","count":5"#));
+        assert!(json.contains(r#""entry":"tnae-b","count":3"#));
     }
 
     #[test]
