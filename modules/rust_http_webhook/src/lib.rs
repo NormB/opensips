@@ -506,9 +506,26 @@ static MOD_STATS: SyncArray<sys::stat_export_, 8> = SyncArray([
 
 /// MI handler: rust_http_webhook:webhook_status
 ///
-/// Reads from native StatVar (shared memory, aggregated across all workers)
-/// so the MI process sees global totals regardless of which process handles
-/// the MI request.
+/// Reads from native StatVar (OpenSIPS-core-managed shared memory,
+/// aggregated across all workers) so the MI process sees global totals
+/// regardless of which process handles the MI request.
+///
+/// # Why this module is NOT affected by the per-worker thread_local bug
+///
+/// Sister modules (rust_acl, rust_concurrent_calls, rust_refer_handler)
+/// hit a bug where MI handlers iterated the MI process's own
+/// thread_local state, which was always empty because the MI process
+/// never serves SIP traffic. This module avoids that trap by design:
+///
+///  * Per-worker `StatSyncState` tracks last-synced deltas; each call
+///    to `webhook()` calls `sync_ff_to_native_stats(ff)` which pushes
+///    its delta into the shared StatVars.
+///  * This MI handler reads ONLY from the shared StatVars — never
+///    from the per-worker `FireAndForget` counters or `StatSyncState`.
+///
+/// So the per-worker struct is effectively a write-through cache, and
+/// the MI view is already authoritative and cross-worker. No shm-map
+/// refactor needed here.
 unsafe extern "C" fn mi_webhook_status(
     _params: *const sys::mi_params_,
     _async_hdl: *mut sys::mi_handler,
