@@ -471,6 +471,27 @@ fn count_inc(key: &[u8]) -> u32 {
     }
 }
 
+/// Atomic check-and-acquire: reserve a slot iff count < limit.
+/// Returns `Ok(new_count)` on success (counter is now count+1).
+/// Returns `Err(observed)` if count >= limit (counter unchanged).
+/// The CAS loop retries on contention so races between parallel workers
+/// settle without any worker punching through the limit.
+fn count_try_acquire(key: &[u8], limit: u32) -> Result<u32, u32> {
+    let Some(s) = count_find_or_insert(key) else { return Err(0); };
+    let mut cur = s.count.load(Ordering::Relaxed);
+    loop {
+        if cur >= limit {
+            return Err(cur);
+        }
+        match s.count.compare_exchange_weak(
+            cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed,
+        ) {
+            Ok(_) => return Ok(cur + 1),
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
 // Saturating atomic sub via CAS (AtomicU32 has no native saturating_sub).
 fn sat_dec_u32(a: &AtomicU32) -> u32 {
     let mut cur = a.load(Ordering::Relaxed);
@@ -1294,6 +1315,82 @@ unsafe extern "C" fn w_concurrent_inc(
     }, -2)
 }
 
+// ── Script function: concurrent_acquire(account) ─────────────────
+//
+// Atomic check-and-acquire: the check-the-limit and increment-the-count
+// operations are fused into a single compare-and-swap, so two parallel
+// workers seeing `count == limit - 1` can no longer both succeed and
+// leave `count > limit`. On failure (at-limit) the counter is not
+// touched; callers get a -1 return analogous to check_concurrent() so
+// existing cfg patterns (`if (!concurrent_acquire(...))`) work.
+
+unsafe extern "C" fn w_concurrent_acquire(
+    msg: *mut sys::sip_msg,
+    p0: *mut c_void, _p1: *mut c_void, _p2: *mut c_void, _p3: *mut c_void,
+    _p4: *mut c_void, _p5: *mut c_void, _p6: *mut c_void, _p7: *mut c_void,
+) -> c_int {
+    let account = match unsafe { <&str as CommandFunctionParam>::from_raw(p0) } {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let key = account.as_bytes();
+
+    let do_dlg_profile = USE_DIALOG_PROFILES.get() != 0;
+
+    with_worker(|state| {
+        state.stats.checked.set(state.stats.checked.get() + 1);
+        if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
+
+        // Cooldown check — same gate as check_concurrent(). If we're in
+        // cooldown, short-circuit without touching the counter.
+        if state.cooldown_secs > 0 {
+            let now = now_secs();
+            if count_in_cooldown(key, now) {
+                state.stats.blocked.set(state.stats.blocked.get() + 1);
+                if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+                safe_log!(L_DBG, "acquire ", account, ": in cooldown, auto-rejected");
+                return -1;
+            }
+        }
+
+        let limit = effective_limit(state, key);
+
+        match count_try_acquire(key, limit) {
+            Ok(new_count) => {
+                state.stats.allowed.set(state.stats.allowed.get() + 1);
+                state.stats.incremented.set(state.stats.incremented.get() + 1);
+                if let Some(s) = StatVar::from_raw(STAT_ALLOWED.load(Ordering::Relaxed)) { s.inc(); }
+                if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
+                safe_log!(L_DBG, "acquire ", account, ": now ", new_count);
+
+                // Dialog profile integration — mirrors w_concurrent_inc.
+                if do_dlg_profile {
+                    let profile_name = unsafe { PROFILE_NAME.get_value() }
+                        .unwrap_or("concurrent_calls");
+                    unsafe {
+                        call_set_dlg_profile(msg, profile_name.as_bytes(), account.as_bytes());
+                    }
+                }
+                1
+            }
+            Err(observed) => {
+                state.stats.blocked.set(state.stats.blocked.get() + 1);
+                if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
+
+                if state.cooldown_secs > 0 {
+                    let now = now_secs();
+                    count_set_cooldown(key, now + state.cooldown_secs);
+                }
+                if state.publish_events {
+                    publish_blocked_event(account, observed, limit);
+                }
+                safe_log!(L_DBG, "acquire ", account, ": blocked (count=", observed, " limit=", limit, ")");
+                -1
+            }
+        }
+    }, -2)
+}
+
 // ── Script function: concurrent_dec(account) ─────────────────────
 
 unsafe extern "C" fn w_concurrent_dec(
@@ -1645,8 +1742,9 @@ const TWO_STR_PARAMS: [sys::cmd_param; 9] = {
     p
 };
 
-static CMDS: SyncArray<sys::cmd_export_, 12> = SyncArray([
+static CMDS: SyncArray<sys::cmd_export_, 13> = SyncArray([
     sys::cmd_export_ { name: cstr_lit!("check_concurrent"), function: Some(w_check_concurrent), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
+    sys::cmd_export_ { name: cstr_lit!("concurrent_acquire"), function: Some(w_concurrent_acquire), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
     sys::cmd_export_ { name: cstr_lit!("concurrent_inc"), function: Some(w_concurrent_inc), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
     sys::cmd_export_ { name: cstr_lit!("concurrent_dec"), function: Some(w_concurrent_dec), params: ONE_STR_PARAM, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
     sys::cmd_export_ { name: cstr_lit!("concurrent_reload"), function: Some(w_concurrent_reload), params: EMPTY_PARAMS, flags: opensips_rs::route::REQ_FAIL_ONREPLY },
