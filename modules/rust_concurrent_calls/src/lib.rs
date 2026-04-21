@@ -49,11 +49,11 @@ use opensips_rs::sys;
 use opensips_rs::cstr_lit;
 use rust_common::stat::{StatVar, StatVarOpaque};
 
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_int, c_long, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
 extern "C" {
     fn calloc(nmemb: usize, size: usize) -> *mut c_void;
@@ -62,6 +62,11 @@ extern "C" {
     fn fclose(stream: *mut c_void) -> c_int;
     fn fgets(buf: *mut c_char, size: c_int, stream: *mut c_void) -> *mut c_char;
     fn opensips_rs_log(level: c_int, module: *const c_char, msg: *const c_char);
+    // OpenSIPS shared memory allocator. Allocated regions are mapped
+    // into all worker processes at the same virtual address, so
+    // pointers stored pre-fork remain valid post-fork in every worker
+    // + the MI process.
+    fn opensips_rs_shm_malloc(size: std::ffi::c_ulong) -> *mut c_void;
 }
 
 // ── Zero-allocation logging ──────────────────────────────────────
@@ -212,24 +217,14 @@ const BURST_RING_SIZE: usize = 8;
 const NUMBER_ST: c_int = 3;
 const STR_ST: c_int = 12;
 
-// ── Fixed-capacity hash map for u32 values (libc-backed) ─────────
+// ── Slot state machine (EMPTY → WRITING → READY) for shm-concurrent
+//    inserts. Modelled on rust_acl's shm counter table. Inserters claim
+//    a slot via compare_exchange (EMPTY → WRITING) then publish READY.
+//    Concurrent INC/DEC on a READY slot uses atomic fetch_add/fetch_sub.
 
-#[repr(C)]
-struct Slot {
-    key: [u8; MAX_KEY_LEN],
-    key_len: u8,
-    occupied: bool,
-    _pad: [u8; 2],
-    value: u32,
-}
-
-struct FixedMap {
-    slots: *mut Slot,
-    capacity: usize,
-    len: usize,
-}
-
-unsafe impl Send for FixedMap {}
+const SLOT_EMPTY: u8 = 0;
+const SLOT_WRITING: u8 = 1;
+const SLOT_READY: u8 = 2;
 
 #[inline(always)]
 fn fnv1a(key: &[u8]) -> u64 {
@@ -241,345 +236,395 @@ fn fnv1a(key: &[u8]) -> u64 {
     h
 }
 
-impl FixedMap {
-    fn new() -> Self {
-        let slots = unsafe { calloc(MAP_CAPACITY, core::mem::size_of::<Slot>()) } as *mut Slot;
-        assert!(!slots.is_null(), "calloc failed for FixedMap");
-        FixedMap { slots, capacity: MAP_CAPACITY, len: 0 }
-    }
+// ── OverrideMap: shm-backed u32 map for per-account limit overrides ──
+//
+// Allocated once in mod_init (pre-fork). All workers + the MI process
+// see the same physical pages, so `concurrent_override` MI calls are
+// visible globally and `concurrent_show` reads the same state UDP
+// workers wrote to.
 
-    fn get(&self, key: &[u8]) -> Option<u32> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &*self.slots.add(idx) };
-            if !slot.occupied { return None; }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                return Some(slot.value);
-            }
-            idx = (idx + 1) % self.capacity;
+#[repr(C)]
+struct OverrideSlot {
+    state: AtomicU8,
+    key_len: AtomicU8,
+    _pad: [u8; 2],
+    value: AtomicU32,
+    // Interior-mutable byte storage. Writes are gated by the slot
+    // state machine (only the slot-owner writes between WRITING and
+    // READY); readers obtain the bytes via `.get()` after observing
+    // the Release store on `state`.
+    key: UnsafeCell<[u8; MAX_KEY_LEN]>,
+}
+
+// Safety: interior mutability on `key` is synchronised by the
+// Acquire/Release ordering on `state`.
+unsafe impl Sync for OverrideSlot {}
+
+#[repr(C)]
+struct OverrideMap {
+    slots: [OverrideSlot; MAP_CAPACITY],
+}
+
+unsafe impl Send for OverrideMap {}
+unsafe impl Sync for OverrideMap {}
+
+static OVERRIDE_MAP: AtomicPtr<OverrideMap> = AtomicPtr::new(ptr::null_mut());
+
+fn override_map() -> Option<&'static OverrideMap> {
+    let p = OVERRIDE_MAP.load(Ordering::Acquire);
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
+
+#[inline]
+unsafe fn override_key_bytes(slot: &OverrideSlot) -> &[u8] {
+    let kl = slot.key_len.load(Ordering::Acquire) as usize;
+    let p = slot.key.get() as *const u8;
+    core::slice::from_raw_parts(p, kl.min(MAX_KEY_LEN))
+}
+
+fn override_get(key: &[u8]) -> Option<u32> {
+    let map = override_map()?;
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_EMPTY { return None; }
+        if st == SLOT_READY && unsafe { override_key_bytes(slot) } == key {
+            return Some(slot.value.load(Ordering::Relaxed));
         }
-        None
+        idx = (idx + 1) % cap;
     }
+    None
+}
 
-    fn get_mut(&mut self, key: &[u8]) -> Option<&mut u32> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &mut *self.slots.add(idx) };
-            if !slot.occupied { return None; }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                return Some(&mut slot.value);
-            }
-            idx = (idx + 1) % self.capacity;
+fn override_insert(key: &[u8], value: u32) -> bool {
+    let Some(map) = override_map() else { return false; };
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_READY && unsafe { override_key_bytes(slot) } == key {
+            slot.value.store(value, Ordering::Relaxed);
+            return true;
         }
-        None
-    }
-
-    fn insert(&mut self, key: &[u8], value: u32) -> bool {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return false; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &mut *self.slots.add(idx) };
-            if !slot.occupied {
-                slot.key[..key.len()].copy_from_slice(key);
-                slot.key_len = key.len() as u8;
-                slot.value = value;
-                slot.occupied = true;
-                self.len += 1;
+        if st == SLOT_EMPTY {
+            if slot.state.compare_exchange(
+                SLOT_EMPTY, SLOT_WRITING, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok() {
+                unsafe {
+                    let kp = slot.key.get() as *mut u8;
+                    ptr::copy_nonoverlapping(key.as_ptr(), kp, key.len());
+                }
+                slot.key_len.store(key.len() as u8, Ordering::Release);
+                slot.value.store(value, Ordering::Relaxed);
+                slot.state.store(SLOT_READY, Ordering::Release);
                 return true;
             }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                slot.value = value;
-                return true;
-            }
-            idx = (idx + 1) % self.capacity;
+            std::hint::spin_loop();
+            continue;
         }
-        false
+        std::hint::spin_loop();
     }
+    false
+}
 
-    fn increment(&mut self, key: &[u8]) -> u32 {
-        if let Some(v) = self.get_mut(key) {
-            *v = v.saturating_add(1);
-            return *v;
-        }
-        self.insert(key, 1);
-        1
-    }
-
-    fn decrement(&mut self, key: &[u8]) -> u32 {
-        if let Some(v) = self.get_mut(key) {
-            *v = v.saturating_sub(1);
-            return *v;
-        }
-        0
-    }
-
-    fn clear(&mut self) {
-        if !self.slots.is_null() {
-            unsafe {
-                core::ptr::write_bytes(self.slots, 0, self.capacity);
-            }
-            self.len = 0;
-        }
-    }
-
-    fn destroy(&mut self) {
-        if !self.slots.is_null() {
-            unsafe { free(self.slots as *mut c_void) };
-            self.slots = ptr::null_mut();
-            self.capacity = 0;
-            self.len = 0;
-        }
+fn override_clear() {
+    let Some(map) = override_map() else { return; };
+    for slot in map.slots.iter() {
+        slot.value.store(0, Ordering::Relaxed);
+        slot.state.store(SLOT_EMPTY, Ordering::Release);
     }
 }
 
-impl Drop for FixedMap {
-    fn drop(&mut self) {
-        self.destroy();
-    }
-}
 
-// ── CountMap: extended per-account state with burst ring buffer ──
+// ── CountMap: shm-backed per-account counters + burst ring ──────
+//
+// Allocated once in mod_init (pre-fork); all workers + the MI process
+// see the same physical pages, so `concurrent_show` returns the true
+// aggregate state. Counters are atomic so multi-worker updates are
+// race-free. The burst ring is protected by a per-slot spinlock
+// because it's multi-word; burst contention is rare and brief.
+
+const BURST_UNLOCKED: u8 = 0;
+const BURST_LOCKED: u8 = 1;
 
 #[repr(C)]
 struct CountSlot {
-    key: [u8; MAX_KEY_LEN],
-    key_len: u8,
-    occupied: bool,
+    state: AtomicU8,
+    key_len: AtomicU8,
     _pad: [u8; 2],
-    count: u32,
-    inbound_count: u32,
-    outbound_count: u32,
-    cooldown_until: i64,
-    burst_ring: [(i64, u32); BURST_RING_SIZE],
-    burst_head: u8,
-    burst_len: u8,
+    count: AtomicU32,
+    inbound_count: AtomicU32,
+    outbound_count: AtomicU32,
+    cooldown_until: AtomicI64,
+    burst_lock: AtomicU8,
+    _pad2: [u8; 7],
+    // Interior-mutable burst ring, key, burst_head, burst_len.
+    // key is published under the state machine; the ring + head/len
+    // indices are synchronised by `burst_lock`.
+    key: UnsafeCell<[u8; MAX_KEY_LEN]>,
+    burst_head: UnsafeCell<u8>,
+    burst_len: UnsafeCell<u8>,
+    _pad3: [u8; 6],
+    burst_ring: UnsafeCell<[(i64, u32); BURST_RING_SIZE]>,
 }
 
+// Safety: interior-mutable members are synchronised either by the
+// state machine (key) or by burst_lock (ring + head/len).
+unsafe impl Sync for CountSlot {}
+
+#[repr(C)]
 struct CountMap {
-    slots: *mut CountSlot,
-    capacity: usize,
-    len: usize,
+    slots: [CountSlot; MAP_CAPACITY],
 }
 
 unsafe impl Send for CountMap {}
+unsafe impl Sync for CountMap {}
 
-impl CountMap {
-    fn new() -> Self {
-        let slots = unsafe {
-            calloc(MAP_CAPACITY, core::mem::size_of::<CountSlot>())
-        } as *mut CountSlot;
-        assert!(!slots.is_null(), "calloc failed for CountMap");
-        CountMap { slots, capacity: MAP_CAPACITY, len: 0 }
+static COUNT_MAP: AtomicPtr<CountMap> = AtomicPtr::new(ptr::null_mut());
+
+fn count_map() -> Option<&'static CountMap> {
+    let p = COUNT_MAP.load(Ordering::Acquire);
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
+
+#[inline]
+unsafe fn count_key_bytes(slot: &CountSlot) -> &[u8] {
+    let kl = slot.key_len.load(Ordering::Acquire) as usize;
+    let p = slot.key.get() as *const u8;
+    core::slice::from_raw_parts(p, kl.min(MAX_KEY_LEN))
+}
+
+fn count_find(key: &[u8]) -> Option<&'static CountSlot> {
+    let map = count_map()?;
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_EMPTY { return None; }
+        if st == SLOT_READY && unsafe { count_key_bytes(slot) } == key {
+            return Some(slot);
+        }
+        idx = (idx + 1) % cap;
     }
+    None
+}
 
-    fn find_slot(&self, key: &[u8]) -> Option<*mut CountSlot> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &*self.slots.add(idx) };
-            if !slot.occupied { return None; }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                return Some(unsafe { self.slots.add(idx) });
+fn count_find_or_insert(key: &[u8]) -> Option<&'static CountSlot> {
+    let map = count_map()?;
+    if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
+    let cap = MAP_CAPACITY;
+    let mut idx = (fnv1a(key) as usize) % cap;
+    for _ in 0..cap {
+        let slot = &map.slots[idx];
+        let st = slot.state.load(Ordering::Acquire);
+        if st == SLOT_READY {
+            if unsafe { count_key_bytes(slot) } == key {
+                return Some(slot);
             }
-            idx = (idx + 1) % self.capacity;
+            idx = (idx + 1) % cap;
+            continue;
         }
-        None
-    }
-
-    fn find_or_insert(&mut self, key: &[u8]) -> Option<*mut CountSlot> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN { return None; }
-        let mut idx = (fnv1a(key) as usize) % self.capacity;
-        for _ in 0..self.capacity {
-            let slot = unsafe { &mut *self.slots.add(idx) };
-            if !slot.occupied {
-                slot.key[..key.len()].copy_from_slice(key);
-                slot.key_len = key.len() as u8;
-                slot.occupied = true;
-                slot.count = 0;
-                slot.inbound_count = 0;
-                slot.outbound_count = 0;
-                slot.cooldown_until = 0;
-                slot.burst_head = 0;
-                slot.burst_len = 0;
-                self.len += 1;
-                return Some(self.slots.wrapping_add(idx));
+        if st == SLOT_EMPTY {
+            if slot.state.compare_exchange(
+                SLOT_EMPTY, SLOT_WRITING, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok() {
+                unsafe {
+                    let kp = slot.key.get() as *mut u8;
+                    ptr::copy_nonoverlapping(key.as_ptr(), kp, key.len());
+                }
+                slot.key_len.store(key.len() as u8, Ordering::Release);
+                // Counters already zero (shm was zeroed at init).
+                slot.state.store(SLOT_READY, Ordering::Release);
+                return Some(slot);
             }
-            if slot.key_len as usize == key.len()
-                && unsafe { slot.key.get_unchecked(..key.len()) } == key
-            {
-                return Some(self.slots.wrapping_add(idx));
-            }
-            idx = (idx + 1) % self.capacity;
+            std::hint::spin_loop();
+            continue;
         }
-        None
+        std::hint::spin_loop();
     }
+    None
+}
 
-    fn get_count(&self, key: &[u8]) -> u32 {
-        match self.find_slot(key) {
-            Some(p) => unsafe { (*p).count },
-            None => 0,
-        }
+fn count_get(key: &[u8]) -> u32 {
+    count_find(key).map_or(0, |s| s.count.load(Ordering::Relaxed))
+}
+
+fn count_get_inbound(key: &[u8]) -> u32 {
+    count_find(key).map_or(0, |s| s.inbound_count.load(Ordering::Relaxed))
+}
+
+fn count_get_outbound(key: &[u8]) -> u32 {
+    count_find(key).map_or(0, |s| s.outbound_count.load(Ordering::Relaxed))
+}
+
+fn count_inc(key: &[u8]) -> u32 {
+    match count_find_or_insert(key) {
+        Some(s) => s.count.fetch_add(1, Ordering::Relaxed).saturating_add(1),
+        None => 0,
     }
+}
 
-    fn get_inbound(&self, key: &[u8]) -> u32 {
-        match self.find_slot(key) {
-            Some(p) => unsafe { (*p).inbound_count },
-            None => 0,
-        }
-    }
-
-    fn get_outbound(&self, key: &[u8]) -> u32 {
-        match self.find_slot(key) {
-            Some(p) => unsafe { (*p).outbound_count },
-            None => 0,
-        }
-    }
-
-    fn increment(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_or_insert(key) {
-            let slot = unsafe { &mut *p };
-            slot.count = slot.count.saturating_add(1);
-            return slot.count;
-        }
-        0
-    }
-
-    fn decrement(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_slot(key) {
-            let slot = unsafe { &mut *p };
-            slot.count = slot.count.saturating_sub(1);
-            return slot.count;
-        }
-        0
-    }
-
-    fn increment_inbound(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_or_insert(key) {
-            let slot = unsafe { &mut *p };
-            slot.inbound_count = slot.inbound_count.saturating_add(1);
-            slot.count = slot.count.saturating_add(1);
-            return slot.inbound_count;
-        }
-        0
-    }
-
-    fn decrement_inbound(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_slot(key) {
-            let slot = unsafe { &mut *p };
-            slot.inbound_count = slot.inbound_count.saturating_sub(1);
-            slot.count = slot.count.saturating_sub(1);
-            return slot.inbound_count;
-        }
-        0
-    }
-
-    fn increment_outbound(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_or_insert(key) {
-            let slot = unsafe { &mut *p };
-            slot.outbound_count = slot.outbound_count.saturating_add(1);
-            slot.count = slot.count.saturating_add(1);
-            return slot.outbound_count;
-        }
-        0
-    }
-
-    fn decrement_outbound(&mut self, key: &[u8]) -> u32 {
-        if let Some(p) = self.find_slot(key) {
-            let slot = unsafe { &mut *p };
-            slot.outbound_count = slot.outbound_count.saturating_sub(1);
-            slot.count = slot.count.saturating_sub(1);
-            return slot.outbound_count;
-        }
-        0
-    }
-
-    /// Set cooldown_until timestamp for an account.
-    fn set_cooldown(&mut self, key: &[u8], until: i64) {
-        if let Some(p) = self.find_or_insert(key) {
-            unsafe { (*p).cooldown_until = until; }
+// Saturating atomic sub via CAS (AtomicU32 has no native saturating_sub).
+fn sat_dec_u32(a: &AtomicU32) -> u32 {
+    let mut cur = a.load(Ordering::Relaxed);
+    loop {
+        let new = cur.saturating_sub(1);
+        match a.compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return new,
+            Err(actual) => cur = actual,
         }
     }
+}
 
-    /// Check if account is in cooldown. Returns true if still cooling down.
-    fn in_cooldown(&self, key: &[u8], now: i64) -> bool {
-        match self.find_slot(key) {
-            Some(p) => unsafe { (*p).cooldown_until > now },
-            None => false,
+fn count_dec(key: &[u8]) -> u32 {
+    let Some(s) = count_find(key) else { return 0; };
+    sat_dec_u32(&s.count)
+}
+
+fn count_inc_inbound(key: &[u8]) -> u32 {
+    match count_find_or_insert(key) {
+        Some(s) => {
+            s.count.fetch_add(1, Ordering::Relaxed);
+            s.inbound_count.fetch_add(1, Ordering::Relaxed).saturating_add(1)
         }
+        None => 0,
     }
+}
 
-    /// Record a burst snapshot (timestamp, count) and check if burst threshold exceeded.
-    /// Returns true if the count increased by >= threshold within window_secs.
-    fn record_and_check_burst(&mut self, key: &[u8], now: i64, threshold: u32, window_secs: i64) -> bool {
-        let p = match self.find_or_insert(key) {
-            Some(p) => p,
-            None => return false,
-        };
-        let slot = unsafe { &mut *p };
-        let current_count = slot.count;
+fn count_dec_inbound(key: &[u8]) -> u32 {
+    let Some(s) = count_find(key) else { return 0; };
+    let new = sat_dec_u32(&s.inbound_count);
+    sat_dec_u32(&s.count);
+    new
+}
 
-        // Add current snapshot to ring buffer
-        let head = slot.burst_head as usize;
-        slot.burst_ring[head] = (now, current_count);
-        slot.burst_head = ((head + 1) % BURST_RING_SIZE) as u8;
-        if slot.burst_len < BURST_RING_SIZE as u8 {
-            slot.burst_len += 1;
+fn count_inc_outbound(key: &[u8]) -> u32 {
+    match count_find_or_insert(key) {
+        Some(s) => {
+            s.count.fetch_add(1, Ordering::Relaxed);
+            s.outbound_count.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+        }
+        None => 0,
+    }
+}
+
+fn count_dec_outbound(key: &[u8]) -> u32 {
+    let Some(s) = count_find(key) else { return 0; };
+    let new = sat_dec_u32(&s.outbound_count);
+    sat_dec_u32(&s.count);
+    new
+}
+
+fn count_set_cooldown(key: &[u8], until: i64) {
+    if let Some(s) = count_find_or_insert(key) {
+        s.cooldown_until.store(until, Ordering::Relaxed);
+    }
+}
+
+fn count_in_cooldown(key: &[u8], now: i64) -> bool {
+    count_find(key).is_some_and(|s| s.cooldown_until.load(Ordering::Relaxed) > now)
+}
+
+fn count_record_and_check_burst(key: &[u8], now: i64, threshold: u32, window_secs: i64) -> bool {
+    let Some(s) = count_find_or_insert(key) else { return false; };
+    while s.burst_lock.compare_exchange(
+        BURST_UNLOCKED, BURST_LOCKED, Ordering::Acquire, Ordering::Relaxed,
+    ).is_err() {
+        std::hint::spin_loop();
+    }
+    // Safety: burst_lock held; exclusive access to ring / head / len.
+    let current_count = s.count.load(Ordering::Relaxed);
+    let head_ptr = s.burst_head.get();
+    let len_ptr = s.burst_len.get();
+    let ring_ptr = s.burst_ring.get();
+
+    unsafe {
+        let head = *head_ptr as usize;
+        (*ring_ptr)[head] = (now, current_count);
+        *head_ptr = ((head + 1) % BURST_RING_SIZE) as u8;
+        if (*len_ptr as usize) < BURST_RING_SIZE {
+            *len_ptr += 1;
         }
 
-        // Check if any snapshot within window shows count increase >= threshold
-        let ring_len = slot.burst_len as usize;
+        let ring_len = *len_ptr as usize;
+        let mut result = false;
         for i in 0..ring_len {
             let idx = if head >= i { head - i } else { BURST_RING_SIZE - (i - head) };
             let idx = idx % BURST_RING_SIZE;
-            let (ts, old_count) = slot.burst_ring[idx];
-            if now - ts <= window_secs && current_count >= old_count {
-                if current_count - old_count >= threshold {
-                    return true;
-                }
+            let (ts, old_count) = (*ring_ptr)[idx];
+            if now - ts <= window_secs
+                && current_count >= old_count
+                && current_count - old_count >= threshold
+            {
+                result = true;
+                break;
             }
         }
-        false
-    }
-
-    fn clear(&mut self) {
-        if !self.slots.is_null() {
-            unsafe {
-                core::ptr::write_bytes(self.slots, 0, self.capacity);
-            }
-            self.len = 0;
-        }
-    }
-
-    /// Iterate over occupied slots.  Calls f(key_bytes, slot) for each.
-    fn for_each<F: FnMut(&[u8], &CountSlot)>(&self, mut f: F) {
-        for i in 0..self.capacity {
-            let slot = unsafe { &*self.slots.add(i) };
-            if slot.occupied {
-                let key = unsafe { slot.key.get_unchecked(..slot.key_len as usize) };
-                f(key, slot);
-            }
-        }
+        s.burst_lock.store(BURST_UNLOCKED, Ordering::Release);
+        result
     }
 }
 
-impl Drop for CountMap {
-    fn drop(&mut self) {
-        if !self.slots.is_null() {
-            unsafe { free(self.slots as *mut c_void) };
-            self.slots = ptr::null_mut();
-        }
+fn count_clear() {
+    let Some(map) = count_map() else { return; };
+    for slot in map.slots.iter() {
+        slot.count.store(0, Ordering::Relaxed);
+        slot.inbound_count.store(0, Ordering::Relaxed);
+        slot.outbound_count.store(0, Ordering::Relaxed);
+        slot.cooldown_until.store(0, Ordering::Relaxed);
+        slot.state.store(SLOT_EMPTY, Ordering::Release);
     }
 }
+
+fn count_for_each<F: FnMut(&[u8], &CountSlot)>(mut f: F) {
+    let Some(map) = count_map() else { return; };
+    for slot in map.slots.iter() {
+        if slot.state.load(Ordering::Acquire) != SLOT_READY { continue; }
+        let kl = slot.key_len.load(Ordering::Acquire) as usize;
+        if kl == 0 || kl > MAX_KEY_LEN { continue; }
+        // Safety: state == READY implies key bytes are initialised.
+        let k_bytes = unsafe {
+            core::slice::from_raw_parts(slot.key.get() as *const u8, kl)
+        };
+        f(k_bytes, slot);
+    }
+}
+
+/// Allocate the shm-backed maps. Called from mod_init (pre-fork).
+fn shm_maps_init() -> bool {
+    unsafe {
+        if COUNT_MAP.load(Ordering::Acquire).is_null() {
+            let sz = core::mem::size_of::<CountMap>() as std::ffi::c_ulong;
+            let raw = opensips_rs_shm_malloc(sz) as *mut CountMap;
+            if raw.is_null() {
+                safe_log!(L_ERR, "shm_malloc failed for CountMap");
+                return false;
+            }
+            // shm_malloc does not guarantee zero on all allocators.
+            ptr::write_bytes(raw as *mut u8, 0, sz as usize);
+            COUNT_MAP.store(raw, Ordering::Release);
+        }
+        if OVERRIDE_MAP.load(Ordering::Acquire).is_null() {
+            let sz = core::mem::size_of::<OverrideMap>() as std::ffi::c_ulong;
+            let raw = opensips_rs_shm_malloc(sz) as *mut OverrideMap;
+            if raw.is_null() {
+                safe_log!(L_ERR, "shm_malloc failed for OverrideMap");
+                return false;
+            }
+            ptr::write_bytes(raw as *mut u8, 0, sz as usize);
+            OVERRIDE_MAP.store(raw, Ordering::Release);
+        }
+    }
+    true
+}
+
 
 // ── LimitMap: per-account limits with direction-aware fields ─────
 
@@ -836,9 +881,11 @@ fn publish_blocked_event(account: &str, count: u32, limit: u32) {
 // ── Per-worker state ─────────────────────────────────────────────
 
 struct WorkerState {
-    counts: CountMap,
+    // counts + limit_overrides live in shm (COUNT_MAP, OVERRIDE_MAP).
+    // WorkerState carries only per-worker private state: the CSV-loaded
+    // LimitMap (immutable after load) and local stats counters
+    // (logging-only; authoritative aggregates live in STAT_* StatVars).
     limits: LimitMap,
-    limit_overrides: FixedMap,
     stats: SimpleStats,
     default_limit: u32,
     cooldown_secs: i64,
@@ -868,21 +915,21 @@ fn with_worker<F: FnOnce(&mut WorkerState) -> c_int>(f: F, err: c_int) -> c_int 
 
 /// Get the effective limit for an account: override > CSV limit > default.
 fn effective_limit(state: &WorkerState, key: &[u8]) -> u32 {
-    if let Some(ov) = state.limit_overrides.get(key) {
+    if let Some(ov) = override_get(key) {
         return ov;
     }
     state.limits.get_limit(key).unwrap_or(state.default_limit)
 }
 
 fn effective_inbound_limit(state: &WorkerState, key: &[u8]) -> u32 {
-    if let Some(ov) = state.limit_overrides.get(key) {
+    if let Some(ov) = override_get(key) {
         return ov;
     }
     state.limits.get_inbound_limit(key).unwrap_or(state.default_limit)
 }
 
 fn effective_outbound_limit(state: &WorkerState, key: &[u8]) -> u32 {
-    if let Some(ov) = state.limit_overrides.get(key) {
+    if let Some(ov) = override_get(key) {
         return ov;
     }
     state.limits.get_outbound_limit(key).unwrap_or(state.default_limit)
@@ -985,6 +1032,14 @@ unsafe extern "C" fn mod_init() -> c_int {
     };
     let default = DEFAULT_LIMIT.get();
 
+    // Allocate shm-backed CountMap + OverrideMap BEFORE fork so every
+    // worker + MI process sees the same pages; otherwise the MI process
+    // reads its own empty per-process copy.
+    if !shm_maps_init() {
+        safe_log!(L_ERR, "shm_maps_init failed — aborting module init");
+        return -1;
+    }
+
     safe_log!(L_INFO, "module initialized");
     safe_log!(L_INFO, "  limits_file=", file);
     safe_log!(L_INFO, "  default_limit=", default);
@@ -1017,9 +1072,7 @@ unsafe extern "C" fn mod_child_init(rank: c_int) -> c_int {
     if state_ptr.is_null() { return -1; }
 
     let state = unsafe { &mut *state_ptr };
-    state.counts = CountMap::new();
     state.limits = LimitMap::new();
-    state.limit_overrides = FixedMap::new();
     state.stats = SimpleStats::new();
     state.default_limit = default_limit;
     state.cooldown_secs = COOLDOWN_SECS.get().max(0) as i64;
@@ -1065,7 +1118,7 @@ unsafe extern "C" fn w_check_concurrent(
         // Cooldown check
         if state.cooldown_secs > 0 {
             let now = now_secs();
-            if state.counts.in_cooldown(key, now) {
+            if count_in_cooldown(key, now) {
                 state.stats.blocked.set(state.stats.blocked.get() + 1);
                 if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
                 safe_log!(L_DBG, "check ", account, ": in cooldown, auto-rejected");
@@ -1073,7 +1126,7 @@ unsafe extern "C" fn w_check_concurrent(
             }
         }
 
-        let count = state.counts.get_count(key);
+        let count = count_get(key);
         let limit = effective_limit(state, key);
 
         if count < limit {
@@ -1087,7 +1140,7 @@ unsafe extern "C" fn w_check_concurrent(
             // Set cooldown
             if state.cooldown_secs > 0 {
                 let now = now_secs();
-                state.counts.set_cooldown(key, now + state.cooldown_secs);
+                count_set_cooldown(key, now + state.cooldown_secs);
             }
 
             // Publish event
@@ -1119,19 +1172,19 @@ unsafe extern "C" fn w_check_concurrent_inbound(
 
         if !state.direction_aware {
             // Fall back to total count check
-            let count = state.counts.get_count(key);
+            let count = count_get(key);
             let limit = effective_limit(state, key);
             return if count < limit { 1 } else { -1 };
         }
 
         // Cooldown check
-        if state.cooldown_secs > 0 && state.counts.in_cooldown(key, now_secs()) {
+        if state.cooldown_secs > 0 && count_in_cooldown(key, now_secs()) {
             state.stats.blocked.set(state.stats.blocked.get() + 1);
             if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
             return -1;
         }
 
-        let count = state.counts.get_inbound(key);
+        let count = count_get_inbound(key);
         let limit = effective_inbound_limit(state, key);
 
         if count < limit {
@@ -1144,7 +1197,7 @@ unsafe extern "C" fn w_check_concurrent_inbound(
 
             if state.cooldown_secs > 0 {
                 let now = now_secs();
-                state.counts.set_cooldown(key, now + state.cooldown_secs);
+                count_set_cooldown(key, now + state.cooldown_secs);
             }
             if state.publish_events {
                 publish_blocked_event(account, count, limit);
@@ -1172,18 +1225,18 @@ unsafe extern "C" fn w_check_concurrent_outbound(
         if let Some(s) = StatVar::from_raw(STAT_CHECKED.load(Ordering::Relaxed)) { s.inc(); }
 
         if !state.direction_aware {
-            let count = state.counts.get_count(key);
+            let count = count_get(key);
             let limit = effective_limit(state, key);
             return if count < limit { 1 } else { -1 };
         }
 
-        if state.cooldown_secs > 0 && state.counts.in_cooldown(key, now_secs()) {
+        if state.cooldown_secs > 0 && count_in_cooldown(key, now_secs()) {
             state.stats.blocked.set(state.stats.blocked.get() + 1);
             if let Some(s) = StatVar::from_raw(STAT_BLOCKED.load(Ordering::Relaxed)) { s.inc(); }
             return -1;
         }
 
-        let count = state.counts.get_outbound(key);
+        let count = count_get_outbound(key);
         let limit = effective_outbound_limit(state, key);
 
         if count < limit {
@@ -1196,7 +1249,7 @@ unsafe extern "C" fn w_check_concurrent_outbound(
 
             if state.cooldown_secs > 0 {
                 let now = now_secs();
-                state.counts.set_cooldown(key, now + state.cooldown_secs);
+                count_set_cooldown(key, now + state.cooldown_secs);
             }
             if state.publish_events {
                 publish_blocked_event(account, count, limit);
@@ -1223,7 +1276,7 @@ unsafe extern "C" fn w_concurrent_inc(
     let do_dlg_profile = USE_DIALOG_PROFILES.get() != 0;
 
     with_worker(|state| {
-        let new_count = state.counts.increment(account.as_bytes());
+        let new_count = count_inc(account.as_bytes());
         state.stats.incremented.set(state.stats.incremented.get() + 1);
         if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) { s.inc(); }
         safe_log!(L_DBG, "inc ", account, ": now ", new_count);
@@ -1258,8 +1311,8 @@ unsafe extern "C" fn w_concurrent_dec(
         // there's no active count (e.g. BYE on a dialog rejected before
         // inc), skip the stat update to avoid underflowing the u64
         // active_calls stat to UINT64_MAX.
-        let had_active = state.counts.get_count(account.as_bytes()) > 0;
-        let new_count = state.counts.decrement(account.as_bytes());
+        let had_active = count_get(account.as_bytes()) > 0;
+        let new_count = count_dec(account.as_bytes());
         if had_active {
             state.stats.decremented.set(state.stats.decremented.get() + 1);
             if let Some(s) = StatVar::from_raw(STAT_ACTIVE_CALLS.load(Ordering::Relaxed)) {
@@ -1328,7 +1381,7 @@ unsafe extern "C" fn w_check_burst(
         }
 
         let now = now_secs();
-        let is_burst = state.counts.record_and_check_burst(
+        let is_burst = count_record_and_check_burst(
             key, now, state.burst_threshold, state.burst_window_secs,
         );
 
@@ -1364,11 +1417,11 @@ unsafe extern "C" fn w_concurrent_status(
     let key = account.as_bytes();
 
     with_worker(|state| {
-        let count = state.counts.get_count(key);
+        let count = count_get(key);
         let limit = effective_limit(state, key);
         if state.direction_aware {
-            let inb = state.counts.get_inbound(key);
-            let outb = state.counts.get_outbound(key);
+            let inb = count_get_inbound(key);
+            let outb = count_get_outbound(key);
             safe_log!(L_INFO, "status ", account, ": count=", count, "/", limit, " in=", inb, " out=", outb);
         } else {
             safe_log!(L_INFO, "status ", account, ": count=", count, "/", limit);
@@ -1397,8 +1450,8 @@ unsafe extern "C" fn w_concurrent_set_limit(
         None => return -2,
     };
 
-    with_worker(|state| {
-        state.limit_overrides.insert(account.as_bytes(), limit);
+    with_worker(|_state| {
+        override_insert(account.as_bytes(), limit);
         safe_log!(L_INFO, "set override limit for ", account, ": ", limit);
         1
     }, -2)
@@ -1499,29 +1552,43 @@ unsafe extern "C" fn mi_show(
     };
 
     if let Some(accounts_arr) = resp.add_array("accounts") {
-        WORKER.with(|cell| {
-            let p = cell.get();
-            if p.is_null() { return; }
-            let state = &*p;
+        // CSV limits live in per-worker LimitMap (loaded identically by
+        // the MI process); fall back to DEFAULT_LIMIT if WorkerState is
+        // absent (defensive — shouldn't happen for rank == -2).
+        let worker_ptr = WORKER.with(|cell| cell.get());
 
-            state.counts.for_each(|key_bytes, slot| {
-                // Convert key to str for display (it's always ASCII account names)
-                let key_str = core::str::from_utf8(key_bytes).unwrap_or("?");
+        count_for_each(|key_bytes, slot| {
+            let cnt  = slot.count.load(Ordering::Relaxed);
+            let inb  = slot.inbound_count.load(Ordering::Relaxed);
+            let outb = slot.outbound_count.load(Ordering::Relaxed);
+            let cd   = slot.cooldown_until.load(Ordering::Relaxed);
+            if cnt == 0 && inb == 0 && outb == 0 && cd == 0 {
+                // Skip slots with no live data so output stays tidy
+                // (the slot may be a tombstone from a prior decrement).
+                return;
+            }
 
-                if let Some(entry) = accounts_arr.add_object("") {
-                    entry.add_str("account", key_str);
-                    entry.add_num("count", slot.count as f64);
-                    entry.add_num("inbound", slot.inbound_count as f64);
-                    entry.add_num("outbound", slot.outbound_count as f64);
+            let key_str = core::str::from_utf8(key_bytes).unwrap_or("?");
+            if let Some(entry) = accounts_arr.add_object("") {
+                entry.add_str("account", key_str);
+                entry.add_num("count", cnt as f64);
+                entry.add_num("inbound", inb as f64);
+                entry.add_num("outbound", outb as f64);
 
-                    let limit = effective_limit(&*p, key_bytes);
-                    entry.add_num("limit", limit as f64);
+                let limit = if let Some(ov) = override_get(key_bytes) {
+                    ov
+                } else if !worker_ptr.is_null() {
+                    let state = &*worker_ptr;
+                    state.limits.get_limit(key_bytes).unwrap_or(state.default_limit)
+                } else {
+                    DEFAULT_LIMIT.get().max(0) as u32
+                };
+                entry.add_num("limit", limit as f64);
 
-                    if slot.cooldown_until > 0 {
-                        entry.add_num("cooldown_until", slot.cooldown_until as f64);
-                    }
+                if cd > 0 {
+                    entry.add_num("cooldown_until", cd as f64);
                 }
-            });
+            }
         });
     }
 
@@ -1545,13 +1612,9 @@ unsafe extern "C" fn mi_override(
         None => return mi_error(400, "invalid limit value") as *mut _,
     };
 
-    WORKER.with(|cell| {
-        let p = cell.get();
-        if p.is_null() { return; }
-        let state = &mut *p;
-        state.limit_overrides.insert(account, limit);
-    });
-
+    // Write to shm-backed OverrideMap so every worker picks up the new
+    // override on its next check_concurrent / effective_limit call.
+    override_insert(account, limit);
     mi_ok() as *mut _
 }
 
@@ -1559,11 +1622,9 @@ unsafe extern "C" fn mi_reset(
     _params: *const sys::mi_params_t,
     _async_hdl: *mut sys::mi_handler,
 ) -> *mut sys::mi_response_t {
-    with_worker(|state| {
-        state.counts.clear();
-        state.limit_overrides.clear();
-        0
-    }, 0);
+    // Shm-backed clear — visible to every worker immediately.
+    count_clear();
+    override_clear();
     mi_ok() as *mut _
 }
 
