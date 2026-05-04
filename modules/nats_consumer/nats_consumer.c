@@ -107,19 +107,21 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_STR, 0, 0},
 		{0, 0, 0}},
 		ALL_ROUTES },
-	/* nats_request is SYNC-ONLY in Phase 6 -- natsConnection_RequestMsg
-	 * blocks the calling worker for up to timeout_ms.  The script
-	 * author MUST restrict callsites to timer_route / startup_route
-	 * (or another context that tolerates blocking the worker) until a
-	 * non-blocking async variant ships in a later phase.  Registered
-	 * under ALL_ROUTES to keep the error surface consistent with the
-	 * rest of the module; honouring the rule is the caller's job. */
+	/* nats_request is SYNC-ONLY: natsConnection_RequestMsg blocks the
+	 * calling process for up to timeout_ms.  Restrict the route mask
+	 * so the engine refuses to call it from contexts where blocking
+	 * a SIP UDP/TCP worker would stall request processing
+	 * (REQUEST_ROUTE, FAILURE_ROUTE, BRANCH_ROUTE, ERROR_ROUTE).
+	 * Allow it from STARTUP/TIMER/LOCAL/EVENT/ONREPLY routes, which
+	 * either don't own a SIP worker (startup, timer, event) or
+	 * already accept synchronous semantics (local, onreply). */
 	{ "nats_request", (cmd_function)w_nats_request, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_INT, 0, 0},
 		{0, 0, 0}},
-		ALL_ROUTES },
+		ONREPLY_ROUTE | LOCAL_ROUTE | STARTUP_ROUTE |
+		TIMER_ROUTE | EVENT_ROUTE },
 	{ 0, 0, {{0, 0, 0}}, 0 }
 };
 
