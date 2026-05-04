@@ -70,6 +70,16 @@
  * sends an oversized reply. */
 extern int nats_request_max_reply;
 
+/* defined in cachedb_nats.c — default request timeout when caller
+ * passes 0 or negative.  Bounded by NATS_REQUEST_MIN_TIMEOUT_MS and
+ * the existing 30 s upper clamp. */
+extern int nats_request_default_timeout_ms;
+
+/* Floor for any positive caller-supplied timeout.  Below this the
+ * cnats library's behavior is undefined and a 0 ms timeout is
+ * effectively "give up before the request leaves the host." */
+#define NATS_REQUEST_MIN_TIMEOUT_MS  10
+
 /*
  * native_str_to_buf() — Null-terminate an OpenSIPS str into a fixed buffer.
  *
@@ -137,15 +147,38 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		return -1;
 	}
 
-	/* clamp timeout to a sane range */
-	if (*timeout_ms > 30000) {
-		static int warned = 0;
-		if (!warned) {
-			LM_WARN("nats_request timeout %d ms clamped to 30000 ms\n",
-				*timeout_ms);
-			warned = 1;
+	/* Fast-fail if the pool is currently disconnected.  cnats would
+	 * otherwise block this SIP worker for up to 30 s waiting for a
+	 * reconnect that may not come in time. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("nats_request: pool disconnected, fast-failing\n");
+		return -1;
+	}
+
+	/* Normalize the caller-supplied timeout into a sane range.
+	 *   - <= 0:        substitute the configured default
+	 *   - 1..MIN-1:    clamp up to MIN (cnats behavior under tiny
+	 *                  timeouts is implementation-defined)
+	 *   - > 30000:     clamp down to 30 s upper bound
+	 *   - in-range:    unchanged
+	 *
+	 * Use a local variable for the effective timeout so we don't
+	 * mutate the caller's pvar in-place (which the old code did). */
+	{
+		int eff = *timeout_ms;
+		if (eff <= 0) eff = nats_request_default_timeout_ms;
+		if (eff < NATS_REQUEST_MIN_TIMEOUT_MS)
+			eff = NATS_REQUEST_MIN_TIMEOUT_MS;
+		if (eff > 30000) {
+			static int warned = 0;
+			if (!warned) {
+				LM_WARN("nats_request timeout %d ms clamped to 30000 ms\n",
+					eff);
+				warned = 1;
+			}
+			eff = 30000;
 		}
-		*timeout_ms = 30000;
+		*timeout_ms = eff;
 	}
 
 	/* null-terminate subject */

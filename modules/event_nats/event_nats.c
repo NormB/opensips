@@ -475,6 +475,15 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 		evi_free_payload(payload);
 		return -1;
 	}
+	/* Fast-fail if the pool is disconnected -- avoid blocking the SIP
+	 * worker on cnats's internal write buffer.  Lost events are noted
+	 * in nats_stats->failed via the publish helpers. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("nats_evi_raise: pool disconnected, dropping event\n");
+		evi_free_payload(payload);
+		if (nats_stats) nats_stats->failed++;
+		return -1;
+	}
 	memcpy(subj_buf, sock->address.s, subj_len);
 	subj_buf[subj_len] = '\0';
 
@@ -604,6 +613,12 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 		LM_ERR("nats_publish: subject rejected (wildcard / control "
 			"char / empty token / leading-trailing dot): %.*s\n",
 			subj_len, subject->s);
+		return -1;
+	}
+	/* Fast-fail if the pool is disconnected. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("nats_publish: pool disconnected, dropping message\n");
+		if (nats_stats) nats_stats->failed++;
 		return -1;
 	}
 	memcpy(subj_buf, subject->s, subj_len);

@@ -130,6 +130,12 @@ int   fts_max_results = 100;
  * sending an oversized reply.  Default 65536 (64 KB). */
 int   nats_request_max_reply = 65536;
 
+/* Default timeout for nats_request when the script call passes 0 or
+ * a negative timeout argument.  Tightened from "no default" to
+ * 500 ms so a misconfigured caller can no longer block a SIP worker
+ * for the upper-clamp duration of 30 seconds. */
+int   nats_request_default_timeout_ms = 500;
+
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
  * When one or more patterns are set, kvStore_WatchMulti() is used. */
@@ -183,6 +189,7 @@ static const param_export_t params[] = {
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
+	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{0, 0, 0}
 };

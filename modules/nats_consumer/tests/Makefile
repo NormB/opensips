@@ -17,7 +17,7 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
 .PHONY: all clean check
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
-     test_slurp_file_cap
+     test_slurp_file_cap test_request_route_restriction
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -44,6 +44,10 @@ test_persist: $(PERSIST_SRCS) test_shim.h ../nats_persist.h \
 test_slurp_file_cap: test_slurp_file_cap.c
 	$(CC) -g -O0 -fsanitize=address -Wall -o $@ $<
 
+# Source-pattern test for nats_request route-flag restriction
+test_request_route_restriction: test_request_route_restriction.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 check: all
 	./test_registry
 	./test_parser
@@ -51,7 +55,8 @@ check: all
 	./test_ack_token
 	./test_persist
 	./test_slurp_file_cap
+	./test_request_route_restriction
 
 clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \
-	      test_slurp_file_cap
+	      test_slurp_file_cap test_request_route_restriction
