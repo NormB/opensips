@@ -226,6 +226,13 @@ static int mod_init(void)
 	LM_DBG("nats_consumer: ack IPC queue ready (fd=%d)\n",
 		nats_ack_ipc_fd());
 
+	if (nats_consumer_hb_init() < 0) {
+		LM_ERR("nats_consumer: heartbeat SHM alloc failed\n");
+		nats_ack_ipc_destroy();
+		nats_registry_destroy();
+		return -1;
+	}
+
 	/* Phase 8 opt-in persistence.  If enabled, start the writer thread
 	 * and rehydrate any snapshot left by a previous run.  Failures
 	 * here are non-fatal -- we log, disable persistence, and continue
@@ -272,5 +279,6 @@ static void mod_destroy(void)
 	 * pending writer can race with the registry teardown below. */
 	nats_persist_destroy();
 	nats_ack_ipc_destroy();
+	nats_consumer_hb_destroy();
 	nats_registry_destroy();
 }

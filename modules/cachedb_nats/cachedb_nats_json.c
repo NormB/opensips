@@ -62,6 +62,7 @@
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
 extern int   fts_max_results;
+extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 
 /* ------------------------------------------------------------------ */
 /*                       Global search index                          */
@@ -325,20 +326,23 @@ static int _parse_json_fields(const char *json, int len,
  * entries in that bucket comparing both length and content.  Returns the
  * matching entry or NULL.  Must be called with g_idx->lock held.
  */
-static nats_idx_entry *_find_entry(const char *fv, int fv_len)
+static nats_idx_entry *_find_entry_in(nats_search_idx *idx,
+	const char *fv, int fv_len)
 {
 	unsigned int bucket = _hash(fv, fv_len);
 	nats_idx_entry *e;
 
-	/* Walk the separate-chaining linked list for this bucket.
-	 * Each bucket head is g_idx->buckets[bucket]; collisions are
-	 * linked via e->next (LIFO insertion order). */
-	for (e = g_idx->buckets[bucket]; e; e = e->next) {
+	for (e = idx->buckets[bucket]; e; e = e->next) {
 		if (e->fv_len == (unsigned int)fv_len
 				&& memcmp(e->field_value, fv, fv_len) == 0)
 			return e;
 	}
 	return NULL;
+}
+
+static nats_idx_entry *_find_entry(const char *fv, int fv_len)
+{
+	return _find_entry_in(g_idx, fv, fv_len);
 }
 
 /**
@@ -351,12 +355,13 @@ static nats_idx_entry *_find_entry(const char *fv, int fv_len)
  *
  * Returns the entry pointer, or NULL on allocation failure.
  */
-static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
+static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
+	const char *fv, int fv_len)
 {
 	nats_idx_entry *e;
 	unsigned int bucket;
 
-	e = _find_entry(fv, fv_len);
+	e = _find_entry_in(idx, fv, fv_len);
 	if (e)
 		return e;
 
@@ -387,14 +392,16 @@ static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
 	}
 	e->num_keys = 0;
 
-	/* Insert at head of this bucket's chain (LIFO order).
-	 * The new entry's next pointer takes the current head, then
-	 * the bucket head is updated to point to the new entry. */
 	bucket = _hash(fv, fv_len);
-	e->next = g_idx->buckets[bucket];
-	g_idx->buckets[bucket] = e;
+	e->next = idx->buckets[bucket];
+	idx->buckets[bucket] = e;
 
 	return e;
+}
+
+static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
+{
+	return _get_or_create_entry_in(g_idx, fv, fv_len);
 }
 
 /**
@@ -491,7 +498,8 @@ static void _free_entry(nats_idx_entry *e)
 /* ------------------------------------------------------------------ */
 
 typedef struct _idx_add_ctx {
-	const char *doc_key;  /* the KV key for this document */
+	const char *doc_key;     /* the KV key for this document */
+	nats_search_idx *target; /* destination index — NULL means g_idx */
 } idx_add_ctx;
 
 /**
@@ -527,7 +535,8 @@ static void _index_field_cb(const char *field, int flen,
 	memcpy(fv_buf + flen + 1, val, vlen);
 	fv_buf[fv_len] = '\0';
 
-	e = _get_or_create_entry(fv_buf, fv_len);
+	e = _get_or_create_entry_in(actx->target ? actx->target : g_idx,
+		fv_buf, fv_len);
 	if (!e)
 		return;
 
@@ -671,6 +680,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		return -1;
 
 	ctx.doc_key = key;
+	ctx.target = NULL;
 
 	pthread_mutex_lock(&g_idx->lock);
 	rc = _parse_json_fields(json_str, json_len, _index_field_cb, &ctx);
@@ -685,6 +695,24 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 
 	LM_DBG("indexed key '%s' (%d fields)\n", key, rc);
 	return 0;
+}
+
+/* Internal: add a parsed JSON document to a CALLER-PROVIDED index
+ * struct.  No locking — caller has exclusive ownership of @target
+ * (the rebuild path holds it on a thread-local shadow until the
+ * atomic swap). */
+static int _index_add_into(nats_search_idx *target, const char *key,
+	const char *json_str, int json_len)
+{
+	idx_add_ctx ctx;
+	int rc;
+
+	if (!target || !key || !json_str) return -1;
+	ctx.doc_key = key;
+	ctx.target = target;
+	rc = _parse_json_fields(json_str, json_len, _index_field_cb, &ctx);
+	if (rc >= 0) target->num_documents++;
+	return rc < 0 ? -1 : 0;
 }
 
 /**
@@ -732,32 +760,84 @@ int nats_json_index_remove(const char *key)
  */
 int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 {
+	nats_search_idx shadow;
+	kvKeysList keys;
+	kvEntry *entry = NULL;
+	natsStatus s;
+	int i, count = 0;
+	int prefix_len;
+	nats_idx_entry *old_buckets[NATS_IDX_BUCKETS];
+	int old_num;
 	unsigned int b;
 	nats_idx_entry *e, *next;
 
-	if (!g_idx)
+	if (!g_idx) return -1;
+	if (!kv)    { LM_ERR("null KV store\n"); return -1; }
+
+	LM_INFO("rebuilding search index (shadow build + atomic swap)...\n");
+
+	/* Step 1: build the new state into a thread-local shadow struct.
+	 * The shadow is on the stack; only this caller sees it.  The lock
+	 * field is unused because no other thread can reach `shadow` --
+	 * we pass it explicitly through _index_add_into. */
+	memset(&shadow, 0, sizeof(shadow));
+
+	prefix_len = prefix ? (int)strlen(prefix) : 0;
+	memset(&keys, 0, sizeof(keys));
+	s = kvStore_Keys(&keys, kv, NULL);
+	if (s == NATS_NOT_FOUND) {
+		/* empty KV — shadow is already empty; just swap */
+	} else if (s != NATS_OK) {
+		LM_ERR("kvStore_Keys failed: %s\n", natsStatus_GetText(s));
 		return -1;
+	} else {
+		for (i = 0; i < keys.Count; i++) {
+			const char *key = keys.Keys[i];
+			const char *data;
+			int data_len;
+			if (prefix_len > 0 &&
+			    strncmp(key, prefix, prefix_len) != 0)
+				continue;
+			s = kvStore_Get(&entry, kv, key);
+			if (s != NATS_OK) continue;
+			data = kvEntry_ValueString(entry);
+			data_len = kvEntry_ValueLen(entry);
+			if (data && data_len > 0 && data[0] == '{') {
+				if (_index_add_into(&shadow, key, data, data_len) == 0)
+					count++;
+			}
+			kvEntry_Destroy(entry);
+			entry = NULL;
+		}
+		kvKeysList_Destroy(&keys);
+	}
 
-	LM_INFO("rebuilding search index...\n");
-
-	/* clear all entries */
+	/* Step 2: atomic swap under g_idx->lock.  Snapshot the old
+	 * bucket pointers (they remain reachable to readers up until
+	 * we release the lock, after which they're disowned), then
+	 * install the shadow's buckets and num_documents.  Queries
+	 * arriving DURING this critical section block on the lock and
+	 * see the new state when they get in. */
 	pthread_mutex_lock(&g_idx->lock);
+	memcpy(old_buckets, g_idx->buckets, sizeof(old_buckets));
+	old_num = g_idx->num_documents;
+	memcpy(g_idx->buckets, shadow.buckets, sizeof(g_idx->buckets));
+	g_idx->num_documents = shadow.num_documents;
+	pthread_mutex_unlock(&g_idx->lock);
 
+	/* Step 3: free the old (now-disowned) bucket entries outside
+	 * the lock, so any blocked readers proceed immediately. */
 	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
-		e = g_idx->buckets[b];
+		e = old_buckets[b];
 		while (e) {
 			next = e->next;
 			_free_entry(e);
 			e = next;
 		}
-		g_idx->buckets[b] = NULL;
 	}
-	g_idx->num_documents = 0;
 
-	pthread_mutex_unlock(&g_idx->lock);
-
-	/* rebuild from KV data */
-	return nats_json_index_build(kv, prefix);
+	LM_INFO("search index rebuilt: %d docs (was %d)\n", count, old_num);
+	return count;
 }
 
 /**
@@ -1453,7 +1533,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	}
 
 	/* CAS loop: fetch, modify, update atomically */
-	retries = NATS_CAS_RETRIES;
+	retries = nats_cas_retries > 0 ? nats_cas_retries : 1;
 	while (retries-- > 0) {
 		s = kvStore_Get(&entry, ncon->kv, target_key);
 		if (s != NATS_OK) {
@@ -1536,7 +1616,10 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		LM_DBG("CAS retry for key '%s'\n", target_key);
 	}
 
-	LM_ERR("CAS failed after retries for key '%s'\n", target_key);
+	LM_WARN("CAS exhausted after %d retries for key '%s'; update "
+		"dropped (raise nats_cas_retries if this key is "
+		"hot-contested)\n",
+		nats_cas_retries > 0 ? nats_cas_retries : 1, target_key);
 	pkg_free(target_key);
 	return -1;
 }

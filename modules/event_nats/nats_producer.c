@@ -79,17 +79,17 @@ int nats_publish(const char *subject, const void *data, int len)
     if (!_nc) {
         LM_ERR("NATS publish to '%s' failed: connection not initialized\n",
                subject ? subject : "(null)");
-        if (nats_stats) nats_stats->failed++;
+        if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
         return -1;
     }
 
     natsStatus s = natsConnection_Publish(_nc, subject, data, len);
     if (s != NATS_OK) {
         LM_ERR("NATS publish to '%s' failed: %s\n", subject, natsStatus_GetText(s));
-        if (nats_stats) nats_stats->failed++;
+        if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
         return -1;
     }
-    if (nats_stats) nats_stats->published++;
+    if (nats_stats) atomic_fetch_add_explicit(&nats_stats->published, 1, memory_order_relaxed);
     return 0;
 }
 
@@ -113,9 +113,9 @@ int nats_js_publish_async(const char *subject, const void *data, int len)
     if (s != NATS_OK) {
         LM_ERR("JetStream async publish to '%s' failed: %s\n",
                subject, natsStatus_GetText(s));
-        if (nats_stats) nats_stats->failed++;
+        if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
         return -1;
     }
-    if (nats_stats) nats_stats->published++;
+    if (nats_stats) atomic_fetch_add_explicit(&nats_stats->published, 1, memory_order_relaxed);
     return 0;
 }

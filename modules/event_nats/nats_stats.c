@@ -149,19 +149,26 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
         return resp;
     }
 
-    if (add_mi_number(resp_obj, MI_SSTR("published"), nats_stats->published) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("published"),
+            atomic_load_explicit(&nats_stats->published, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("evi_published"), nats_stats->evi_published) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("evi_published"),
+            atomic_load_explicit(&nats_stats->evi_published, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("script_published"), nats_stats->script_published) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("script_published"),
+            atomic_load_explicit(&nats_stats->script_published, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("failed"), nats_stats->failed) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("failed"),
+            atomic_load_explicit(&nats_stats->failed, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("reconnects"), nats_stats->reconnects) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("reconnects"),
+            atomic_load_explicit(&nats_stats->reconnects, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("js_ack_ok"), nats_stats->js_ack_ok) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("js_ack_ok"),
+            atomic_load_explicit(&nats_stats->js_ack_ok, memory_order_relaxed)) < 0)
         goto error;
-    if (add_mi_number(resp_obj, MI_SSTR("js_ack_failed"), nats_stats->js_ack_failed) < 0)
+    if (add_mi_number(resp_obj, MI_SSTR("js_ack_failed"),
+            atomic_load_explicit(&nats_stats->js_ack_failed, memory_order_relaxed)) < 0)
         goto error;
 
     return resp;

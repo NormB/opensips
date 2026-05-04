@@ -59,6 +59,8 @@
 #include "cachedb_nats_watch.h"
 #include "../../lib/nats/nats_pool.h"
 
+extern int nats_cas_retries;   /* defined in cachedb_nats.c */
+
 /**
  * nats_new_connection() — allocate and initialise a NATS cachedb connection.
  *
@@ -494,7 +496,8 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 	kvEntry *entry = NULL;
 	int64_t current;
 	uint64_t last_rev, new_rev;
-	int retries = NATS_CAS_RETRIES;
+	int max_retries = nats_cas_retries > 0 ? nats_cas_retries : 1;
+	int retries = max_retries;
 	char key_buf[NATS_KEY_BUF_SIZE];
 	char buf[32];
 
@@ -571,11 +574,13 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 		/* CAS conflict or key-already-exists — another writer won
 		 * the race.  Loop back to re-read and retry. */
 		LM_DBG("CAS retry for key '%s' (attempt %d)\n",
-			key_buf, NATS_CAS_RETRIES - retries);
+			key_buf, max_retries - retries);
 	}
 
-	LM_ERR("CAS failed after %d retries for counter '%s'\n",
-		NATS_CAS_RETRIES, key_buf);
+	LM_WARN("CAS exhausted for counter '%s' after %d retries; "
+		"increment dropped (raise nats_cas_retries if this key "
+		"is hot-contested)\n",
+		key_buf, max_retries);
 	return -1;
 }
 

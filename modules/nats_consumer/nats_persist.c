@@ -207,11 +207,24 @@ static int serialize_cb(nats_handle_t *h, void *user)
 	if (h->deliver_policy != NATS_DELIVER_ALL)
 		cJSON_AddStringToObject(obj, "deliver_policy",
 				deliver_to_str(h->deliver_policy));
-	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ && h->start_seq)
-		cJSON_AddNumberToObject(obj, "start_seq", (double)h->start_seq);
-	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME && h->start_time_unix_ns)
-		cJSON_AddNumberToObject(obj, "start_time_ns",
-				(double)h->start_time_unix_ns);
+	/* uint64_t values above 2^53 lose precision when round-tripped
+	 * through JSON Number (which is IEEE 754 double).  start_seq can
+	 * exceed that on long-lived streams; start_time_unix_ns
+	 * (nanoseconds since epoch in 2026) already exceeds 2^53 by
+	 * orders of magnitude.  Serialize both as JSON strings; the
+	 * rehydrate path detects the string form and uses strtoull. */
+	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ && h->start_seq) {
+		char numbuf[32];
+		snprintf(numbuf, sizeof(numbuf), "%llu",
+			(unsigned long long)h->start_seq);
+		cJSON_AddStringToObject(obj, "start_seq", numbuf);
+	}
+	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME && h->start_time_unix_ns) {
+		char numbuf[32];
+		snprintf(numbuf, sizeof(numbuf), "%lld",
+			(long long)h->start_time_unix_ns);
+		cJSON_AddStringToObject(obj, "start_time_ns", numbuf);
+	}
 
 	if (h->replay_policy != NATS_REPLAY_INSTANT)
 		cJSON_AddStringToObject(obj, "replay_policy",
@@ -727,7 +740,20 @@ static char *build_config_from_json(cJSON *obj)
 			v = c->valuestring ? c->valuestring : "";
 			vlen = strlen(v);
 		} else if (c->type & cJSON_Number) {
-			int n = snprintf(numbuf, sizeof(numbuf), "%g", c->valuedouble);
+			/* Use %lld for integer-valued numbers so we don't print
+			 * "1e+18" for fields the JSON happens to round-trip
+			 * losslessly (small ints).  Fields that need uint64
+			 * precision (start_seq, start_time_ns) are serialized as
+			 * strings by us and arrive on the cJSON_String branch
+			 * above. */
+			double d = c->valuedouble;
+			int n;
+			if (d == (double)(long long)d) {
+				n = snprintf(numbuf, sizeof(numbuf), "%lld",
+					(long long)d);
+			} else {
+				n = snprintf(numbuf, sizeof(numbuf), "%g", d);
+			}
 			if (n < 0 || n >= (int)sizeof(numbuf))
 				continue;
 			v = numbuf;
@@ -780,7 +806,9 @@ static char *build_config_from_json(cJSON *obj)
 			 * If the handle was configured with by_start_time we
 			 * cannot round-trip without saving the raw string; a
 			 * later phase can extend serialization to persist the
-			 * original RFC3339 form.  For now, log and skip. */
+			 * original RFC3339 form.  For now, log and skip.  The
+			 * uint64-string serialization above keeps the value
+			 * lossless on disk so a future rehydrate can use it. */
 			LM_WARN("nats_persist: start_time_ns not round-trippable; "
 					"handle will rehydrate without start_time\n");
 			continue;

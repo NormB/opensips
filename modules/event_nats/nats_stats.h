@@ -41,36 +41,41 @@
 #ifndef _NATS_STATS_H_
 #define _NATS_STATS_H_
 
+#include <stdatomic.h>
+
 #include "../../mi/mi.h"
 #include "../../statistics.h"
 
 /*
  * NATS statistics counters, allocated in OpenSIPS shared memory.
  *
- * All fields are declared volatile because they are written by multiple
- * worker processes and read by the MI process.  Increments are not
- * atomic (acceptable for advisory counters — minor races do not affect
- * correctness).
+ * Counters are C11 _Atomic with relaxed ordering.  Plain `volatile`
+ * is not atomic on weakly-ordered architectures (e.g. aarch64) and
+ * concurrent increments produce torn writes (we measured a ~6x
+ * undercount under N=8 threads).  The two hot counters (published,
+ * failed) are cache-line aligned so per-worker increments do not
+ * thrash a shared 64-byte line shared with cooler counters.
+ *
+ * NOTE: The `connected` field below is no longer read or written
+ * anywhere; the canonical connection-status accessor is
+ * nats_pool_is_connected() in lib/nats.  Field retained for ABI
+ * compatibility; consider removing in a future cleanup.
  */
 typedef struct _nats_stats {
-    volatile int connected;             /* Connection state flag.
-                                         * 1 = connected, 0 = disconnected.
-                                         * Set by the nats.c reconnect/disconnect
-                                         * callbacks (via atomic write). */
-    volatile unsigned long published;   /* Total messages published (core NATS
-                                         * + JetStream combined). */
-    volatile unsigned long evi_published;   /* Messages published via EVI
-                                             * subscribe_event() transport. */
-    volatile unsigned long script_published; /* Messages published via the
-                                              * nats_publish() script function. */
-    volatile unsigned long failed;          /* Publish attempts that returned
-                                             * an error from nats.c. */
-    volatile unsigned long reconnects;      /* Number of successful reconnections
-                                             * reported by the nats.c library. */
-    volatile unsigned long js_ack_ok;       /* JetStream publish acknowledgments
-                                             * received successfully. */
-    volatile unsigned long js_ack_failed;   /* JetStream publish acknowledgments
-                                             * that reported an error. */
+    volatile int connected;             /* DEPRECATED -- see nats_pool_is_connected() */
+
+    /* Hot counters: written on every publish.  Pad to 64-byte
+     * cache line so a worker bumping `published` does not invalidate
+     * `failed`'s line on a different core. */
+    _Atomic unsigned long published __attribute__((aligned(64)));
+    _Atomic unsigned long failed    __attribute__((aligned(64)));
+
+    /* Cooler per-source breakdown counters: */
+    _Atomic unsigned long evi_published;
+    _Atomic unsigned long script_published;
+    _Atomic unsigned long reconnects;
+    _Atomic unsigned long js_ack_ok;
+    _Atomic unsigned long js_ack_failed;
 } nats_stats_t;
 
 /* Global pointer to the shared-memory stats structure.

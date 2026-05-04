@@ -36,6 +36,10 @@
 #include "nats_handle_parse.h"
 #include "nats_mi.h"
 #include "nats_persist.h"
+#include "nats_consumer_proc.h"
+
+#include <stdatomic.h>
+#include <time.h>
 
 /* ── enum -> string helpers ───────────────────────────────────── */
 
@@ -256,6 +260,73 @@ mi_response_t *mi_handle_reload(const mi_params_t *params,
 	return resp;
 }
 
+/* nats_consumer_health -- consumer-process liveness snapshot.
+ *
+ * Returns a JSON object:
+ *   { "tick": N,
+ *     "consumer_pid": PID,
+ *     "last_tick_ms_ago": MS,    // monotonic ms since last tick
+ *     "stale": true|false        // last_tick_ms_ago > 5000 (>5x loop tick)
+ *   }
+ *
+ * Operators / external watchdogs poll this and treat stale=true as
+ * "consumer process wedged or crashed" -- since the SHM ring's
+ * eventfd-blocked workers cannot raise the alarm themselves. */
+mi_response_t *mi_consumer_health(const mi_params_t *params,
+		struct mi_handler *async)
+{
+	mi_response_t *resp;
+	mi_item_t *resp_obj;
+	(void)params; (void)async;
+
+	resp = init_mi_result_object(&resp_obj);
+	if (!resp) return NULL;
+
+	if (!nats_consumer_hb) {
+		if (add_mi_string(resp_obj, MI_SSTR("error"),
+				MI_SSTR("heartbeat block not initialized")) < 0)
+			goto err;
+		return resp;
+	}
+
+	{
+		unsigned long tick = atomic_load_explicit(&nats_consumer_hb->tick,
+			memory_order_relaxed);
+		long long last_us = atomic_load_explicit(
+			&nats_consumer_hb->last_tick_us, memory_order_relaxed);
+		int pid = atomic_load_explicit(&nats_consumer_hb->consumer_pid,
+			memory_order_relaxed);
+		struct timespec ts;
+		long long now_us = 0;
+		long long ms_ago;
+		int stale;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+			now_us = (long long)ts.tv_sec * 1000000LL +
+			         (long long)ts.tv_nsec / 1000LL;
+		ms_ago = (last_us > 0 && now_us >= last_us) ?
+		         (now_us - last_us) / 1000LL : -1;
+		stale = (ms_ago < 0 || ms_ago > 5000);
+
+		if (add_mi_number(resp_obj, MI_SSTR("tick"), (double)tick) < 0) goto err;
+		if (add_mi_number(resp_obj, MI_SSTR("consumer_pid"),
+				(double)pid) < 0) goto err;
+		if (add_mi_number(resp_obj, MI_SSTR("last_tick_ms_ago"),
+				(double)ms_ago) < 0) goto err;
+		if (stale) {
+			if (add_mi_string(resp_obj, MI_SSTR("stale"),
+					MI_SSTR("true")) < 0) goto err;
+		} else {
+			if (add_mi_string(resp_obj, MI_SSTR("stale"),
+					MI_SSTR("false")) < 0) goto err;
+		}
+	}
+	return resp;
+err:
+	free_mi_response(resp);
+	return NULL;
+}
+
 /* ── MI export table ──────────────────────────────────────────── */
 
 const mi_export_t nats_consumer_mi_cmds[] = {
@@ -280,6 +351,13 @@ const mi_export_t nats_consumer_mi_cmds[] = {
 	{ "nats_handle_reload",
 	  "re-read the persistence file and merge new bindings", 0, 0, {
 		{ mi_handle_reload, {0} },
+		{ EMPTY_MI_RECIPE }
+	  }, { 0 }
+	},
+	{ "nats_consumer_health",
+	  "consumer-process heartbeat snapshot for watchdog use",
+	  0, 0, {
+		{ mi_consumer_health, {0} },
 		{ EMPTY_MI_RECIPE }
 	  }, { 0 }
 	},

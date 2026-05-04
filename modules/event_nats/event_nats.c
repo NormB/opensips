@@ -88,6 +88,7 @@ static str nats_evi_print(evi_reply_sock *sock);
 
 /* script function */
 static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload);
+static void nats_evi_js_ack_cb(int success);
 
 /* module parameters (non-static, accessed by nats_stats.c) */
 char *nats_url = NATS_DEFAULT_URL;
@@ -295,6 +296,11 @@ static int mod_init(void)
 		return -1;
 	}
 
+	/* Register the JS publish-ack callback so the pool's cnats-thread
+	 * AckHandler bumps our shared js_ack_ok / js_ack_failed counters
+	 * via atomic_fetch_add. */
+	nats_pool_set_pub_ack_cb(nats_evi_js_ack_cb);
+
 	{
 		char redacted[512];
 		nats_redact_url(nats_url, redacted, sizeof(redacted));
@@ -481,7 +487,7 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	if (!nats_pool_is_connected()) {
 		LM_DBG("nats_evi_raise: pool disconnected, dropping event\n");
 		evi_free_payload(payload);
-		if (nats_stats) nats_stats->failed++;
+		if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
 		return -1;
 	}
 	memcpy(subj_buf, sock->address.s, subj_len);
@@ -497,7 +503,7 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 
 	/* update per-type stats on success */
 	if (rc == 0 && nats_stats)
-		nats_stats->evi_published++;
+		atomic_fetch_add_explicit(&nats_stats->evi_published, 1, memory_order_relaxed);
 
 	/* report async status -- non-blocking publish, report immediately */
 	if (async_ctx && async_ctx->status_cb) {
@@ -618,7 +624,7 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 	/* Fast-fail if the pool is disconnected. */
 	if (!nats_pool_is_connected()) {
 		LM_DBG("nats_publish: pool disconnected, dropping message\n");
-		if (nats_stats) nats_stats->failed++;
+		if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
 		return -1;
 	}
 	memcpy(subj_buf, subject->s, subj_len);
@@ -632,7 +638,26 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 
 	/* update per-type stats on success */
 	if (rc == 0 && nats_stats)
-		nats_stats->script_published++;
+		atomic_fetch_add_explicit(&nats_stats->script_published, 1, memory_order_relaxed);
 
 	return rc == 0 ? 1 : -1;
+}
+
+/*
+ * nats_evi_js_ack_cb -- registered with the pool, invoked from a
+ * cnats-internal I/O thread when a JetStream publish-ack arrives.
+ *
+ * MUST stay free of OpenSIPS APIs.  Only atomic ops on shared SHM
+ * counters are safe here.  See lib/nats/nats_pool.h for the full
+ * thread-safety contract.
+ */
+static void nats_evi_js_ack_cb(int success)
+{
+	if (!nats_stats) return;
+	if (success)
+		atomic_fetch_add_explicit(&nats_stats->js_ack_ok, 1,
+			memory_order_relaxed);
+	else
+		atomic_fetch_add_explicit(&nats_stats->js_ack_failed, 1,
+			memory_order_relaxed);
 }

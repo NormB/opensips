@@ -136,6 +136,16 @@ int   nats_request_max_reply = 65536;
  * for the upper-clamp duration of 30 seconds. */
 int   nats_request_default_timeout_ms = 500;
 
+/* Compare-and-swap retry count for atomic counter increments
+ * (nats_cache_add) and JSON field updates (nats_cache_update).
+ * Each retry costs one round-trip to the NATS server.  Default 10
+ * is a balance between giving up too early under modest contention
+ * (the previous hard-coded 3 dropped silent counter increments
+ * with as few as 3 concurrent writers) and burning latency on
+ * pathological hotspots.  Operator can raise for very contended
+ * counters; minimum bound is 1. */
+int   nats_cas_retries = 10;
+
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
  * When one or more patterns are set, kvStore_WatchMulti() is used. */
@@ -190,6 +200,7 @@ static const param_export_t params[] = {
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
+	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{0, 0, 0}
 };

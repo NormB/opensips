@@ -317,10 +317,22 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
  * @param pae      Publish ack error, or NULL on success (stack-allocated).
  * @param closure  User closure (NULL, unused).
  */
+/* Optional caller-registered hook to report JS ack outcomes.
+ * Read on the cnats thread, set once pre-fork via
+ * nats_pool_set_pub_ack_cb().  Always called with success=1 (acked)
+ * or success=0 (error). */
+static void (*_pub_ack_cb)(int success) = NULL;
+
+void nats_pool_set_pub_ack_cb(void (*cb)(int success))
+{
+	_pub_ack_cb = cb;
+}
+
 static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
                                  jsPubAckErr *pae, void *closure)
 {
-	if (pae && pae->ErrText) {
+	int success = (pae == NULL || pae->ErrText == NULL);
+	if (!success) {
 		char buf[256];
 		int len = snprintf(buf, sizeof(buf),
 			"NATS JetStream async publish error: %s\n",
@@ -328,6 +340,8 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
 		if (len > 0)
 			(void)write(STDERR_FILENO, buf, len);
 	}
+	if (_pub_ack_cb)
+		_pub_ack_cb(success);
 	if (msg)
 		natsMsg_Destroy(msg);
 }
@@ -948,9 +962,18 @@ void nats_pool_destroy(void)
 
 	/* Step 3: Drain then destroy connection.
 	 * Drain flushes pending publishes, waits for acks, then closes.
-	 * This ensures nats.c I/O threads complete before we destroy. */
+	 * Use DrainTimeout with an explicit bound (5 s) so we don't hang
+	 * mod_destroy if the broker is unreachable.  Log non-OK so an
+	 * operator investigating ack-loss has a fingerprint, then
+	 * proceed to Destroy regardless -- shutdown must complete. */
 	if (_nc) {
-		natsConnection_Drain(_nc);
+		natsStatus ds = natsConnection_DrainTimeout(_nc, 5000);
+		if (ds != NATS_OK) {
+			LM_WARN("NATS pool: connection drain returned %s; "
+				"in-flight JetStream publishes may not have "
+				"acked before destroy\n",
+				natsStatus_GetText(ds));
+		}
 		natsConnection_Destroy(_nc);
 		_nc = NULL;
 	}
