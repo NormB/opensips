@@ -67,6 +67,11 @@ typedef struct nats_tls_opts {
     int skip_openssl_init;  /* If non-zero, tell nats.c to skip OpenSSL_init().
                              * Required when running inside OpenSIPS, which
                              * manages OpenSSL lifecycle via tls_openssl. */
+    int allow_downgrade;    /* If non-zero, allow silent rewrite of tls://
+                             * URLs to nats:// when the linked nats.c was
+                             * built without TLS support.  Default 0 (fail
+                             * loudly rather than silently expose
+                             * credentials in plaintext). */
 } nats_tls_opts;
 
 /* Maximum number of KV bucket handles cached per process. */
@@ -229,5 +234,26 @@ int nats_pool_get_reconnect_epoch(void);
  * locking, no globals.
  */
 int nats_pool_should_init(int rank);
+
+/*
+ * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
+ *
+ * Replaces every "user[:pass]@" segment that appears in the authority
+ * section after a "scheme://" prefix with "****@".  Handles
+ * comma-separated lists of URLs.  URLs without userinfo are copied
+ * unchanged.  Always NUL-terminates @out unless out_sz == 0.
+ *
+ * @param url      Source URL string.  May be NULL.
+ * @param out      Destination buffer.  Must be non-NULL if out_sz > 0.
+ * @param out_sz   Size of @out in bytes.  If 0, no write is performed.
+ *
+ * Examples:
+ *   "nats://user:pass@h:4222"         -> "nats://****@h:4222"
+ *   "nats://h:4222"                   -> "nats://h:4222"
+ *   "nats://h1,nats://u:p@h2"         -> "nats://h1,nats://****@h2"
+ *
+ * Thread safety: Pure function on caller-provided memory; safe anywhere.
+ */
+void nats_redact_url(const char *url, char *out, size_t out_sz);
 
 #endif /* NATS_POOL_H */

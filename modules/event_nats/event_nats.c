@@ -96,11 +96,13 @@ int nats_reconnect_wait = 2000;   /* ms */
 int nats_max_reconnect = 60;
 
 /* TLS parameters */
-int nats_tls_skip_verify = 1;     /* skip server cert verification (default: yes) */
+int nats_tls_skip_verify = 0;     /* skip server cert verification (default: no - verify) */
 char *nats_tls_ca = NULL;         /* CA certificate file for verification */
 char *nats_tls_cert = NULL;       /* client certificate file (mutual TLS) */
 char *nats_tls_key = NULL;        /* client private key file (mutual TLS) */
 char *nats_tls_hostname = NULL;   /* expected server cert hostname (overrides URL host) */
+int nats_tls_allow_downgrade = 0; /* allow silent rewrite of tls:// -> nats:// when
+                                   * nats.c was built without TLS (default: no - fail) */
 
 /* OpenSSL lifecycle -- when 1, nats.c skips OpenSSL init/cleanup
  * (the host application manages it). Set to 0 only if no other
@@ -117,6 +119,7 @@ static const param_export_t mod_params[] = {
 	{"tls_cert",            STR_PARAM, &nats_tls_cert},
 	{"tls_key",             STR_PARAM, &nats_tls_key},
 	{"tls_hostname",        STR_PARAM, &nats_tls_hostname},
+	{"tls_allow_downgrade", INT_PARAM, &nats_tls_allow_downgrade},
 	{"skip_openssl_init",   INT_PARAM, &nats_skip_openssl_init},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
@@ -284,6 +287,7 @@ static int mod_init(void)
 	tls_opts.hostname = nats_tls_hostname;
 	tls_opts.skip_verify = nats_tls_skip_verify;
 	tls_opts.skip_openssl_init = nats_skip_openssl_init;
+	tls_opts.allow_downgrade = nats_tls_allow_downgrade;
 
 	if (nats_pool_register(nats_url, &tls_opts, "event_nats",
 			nats_reconnect_wait, nats_max_reconnect) < 0) {
@@ -291,12 +295,23 @@ static int mod_init(void)
 		return -1;
 	}
 
-	LM_INFO("NATS URL: %s, JetStream: %s, TLS verify: %s, "
-		"skip_openssl_init: %s\n",
-		nats_url,
-		nats_jetstream ? "enabled" : "disabled",
-		nats_tls_skip_verify ? "off" : "on",
-		nats_skip_openssl_init ? "yes" : "no");
+	{
+		char redacted[512];
+		nats_redact_url(nats_url, redacted, sizeof(redacted));
+		LM_INFO("NATS URL: %s, JetStream: %s, TLS verify: %s, "
+			"skip_openssl_init: %s\n",
+			redacted,
+			nats_jetstream ? "enabled" : "disabled",
+			nats_tls_skip_verify ? "off" : "on",
+			nats_skip_openssl_init ? "yes" : "no");
+	}
+
+	if (nats_tls_skip_verify) {
+		LM_WARN("NATS TLS server certificate verification is DISABLED "
+			"(tls_skip_verify=1) -- connections are vulnerable to "
+			"man-in-the-middle attacks. Set tls_skip_verify=0 and "
+			"provide tls_ca for production deployments.\n");
+	}
 
 	/* Register EVI events for all configured subscriptions */
 	if (nats_subscription_count > 0) {

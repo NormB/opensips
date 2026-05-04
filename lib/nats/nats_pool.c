@@ -409,6 +409,7 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 
 			pool_cfg->tls.skip_verify = tls->skip_verify;
 			pool_cfg->tls.skip_openssl_init = tls->skip_openssl_init;
+			pool_cfg->tls.allow_downgrade = tls->allow_downgrade;
 		}
 
 		pool_cfg->reconnect_wait = reconnect_wait > 0 ?
@@ -487,6 +488,10 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 		/* warn on TLS config conflict if both provide TLS */
 		if (tls && pool_cfg->tls.skip_verify != tls->skip_verify) {
 			LM_WARN("NATS pool: TLS skip_verify conflict between "
+				"modules (using first registration's value)\n");
+		}
+		if (tls && pool_cfg->tls.allow_downgrade != tls->allow_downgrade) {
+			LM_WARN("NATS pool: TLS allow_downgrade conflict between "
 				"modules (using first registration's value)\n");
 		}
 
@@ -585,10 +590,24 @@ natsConnection *nats_pool_get(void)
 
 			if (!tls_ok) {
 				int i;
+				if (!pool_cfg->tls.allow_downgrade) {
+					LM_ERR("NATS pool: TLS requested "
+						"(tls:// URLs) but the linked "
+						"nats.c library was built "
+						"without TLS support;"
+						" refusing to downgrade tls:// to plaintext."
+						" Set tls_allow_downgrade=1 to opt"
+						" in to plaintext fallback (NOT"
+						" recommended -- credentials"
+						" will be sent in the clear).\n");
+					return NULL;
+				}
 				LM_WARN("NATS pool: TLS requested (tls:// URLs) "
 					"but not available in nats.c library. "
-					"Downgrading to plain nats:// "
-					"connections.\n");
+					"tls_allow_downgrade=1 -- downgrading "
+					"to plain nats:// connections "
+					"(credentials will be sent in the "
+					"clear).\n");
 				pool_cfg->use_tls = 0;
 
 				/* Rewrite tls:// URLs to nats:// in-place */
@@ -707,12 +726,16 @@ natsConnection *nats_pool_get(void)
 	natsOptions_Destroy(opts);
 	atomic_store(&_connected, 1);
 
-	/* Log connected URL */
+	/* Log connected URL — natsConnection_GetConnectedUrl is documented
+	 * to strip credentials, but redact defensively in case any nats.c
+	 * version preserves them. */
 	{
 		char url[256];
+		char redacted[256];
 		natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
+		nats_redact_url(url, redacted, sizeof(redacted));
 		LM_INFO("NATS pool: connected to %s (%d server(s) configured)\n",
-			url, pool_cfg->server_cnt);
+			redacted, pool_cfg->server_cnt);
 	}
 
 	return _nc;
