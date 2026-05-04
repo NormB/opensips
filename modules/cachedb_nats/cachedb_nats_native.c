@@ -65,6 +65,11 @@
 /* separator for map keys: key:subkey */
 #define NATS_MAP_SEP ':'
 
+/* defined in cachedb_nats.c — caps the per-call pkg_malloc in
+ * w_nats_request to bound resource usage when a remote responder
+ * sends an oversized reply. */
+extern int nats_request_max_reply;
+
 /*
  * native_str_to_buf() — Null-terminate an OpenSIPS str into a fixed buffer.
  *
@@ -180,8 +185,16 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		return -1;
 	}
 
-	/* copy reply data before destroying message */
+	/* copy reply data before destroying message — but cap the size
+	 * first to bound peer-controlled allocation. */
 	reply_len = natsMsg_GetDataLength(reply);
+	if (reply_len < 0 || reply_len > nats_request_max_reply) {
+		LM_ERR("nats_request to '%s' rejected: reply size %d "
+			"exceeds nats_request_max_reply=%d\n",
+			subj_buf, reply_len, nats_request_max_reply);
+		natsMsg_Destroy(reply);
+		return -1;
+	}
 	reply_copy = pkg_malloc(reply_len + 1);
 	if (!reply_copy) {
 		LM_ERR("no more pkg memory for reply (%d bytes)\n", reply_len);

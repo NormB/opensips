@@ -1,0 +1,7 @@
+test_registry
+test_parser
+test_ring
+test_ack_token
+test_persist
+test_slurp_file_cap
+*.o

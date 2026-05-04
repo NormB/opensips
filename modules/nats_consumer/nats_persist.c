@@ -85,6 +85,12 @@ static long long now_ms(void)
 #define NATS_PERSIST_DEBOUNCE_MS   500
 #define NATS_PERSIST_TICK_MS       100
 
+/* Cap on the bytes slurp_file() will allocate for a persist snapshot.
+ * 10 MiB is far larger than any realistic registry dump but small
+ * enough to refuse to load a symlinked log/dump file or a corrupted
+ * persist target.  Caller logs an error if exceeded. */
+#define NATS_PERSIST_MAX_FILE_BYTES   (10L * 1024 * 1024)
+
 typedef struct nats_persist_state {
 	char           *path;        /* malloc'd absolute path */
 
@@ -819,6 +825,13 @@ static char *slurp_file(const char *path, int *out_missing)
 	}
 	sz = ftell(f);
 	if (sz < 0) {
+		fclose(f);
+		return NULL;
+	}
+	if (sz > NATS_PERSIST_MAX_FILE_BYTES) {
+		LM_ERR("nats_persist: %s exceeds size cap (%ld > %ld bytes); "
+			"refusing to load -- check for symlink / wrong path\n",
+			path, sz, (long)NATS_PERSIST_MAX_FILE_BYTES);
 		fclose(f);
 		return NULL;
 	}

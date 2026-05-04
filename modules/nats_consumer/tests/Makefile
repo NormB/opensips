@@ -16,7 +16,8 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
 
 .PHONY: all clean check
 
-all: test_registry test_parser test_ring test_ack_token test_persist
+all: test_registry test_parser test_ring test_ack_token test_persist \
+     test_slurp_file_cap
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -36,12 +37,21 @@ test_persist: $(PERSIST_SRCS) test_shim.h ../nats_persist.h \
               ../nats_handle_registry.h ../nats_handle_parse.h
 	$(CC) $(CFLAGS) -o $@ $(PERSIST_SRCS) $(LDFLAGS)
 
+# Standalone test for slurp_file size cap -- self-contained, ASan-built,
+# does not link against test_shim or production .c files (uses inline
+# copies of the buggy and fixed slurp_file logic plus a source-pattern
+# assertion against ../nats_persist.c).
+test_slurp_file_cap: test_slurp_file_cap.c
+	$(CC) -g -O0 -fsanitize=address -Wall -o $@ $<
+
 check: all
 	./test_registry
 	./test_parser
 	./test_ring
 	./test_ack_token
 	./test_persist
+	./test_slurp_file_cap
 
 clean:
-	rm -f test_registry test_parser test_ring test_ack_token test_persist
+	rm -f test_registry test_parser test_ring test_ack_token test_persist \
+	      test_slurp_file_cap

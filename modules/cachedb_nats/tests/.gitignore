@@ -1,3 +1,5 @@
 test_intersect_uaf
 test_kvget_copy_pattern
+test_json_escape
+test_reply_size_cap
 *.o
