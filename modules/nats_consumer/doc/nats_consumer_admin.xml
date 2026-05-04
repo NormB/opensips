@@ -170,6 +170,21 @@ modparam("nats_consumer", "persist_path",
                 leave the file half-written.
             </para>
             <para>
+                On rehydrate, the file is rejected with an
+                <varname>LM_ERR</varname> if it exceeds 10 MiB
+                (<varname>NATS_PERSIST_MAX_FILE_BYTES</varname>) -- a
+                guard against a misconfigured path or a symlink to a
+                large file (e.g., a log) that would otherwise be
+                slurped entirely into heap before parsing.
+            </para>
+            <para>
+                Numeric fields that exceed double precision
+                (<varname>start_seq</varname> above 2^53,
+                <varname>start_time_ns</varname> in nanoseconds since
+                epoch) are serialized as JSON strings so they
+                round-trip losslessly through the snapshot.
+            </para>
+            <para>
                 <emphasis>Default value:</emphasis>
                 <varname>/var/lib/opensips/nats_consumer/handles.json</varname>
             </para>
@@ -442,13 +457,20 @@ timer_route[drain] {
             </para>
             <para>
                 <emphasis>This function is sync-only.</emphasis>  It
-                blocks the worker process for the full timeout.
-                Callsites <emphasis>must</emphasis> be restricted to
-                <varname>timer_route</varname> or
-                <varname>startup_route</varname> (or any other context
-                that tolerates a blocking worker).  Calling it from a
-                SIP <varname>request_route</varname> stalls SIP
-                processing for the whole timeout.
+                blocks the worker process for the full timeout.  The
+                cmd_export route mask is restricted to
+                <varname>ONREPLY_ROUTE | LOCAL_ROUTE |
+                STARTUP_ROUTE | TIMER_ROUTE | EVENT_ROUTE</varname> so
+                the engine refuses to call it from
+                <varname>REQUEST_ROUTE</varname>,
+                <varname>FAILURE_ROUTE</varname>,
+                <varname>BRANCH_ROUTE</varname>, or
+                <varname>ERROR_ROUTE</varname> -- the contexts where a
+                SIP UDP/TCP worker would be blocked while holding an
+                in-flight transaction.  An attempt to call from a
+                forbidden route surfaces as an
+                &quot;function not supported in this route&quot; error
+                at config-load.
             </para>
             <para>
                 Returns <varname>1</varname> on success,
@@ -611,6 +633,55 @@ opensips-cli -x mi nats_consumer_unbind id=jobs
                 number of new handles loaded.  Useful when the snapshot
                 has been hand-edited or copied in from another node.
             </para>
+        </section>
+
+        <section id="mi_nats_consumer_health">
+            <title><function moreinfo="none">nats_consumer_health</function></title>
+            <para>
+                Liveness snapshot of the dedicated consumer process.
+                Intended for external watchdogs (Prometheus
+                exporters, Nagios checks, etc.) -- a wedged or
+                crashed consumer leaves SIP workers blocked on the
+                per-handle SHM ring's eventfd with no other observable
+                signal.
+            </para>
+            <para>
+                Returns a JSON object:
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis role="bold">tick</emphasis> — monotonic
+                    loop-iteration counter incremented once per
+                    consumer-loop pass.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">consumer_pid</emphasis> —
+                    PID of the consumer process.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">last_tick_ms_ago</emphasis> —
+                    Milliseconds since the last tick (CLOCK_MONOTONIC).
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">stale</emphasis> —
+                    <emphasis>"true"</emphasis> when
+                    <varname>last_tick_ms_ago</varname> exceeds 5000 ms
+                    (more than five times the loop's 1 s upper-wait
+                    bound) or no tick has been observed yet.
+                </para></listitem>
+            </itemizedlist>
+            <example>
+                <title>Poll consumer health from opensips-cli</title>
+                <programlisting format="linespecific">
+$ opensips-cli -x mi nats_consumer_health
+{
+    "tick": 12943,
+    "consumer_pid": 4711,
+    "last_tick_ms_ago": 821,
+    "stale": "false"
+}
+                </programlisting>
+            </example>
         </section>
 
     </section><!-- /mi -->

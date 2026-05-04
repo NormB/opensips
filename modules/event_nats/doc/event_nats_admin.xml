@@ -244,30 +244,68 @@ modparam("event_nats", "max_reconnect", 30)
             <title><varname>tls_skip_verify</varname> (integer)</title>
             <para>
                 Skip server TLS certificate verification.  When set to
-                <varname>1</varname> (the default), nats.c does not verify
-                the server's certificate chain or hostname.  This is
-                appropriate for internal cluster networks where the NATS
-                servers use self-signed certificates.
+                <varname>0</varname> (the default), nats.c verifies both
+                the server's certificate chain (against
+                <varname>tls_ca</varname>) and its hostname.  This is
+                the secure default for production deployments.
             </para>
             <para>
-                Set to <varname>0</varname> to enable full certificate
-                verification.  In that case <varname>tls_ca</varname> must be
-                configured with the CA certificate that signed the server
-                certificate, and <varname>tls_hostname</varname> must be set
-                if connecting by IP address (since nats.c enforces hostname
-                verification by default via
-                <varname>NATS_FORCE_HOST_VERIFICATION</varname>).
+                Set to <varname>1</varname> only for development or
+                lab environments where the NATS servers use self-signed
+                certificates and certificate procurement is not
+                feasible.  When enabled, the module emits an
+                <varname>LM_WARN</varname> at startup so the operator
+                can confirm the setting was intentional.
             </para>
             <para>
-                <emphasis>Default value:</emphasis> <varname>1</varname>
-                (skip verification)
+                <emphasis>Default value:</emphasis> <varname>0</varname>
+                (verify -- changed from <varname>1</varname> in
+                phase-2 secure-defaults)
             </para>
             <example>
-                <title>Enable full TLS certificate verification</title>
+                <title>Production: full TLS certificate verification</title>
                 <programlisting format="linespecific">
-modparam("event_nats", "tls_skip_verify", 0)
 modparam("event_nats", "tls_ca",          "/etc/ssl/certs/nats-ca.pem")
 modparam("event_nats", "tls_hostname",    "nats-1.example.com")
+                </programlisting>
+            </example>
+            <example>
+                <title>Development: skip verification (insecure)</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_skip_verify", 1)
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- tls_allow_downgrade -->
+        <section id="param_tls_allow_downgrade">
+            <title><varname>tls_allow_downgrade</varname> (integer)</title>
+            <para>
+                Permit silent rewrite of <varname>tls://</varname>
+                URLs to <varname>nats://</varname> when the linked
+                nats.c library was built without TLS support.  By
+                default (<varname>0</varname>) the pool refuses to
+                start when TLS is requested but unavailable, with a
+                clear <varname>LM_ERR</varname> -- this prevents
+                deployments that read &quot;TLS=yes&quot; in their
+                config from silently sending credentials in the
+                clear.
+            </para>
+            <para>
+                Set to <varname>1</varname> only after explicitly
+                accepting the plaintext fallback risk.  When enabled
+                and a downgrade actually occurs, the module emits an
+                <varname>LM_WARN</varname> at startup noting that
+                credentials will travel unencrypted.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis> <varname>0</varname>
+                (refuse silent downgrade)
+            </para>
+            <example>
+                <title>Allow plaintext fallback (NOT recommended)</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "tls_allow_downgrade", 1)
                 </programlisting>
             </example>
         </section>
@@ -498,10 +536,29 @@ event_route[E_NATS_JOB] {
                 execution to push arbitrary content to NATS.
             </para>
             <para>
-                The <emphasis>subject</emphasis> must be a valid NATS subject
-                token string and must not exceed 512 bytes.  If the subject
-                is longer than 511 bytes the function logs an error and
-                returns <varname>-1</varname> without publishing.
+                The <emphasis>subject</emphasis> must be a valid NATS
+                subject token string and must not exceed 512 bytes.
+                The function rejects with <varname>-1</varname> any
+                subject that:
+            </para>
+            <itemizedlist>
+                <listitem><para>is empty or longer than 511 bytes;</para></listitem>
+                <listitem><para>contains the NATS wildcards
+                    <varname>&apos;*&apos;</varname> or
+                    <varname>&apos;&gt;&apos;</varname> (publish must
+                    target a concrete subject);</para></listitem>
+                <listitem><para>contains whitespace, control bytes, or
+                    embedded NUL;</para></listitem>
+                <listitem><para>has malformed dot structure (leading,
+                    trailing, or consecutive dots).</para></listitem>
+            </itemizedlist>
+            <para>
+                Additionally, when the underlying NATS connection pool
+                is in disconnected state, the function fast-fails with
+                <varname>-1</varname> rather than blocking the worker
+                up to the cnats internal-buffer timeout.  Lost messages
+                are reflected in
+                <varname>nats_stats-&gt;failed</varname>.
             </para>
             <para>
                 The <emphasis>payload</emphasis> is published as-is with no
