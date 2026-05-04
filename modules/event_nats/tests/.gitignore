@@ -1,3 +1,4 @@
 test_partial_alloc
 test_seq_cast_guard
 *.o
+test_tls_default

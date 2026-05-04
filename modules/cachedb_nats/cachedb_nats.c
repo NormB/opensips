@@ -118,6 +118,7 @@ static char *tls_cert = NULL;
 static char *tls_key = NULL;
 static char *tls_hostname = NULL;
 static int   tls_skip_verify = 0;
+static int   tls_allow_downgrade = 0;  /* require explicit opt-in to plaintext fallback */
 
 /* JSON full-text search parameters */
 char *fts_json_prefix = "json:";
@@ -172,6 +173,7 @@ static const param_export_t params[] = {
 	{"tls_key",        STR_PARAM,                 &tls_key},
 	{"tls_hostname",   STR_PARAM,                 &tls_hostname},
 	{"tls_skip_verify", INT_PARAM,                &tls_skip_verify},
+	{"tls_allow_downgrade", INT_PARAM,            &tls_allow_downgrade},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
@@ -346,6 +348,7 @@ static int mod_init(void)
 			tls_opts.hostname = tls_hostname;
 			tls_opts.skip_verify = tls_skip_verify;
 			tls_opts.skip_openssl_init = 1;
+			tls_opts.allow_downgrade = tls_allow_downgrade;
 			tls_ptr = &tls_opts;
 
 			/* if URL doesn't start with tls://, rewrite it */

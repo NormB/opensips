@@ -1,0 +1,3 @@
+test_tls_downgrade_policy
+test_redact_url
+*.o
