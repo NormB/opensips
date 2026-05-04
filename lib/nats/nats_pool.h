@@ -273,4 +273,23 @@ void nats_redact_url(const char *url, char *out, size_t out_sz);
  */
 int nats_validate_publish_subject(const char *s, int len);
 
+/*
+ * Register a callback for JetStream publish-ack outcomes.
+ *
+ * The cnats library invokes the AckHandler from a library-internal
+ * I/O thread.  Modules that want to observe per-ack success/failure
+ * (e.g. to bump nats_stats counters) register a callback here.
+ * The callback runs on the cnats thread and MUST NOT call any
+ * OpenSIPS APIs (LM_*, pkg_malloc, etc.); it may only do atomic
+ * memory operations and async-signal-safe I/O.
+ *
+ * @param cb  Function called as cb(success) where success != 0 if
+ *            the JS broker acked the publish, 0 on error.  Pass
+ *            NULL to clear any previously-registered callback.
+ *
+ * Thread safety: Set once during mod_init, before fork.  The
+ * callback pointer is read on the cnats thread without locking.
+ */
+void nats_pool_set_pub_ack_cb(void (*cb)(int success));
+
 #endif /* NATS_POOL_H */

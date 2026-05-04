@@ -6,3 +6,5 @@ test_persist
 test_slurp_file_cap
 test_request_route_restriction
 *.o
+test_consumer_heartbeat
+test_persist_precision

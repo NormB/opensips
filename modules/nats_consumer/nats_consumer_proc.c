@@ -59,6 +59,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
 
@@ -73,6 +74,50 @@
 #include "nats_ack_ipc.h"
 #include "nats_ack.h"
 #include "nats_consumer_proc.h"
+
+/* SHM heartbeat block -- bumped per loop iteration so a watchdog or
+ * MI handler can detect a wedged or crashed consumer process.
+ * Allocated by mod_init via nats_consumer_hb_init(); NULL until
+ * then, so writes are guarded. */
+nats_consumer_heartbeat_t *nats_consumer_hb = NULL;
+
+int nats_consumer_hb_init(void)
+{
+	nats_consumer_hb = shm_malloc(sizeof(*nats_consumer_hb));
+	if (!nats_consumer_hb) {
+		LM_ERR("nats_consumer: shm_malloc for heartbeat failed\n");
+		return -1;
+	}
+	memset(nats_consumer_hb, 0, sizeof(*nats_consumer_hb));
+	atomic_store_explicit(&nats_consumer_hb->tick, 0, memory_order_relaxed);
+	atomic_store_explicit(&nats_consumer_hb->last_tick_us, 0, memory_order_relaxed);
+	atomic_store_explicit(&nats_consumer_hb->consumer_pid, 0, memory_order_relaxed);
+	return 0;
+}
+
+void nats_consumer_hb_destroy(void)
+{
+	if (nats_consumer_hb) {
+		shm_free(nats_consumer_hb);
+		nats_consumer_hb = NULL;
+	}
+}
+
+static inline long long _now_monotonic_us(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+	return (long long)ts.tv_sec * 1000000LL + (long long)ts.tv_nsec / 1000LL;
+}
+
+static inline void nats_consumer_hb_tick(void)
+{
+	if (!nats_consumer_hb) return;
+	atomic_fetch_add_explicit(&nats_consumer_hb->tick, 1,
+		memory_order_relaxed);
+	atomic_store_explicit(&nats_consumer_hb->last_tick_us,
+		_now_monotonic_us(), memory_order_relaxed);
+}
 
 /* ── tuning ──────────────────────────────────────────────────── */
 
@@ -1399,7 +1444,14 @@ void nats_consumer_proc_main(int rank)
 		"baseline_epoch=%d, entering main loop\n",
 		ack_fd, retry_fd, baseline_epoch);
 
+	if (nats_consumer_hb) {
+		atomic_store_explicit(&nats_consumer_hb->consumer_pid,
+			(int)getpid(), memory_order_relaxed);
+		nats_consumer_hb_tick();
+	}
+
 	for (;;) {
+		nats_consumer_hb_tick();
 		proc_sub_state_t *ss;
 		int any_work = 0;
 		int cur_epoch;

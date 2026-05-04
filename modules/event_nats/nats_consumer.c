@@ -224,14 +224,73 @@ void nats_consumer_process(int rank)
 			sub->event_name);
 	}
 
-	/* Block forever — nats.c fires callbacks on its internal threads.
-	 * This process just needs to stay alive. Sleep in 60-second intervals
-	 * and check connection health. */
-	for (;;) {
-		sleep(60);
+	/* Block forever -- nats.c fires the per-subscription callbacks on
+	 * its internal threads, so this process just needs to stay alive
+	 * AND react to reconnects.
+	 *
+	 * Loop cadence: 5 s.  cnats handles the actual reconnect on a
+	 * background thread; we poll the pool's atomic reconnect epoch.
+	 * When it advances, walk every subscription, and if cnats has
+	 * marked it invalid (server-side state was lost across the
+	 * reconnect), destroy it and re-subscribe.  Subscriptions that
+	 * survived the reconnect on the broker side report
+	 * natsSubscription_IsValid()=true and are left alone. */
+	{
+		int last_epoch = nats_pool_get_reconnect_epoch();
+		int prev_connected = nats_pool_is_connected();
 
-		if (!nats_pool_is_connected()) {
-			LM_WARN("NATS consumer: connection lost, waiting for reconnect...\n");
+		for (;;) {
+			sleep(5);
+
+			int cur_epoch = nats_pool_get_reconnect_epoch();
+			int cur_connected = nats_pool_is_connected();
+
+			if (cur_epoch != last_epoch) {
+				LM_INFO("NATS consumer: reconnect detected (epoch "
+					"%d -> %d); checking subscriptions\n",
+					last_epoch, cur_epoch);
+				for (i = 0; i < nats_subscription_count; i++) {
+					nats_subscription_t *sub =
+						&nats_subscriptions[i];
+					if (sub->sub &&
+					    natsSubscription_IsValid(sub->sub))
+						continue;
+					if (sub->sub) {
+						natsSubscription_Destroy(sub->sub);
+						sub->sub = NULL;
+					}
+					if (sub->queue_group[0]) {
+						s = natsConnection_QueueSubscribe(
+							&sub->sub, nc, sub->subject,
+							sub->queue_group,
+							nats_msg_handler, sub);
+					} else {
+						s = natsConnection_Subscribe(
+							&sub->sub, nc, sub->subject,
+							nats_msg_handler, sub);
+					}
+					if (s == NATS_OK) {
+						LM_INFO("NATS consumer: "
+							"re-subscribed to '%s'\n",
+							sub->subject);
+					} else {
+						LM_ERR("NATS consumer: "
+							"resubscribe to '%s' "
+							"failed: %s\n",
+							sub->subject,
+							natsStatus_GetText(s));
+					}
+				}
+				last_epoch = cur_epoch;
+			}
+
+			if (prev_connected && !cur_connected) {
+				LM_WARN("NATS consumer: connection lost, "
+					"awaiting reconnect...\n");
+			} else if (!prev_connected && cur_connected) {
+				LM_INFO("NATS consumer: connection restored\n");
+			}
+			prev_connected = cur_connected;
 		}
 	}
 }

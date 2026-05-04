@@ -17,7 +17,8 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
 .PHONY: all clean check
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
-     test_slurp_file_cap test_request_route_restriction
+     test_slurp_file_cap test_request_route_restriction \
+     test_consumer_heartbeat test_persist_precision
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -56,7 +57,17 @@ check: all
 	./test_persist
 	./test_slurp_file_cap
 	./test_request_route_restriction
+	./test_consumer_heartbeat
+	./test_persist_precision
 
 clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \
-	      test_slurp_file_cap test_request_route_restriction
+	      test_slurp_file_cap test_request_route_restriction \
+	      test_consumer_heartbeat test_persist_precision
+
+# Phase-5d heartbeat + Phase-6a persist precision tests (self-contained)
+test_consumer_heartbeat: test_consumer_heartbeat.c
+	$(CC) -g -O0 -Wall -pthread -o $@ $<
+
+test_persist_precision: test_persist_precision.c
+	$(CC) -g -O0 -Wall -o $@ $<

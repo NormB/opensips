@@ -45,4 +45,29 @@
  * return-from-main as an exiting child and reaps the process. */
 void nats_consumer_proc_main(int rank);
 
+/*
+ * SHM-allocated heartbeat block.  The consumer process bumps tick
+ * once per loop iteration and writes the current monotonic time
+ * to last_tick_us.  A watchdog (MI handler, monitor module, external
+ * exporter) compares (now - last_tick_us) against a staleness
+ * threshold to detect a wedged or crashed consumer process.
+ *
+ * Allocated by mod_init (pre-fork) so all workers + the consumer
+ * inherit the same SHM pointer.
+ */
+typedef struct nats_consumer_heartbeat {
+	_Atomic unsigned long  tick;          /* monotonic loop counter */
+	_Atomic long long      last_tick_us;  /* CLOCK_MONOTONIC microseconds */
+	_Atomic int            consumer_pid;  /* pid of the consumer process */
+} nats_consumer_heartbeat_t;
+
+extern nats_consumer_heartbeat_t *nats_consumer_hb;
+
+/* Allocate the SHM heartbeat block (mod_init).  Returns 0 on success,
+ * -1 on shared-memory allocation failure. */
+int nats_consumer_hb_init(void);
+
+/* Free the SHM heartbeat block (mod_destroy). */
+void nats_consumer_hb_destroy(void);
+
 #endif /* NATS_CONSUMER_PROC_H */
