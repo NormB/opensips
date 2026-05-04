@@ -1008,31 +1008,37 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
 			}
-			/* free old strdup'd keys not in the intersection */
+			/* _intersect_keys returns pointers aliased into match_keys.
+			 * strdup the survivors in place BEFORE freeing match_keys,
+			 * otherwise the strdup reads freed memory (UAF). */
+			{
+				int k;
+				for (k = 0; k < new_count; k++) {
+					char *dup = strdup(new_keys[k]);
+					if (!dup) {
+						int j;
+						LM_ERR("no memory for intersect key strdup\n");
+						for (j = 0; j < k; j++)
+							free(new_keys[j]);
+						free(new_keys);
+						for (j = 0; j < match_count; j++)
+							free(match_keys[j]);
+						free(match_keys);
+						pthread_mutex_unlock(&g_idx->lock);
+						return -1;
+					}
+					new_keys[k] = dup;
+				}
+			}
+			/* now safe to free the previous match_keys */
 			{
 				int k;
 				for (k = 0; k < match_count; k++)
 					free(match_keys[k]);
 			}
 			free(match_keys);
-			/* strdup the intersection results */
 			match_keys = new_keys;
 			match_count = new_count;
-			{
-				int k;
-				for (k = 0; k < match_count; k++) {
-					char *dup = strdup(match_keys[k]);
-					if (!dup) {
-						LM_ERR("no memory for intersect key strdup\n");
-						while (--k >= 0)
-							free(match_keys[k]);
-						free(match_keys);
-						pthread_mutex_unlock(&g_idx->lock);
-						return -1;
-					}
-					match_keys[k] = dup;
-				}
-			}
 		}
 	}
 

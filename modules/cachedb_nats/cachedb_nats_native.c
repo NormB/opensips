@@ -374,33 +374,52 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	/* set value pvar */
-	const char *entry_val = kvEntry_ValueString(entry);
-	int entry_len = kvEntry_ValueLen(entry);
-
-	memset(&val, 0, sizeof(val));
-	val.flags = PV_VAL_STR;
-	val.rs.s = (char *)entry_val;
-	val.rs.len = entry_len;
-	pv_set_value(msg, value_var, 0, &val);
-
-	/* set revision pvar (optional) */
-	if (rev_var) {
+	/* Copy the value out of the kvEntry into worker-local memory before
+	 * destroying the entry — same defensive pattern as w_nats_request.
+	 * Every current OpenSIPS pvar setter copies PV_VAL_STR data, so the
+	 * existing inline use was safe today, but the explicit copy keeps
+	 * us robust if any future module-defined pvar setter forgets to. */
+	{
+		const char *entry_val = kvEntry_ValueString(entry);
+		int entry_len = kvEntry_ValueLen(entry);
 		uint64_t rev = kvEntry_Revision(entry);
-		char rev_buf[24];
-		snprintf(rev_buf, sizeof(rev_buf), "%llu", (unsigned long long)rev);
+		char *value_copy = pkg_malloc(entry_len + 1);
+		if (!value_copy) {
+			LM_ERR("no more pkg memory for kv value (%d bytes)\n",
+				entry_len);
+			kvEntry_Destroy(entry);
+			return -1;
+		}
+		memcpy(value_copy, entry_val, entry_len);
+		value_copy[entry_len] = '\0';
+		kvEntry_Destroy(entry);
+		entry = NULL;
+
+		/* set value pvar */
 		memset(&val, 0, sizeof(val));
 		val.flags = PV_VAL_STR;
-		val.rs.s = rev_buf;
-		val.rs.len = strlen(rev_buf);
-		pv_set_value(msg, rev_var, 0, &val);
+		val.rs.s = value_copy;
+		val.rs.len = entry_len;
+		pv_set_value(msg, value_var, 0, &val);
+
+		/* set revision pvar (optional) */
+		if (rev_var) {
+			char rev_buf[24];
+			snprintf(rev_buf, sizeof(rev_buf), "%llu",
+				(unsigned long long)rev);
+			memset(&val, 0, sizeof(val));
+			val.flags = PV_VAL_STR;
+			val.rs.s = rev_buf;
+			val.rs.len = strlen(rev_buf);
+			pv_set_value(msg, rev_var, 0, &val);
+		}
+
+		LM_DBG("nats_kv_get '%s' = '%.*s' (rev=%llu)\n",
+			key_buf, entry_len, value_copy,
+			(unsigned long long)rev);
+
+		pkg_free(value_copy);
 	}
-
-	LM_DBG("nats_kv_get '%s' = '%.*s' (rev=%llu)\n",
-		key_buf, entry_len, entry_val,
-		(unsigned long long)kvEntry_Revision(entry));
-
-	kvEntry_Destroy(entry);
 	return 1;
 }
 

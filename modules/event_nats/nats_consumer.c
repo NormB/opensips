@@ -268,24 +268,33 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	memset(evt, 0, sizeof(*evt));
 	evt->event_id = nsub->event_id;
 
-	/* Copy subject */
+	/* Copy subject — all-or-nothing: if any required field fails to
+	 * allocate, drop the message rather than dispatching with a NULL
+	 * field that the script would silently see as undefined. */
 	if (subject_len > 0) {
 		evt->subject = shm_malloc(subject_len + 1);
-		if (evt->subject) {
-			memcpy(evt->subject, subject, subject_len);
-			evt->subject[subject_len] = '\0';
-			evt->subject_len = subject_len;
+		if (!evt->subject) {
+			natsMsg_Destroy(msg);
+			shm_free(evt);
+			return;
 		}
+		memcpy(evt->subject, subject, subject_len);
+		evt->subject[subject_len] = '\0';
+		evt->subject_len = subject_len;
 	}
 
 	/* Copy data */
 	if (data && data_len > 0) {
 		evt->data = shm_malloc(data_len + 1);
-		if (evt->data) {
-			memcpy(evt->data, data, data_len);
-			evt->data[data_len] = '\0';
-			evt->data_len = data_len;
+		if (!evt->data) {
+			natsMsg_Destroy(msg);
+			if (evt->subject) shm_free(evt->subject);
+			shm_free(evt);
+			return;
 		}
+		memcpy(evt->data, data, data_len);
+		evt->data[data_len] = '\0';
+		evt->data_len = data_len;
 	}
 
 	natsMsg_Destroy(msg);
