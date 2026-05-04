@@ -25,7 +25,7 @@ include ../../Makefile.conf
 
 NAME     = libnats_pool.so
 SONAME   = libnats_pool.so
-OBJS     = nats_pool.o nats_rank.o nats_redact.o
+OBJS     = nats_pool.o nats_rank.o nats_redact.o nats_validate.o
 
 # Bring in pkg-config CFLAGS/LIBS for the external libnats C client.
 include ./Makefile.nats

@@ -124,6 +124,12 @@ static int   tls_allow_downgrade = 0;  /* require explicit opt-in to plaintext f
 char *fts_json_prefix = "json:";
 int   fts_max_results = 100;
 
+/* Maximum bytes accepted in a NATS request/reply response.  Caps
+ * the per-call pkg_malloc in w_nats_request so a malicious or
+ * misbehaving responder can't exhaust per-worker pkg memory by
+ * sending an oversized reply.  Default 65536 (64 KB). */
+int   nats_request_max_reply = 65536;
+
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
  * When one or more patterns are set, kvStore_WatchMulti() is used. */
@@ -176,6 +182,7 @@ static const param_export_t params[] = {
 	{"tls_allow_downgrade", INT_PARAM,            &tls_allow_downgrade},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
+	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{0, 0, 0}
 };

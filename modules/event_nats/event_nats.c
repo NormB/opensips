@@ -468,6 +468,13 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 		evi_free_payload(payload);
 		return -1;
 	}
+	if (nats_validate_publish_subject(sock->address.s, subj_len) < 0) {
+		LM_ERR("NATS subject rejected (wildcard / control char / "
+			"empty token / leading-trailing dot): %.*s\n",
+			subj_len, sock->address.s);
+		evi_free_payload(payload);
+		return -1;
+	}
 	memcpy(subj_buf, sock->address.s, subj_len);
 	subj_buf[subj_len] = '\0';
 
@@ -591,6 +598,12 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
 			subj_len, (int)sizeof(subj_buf) - 1,
 			subject->len, subject->s);
+		return -1;
+	}
+	if (nats_validate_publish_subject(subject->s, subj_len) < 0) {
+		LM_ERR("nats_publish: subject rejected (wildcard / control "
+			"char / empty token / leading-trailing dot): %.*s\n",
+			subj_len, subject->s);
 		return -1;
 	}
 	memcpy(subj_buf, subject->s, subj_len);

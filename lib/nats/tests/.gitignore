@@ -1,3 +1,4 @@
 test_tls_downgrade_policy
 test_redact_url
+test_validate_publish_subject
 *.o

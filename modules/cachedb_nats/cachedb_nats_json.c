@@ -1130,6 +1130,58 @@ error:
 /*                   cachedb update() callback                        */
 /* ------------------------------------------------------------------ */
 
+/*
+ * _json_escape() — RFC 8259 string escape.
+ *
+ * Writes the JSON-escaped form of @in (without surrounding quotes)
+ * into @out.  Returns the number of bytes written, or -1 if the
+ * escaped form does not fit (including the trailing NUL).
+ *
+ * Escapes: " \ \b \f \n \r \t -> short forms; other bytes < 0x20 ->
+ * \uXXXX; everything else passes through verbatim.
+ *
+ * The worst-case expansion is 6 bytes per input byte ( ...).
+ */
+static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+{
+	int i, w = 0;
+	if (out_sz <= 0) return -1;
+	for (i = 0; i < in_len; i++) {
+		unsigned char c = (unsigned char)in[i];
+		const char *esc = NULL;
+		char short_buf[2];
+
+		switch (c) {
+		case '"':  esc = "\\\""; break;
+		case '\\': esc = "\\\\"; break;
+		case '\b': esc = "\\b";  break;
+		case '\f': esc = "\\f";  break;
+		case '\n': esc = "\\n";  break;
+		case '\r': esc = "\\r";  break;
+		case '\t': esc = "\\t";  break;
+		default:
+			if (c < 0x20) {
+				if (w + 6 > out_sz) return -1;
+				w += snprintf(out + w, out_sz - w,
+					"\\u%04x", c);
+				continue;
+			}
+			short_buf[0] = (char)c;
+			short_buf[1] = '\0';
+			esc = short_buf;
+		}
+		{
+			int n = (int)strlen(esc);
+			if (w + n >= out_sz) return -1;
+			memcpy(out + w, esc, n);
+			w += n;
+		}
+	}
+	if (w >= out_sz) return -1;
+	out[w] = '\0';
+	return w;
+}
+
 /**
  * _json_set_field() — Update (or append) a string field in a JSON document.
  *
@@ -1193,32 +1245,50 @@ static char *_json_set_field(const char *json, int json_len,
 	}
 
 	if (found) {
-		/* replace the value in-place: [json..fstart] + "new_val" + [fend..end] */
+		/* replace the value in-place: [json..fstart] + "esc(val)" + [fend..end].
+		 * Escape the value per RFC 8259 to prevent JSON injection. */
 		int prefix_len = (int)(fstart - json);
 		int suffix_len = (int)(end - fend);
+		int esc_cap, esc_len;
+		char *esc_val;
+		int new_len;
 
-		/* guard against integer overflow in the length computation */
-		if (prefix_len < 0 || suffix_len < 0 ||
-				vlen > INT_MAX - prefix_len - suffix_len - 2)
+		if (prefix_len < 0 || suffix_len < 0)
 			return NULL;
+		/* worst case: every byte expands to \uXXXX (6 bytes), +1 for NUL */
+		if (vlen > (INT_MAX - 1) / 6) return NULL;
+		esc_cap = vlen * 6 + 1;
+		esc_val = malloc(esc_cap);
+		if (!esc_val) return NULL;
+		esc_len = _json_escape(val, vlen, esc_val, esc_cap);
+		if (esc_len < 0) { free(esc_val); return NULL; }
 
-		int new_len = prefix_len + 1 + vlen + 1 + suffix_len;
+		if (esc_len > INT_MAX - prefix_len - suffix_len - 2) {
+			free(esc_val);
+			return NULL;
+		}
+		new_len = prefix_len + 1 + esc_len + 1 + suffix_len;
 
 		result = malloc(new_len + 1);
-		if (!result) return NULL;
+		if (!result) { free(esc_val); return NULL; }
 
 		memcpy(result, json, prefix_len);
 		result[prefix_len] = '"';
-		memcpy(result + prefix_len + 1, val, vlen);
-		result[prefix_len + 1 + vlen] = '"';
-		memcpy(result + prefix_len + 1 + vlen + 1, fend, suffix_len);
+		memcpy(result + prefix_len + 1, esc_val, esc_len);
+		result[prefix_len + 1 + esc_len] = '"';
+		memcpy(result + prefix_len + 1 + esc_len + 1, fend, suffix_len);
 		result[new_len] = '\0';
 
+		free(esc_val);
 		return result;
 	} else {
-		/* field not found — append before closing brace */
+		/* field not found — append before closing brace.  Escape both
+		 * field name and value per RFC 8259. */
 		const char *close_brace = end;
 		int prefix_len;
+		int esc_field_cap, esc_field_len;
+		int esc_val_cap, esc_val_len;
+		char *esc_field, *esc_val;
 		int new_len;
 
 		/* find the closing brace */
@@ -1228,24 +1298,51 @@ static char *_json_set_field(const char *json, int json_len,
 		close_brace--; /* point at '}' */
 
 		prefix_len = (int)(close_brace - json);
+		if (prefix_len < 0) return NULL;
 
-		/* ,"field":"value"} */
-		new_len = prefix_len + 2 + flen + 3 + vlen + 2;
+		if (flen > (INT_MAX - 1) / 6 || vlen > (INT_MAX - 1) / 6)
+			return NULL;
+		esc_field_cap = flen * 6 + 1;
+		esc_val_cap   = vlen * 6 + 1;
+		esc_field = malloc(esc_field_cap);
+		esc_val   = malloc(esc_val_cap);
+		if (!esc_field || !esc_val) {
+			free(esc_field); free(esc_val);
+			return NULL;
+		}
+		esc_field_len = _json_escape(field, flen, esc_field, esc_field_cap);
+		esc_val_len   = _json_escape(val,   vlen, esc_val,   esc_val_cap);
+		if (esc_field_len < 0 || esc_val_len < 0) {
+			free(esc_field); free(esc_val);
+			return NULL;
+		}
+
+		/* ,"field":"value"}  -> 2 + flen + 3 + vlen + 2 added */
+		if (esc_field_len > INT_MAX - prefix_len - esc_val_len - 8) {
+			free(esc_field); free(esc_val);
+			return NULL;
+		}
+		new_len = prefix_len + 2 + esc_field_len + 3 + esc_val_len + 2;
 		result = malloc(new_len + 1);
-		if (!result) return NULL;
+		if (!result) {
+			free(esc_field); free(esc_val);
+			return NULL;
+		}
 
 		memcpy(result, json, prefix_len);
 		result[prefix_len] = ',';
 		result[prefix_len + 1] = '"';
-		memcpy(result + prefix_len + 2, field, flen);
-		result[prefix_len + 2 + flen] = '"';
-		result[prefix_len + 2 + flen + 1] = ':';
-		result[prefix_len + 2 + flen + 2] = '"';
-		memcpy(result + prefix_len + 2 + flen + 3, val, vlen);
-		result[prefix_len + 2 + flen + 3 + vlen] = '"';
-		result[prefix_len + 2 + flen + 3 + vlen + 1] = '}';
+		memcpy(result + prefix_len + 2, esc_field, esc_field_len);
+		result[prefix_len + 2 + esc_field_len] = '"';
+		result[prefix_len + 2 + esc_field_len + 1] = ':';
+		result[prefix_len + 2 + esc_field_len + 2] = '"';
+		memcpy(result + prefix_len + 2 + esc_field_len + 3,
+			esc_val, esc_val_len);
+		result[prefix_len + 2 + esc_field_len + 3 + esc_val_len] = '"';
+		result[prefix_len + 2 + esc_field_len + 3 + esc_val_len + 1] = '}';
 		result[new_len] = '\0';
 
+		free(esc_field); free(esc_val);
 		return result;
 	}
 }

@@ -256,4 +256,21 @@ int nats_pool_should_init(int rank);
  */
 void nats_redact_url(const char *url, char *out, size_t out_sz);
 
+/*
+ * Validate a NATS subject for use as an outbound publish target.
+ *
+ * Rejects empty/NULL, embedded NUL, control/whitespace chars, NATS
+ * wildcards ('*' and '>'), and ill-formed dot structure (leading,
+ * trailing, or consecutive dots).  Length bound is the caller's job
+ * (this function is content-only).
+ *
+ * @param s   Subject bytes (NOT required to be NUL-terminated).
+ * @param len Length of @s in bytes.
+ *
+ * @return 0 if valid for publish, -1 otherwise.
+ *
+ * Thread safety: Pure function on caller-provided memory.
+ */
+int nats_validate_publish_subject(const char *s, int len);
+
 #endif /* NATS_POOL_H */
