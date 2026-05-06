@@ -22,6 +22,22 @@ set -e
 LIBNATS_VERSION="${LIBNATS_VERSION:-3.12.0}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
 
+# Skip on cross-compile builds.  The multiarch CI uses *-cross
+# compilers (gcc-mips64-cross, clang-arm32-qemu-cross, etc.) running
+# inside an older Ubuntu 18.04 container with cmake 3.10, which
+# can't build libnats >= 3.10 (CMake 3.13+ required).  Even if we
+# upgraded cmake there, the resulting libnats would target the
+# build host's architecture and link-fail against the cross-built
+# OpenSIPS modules.  The Makefile gate in lib/nats/Makefile.nats
+# handles the no-libnats case cleanly: NATS modules silently skip,
+# the rest of the build proceeds.
+case "${COMPILER:-}" in
+    *cross*)
+        echo "skipping libnats install: cross-compile build (COMPILER=${COMPILER})"
+        exit 0
+        ;;
+esac
+
 # Skip if a working install is already in place (cache hit, prior run,
 # or a host-level libnats from apt).
 if command -v pkg-config >/dev/null 2>&1 && \
