@@ -1,27 +1,20 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-
-<!-- Minimal SIP REGISTER scenario for the bidirectional e2e test. -->
 <scenario name="REGISTER">
   <send retrans="500">
     <![CDATA[
-
       REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[call_number]
-      To: sipp <sip:sipp@[remote_ip]:[remote_port]>
+      From: alice <sip:alice@[local_ip]:[local_port]>;tag=[call_number]
+      To: alice <sip:alice@[remote_ip]:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 REGISTER
-      Contact: sip:sipp@[local_ip]:[local_port]
+      Contact: sip:alice@[local_ip]:[local_port]
       Max-Forwards: 70
       Expires: 3600
       Content-Length: 0
 
     ]]>
   </send>
-
   <recv response="200" timeout="3000" />
-
-  <ResponseTimeRepartition value="10, 50, 100, 200, 500, 1000"/>
-  <CallLengthRepartition value="10, 50, 100, 500, 1000"/>
 </scenario>

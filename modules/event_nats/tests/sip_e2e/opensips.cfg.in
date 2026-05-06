@@ -1,21 +1,21 @@
 ####### bidirectional sip <-> nats e2e test cfg #################
 #
-# Direction A:  SIP REGISTER -> opensips -> nats_publish -> NATS subject
-#               test.sip.register
+# Boots once, tested by many cases under cases/.
 #
-# Direction B:  nats kv put on TESTKV bucket -> cachedb_nats KV watcher
-#               (pthread + ipc_dispatch_rpc -> SIP worker) ->
-#               event_route[E_NATS_KV_CHANGE] -> xlog
+# Surfaces exercised:
+#   - event_nats nats_publish() to several subjects, distinguished by
+#     SIP method  (REGISTER, INVITE, MESSAGE, OPTIONS, BYE)
+#   - cachedb_nats KV watcher with multiple kv_watch patterns
+#   - cachedb_nats native script funcs (nats_kv_put / get / delete /
+#     update / revision, nats_request, nats_kv_history)
+#   - cachedb_nats EVI events (E_NATS_KV_CHANGE) routed through
+#     event_route[E_NATS_KV_CHANGE] -> xlog
+#   - nats_consumer with timer_route drain ('cmd' handle bound at
+#     runtime via mi_datagram); uses the predicate form of nats_fetch.
 #
 # This is a TEMPLATE.  run.sh substitutes:
 #   @@MODULES@@   ->  flat-symlinked module .so directory
 #   @@NATS_URL@@  ->  NATS broker URL
-# (OpenSIPS' cfg parser doesn't expand shell variables, so we
-#  pre-process here to keep the test runnable from any build prefix.)
-#
-# Required NATS-side state (set up by run.sh):
-#   - NATS server reachable at @@NATS_URL@@
-#   - JetStream KV bucket TESTKV exists
 
 log_level=3
 xlog_level=3
@@ -36,37 +36,94 @@ loadmodule "sl.so"
 loadmodule "signaling.so"
 loadmodule "sipmsgops.so"
 
+loadmodule "mi_datagram.so"
+modparam("mi_datagram", "socket_name", "udp:127.0.0.1:8889")
+
 loadmodule "event_nats.so"
 modparam("event_nats", "nats_url", "@@NATS_URL@@")
 
 loadmodule "cachedb_nats.so"
 modparam("cachedb_nats", "nats_url", "@@NATS_URL@@")
 modparam("cachedb_nats", "kv_bucket", "TESTKV")
-# At least one kv_watch entry is required for the watcher pthread to
-# start on the rank-1 worker.  "*" matches every single-segment key.
+# Multiple kv_watch patterns: '*' for single-segment keys, 'json.>'
+# for the JSON-FTS prefix.  Calling set_watch_pattern multiple times
+# extends the list.
 modparam("cachedb_nats", "kv_watch", "*")
+modparam("cachedb_nats", "kv_watch", "json.>")
+modparam("cachedb_nats", "fts_json_prefix", "json.")
+modparam("cachedb_nats", "nats_request_default_timeout_ms", 1000)
+
+loadmodule "nats_consumer.so"
 
 ####### routes ###################################################
 
 startup_route {
-    xlog("L_INFO", "sip-to/from-nats e2e cfg up\n");
+    xlog("L_INFO", "e2e cfg up\n");
 }
 
 route {
     if (is_method("REGISTER")) {
-        xlog("L_INFO", "REGISTER from $fU -> publishing to NATS\n");
+        xlog("L_INFO", "REGISTER from $fU expires=$hdr(Expires)\n");
         nats_publish("test.sip.register",
-                     "method=$rm uri=$ru from=$fU contact=$ct");
+                     "method=$rm uri=$ru from=$fU contact=$ct expires=$hdr(Expires)");
         sl_send_reply(200, "OK");
         exit;
     }
+    if (is_method("INVITE")) {
+        xlog("L_INFO", "INVITE callid=$ci from=$fU to=$tU\n");
+        nats_publish("test.sip.invite",
+                     "callid=$ci from=$fU to=$tU cseq=$cs");
+        sl_send_reply(200, "OK");
+        exit;
+    }
+    if (is_method("MESSAGE")) {
+        xlog("L_INFO", "MESSAGE from=$fU to=$tU body-len=$cl\n");
+        nats_publish("test.sip.message",
+                     "from=$fU to=$tU body=$rb");
+        sl_send_reply(200, "OK");
+        exit;
+    }
+    if (is_method("OPTIONS")) {
+        nats_publish("test.sip.options", "from=$fU");
+        sl_send_reply(200, "OK");
+        exit;
+    }
+    if (is_method("BYE")) {
+        xlog("L_INFO", "BYE callid=$ci\n");
+        nats_publish("test.sip.bye", "callid=$ci from=$fU to=$tU");
+        sl_send_reply(200, "OK");
+        exit;
+    }
+    if (is_method("ACK")) { exit; }
     sl_send_reply(405, "Method Not Allowed");
     exit;
 }
 
+# nats_consumer drain.  A test case binds the 'cmd' handle via MI;
+# after that, every published message on the bound subject lands in
+# the ring and is logged here.  Predicate form (the $var(n)= form
+# warns 'no value in right expression' because nats_fetch isn't a
+# value-returning export).
+timer_route[drain_cmd, 1] {
+    if (nats_fetch("cmd", 100)) {
+        xlog("L_INFO", "got NATS command: $nats_data subj=$nats_subject "
+                       "seq=$nats_seq\n");
+        nats_ack();
+    }
+}
+
+# Optional second drain for the 'rpc' handle used by the request /
+# reply test.  Replies inline.  Bind via MI from the test case.
+timer_route[drain_rpc, 1] {
+    if (nats_fetch("rpc", 100)) {
+        xlog("L_INFO", "got NATS rpc: $nats_data reply_to=$nats_reply_to\n");
+        nats_reply("pong:$nats_data");
+        nats_ack();
+    }
+}
+
 # cachedb_nats's watcher pthread raises this for every put / delete
-# / purge on the TESTKV bucket.  Params: key, operation, value,
-# revision.
+# / purge on the TESTKV bucket.
 event_route[E_NATS_KV_CHANGE] {
     xlog("L_INFO", "E_NATS_KV_CHANGE op=$param(operation) "
                    "key=$param(key) value=$param(value) "
