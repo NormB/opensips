@@ -158,6 +158,12 @@ static void _kv_change_rpc_cb(int sender, void *param)
 	static str pn_val = str_init("value");
 	static str pn_rev = str_init("revision");
 
+	LM_DBG("kv-change worker handler: sender=%d evi_id=%d probe=%d "
+		"key_len=%d val_len=%d\n",
+		sender, (int)evi_kv_change_id,
+		evi_probe_event(evi_kv_change_id),
+		ev->key_len, ev->val_len);
+
 	/* Short-circuit if no subscribers */
 	if (evi_kv_change_id == EVI_ERROR || !evi_probe_event(evi_kv_change_id))
 		goto done;
@@ -262,6 +268,8 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	}
 
 	/* Dispatch to a SIP worker -- atomic pipe write, pthread-safe */
+	LM_DBG("kv-change dispatch: key=%s op=%d val_len=%d\n",
+		key, (int)op, val_len);
 	if (ipc_dispatch_rpc(_kv_change_rpc_cb, ev) < 0) {
 		LM_ERR("ipc_dispatch_rpc failed for KV change event\n");
 		shm_free(ev);

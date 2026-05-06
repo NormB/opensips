@@ -209,26 +209,33 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	if (tmo <= 0)
 		return 0;   /* non-blocking poll miss */
 
-	/* Short sync loop: block on the eventfd for up to tmo ms with a
-	 * single poll(), then retry the pop.  This path is only intended
-	 * for timer_routes and polling scripts -- it stalls the worker.
+	/* Short sync loop: poll the ring for up to tmo ms.
 	 *
-	 * The caller cares about total wall-clock time more than fairness,
-	 * so we do a single wait + single retry.  If still empty after
-	 * the wait, report miss; the script can loop itself. */
+	 * Note: the ring carries an eventfd intended to wake the worker,
+	 * but eventfd(2) is created post-fork in whichever process happens
+	 * to allocate the ring (MI handler in the bind path).  Worker fd
+	 * tables don't share that fd number, so poll(2) on it is undefined
+	 * and the consumer-process write() to it is silently swallowed.
+	 * Until the eventfd plumbing is rebuilt cross-process, fall back
+	 * to a bounded retry loop that ticks every 5 ms.  At 100 ms timeout
+	 * that's at most 20 cheap pops -- no syscalls per iteration.
+	 *
+	 * Suppress the unused-variable warning for fd; we still call
+	 * nats_ring_eventfd() so a later fix can reattach a working poll
+	 * with no further changes to the call site. */
 	fd = nats_ring_eventfd(h->ring);
-	if (fd >= 0) {
-		struct pollfd pfd;
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		/* poll(2) handles EINTR internally only on modern kernels;
-		 * use the simple restartable pattern. */
-		int prc;
-		do {
-			prc = poll(&pfd, 1, tmo);
-		} while (prc < 0 && errno == EINTR);
-		evfd_drain(fd);
+	(void)fd;
+	{
+		const int tick_ms = 5;
+		int       waited  = 0;
+
+		while (waited < tmo) {
+			rc = nats_ring_pop(h->ring, &slot);
+			if (rc == 0)
+				return cur_set_from_slot(h->index, &slot);
+			usleep(tick_ms * 1000);
+			waited += tick_ms;
+		}
 	}
 
 	rc = nats_ring_pop(h->ring, &slot);
