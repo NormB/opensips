@@ -70,6 +70,21 @@ jobs:
         with:
           submodules: recursive
 
+      # Cache the libnats C client SDK install across runs.  Keyed on
+      # the install script + Ubuntu version (libnats is a native
+      # binary, so the OS image matters; compilers share the cache).
+      # Bumping LIBNATS_VERSION inside install_libnats.sh changes the
+      # hash and triggers a rebuild.
+      - name: Cache libnats C client
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/include/nats
+            /usr/local/lib/libnats*
+            /usr/local/lib/pkgconfig/libnats*
+            /usr/local/lib/cmake/cnats
+          key: libnats-${{ matrix.os }}-${{ hashFiles('scripts/build/install_libnats.sh') }}
+
       - name: Install dependencies
         run: |
           sh -x scripts/build/reset_sources.sh
