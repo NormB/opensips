@@ -1,6 +1,16 @@
 # WARNING: do not run this directly, it should be run by the master Makefile
 
 include ../../Makefile.defs
+
+# External libnats dependency probe (sets NATS_FOUND if available).
+include ../../lib/nats/Makefile.nats
+
+ifeq ($(NATS_FOUND),)
+$(info [skip] cachedb_nats.so — libnats C client not detected (install libnats-dev or set LOCALBASE))
+.PHONY: all clean install modules
+all clean install modules: ; @true
+else
+
 auto_gen=
 NAME=cachedb_nats.so
 
@@ -8,9 +18,6 @@ NAME=cachedb_nats.so
 # Installed into $(modules_dir); modules locate it via $ORIGIN rpath so
 # all loaded NATS modules share one copy of pool_cfg / _nc / _js state.
 LIBS    += -L../../lib/nats -lnats_pool
-
-# External libnats dependency (pkg-config or fallback)
-include ../../lib/nats/Makefile.nats
 
 # EVI support for E_NATS_KV_CHANGE events (KV watcher -> OpenSIPS scripts)
 DEFS += -DHAVE_EVI
@@ -24,3 +31,5 @@ include ../../Makefile.modules
 # reassignment that happens inside Makefile.modules.  LDFLAGS is deferred in
 # the $(NAME) link rule, so late edits still reach the linker.
 LDFLAGS += -Wl,-rpath,'$$ORIGIN'
+
+endif
