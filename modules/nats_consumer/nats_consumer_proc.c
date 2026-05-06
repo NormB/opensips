@@ -1103,6 +1103,33 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		subject_len = subject ? strlen(subject) : 0;
 		reply_len   = reply   ? strlen(reply)   : 0;
 
+		/* JetStream pull-delivered messages have natsMsg_GetReply()
+		 * set to the per-delivery $JS.ACK.<...> subject for ack
+		 * tracking, NOT to the publisher's application reply.  Acks
+		 * are dispatched separately via the ref-table token, so the
+		 * ACK subject is not useful to the script via $nats_reply_to.
+		 *
+		 * The original publisher's application reply is preserved by
+		 * convention in the Nats-Reply-To header (set by the
+		 * publisher with `nats pub -H 'Nats-Reply-To: <inbox>'` or
+		 * the equivalent SDK call).  For JS-delivered messages we
+		 * extract that header and surface it as the reply; without
+		 * it, the message has no application reply destination. */
+		if (reply_len >= 8 &&
+		    memcmp(reply, "$JS.ACK.", 8) == 0) {
+			const char *hdr_reply = NULL;
+			natsStatus  hs;
+
+			hs = natsMsgHeader_Get(m, "Nats-Reply-To", &hdr_reply);
+			if (hs == NATS_OK && hdr_reply != NULL) {
+				reply     = hdr_reply;
+				reply_len = (int)strlen(hdr_reply);
+			} else {
+				reply     = NULL;
+				reply_len = 0;
+			}
+		}
+
 		/* Serialize headers into the per-message stack buffer; ring_push
 		 * copies the bytes into the slot so this local array's lifetime
 		 * ends with the loop iteration. */
