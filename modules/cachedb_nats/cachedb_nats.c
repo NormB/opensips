@@ -255,7 +255,8 @@ static const cmd_export_t cmds[] = {
 static const mi_export_t mi_cmds[] = {
 	{"nats_kv_status", 0, 0, 0, {
 		{mi_nats_kv_status, {0}},
-		{EMPTY_MI_RECIPE}}
+		{EMPTY_MI_RECIPE}},
+		{0}        /* aliases — required by mi_export_t struct */
 	},
 	{EMPTY_MI_EXPORT}
 };

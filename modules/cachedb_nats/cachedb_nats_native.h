@@ -148,62 +148,13 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
  *
  * Thread safety: Safe from OpenSIPS worker process context.
  */
-int nats_cache_raw_query_impl(cachedb_con *con, str *attr,
-                              cdb_raw_entry ***reply, int expected_kv_no,
-                              int *reply_no);
-
 /*
- * CacheDB map_get: retrieve a JSON document and return parsed fields.
- *
- * Fetches the raw JSON value for the given key, parses it with cJSON,
- * and populates cdb_res_t with a single row whose columns correspond
- * to the top-level JSON object fields.
- *
- * @param con   cachedb connection.
- * @param key   Document key in the KV store.
- * @param res   Output: result set populated with parsed columns.
- * @return      0 on success, -2 if key not found, -1 on error.
- *
- * Thread safety: Safe from OpenSIPS worker process context.
+ * The cachedb engine entry points (nats_cache_raw_query_impl,
+ * nats_cache_map_get/set/remove) are forward-declared in the
+ * module's primary header (cachedb_nats.h).  Re-declaring them here
+ * triggers gcc's -Wredundant-decls under -Werror in CI, so the
+ * canonical declarations live in cachedb_nats.h and any consumer
+ * that needs them includes that header instead.
  */
-int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res);
-
-/*
- * CacheDB map_set: merge fields into a JSON document in the KV store.
- *
- * Reads the existing document (or creates {}), merges the provided
- * field-value pairs from the dictionary, and writes the result back.
- * Uses compare-and-swap for consistency when the key already exists.
- *
- * @param con     cachedb connection.
- * @param key     Document key in the KV store.
- * @param subkey  Unused (pass NULL).  Reserved for future sub-document
- *                addressing.
- * @param pairs   Dictionary of field names to values.  Supported value
- *                types: string, integer.
- * @return        0 on success, -1 on error.
- *
- * Thread safety: Safe from OpenSIPS worker process context.
- */
-int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
-                       const cdb_dict_t *pairs);
-
-/*
- * CacheDB map_remove: delete fields from a JSON document in the KV store.
- *
- * Reads the existing document, removes the specified field(s), and writes
- * the result back.  If no fields remain after removal, the key itself is
- * deleted from the KV store.
- *
- * @param con     cachedb connection.
- * @param key     Document key in the KV store.
- * @param subkey  Field name to remove, or NULL to remove the entire
- *                document.
- * @return        0 on success, -1 on error.
- *
- * Thread safety: Safe from OpenSIPS worker process context.
- */
-int nats_cache_map_remove(cachedb_con *con, const str *key,
-                          const str *subkey);
 
 #endif /* CACHEDB_NATS_NATIVE_H */

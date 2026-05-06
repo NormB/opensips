@@ -86,11 +86,11 @@ typedef int event_id_t;
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
 
-/* Module globals from cachedb_nats.c -- needed for reconnection */
-extern char *kv_bucket;
-extern int kv_replicas;
-extern int kv_history;
-extern int kv_ttl;
+/* Module globals from cachedb_nats.c are declared extern in
+ * cachedb_nats_dbase.h (kv_bucket, kv_replicas, kv_history, kv_ttl)
+ * which is included above; redeclaring them here triggers gcc's
+ * -Wredundant-decls under -Werror.  fts_json_prefix isn't yet in a
+ * header, so it stays as a single extern below. */
 extern char *fts_json_prefix;
 
 /* ---- watcher thread state (process-local) ---- */
