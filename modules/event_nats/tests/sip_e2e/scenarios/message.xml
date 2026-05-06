@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="MESSAGE">
+  <send retrans="500">
+    <![CDATA[
+      MESSAGE sip:bob@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: alice <sip:alice@[local_ip]:[local_port]>;tag=[call_number]
+      To: bob <sip:bob@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 MESSAGE
+      Max-Forwards: 70
+      Content-Type: text/plain
+      Content-Length: [len]
+
+      hello-from-sipp
+    ]]>
+  </send>
+  <recv response="200" timeout="3000" />
+</scenario>

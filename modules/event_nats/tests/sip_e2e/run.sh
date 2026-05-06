@@ -1,34 +1,23 @@
 #!/bin/bash
-# End-to-end test for the bidirectional SIP <-> NATS path.
+# End-to-end test runner for the bidirectional SIP <-> NATS suite.
 #
-#   A) sipp REGISTER -> opensips route -> nats_publish ->
-#      `nats sub test.sip.register` reader sees the payload.
+# Boots opensips ONCE, sources lib/helpers.sh, then iterates over
+# every cases/*.sh file in lexical order.  Each case file is sourced
+# (not exec'd); each calls case_begin <name> + check <label> ok|fail.
+# The runner aggregates results and exits non-zero unless every check
+# in every case passes.
 #
-#   B) `nats kv put TESTKV <key> <value>` ->
-#      cachedb_nats KV watcher pthread (rank-1 worker) ->
-#      ipc_dispatch_rpc -> SIP worker raises E_NATS_KV_CHANGE ->
-#      event_route[E_NATS_KV_CHANGE] xlog.
-#
-# Required tools on $PATH:
-#   - opensips  (binary built from this branch)
-#   - sipp      (3.x; tested with 3.7.2)
-#   - nats      (CLI; https://github.com/nats-io/natscli)
-#   - docker    (used only to launch a throw-away nats:2.10-alpine
-#                container if no broker is reachable on $NATS_URL)
+# Required tools: opensips (built), sipp, nats CLI, docker (only if
+# no broker is reachable on $NATS_URL).  Skips with autotools-style
+# exit 77 on missing prerequisites.
 #
 # Environment overrides:
-#   OPENSIPS_BIN       path to the opensips binary
-#                      (default: ../../../../opensips, i.e. the
-#                      build tree's top-level binary)
-#   OPENSIPS_LIB_NATS  directory containing libnats_pool.so
-#                      (default: ../../../../lib/nats)
-#   OPENSIPS_MODULES   directory containing flat-symlinked module
-#                      .so files (default: ../../../../_modules)
-#   NATS_URL           NATS server URL
-#                      (default: nats://127.0.0.1:4322)
-#
-# Exit:
-#   0 if both directions pass; non-zero with detail otherwise.
+#   OPENSIPS_BIN          path to opensips (default: ../../../../opensips)
+#   OPENSIPS_LIB_NATS     dir with libnats_pool.so (default: ../../../../lib/nats)
+#   OPENSIPS_MODULES      dir with flat-symlinked .so files
+#                         (default: ../../../../_modules)
+#   NATS_URL              broker URL (default: nats://127.0.0.1:4322)
+#   ONLY                  glob to filter which cases run (default: '*.sh')
 
 set -u
 
@@ -39,70 +28,72 @@ OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
 OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
 OPENSIPS_MODULES="${OPENSIPS_MODULES:-${TREE_ROOT}/_modules}"
 NATS_URL="${NATS_URL:-nats://127.0.0.1:4322}"
+ONLY="${ONLY:-*.sh}"
 
 WORKDIR="$(mktemp -d -t sip-nats-e2e.XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
 
-PASS=0
-FAIL=0
-note()   { echo "[$(date +%H:%M:%S)] $*"; }
-record() {
-    local name=$1 ok=$2
-    if [ "$ok" = ok ]; then echo "  PASS: $name"; PASS=$((PASS+1))
-    else echo "  FAIL: $name"; FAIL=$((FAIL+1))
+OPENSIPS_PID=""
+DOCKER_NATS=""
+
+cleanup() {
+    [ -n "$OPENSIPS_PID" ] && kill "$OPENSIPS_PID" 2>/dev/null
+    [ -n "$DOCKER_NATS" ] && docker rm -f "$DOCKER_NATS" >/dev/null 2>&1
+    wait 2>/dev/null
+    # leave WORKDIR around if anything failed; remove on success
+    if [ "${SUITE_FAIL:-0}" -eq 0 ]; then
+        rm -rf "$WORKDIR"
+    else
+        echo
+        echo "Workdir preserved for inspection: $WORKDIR"
     fi
 }
+trap cleanup EXIT
 
 # ─── prerequisite checks ─────────────────────────────────────────
 need() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing required tool: $1"
-        exit 77   # autotools "skip" code; CI can detect
+        exit 77
     }
 }
-need sipp; need nats
+need sipp; need nats; need nc
 
 if [ ! -x "$OPENSIPS_BIN" ]; then
     echo "opensips binary not found at $OPENSIPS_BIN"
-    echo "  build the tree first, or set OPENSIPS_BIN"
     exit 77
 fi
 if [ ! -d "$OPENSIPS_MODULES" ]; then
     echo "module directory not found at $OPENSIPS_MODULES"
-    echo "  build the tree first, or set OPENSIPS_MODULES"
-    echo "  (run.sh expects flat-symlinked module .so files; mkdir +"
-    echo "   ln -sf modules/*/*.so lib/nats/libnats_pool.so works)"
     exit 77
 fi
 
-# ─── ensure a NATS broker is reachable ───────────────────────────
+# ─── ensure broker reachable ────────────────────────────────────
 if ! nats --server "$NATS_URL" server check connection \
         > "$WORKDIR/conn.out" 2>&1; then
-    note "no NATS broker on $NATS_URL; starting throw-away container"
     need docker
-    NATS_PORT="${NATS_URL##*:}"
-    NATS_PORT="${NATS_PORT%%/*}"
-    docker run -d --rm --name sip-nats-e2e-natstest \
+    NATS_PORT="${NATS_URL##*:}"; NATS_PORT="${NATS_PORT%%/*}"
+    DOCKER_NATS="sip-nats-e2e-natstest"
+    docker rm -f "$DOCKER_NATS" >/dev/null 2>&1 || true
+    docker run -d --rm --name "$DOCKER_NATS" \
         -p "${NATS_PORT}:4222" nats:2.10-alpine -js >/dev/null
-    trap 'docker rm -f sip-nats-e2e-natstest >/dev/null 2>&1; rm -rf "$WORKDIR"' EXIT
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    for i in $(seq 1 10); do
         nats --server "$NATS_URL" server check connection \
             >/dev/null 2>&1 && break
         sleep 1
     done
 fi
 
-# Ensure the TESTKV bucket exists.  Idempotent.
+# Buckets / streams the suite expects up front.
 nats --server "$NATS_URL" kv add TESTKV --history=5 --replicas=1 \
-    > "$WORKDIR/kv_add.out" 2>&1 || true
+    >/dev/null 2>&1 || true
+nats --server "$NATS_URL" stream add TEST --subjects 'test.>' \
+    --storage memory --defaults >/dev/null 2>&1 || true
 
-# ─── render opensips.cfg from template ───────────────────────────
+# ─── render cfg + boot opensips ─────────────────────────────────
 sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NATS_URL@@|${NATS_URL}|g" \
     "${HERE}/opensips.cfg.in" > "$WORKDIR/opensips.cfg"
 
-# ─── start opensips ──────────────────────────────────────────────
-note "starting opensips"
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$WORKDIR/opensips.cfg" -m 64 -M 4 \
     > "$WORKDIR/opensips.log" 2>&1 &
@@ -111,61 +102,54 @@ sleep 3
 
 if ! kill -0 "$OPENSIPS_PID" 2>/dev/null; then
     echo "FATAL: opensips died on startup"
-    tail -25 "$WORKDIR/opensips.log"
+    tail -30 "$WORKDIR/opensips.log"
     exit 1
 fi
 
-cleanup() {
-    [ -n "${OPENSIPS_PID:-}" ] && kill "$OPENSIPS_PID" 2>/dev/null
-    [ -n "${SUB_PID:-}" ] && kill "$SUB_PID" 2>/dev/null
-    docker rm -f sip-nats-e2e-natstest >/dev/null 2>&1 || true
-    rm -rf "$WORKDIR"
-}
-trap cleanup EXIT
-
-# ─── Direction A: SIP -> NATS ────────────────────────────────────
-note "[A] subscribe to test.sip.register, send SIP REGISTER via sipp"
-nats --server "$NATS_URL" sub "test.sip.register" --count=1 \
-    > "$WORKDIR/sub.out" 2>&1 &
-SUB_PID=$!
-sleep 1
-
-sipp -sf "${HERE}/sipp_register.xml" -m 1 -r 1 -i 127.0.0.1 -p 5071 \
-     -timeout 10s -nostdin \
-     127.0.0.1:5072 > "$WORKDIR/sipp.out" 2>&1
-note "  sipp exit=$?"
-
-for i in 1 2 3 4 5; do
-    kill -0 "$SUB_PID" 2>/dev/null || break
-    sleep 1
+# Wait for mi_datagram + UDP socket to be live.
+for i in $(seq 1 20); do
+    ss -lnu 2>/dev/null | grep -q '127.0.0.1:8889' && \
+    ss -lnu 2>/dev/null | grep -q '127.0.0.1:5072' && break
+    sleep 0.5
 done
 
-if grep -q 'method=REGISTER' "$WORKDIR/sub.out" && \
-   grep -q 'from=sipp' "$WORKDIR/sub.out"; then
-    record "Direction A: SIP REGISTER -> opensips -> nats_publish" ok
-else
-    record "Direction A: SIP REGISTER -> opensips -> nats_publish" fail
-    echo "    sub.out:"; sed 's/^/      /' "$WORKDIR/sub.out"
-fi
-
-# ─── Direction B: NATS KV -> watcher -> event_route ──────────────
-KEY="sipuser-$(date +%s%N)"
-VAL="alice-$(date +%s%N)"
-note "[B] kv put TESTKV/${KEY}=${VAL}, await event_route xlog"
-nats --server "$NATS_URL" kv put TESTKV "$KEY" "$VAL" \
-    > "$WORKDIR/kv_put.out" 2>&1 || true
-sleep 3
-
-if grep -q "E_NATS_KV_CHANGE op=put key=${KEY} value=${VAL}" \
-        "$WORKDIR/opensips.log"; then
-    record "Direction B: NATS KV put -> watcher -> event_route" ok
-else
-    record "Direction B: NATS KV put -> watcher -> event_route" fail
-    echo "    looking for: E_NATS_KV_CHANGE op=put key=${KEY} value=${VAL}"
-    echo "    opensips.log tail:"
-    tail -25 "$WORKDIR/opensips.log" | sed 's/^/      /'
-fi
+# ─── source helpers + iterate cases ─────────────────────────────
+. "${HERE}/lib/helpers.sh"
 
 echo
-echo "=== summary: pass=$PASS fail=$FAIL ==="
-exit $FAIL
+echo "=========================================="
+echo "  bidirectional SIP <-> NATS e2e suite"
+echo "  workdir: $WORKDIR"
+echo "  cases:   ${HERE}/cases/${ONLY}"
+echo "=========================================="
+
+shopt -s nullglob
+cases=( "${HERE}/cases/"${ONLY} )
+shopt -u nullglob
+
+if [ ${#cases[@]} -eq 0 ]; then
+    echo "no cases matched"
+    exit 1
+fi
+
+for c in "${cases[@]}"; do
+    [ -f "$c" ] || continue
+    echo
+    # shellcheck source=/dev/null
+    . "$c"
+done
+
+# ─── summary ────────────────────────────────────────────────────
+echo
+echo "=========================================="
+echo "  summary: pass=${SUITE_PASS} fail=${SUITE_FAIL}"
+if [ "${SUITE_FAIL}" -gt 0 ]; then
+    echo
+    echo "  failing checks:"
+    for f in "${FAILED_CASES[@]}"; do
+        echo "    - $f"
+    done
+fi
+echo "=========================================="
+
+exit "${SUITE_FAIL}"
