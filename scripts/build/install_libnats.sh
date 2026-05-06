@@ -19,7 +19,7 @@
 
 set -e
 
-LIBNATS_VERSION="${LIBNATS_VERSION:-3.13.0}"
+LIBNATS_VERSION="${LIBNATS_VERSION:-3.12.0}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
 
 # Skip if a working install is already in place (cache hit, prior run,
