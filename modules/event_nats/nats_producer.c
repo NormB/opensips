@@ -39,11 +39,12 @@
 #include "nats_producer.h"
 #include "nats_stats.h"
 
-/* Set by child_init via event_nats.c */
+/* Set by child_init via event_nats.c.  The nats_stats global is
+ * declared extern in nats_stats.h (already included above), so we
+ * don't repeat it here -- gcc's -Wredundant-decls under -Werror
+ * would flag a second extern declaration in the same TU. */
 static natsConnection *_nc = NULL;
 static jsCtx *_js = NULL;
-
-extern nats_stats_t *nats_stats;
 
 /**
  * nats_producer_set_connection() -- Store the per-process NATS connection.
