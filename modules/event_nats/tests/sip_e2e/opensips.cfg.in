@@ -1,0 +1,74 @@
+####### bidirectional sip <-> nats e2e test cfg #################
+#
+# Direction A:  SIP REGISTER -> opensips -> nats_publish -> NATS subject
+#               test.sip.register
+#
+# Direction B:  nats kv put on TESTKV bucket -> cachedb_nats KV watcher
+#               (pthread + ipc_dispatch_rpc -> SIP worker) ->
+#               event_route[E_NATS_KV_CHANGE] -> xlog
+#
+# This is a TEMPLATE.  run.sh substitutes:
+#   @@MODULES@@   ->  flat-symlinked module .so directory
+#   @@NATS_URL@@  ->  NATS broker URL
+# (OpenSIPS' cfg parser doesn't expand shell variables, so we
+#  pre-process here to keep the test runnable from any build prefix.)
+#
+# Required NATS-side state (set up by run.sh):
+#   - NATS server reachable at @@NATS_URL@@
+#   - JetStream KV bucket TESTKV exists
+
+log_level=3
+xlog_level=3
+stderror_enabled=yes
+syslog_enabled=no
+
+udp_workers=2
+tcp_workers=0
+
+socket=udp:127.0.0.1:5072
+
+mpath="@@MODULES@@/"
+
+####### loaded modules ###########################################
+
+loadmodule "proto_udp.so"
+loadmodule "sl.so"
+loadmodule "signaling.so"
+loadmodule "sipmsgops.so"
+
+loadmodule "event_nats.so"
+modparam("event_nats", "nats_url", "@@NATS_URL@@")
+
+loadmodule "cachedb_nats.so"
+modparam("cachedb_nats", "nats_url", "@@NATS_URL@@")
+modparam("cachedb_nats", "kv_bucket", "TESTKV")
+# At least one kv_watch entry is required for the watcher pthread to
+# start on the rank-1 worker.  "*" matches every single-segment key.
+modparam("cachedb_nats", "kv_watch", "*")
+
+####### routes ###################################################
+
+startup_route {
+    xlog("L_INFO", "sip-to/from-nats e2e cfg up\n");
+}
+
+route {
+    if (is_method("REGISTER")) {
+        xlog("L_INFO", "REGISTER from $fU -> publishing to NATS\n");
+        nats_publish("test.sip.register",
+                     "method=$rm uri=$ru from=$fU contact=$ct");
+        sl_send_reply(200, "OK");
+        exit;
+    }
+    sl_send_reply(405, "Method Not Allowed");
+    exit;
+}
+
+# cachedb_nats's watcher pthread raises this for every put / delete
+# / purge on the TESTKV bucket.  Params: key, operation, value,
+# revision.
+event_route[E_NATS_KV_CHANGE] {
+    xlog("L_INFO", "E_NATS_KV_CHANGE op=$param(operation) "
+                   "key=$param(key) value=$param(value) "
+                   "rev=$param(revision)\n");
+}
