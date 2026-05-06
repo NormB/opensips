@@ -239,18 +239,23 @@ int nats_pool_should_init(int rank);
  * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
  *
  * Replaces every "user[:pass]@" segment that appears in the authority
- * section after a "scheme://" prefix with "****@".  Handles
- * comma-separated lists of URLs.  URLs without userinfo are copied
- * unchanged.  Always NUL-terminates @out unless out_sz == 0.
+ * section after a "scheme://" prefix with four ASCII asterisks
+ * followed by '@'.  Handles comma-separated lists of URLs.  URLs
+ * without userinfo are copied unchanged.  Always NUL-terminates @out
+ * unless out_sz == 0.
+ *
+ * (Inline asterisk strings are avoided in this doc-comment because
+ *  a literal slash-star sequence inside a slash-star block trips
+ *  gcc's -Wcomment "nested comment" warning under -Werror.)
  *
  * @param url      Source URL string.  May be NULL.
  * @param out      Destination buffer.  Must be non-NULL if out_sz > 0.
  * @param out_sz   Size of @out in bytes.  If 0, no write is performed.
  *
- * Examples:
- *   "nats://user:pass@h:4222"         -> "nats://****@h:4222"
- *   "nats://h:4222"                   -> "nats://h:4222"
- *   "nats://h1,nats://u:p@h2"         -> "nats://h1,nats://****@h2"
+ * Examples (REDACTED == four asterisks):
+ *   nats://user:pass@h:4222         becomes  nats://REDACTED@h:4222
+ *   nats://h:4222                   unchanged
+ *   nats://h1,nats://u:p@h2         becomes  nats://h1,nats://REDACTED@h2
  *
  * Thread safety: Pure function on caller-provided memory; safe anywhere.
  */
