@@ -1,6 +1,17 @@
-# lib/nats/Makefile.nats — shared NATS dependency detection
-# Include this from any module that needs libnats (event_nats, cachedb_nats)
-# Follows the same pattern as Makefile.openssl
+# lib/nats/Makefile.nats — shared NATS dependency detection.
+# Include this from any consumer that needs libnats (lib/nats itself
+# plus modules/event_nats, modules/cachedb_nats, modules/nats_consumer).
+# Follows the same pattern as Makefile.openssl.
+#
+# Sets:
+#   NATS_FOUND := yes      iff libnats headers + library are reachable
+#   DEFS  += <cflags>      pkg-config CFLAGS or -I$(LOCALBASE)/include
+#   LIBS  += <linker>      pkg-config LIBS    or -L$(LOCALBASE)/lib -lnats
+#
+# Consumers of this fragment MUST gate their build rules on
+# NATS_FOUND so that hosts without libnats produce a clean skip
+# rather than a fatal "nats/nats.h: No such file or directory" at
+# the C compile step.
 
 ifeq ($(CROSS_COMPILE),)
 NATS_BUILDER := $(shell \
@@ -12,9 +23,17 @@ NATS_BUILDER := $(shell \
 endif
 
 ifneq ($(NATS_BUILDER),)
+	NATS_FOUND := yes
 	DEFS += $(shell $(NATS_BUILDER) --cflags)
 	LIBS += $(shell $(NATS_BUILDER) --libs)
 else
-	DEFS += -I$(LOCALBASE)/include
-	LIBS += -L$(LOCALBASE)/lib -lnats
+	# Fall back to a header probe at LOCALBASE.  Don't blindly emit
+	# -I$(LOCALBASE)/include + -lnats when the headers aren't there:
+	# that would let the build proceed past Make and only fail at
+	# the C compile step, which is the failure mode that bit CI.
+	ifneq (,$(wildcard $(LOCALBASE)/include/nats/nats.h))
+		NATS_FOUND := yes
+		DEFS += -I$(LOCALBASE)/include
+		LIBS += -L$(LOCALBASE)/lib -lnats
+	endif
 endif

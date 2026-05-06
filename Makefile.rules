@@ -18,7 +18,18 @@ all_nostatic_modules=$(filter-out $(addprefix modules/, $(static_modules)), \
 all_modules:=$(addprefix modules/, $(all_modules))
 all_modules:=$(addprefix net/, $(builtin_modules)) $(all_modules)
 all_utils:=$(addprefix utils/, $(all_utils))
-all_misclibs=digest_auth reg nats
+all_misclibs=digest_auth reg
+# lib/nats only when libnats is detectable on the build host.  The
+# consuming modules (event_nats, cachedb_nats, nats_consumer) gate
+# themselves on the same probe, so a missing libnats produces a clean
+# skip across the whole NATS surface rather than a hard compile fail.
+NATS_DETECTED := $(shell { pkg-config --exists libnats || pkg-config --exists nats; } 2>/dev/null && echo yes)
+ifeq ($(NATS_DETECTED),)
+NATS_DETECTED := $(if $(wildcard $(LOCALBASE)/include/nats/nats.h),yes,)
+endif
+ifneq ($(NATS_DETECTED),)
+all_misclibs += nats
+endif
 all_misclibs:=$(addprefix lib/, $(all_misclibs))
 
 #implicit rules
