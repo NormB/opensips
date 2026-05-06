@@ -377,7 +377,6 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	int name_len, subjects_len;
 	char name_buf[256], subj_buf[1024];
 	int replicas_int = 0;
-	double max_msgs_d = 0, max_bytes_d = 0, max_age_d = 0;
 	char *retention_str = NULL, *storage_str = NULL;
 	int retention_len = 0, storage_len = 0;
 
