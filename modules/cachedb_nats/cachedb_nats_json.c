@@ -399,10 +399,11 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	return e;
 }
 
-static nats_idx_entry *_get_or_create_entry(const char *fv, int fv_len)
-{
-	return _get_or_create_entry_in(g_idx, fv, fv_len);
-}
+/* The thin wrapper _get_or_create_entry(fv, fv_len) -> _get_or_create_entry_in(
+ * g_idx, fv, fv_len) was removed: every call site already targets a
+ * specific index (the live index OR a shadow index during rebuild),
+ * so the wrapper had no callers and gcc -Wunused-function under
+ * -Werror flagged it. */
 
 /**
  * _entry_add_key() — Append a document key to an entry's key list.
