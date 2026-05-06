@@ -1447,7 +1447,6 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	const cdb_dict_t *pairs)
 {
 	nats_cachedb_con *ncon;
-	const cdb_filter_t *it;
 	nats_idx_entry *e;
 	char *target_key = NULL;
 	kvEntry *entry = NULL;
