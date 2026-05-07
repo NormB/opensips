@@ -821,6 +821,157 @@ if ($retcode == 1) {
 	</example>
 	</section>
 
+	<section id="func_nats_kv_get" xreflabel="nats_kv_get()">
+	<title>
+		<function moreinfo="none">nats_kv_get(bucket, key, value_pvar, [revision_pvar])</function>
+	</title>
+	<para>
+		Reads a key from the JetStream KV bucket and stores its value
+		in <emphasis>value_pvar</emphasis>.  The optional
+		<emphasis>revision_pvar</emphasis> receives the current
+		revision number; pass it to a subsequent
+		<function>nats_kv_update</function> call to perform a
+		Compare-And-Swap update.
+	</para>
+	<para>
+		The bucket must already exist.  At
+		<function>mod_init</function> time the module creates the
+		bucket named by the <varname>kv_bucket</varname> modparam; if
+		you call <function>nats_kv_get</function> with a different
+		bucket name that bucket must have been pre-created out of
+		band (e.g. via the <command>nats</command> CLI or another
+		opensips instance).
+	</para>
+	<para>
+		<emphasis role="bold">CAS contract for
+		<varname>revision_pvar</varname>:</emphasis> the wrapper
+		populates the script var with both string and integer views
+		so it can drive a subsequent
+		<function>nats_kv_update</function> CAS.  NATS revisions are
+		64-bit; the &osips; script integer type is 32-bit.  In the
+		(unrealistic) case that a key passes
+		<varname>INT_MAX</varname> revisions the wrapper logs a
+		<varname>WARN</varname> and the truncated value will fail any
+		subsequent CAS.
+	</para>
+	<para>Return values:
+		<emphasis role="bold">1</emphasis> success;
+		<emphasis role="bold">-1</emphasis> error (no NATS connection,
+		bucket missing, etc);
+		<emphasis role="bold">-2</emphasis> key not found.
+	</para>
+	<example>
+	<title><function>nats_kv_get</function> usage with CAS read</title>
+	<programlisting format="linespecific">
+$var(rev) = 0;
+if (nats_kv_get("calls", "$ci", $var(state), $var(rev))) {
+    xlog("call $ci is in state $var(state) at rev $var(rev)\n");
+}
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="func_nats_kv_put" xreflabel="nats_kv_put()">
+	<title>
+		<function moreinfo="none">nats_kv_put(bucket, key, value)</function>
+	</title>
+	<para>
+		Unconditionally writes <emphasis>value</emphasis> at
+		<emphasis>key</emphasis> in <emphasis>bucket</emphasis>.  Any
+		concurrent writer's revision is overwritten.  Use
+		<function>nats_kv_update</function> instead when you need to
+		preserve optimistic-concurrency semantics.
+	</para>
+	<para>Return values:
+		<emphasis role="bold">1</emphasis> success;
+		<emphasis role="bold">-1</emphasis> error.
+	</para>
+	</section>
+
+	<section id="func_nats_kv_update" xreflabel="nats_kv_update()">
+	<title>
+		<function moreinfo="none">nats_kv_update(bucket, key, value, expected_rev)</function>
+	</title>
+	<para>
+		Compare-And-Swap update: writes
+		<emphasis>value</emphasis> at <emphasis>key</emphasis> only
+		if the bucket's current revision for that key equals
+		<emphasis>expected_rev</emphasis>.  Read the rev with
+		<function>nats_kv_get</function>; pass it back here.
+	</para>
+	<para>
+		<emphasis role="bold">expected_rev</emphasis> accepts both a
+		literal integer and a script variable (e.g.
+		<varname>$var(rev)</varname>).  When passing a variable the
+		var must have been written by
+		<function>nats_kv_get</function> /
+		<function>nats_kv_revision</function> -- those wrappers
+		mark the var with the int type flag the &osips; fixup engine
+		requires.
+	</para>
+	<para>Return values:
+		<emphasis role="bold">1</emphasis> CAS succeeded;
+		<emphasis role="bold">-1</emphasis> error (connection,
+		permissions, etc);
+		<emphasis role="bold">-2</emphasis> CAS mismatch -- the key's
+		current revision is not <emphasis>expected_rev</emphasis>; a
+		concurrent writer beat us.  In script,
+		<emphasis>retcode</emphasis> is FALSE for both -1 and -2; if
+		you need to distinguish them inspect <varname>$retcode</varname>
+		directly.
+	</para>
+	<example>
+	<title>Idempotent state transition with CAS</title>
+	<programlisting format="linespecific">
+$var(rev) = 0;
+if (!nats_kv_get("calls", "$ci", $var(s), $var(rev)))
+    return;
+
+if (!nats_kv_update("calls", "$ci", "ringing", $var(rev))) {
+    xlog("CAS failed: someone else updated $ci, rc=$retcode\n");
+    # caller can retry, surface 503, etc.
+}
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="func_nats_kv_delete" xreflabel="nats_kv_delete()">
+	<title>
+		<function moreinfo="none">nats_kv_delete(bucket, key)</function>
+	</title>
+	<para>
+		Removes <emphasis>key</emphasis> from
+		<emphasis>bucket</emphasis>.  Subsequent
+		<function>nats_kv_get</function> on the same key returns -2
+		(not found).  Past revisions remain visible to
+		<function>nats_kv_history</function> until the bucket's
+		history window rolls them off.
+	</para>
+	<para>Return values:
+		<emphasis role="bold">1</emphasis> success;
+		<emphasis role="bold">-1</emphasis> error.
+	</para>
+	</section>
+
+	<section id="func_nats_kv_revision" xreflabel="nats_kv_revision()">
+	<title>
+		<function moreinfo="none">nats_kv_revision(bucket, key, revision_pvar)</function>
+	</title>
+	<para>
+		Convenience wrapper around <function>nats_kv_get</function>
+		that fetches only the current revision number, without
+		copying the value out.  Same int-type contract on the
+		returned var as
+		<function>nats_kv_get</function> -- safe to drive
+		<function>nats_kv_update</function>.
+	</para>
+	<para>Return values:
+		<emphasis role="bold">1</emphasis> success;
+		<emphasis role="bold">-1</emphasis> error;
+		<emphasis role="bold">-2</emphasis> key not found.
+	</para>
+	</section>
+
 	</section>
 
 
