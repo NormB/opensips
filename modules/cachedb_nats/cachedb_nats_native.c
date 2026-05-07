@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include "../../dprint.h"
 #include "../../mem/mem.h"
@@ -448,15 +449,38 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		val.rs.len = entry_len;
 		pv_set_value(msg, value_var, 0, &val);
 
-		/* set revision pvar (optional) */
+		/* set revision pvar (optional)
+		 *
+		 * Set both PV_VAL_STR and PV_VAL_INT so the rev can drive a
+		 * subsequent nats_kv_update() — that wrapper takes
+		 * CMD_PARAM_INT, and core's get_cmd_fixups() rejects script
+		 * vars that lack PV_VAL_INT with "Variable in param [N] is not
+		 * an integer" (mod_fix.c:366-370).  Without the int flag CAS
+		 * is unusable from script.
+		 *
+		 * Truncation: NATS revisions are uint64; OpenSIPS script ints
+		 * are 32-bit.  In practice INT_MAX revisions per key is many
+		 * decades of updates; we warn if we ever cross it. */
 		if (rev_var) {
 			char rev_buf[24];
-			snprintf(rev_buf, sizeof(rev_buf), "%llu",
+			int rev_buf_len = snprintf(rev_buf, sizeof(rev_buf), "%llu",
 				(unsigned long long)rev);
+			if (rev > (uint64_t)INT_MAX) {
+				LM_WARN("KV revision %llu for '%s' exceeds INT_MAX; "
+					"script var will receive a truncated int — CAS using "
+					"this var will fail\n",
+					(unsigned long long)rev, key_buf);
+			}
 			memset(&val, 0, sizeof(val));
-			val.flags = PV_VAL_STR;
+			/* PV_TYPE_INT tells pv_set_scriptvar to store the var as int
+			 * (avp_val.n); without it the setter falls back to str storage
+			 * and the next read will not restore PV_VAL_INT, so CAS via
+			 * nats_kv_update($var(rev)) is rejected at fixup time with
+			 * "Variable in param [N] is not an integer". */
+			val.flags = PV_VAL_STR | PV_VAL_INT | PV_TYPE_INT;
 			val.rs.s = rev_buf;
-			val.rs.len = strlen(rev_buf);
+			val.rs.len = rev_buf_len;
+			val.ri = (int)rev;
 			pv_set_value(msg, rev_var, 0, &val);
 		}
 
@@ -718,13 +742,25 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 
 	uint64_t rev = kvEntry_Revision(entry);
 	char rev_buf[24];
+	int rev_buf_len;
 	kvEntry_Destroy(entry);
 
-	snprintf(rev_buf, sizeof(rev_buf), "%llu", (unsigned long long)rev);
+	rev_buf_len = snprintf(rev_buf, sizeof(rev_buf), "%llu",
+		(unsigned long long)rev);
+	if (rev > (uint64_t)INT_MAX) {
+		LM_WARN("KV revision %llu for '%s' exceeds INT_MAX; "
+			"script var will receive a truncated int — CAS using "
+			"this var will fail\n",
+			(unsigned long long)rev, key_buf);
+	}
 	memset(&val, 0, sizeof(val));
-	val.flags = PV_VAL_STR;
+	/* See the matching block in w_nats_kv_get for the rationale on
+	 * PV_TYPE_INT — without it pv_set_scriptvar stores the var as a
+	 * string and a subsequent CMD_PARAM_INT read fails. */
+	val.flags = PV_VAL_STR | PV_VAL_INT | PV_TYPE_INT;
 	val.rs.s = rev_buf;
-	val.rs.len = strlen(rev_buf);
+	val.rs.len = rev_buf_len;
+	val.ri = (int)rev;
 	pv_set_value(msg, rev_var, 0, &val);
 
 	LM_DBG("nats_kv_revision '%s' = %llu\n",
