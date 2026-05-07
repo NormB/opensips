@@ -665,11 +665,15 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 
 	/* Render sample_freq as a string -- nats.c expects a C string here,
 	 * e.g. "25" for 25% sampling.  Only set when the script supplied
-	 * a non-zero value; zero means "disabled / don't sample". */
+	 * a non-zero value; zero means "disabled / don't sample".
+	 *
+	 * Buffer sized for any 32-bit int (max -2147483648 = 11 chars + NUL),
+	 * not the validated 0..100 range, so gcc -Wformat-truncation is
+	 * satisfied without relying on cross-translation-unit value tracking. */
 	if (h->sample_freq > 0) {
-		sample_freq_c = (char *)malloc(8);
+		sample_freq_c = (char *)malloc(12);
 		if (sample_freq_c)
-			snprintf(sample_freq_c, 8, "%d", h->sample_freq);
+			snprintf(sample_freq_c, 12, "%d", h->sample_freq);
 	}
 
 	if (h->type == NATS_CONSUMER_DURABLE && durable_c)
