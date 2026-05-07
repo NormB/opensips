@@ -1,0 +1,132 @@
+# Sanitizer CI for the NATS modules.
+#
+# Builds the four NATS test suites (lib/nats, event_nats, cachedb_nats,
+# nats_consumer) under AddressSanitizer + UBSan and ThreadSanitizer.
+# Unit tests are pure C with their own main() functions, so they don't
+# require a running nats-server -- which keeps this workflow cheap and
+# fast vs. the integration shell tests in modules/nats_consumer/tests/
+# (those still need the docker-compose stack).
+#
+# Why two sanitizer variants:
+#   asan_ubsan : catches use-after-free, OOB, signed/unsigned UB, etc.
+#   tsan       : catches data races -- the connection pool, ring,
+#                ack-IPC and registry are all multi-process+pthread.
+#
+# These checks complement Main CI; they don't replace it.
+
+name: NATS Sanitizers
+
+on:
+  push:
+    paths:
+      - 'lib/nats/**'
+      - 'modules/event_nats/**'
+      - 'modules/cachedb_nats/**'
+      - 'modules/nats_consumer/**'
+      - '.github/workflows/nats-sanitizers.yml'
+  pull_request:
+    paths:
+      - 'lib/nats/**'
+      - 'modules/event_nats/**'
+      - 'modules/cachedb_nats/**'
+      - 'modules/nats_consumer/**'
+      - '.github/workflows/nats-sanitizers.yml'
+  workflow_dispatch:
+
+jobs:
+  sanitize:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: asan_ubsan
+            cflags: "-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -g -O0 -Wall"
+            ldflags: "-fsanitize=address -fsanitize=undefined"
+            check_target: check
+            asan_options: "abort_on_error=1:detect_leaks=1:halt_on_error=1"
+            ubsan_options: "halt_on_error=1:print_stacktrace=1"
+          - variant: tsan
+            # TSan fundamentally cannot share an address space with
+            # ASan, so we run them as separate matrix entries.  The
+            # check-tsan target in each test Makefile excludes the
+            # ASan-pinned canaries (test_atomic_stats demonstrates a
+            # volatile race; test_intersect_uaf relies on ASan UAF
+            # detection; test_slurp_file_cap hard-codes -fsanitize=address).
+            cflags: "-fsanitize=thread -fno-omit-frame-pointer -g -O0 -Wall"
+            ldflags: "-fsanitize=thread"
+            check_target: check-tsan
+            asan_options: ""
+            ubsan_options: ""
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      # All matrix-derived values are hoisted into env to keep them
+      # out of inline shell strings -- recommended pattern from
+      # https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+      SAN_CFLAGS: ${{ matrix.cflags }}
+      SAN_LDFLAGS: ${{ matrix.ldflags }}
+      CHECK_TARGET: ${{ matrix.check_target }}
+      ASAN_OPTIONS: ${{ matrix.asan_options }}
+      UBSAN_OPTIONS: ${{ matrix.ubsan_options }}
+      # TSan-specific: keep stacks small; expand if the suite ever
+      # legitimately needs deeper backtraces.
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+
+    steps:
+      - name: Install build deps + libnats
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libnats-dev libuv1-dev \
+            git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build NATS module .o files (needed by lib/nats unit tests)
+        run: |
+          # The lib/nats unit tests link against ../nats_redact.o and
+          # ../nats_validate.o.  We compile those translation units
+          # here so the test Makefile's link rule can resolve them
+          # without requiring a full opensips build.
+          set -eu
+          mkdir -p lib/nats
+          common_defs="-fPIC -DPIC -I. -I./parser \
+            -DNAME='\"opensips\"' -DVERSION='\"4.1.0-dev\"' \
+            -DARCH='\"x86_64\"' -DOS='\"linux\"' -DCOMPILER='\"cc\"' \
+            -DCFG_DIR='\"/etc/opensips/\"' -DVERSIONTYPE='\"git\"' \
+            -DTHISREVISION='\"sanitizer-ci\"'"
+          ${CC:-cc} ${SAN_CFLAGS} ${common_defs} \
+            -c lib/nats/nats_redact.c   -o lib/nats/nats_redact.o
+          ${CC:-cc} ${SAN_CFLAGS} ${common_defs} \
+            -c lib/nats/nats_validate.c -o lib/nats/nats_validate.o
+
+      - name: lib/nats unit tests
+        run: |
+          make -C lib/nats/tests \
+              CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
+
+      - name: event_nats unit tests
+        run: |
+          make -C modules/event_nats/tests \
+              CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
+
+      - name: cachedb_nats unit tests
+        run: |
+          make -C modules/cachedb_nats/tests \
+              CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
+
+      - name: nats_consumer unit tests
+        run: |
+          # nats_consumer/tests/Makefile already builds test_slurp_file_cap
+          # with -fsanitize=address; we override CFLAGS/LDFLAGS to apply
+          # the matrix-selected sanitizer to every binary uniformly.
+          make -C modules/nats_consumer/tests \
+              CFLAGS="-DTEST_SHIM -I. -I../../.. ${SAN_CFLAGS}" \
+              LDFLAGS="-lpthread ${SAN_LDFLAGS}" \
+              "${CHECK_TARGET}"

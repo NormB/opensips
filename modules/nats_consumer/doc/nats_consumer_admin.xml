@@ -68,10 +68,47 @@
         <para>
             The module shares the same nats.c connection pool as
             <emphasis>event_nats</emphasis> (via
-            <filename>lib/nats/libnats_pool.a</filename>), so a single
+            <filename>lib/nats/libnats_pool.so</filename>), so a single
             &osips; instance consumes one NATS connection per worker
             regardless of which NATS modules are loaded.
         </para>
+
+        <section id="nats_consumer-process-model">
+            <title>Process Model and Failure Handling</title>
+            <para>
+                <emphasis>nats_consumer</emphasis> registers a single
+                dedicated worker named <varname>[NATS consumer]</varname>
+                whose only job is to drive the JetStream pull loop and
+                hand messages to the SHM ring.  Acks travel back over a
+                Unix-domain IPC socket
+                (<filename>nats_ack_ipc.c</filename>).
+            </para>
+            <para>
+                <emphasis role="bold">If the consumer worker dies for
+                any reason</emphasis> (signal, segfault, OOM kill) the
+                &osips; core treats it as a fatal child death and
+                shuts the entire instance down — exactly the same path
+                a SIP UDP receiver crash takes
+                (<filename>signals.c</filename>:<function>handle_sigs</function>,
+                <varname>SIGCHLD</varname> branch).  There is
+                <emphasis>no per-process auto-restart</emphasis>; the
+                consumer is not registered with the
+                <varname>OSS_PROC_SELFEXIT</varname> flag.
+            </para>
+            <para>
+                Operationally this means the supervisor that runs
+                &osips; (systemd, Kubernetes, etc.) is responsible for
+                restarting the whole &osips; instance after a consumer
+                death.  Bound handles persist across that restart only
+                when <varname>persist_handles</varname> is enabled
+                (see the modparam below); otherwise the registry must
+                be repopulated by re-issuing
+                <function>nats_consumer_bind</function>.  In-flight
+                messages whose ack didn't reach NATS before the
+                restart will be re-delivered after
+                <varname>ack_wait</varname>.
+            </para>
+        </section>
     </section>
 
     <!-- ============================================================ -->

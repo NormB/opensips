@@ -5,9 +5,12 @@ CC      ?= cc
 CFLAGS  ?= -g -O0 -Wall
 ASAN    := -fsanitize=address
 
-.PHONY: all check clean
+.PHONY: all check check-tsan clean
 
 TESTS = test_redact_url test_tls_downgrade_policy test_validate_publish_subject
+
+# All lib/nats unit tests are TSan-safe (no race exercises).
+TESTS_TSAN_SAFE = $(TESTS)
 
 all: $(TESTS)
 
@@ -27,6 +30,10 @@ check: all
 	./test_redact_url
 	./test_tls_downgrade_policy
 	./test_validate_publish_subject
+
+# Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
+check-tsan: $(TESTS_TSAN_SAFE)
+	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
 
 clean:
 	rm -f $(TESTS)
