@@ -38,6 +38,21 @@ case "${COMPILER:-}" in
         ;;
 esac
 
+# Skip on uncommon architectures.  rtp.io's Docker buildx matrix runs
+# native-in-QEMU on mips64le, ppc64le, s390x, riscv64, arm/v7 and 386,
+# none of which match *cross* above.  libnats's CMake FindOpenSSL fails
+# to locate libcrypto.so across multiarch sysroots there even with
+# libssl-dev:<arch> installed, and these targets aren't a real NATS
+# deployment surface.  The Makefile gate covers the absent-libnats case.
+case "$(uname -m)" in
+    x86_64|amd64|aarch64|arm64)
+        ;;
+    *)
+        echo "skipping libnats install: uncommon arch $(uname -m)"
+        exit 0
+        ;;
+esac
+
 # Skip if a working install is already in place (cache hit, prior run,
 # or a host-level libnats from apt).
 if command -v pkg-config >/dev/null 2>&1 && \
