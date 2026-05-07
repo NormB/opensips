@@ -32,6 +32,7 @@
 #include "../../cachedb/cachedb.h"
 #include "../../timer.h"
 #include "../b2b_entities/b2be_load.h"
+#include "../../lib/csv.h"
 
 enum b2b_tuple_state {
 	/* initial bridge state */
@@ -68,6 +69,7 @@ enum b2b_tuple_state {
 /* B2BL_FLAGS constants */
 #define		B2BL_FLAG_TRANSPARENT_AUTH	0x01
 #define		B2BL_FLAG_TRANSPARENT_TO	0x02
+#define		B2BL_FLAG_PASS_LEGS_UPSTREAM	0x04
 
 /* tuple bridge flags */
 #define B2BL_BR_FLAG_NOTIFY                        (1<<0)
@@ -80,6 +82,12 @@ enum b2b_tuple_state {
 #define B2BL_BR_FLAG_NO_OLD_ENT                    (1<<7)
 #define B2BL_BR_FLAG_PENDING_SDP                   (1<<8)
 #define B2BL_BR_FLAG_BR_MSG_LATE_BYE               (1<<9)
+
+/* Internal flag: set when a per-bridge lifetime was explicitly provided
+ * via the max_duration flag on b2b_bridge(). Prevents b2b_add_dlginfo()
+ * from overwriting the per-bridge lifetime with the global max_duration
+ * modparam value when the bridged call is confirmed (200 OK). */
+#define B2BL_BR_FLAG_EXPLICIT_LIFETIME             (1<<10)
 
 /* reply flags */
 #define B2BL_RPL_FLAG_PASS_CONTACT                 (1<<0)
@@ -131,6 +139,7 @@ enum pv_entity_field {
 };
 
 extern str custom_headers_lst[HDR_LST_LEN];
+extern csv_record *custom_ct_hdrs_params_list;
 extern regex_t* custom_headers_re;
 extern int custom_headers_lst_len;
 extern int contact_user;

@@ -241,6 +241,30 @@ modparam("b2b_logic", "custom_headers", "User-Agent;Date")
 	</programlisting>
 		</example>
 	</section>
+	<section id="param_custom_contact_header_param" xreflabel="custom_contact_header_params">
+		<title><varname>custom_contact_header_params</varname> (str)</title>
+		<para>
+			A list of Contact header parameters, delimited by ';', that should
+			be passed from the dialog of one side to the other side.
+		</para>
+		<para>
+			Throughout a dialog, the value of each parameter is being
+			attached to the entity - this means that when an entity is being bridged,
+			the corresponding entity's headers params are being sent towards the new
+			entity.
+		</para>
+		<para>
+		<emphasis>Default value is <quote></quote> (no parameter).</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>custom_contact_header_params</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("b2b_logic", "custom_contact_header_params", "audio;video")
+...
+	</programlisting>
+		</example>
+	</section>
 	<section id="param_db_url" xreflabel="db_url">
 		<title><varname>db_url</varname> (str)</title>
 		<para>
@@ -309,7 +333,10 @@ modparam("b2b_logic", "update_period", 60)
 	<section id="param_max_duration" xreflabel="max_duration">
 		<title><varname>max_duration</varname> (int)</title>
 		<para>
-			The maximum duration of a call.
+			The maximum duration of a call. This value is applied as the default
+			lifetime for all B2B sessions. It can be overridden on a per-bridge
+			basis by using the <emphasis>max_duration</emphasis> flag of the
+			<xref linkend="func_b2b_bridge"/> function.
 		</para>
 		<para>
 		<emphasis>Default value is <quote>12 * 3600 (12 hours)</quote>.</emphasis>
@@ -565,6 +592,10 @@ modparam("b2b_logic", "old_entity_term_delay", 2) # delay the BYE with 2 seconds
 					<listitem><para>
 					<emphasis>preserve-to</emphasis> - Preserve To: header.
 					</para></listitem>
+					<listitem><para>
+					<emphasis>pass-legs-upstream</emphasis> - Reuse the downstream
+					reply leg index when forwarding pre-establishment replies upstream.
+					</para></listitem>
 				</itemizedlist>
 			</para></listitem>
 			<listitem><para>
@@ -659,7 +690,7 @@ if(is_method("INVITE") &amp;&amp; !has_totag()) {
 	<section id="func_b2b_client_new" xreflabel="b2b_client_new()">
 		<title>
 		<function moreinfo="none">b2b_client_new(id, dest_uri, [proxy], [from_dname],
-			[adv_contact], [extra_hdrs], [extra_hdr_bodies])</function>
+			[adv_contact], [extra_hdrs], [extra_hdr_bodies], [flags])</function>
 		</title>
 		<para>
 			This function creates a new client entity (dialog where OpenSIPS acts as a UAC)
@@ -698,6 +729,16 @@ if(is_method("INVITE") &amp;&amp; !has_totag()) {
 				list of extra header bodies (corresponding to the headers given in the
 				<emphasis>extra_hdrs</emphasis> parameter) to be added for any request
 				sent to this entity.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>flags (string, optional)</emphasis> - CSV list of per-entity
+				flags. Supported values are:
+				<itemizedlist>
+					<listitem><para>
+					<emphasis>pass-legs-upstream</emphasis> - Pass the downstream leg
+					index upstream for this client entity only.
+					</para></listitem>
+				</itemizedlist>
 			</para></listitem>
 		</itemizedlist>
 		<para>
@@ -744,7 +785,9 @@ b2b_client_new("client1", "sip:alice@opensips.org");
 					<listitem><para>
 					<emphasis>max_duration=[nn]</emphasis> - Maximum duration of the B2B
 					session. If the lifetime expires, the B2BUA will send BYE messages to both
-					ends and delete the record. Example: "max_duration=300".
+					ends and delete the record. This per-bridge value takes precedence over the
+					global <xref linkend="param_max_duration"/> module parameter.
+					Example: "max_duration=300".
 					</para></listitem>
 					<listitem><para>
 					<emphasis>notify</emphasis> - Enable rfc3515 NOTIFY to inform the agent
@@ -1516,4 +1559,3 @@ route[b2b_logic_request] {
 </section>
 
 </chapter>
-

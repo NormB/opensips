@@ -37,6 +37,7 @@
 #define _B2BE_LOAD_H_
 
 #include "../../bin_interface.h"
+#include "../../profiling.h"
 #include "../../parser/parse_from.h"
 
 #define B2BCB_TRIGGER_EVENT    (1<<0)
@@ -73,6 +74,7 @@ typedef struct client_info
 	str* body;
 	str* from_tag;
 	str local_contact;
+	str *contact_hdr_params;
 	unsigned int cseq;
 	unsigned int maxfwd;
 	const struct socket_info* send_sock;
@@ -98,6 +100,8 @@ typedef struct b2b_req_data
 	b2b_dlginfo_t* dlginfo;
 	unsigned int maxfwd;
 	unsigned int no_cb;
+	str *contact_hdr_params;
+	int leg_idx;
 }b2b_req_data_t;
 
 typedef struct b2b_rpl_data
@@ -109,8 +113,10 @@ typedef struct b2b_rpl_data
 	str* text;
 	str* body;
 	str* extra_headers;
+	str* contact_hdr_params;
 	str* contact;
 	b2b_dlginfo_t* dlginfo;
+	int leg_idx;
 }b2b_rpl_data_t;
 
 
@@ -166,6 +172,8 @@ typedef str *(*b2b_get_b2bl_key_t)(str* callid, str* from_tag, str* to_tag,
 typedef int (*b2b_apply_lumps_t)(struct sip_msg* msg);
 
 typedef void* (*b2b_get_context_t)(void);
+typedef int (*b2b_get_reply_leg_t)(enum b2b_entity_type et, str *b2b_key,
+		str *to_tag);
 
 typedef struct b2b_api
 {
@@ -182,6 +190,7 @@ typedef struct b2b_api
 	b2b_get_b2bl_key_t        get_b2bl_key;
 	b2b_apply_lumps_t         apply_lumps;
 	b2b_get_context_t		  get_context;
+	b2b_get_reply_leg_t       get_reply_leg;
 }b2b_api_t;
 
 typedef int(*load_b2b_f) (b2b_api_t* api);
@@ -199,6 +208,15 @@ static inline int load_b2b_api( struct b2b_api *b2b_api)
 	/* let the auto-loading function load all B2B entities stuff */
 	return load_b2b( b2b_api );
 }
+
+#define run_b2be_api(_b2b_api, _api_func, _args...) \
+	({ \
+		typeof((_b2b_api)->_api_func(_args)) _b2be_api_rc; \
+		profiling_proc_enter( LEVEL_SIP, #_api_func, 0); \
+		_b2be_api_rc = (_b2b_api)->_api_func(_args); \
+		profiling_proc_exit( LEVEL_SIP, #_api_func, (int)(intptr_t)_b2be_api_rc); \
+		_b2be_api_rc; \
+	})
 
 static inline b2b_dlginfo_t *b2b_new_dlginfo(str *callid, str *fromtag, str *totag)
 {
