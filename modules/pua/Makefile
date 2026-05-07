@@ -22,4 +22,7 @@ else
 			-L$(LOCALBASE)/lib -lxml2
 endif
 
+# libxml2 marked xmlMemoryDump and xmlCleanupParser deprecated; module still uses them.
+DEFS += -Wno-deprecated-declarations
+
 include ../../Makefile.modules
