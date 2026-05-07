@@ -250,6 +250,22 @@ static int parse_urls(const char *url)
  */
 static atomic_int _kv_stale = 0;
 
+/*
+ * Callback-thread-safe stderr emit.
+ *
+ * The nats.c callbacks below run on library-internal threads where OpenSIPS
+ * APIs (LM_*, pkg_malloc, …) are not safe to call, so we emit diagnostics
+ * with a raw write(2).  glibc decorates write() with warn_unused_result, and
+ * GCC's -Wunused-result is not silenced by a (void) cast, so we capture the
+ * return into a local and explicitly discard it.  Centralizing the discard
+ * here keeps any future callback site from re-introducing -Werror breakage.
+ */
+static void nats_pool_unsafe_log(const char *buf, size_t len)
+{
+	ssize_t n = write(STDERR_FILENO, buf, len);
+	(void)n;
+}
+
 /**
  * Disconnect callback — called by nats.c I/O thread when the connection drops.
  *
@@ -264,8 +280,7 @@ static void _pool_disconnected_cb(natsConnection *nc, void *closure)
 	/* safe: atomic op + raw write() — no OpenSIPS APIs */
 	atomic_store(&_connected, 0);
 	atomic_store(&_kv_stale, 1);  /* mark KV handles stale immediately on disconnect */
-	(void)write(STDERR_FILENO,
-		"NATS pool: disconnected\n", 24);
+	nats_pool_unsafe_log("NATS pool: disconnected\n", 24);
 }
 
 /**
@@ -295,7 +310,7 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 	len = snprintf(buf, sizeof(buf),
 		"NATS pool: reconnected to %s\n", url);
 	if (len > 0)
-		(void)write(STDERR_FILENO, buf, len);
+		nats_pool_unsafe_log(buf, (size_t)len);
 }
 
 /**
@@ -338,7 +353,7 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
 			"NATS JetStream async publish error: %s\n",
 			pae->ErrText);
 		if (len > 0)
-			(void)write(STDERR_FILENO, buf, len);
+			nats_pool_unsafe_log(buf, (size_t)len);
 	}
 	if (_pub_ack_cb)
 		_pub_ack_cb(success);
