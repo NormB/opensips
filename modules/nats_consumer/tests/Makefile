@@ -14,7 +14,14 @@ ACKTOK_SRCS := test_ack_token.c
 PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
                ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
 
-.PHONY: all clean check
+.PHONY: all clean check check-tsan
+
+# test_slurp_file_cap pins -fsanitize=address in its own rule (it is
+# specifically asserting an ASan trip on a bad slurp), so it cannot
+# be linked under ThreadSanitizer.  The rest of the suite is race-safe.
+TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
+                  test_persist test_request_route_restriction \
+                  test_consumer_heartbeat test_persist_precision
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -59,6 +66,10 @@ check: all
 	./test_request_route_restriction
 	./test_consumer_heartbeat
 	./test_persist_precision
+
+# Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
+check-tsan: $(TESTS_TSAN_SAFE)
+	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
 
 clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \

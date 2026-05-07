@@ -5,10 +5,18 @@ CC      ?= cc
 CFLAGS  ?= -g -O0 -Wall
 ASAN    := -fsanitize=address
 
-.PHONY: all check clean
+.PHONY: all check check-tsan clean
 
 TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_reply_size_cap test_disconnected_fastfail test_timeout_normalize
+
+# test_intersect_uaf and test_kvget_copy_pattern both deliberately
+# exercise a use-after-free on their "buggy" arm and assert that
+# AddressSanitizer trips.  TSan has no UAF detection, so the buggy
+# arm completes silently and the assertion fails.  Skip both under
+# TSan -- the regression they catch is an ASan-only contract.
+TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
+                  test_disconnected_fastfail test_timeout_normalize
 
 all: $(TESTS)
 
@@ -37,6 +45,10 @@ check: all
 	./test_reply_size_cap
 	./test_disconnected_fastfail
 	./test_timeout_normalize
+
+# Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
+check-tsan: $(TESTS_TSAN_SAFE)
+	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
 
 clean:
 	rm -f $(TESTS)
