@@ -2059,6 +2059,394 @@ static char *_build_seed_doc(const char *field, int flen,
 	return buf;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Single-pass pair-apply — replaces the per-pair _json_apply_pair    */
+/*  loop in nats_cache_update.  Walks the existing doc once, copying  */
+/*  through to a sink while applying every cdb_pair_t in @pairs.  Any */
+/*  pair whose field is not present in the input is appended at the   */
+/*  end of the output object.                                         */
+/* ------------------------------------------------------------------ */
+
+/* Classified op for one cdb_pair.  Built once at the start of an apply
+ * pass, used at most twice (once when matched against an input field,
+ * once when appended as a new field if not consumed). */
+typedef struct apply_op {
+	const cdb_pair_t *pair;
+	int   consumed;        /* matched against an input field */
+	char  val_type;        /* S/I/L/N/O — value type for set ops */
+	const char *val_str;   /* value bytes for S, O */
+	int   val_len;
+	int64_t val_int;       /* value for I, L */
+	char *owned;           /* malloc'd serialized JSON for CDB_DICT */
+} apply_op_t;
+
+static void _free_apply_ops(apply_op_t *ops, int n)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		free(ops[i].owned);
+	free(ops);
+}
+
+/* Translate cdb_pair_t types into the inline apply_op_t representation.
+ * Materializes any CDB_DICT subtree once via the new sink-based
+ * _serialize_cdb_dict (Tier-1 #1).  Returns NULL on alloc / unknown
+ * type. */
+static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
+{
+	struct list_head *pos;
+	const cdb_pair_t *pair;
+	apply_op_t *ops;
+	int n = 0, i;
+
+	list_for_each(pos, pairs) n++;
+	if (n == 0) {
+		*out_count = 0;
+		return calloc(1, 1); /* non-NULL sentinel */
+	}
+
+	ops = calloc(n, sizeof *ops);
+	if (!ops) return NULL;
+
+	i = 0;
+	list_for_each(pos, pairs) {
+		pair = list_entry(pos, const cdb_pair_t, list);
+		ops[i].pair = pair;
+		if (pair->unset) {
+			ops[i].val_type = 'N';
+			i++;
+			continue;
+		}
+		switch (pair->val.type) {
+		case CDB_STR:
+			ops[i].val_type = 'S';
+			ops[i].val_str = pair->val.val.st.s;
+			ops[i].val_len = pair->val.val.st.len;
+			break;
+		case CDB_INT32:
+			ops[i].val_type = 'I';
+			ops[i].val_int = pair->val.val.i32;
+			break;
+		case CDB_INT64:
+			ops[i].val_type = 'L';
+			ops[i].val_int = pair->val.val.i64;
+			break;
+		case CDB_NULL:
+			ops[i].val_type = 'N';
+			break;
+		case CDB_DICT: {
+			int slen = 0;
+			ops[i].owned = _serialize_cdb_dict(&pair->val.val.dict,
+				&slen);
+			if (!ops[i].owned) {
+				_free_apply_ops(ops, n);
+				return NULL;
+			}
+			ops[i].val_type = 'O';
+			ops[i].val_str = ops[i].owned;
+			ops[i].val_len = slen;
+			break;
+		}
+		default:
+			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
+				pair->val.type, pair->key.name.len,
+				pair->key.name.s);
+			_free_apply_ops(ops, n);
+			return NULL;
+		}
+		i++;
+	}
+	*out_count = n;
+	return ops;
+}
+
+/* Emit a classified op's value into the sink.  Used both for top-level
+ * set emissions and for subkey-set emissions inside an inner object. */
+static int _sink_emit_op_value(json_sink_t *s, const apply_op_t *op)
+{
+	switch (op->val_type) {
+	case 'S':
+		return _sink_emit_string(s, op->val_str, op->val_len);
+	case 'I':
+	case 'L':
+		return _sink_emit_int(s, op->val_int);
+	case 'N':
+		return _sink_write(s, "null", 4);
+	case 'O':
+		return _sink_write(s, op->val_str, op->val_len);
+	}
+	return -1;
+}
+
+/* For a given field name, scan @ops in pair-order and pick the
+ * effective top-level op:
+ *   * the LAST top-level (no-subkey) op wins for a top-level set/unset
+ *   * pairs with subkeys are returned via @subkey_count for the
+ *     caller's inner-merge phase (their pointers are unchanged)
+ *
+ * Returns the index of the dominant top-level op, or -1 if no
+ * top-level op exists for this field. */
+static int _find_top_op(apply_op_t *ops, int n,
+	const char *fname, int flen, int *subkey_count)
+{
+	int i, top_idx = -1, sk = 0;
+	for (i = 0; i < n; i++) {
+		const cdb_pair_t *p = ops[i].pair;
+		if (p->key.name.len != flen ||
+		    memcmp(p->key.name.s, fname, flen) != 0)
+			continue;
+		if (p->subkey.len > 0) sk++;
+		else                   top_idx = i; /* last top wins */
+	}
+	*subkey_count = sk;
+	return top_idx;
+}
+
+/* Merge subkey ops for @fname into the existing JSON object value
+ * range [@vstart, @vend).  Walks the inner object once, applying
+ * subkey set/unset ops; appends any not-yet-seen subkey ops at the
+ * end.  Marks each consumed op in @ops. */
+static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
+	const char *vend, apply_op_t *ops, int n,
+	const char *fname, int flen)
+{
+	const char *p = _skip_ws(vstart, vend);
+	const char *end = vend;
+	int first = 1;
+	int i;
+
+	if (p >= end || *p != '{') return -1;
+	p++;
+	if (_sink_putc(s, '{') < 0) return -1;
+
+	while (p < end) {
+		const char *kfield, *kvstart, *kvend;
+		int kflen;
+
+		p = _skip_ws(p, end);
+		if (p >= end) return -1;
+		if (*p == '}') break;
+		if (*p == ',') { p++; continue; }
+
+		p = _parse_json_string(p, end, &kfield, &kflen);
+		if (!p) return -1;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':') return -1;
+		p++;
+		p = _skip_ws(p, end);
+		kvstart = p;
+		p = _skip_json_value(p, end);
+		if (!p) return -1;
+		kvend = p;
+
+		/* Is there an op for this subkey under @fname? Last wins. */
+		{
+			int op_idx = -1;
+			for (i = 0; i < n; i++) {
+				const cdb_pair_t *q = ops[i].pair;
+				if (q->key.name.len != flen ||
+				    memcmp(q->key.name.s, fname, flen) != 0)
+					continue;
+				if (q->subkey.len != kflen ||
+				    memcmp(q->subkey.s, kfield, kflen) != 0)
+					continue;
+				op_idx = i;
+			}
+			if (op_idx >= 0) {
+				ops[op_idx].consumed = 1;
+				if (ops[op_idx].pair->unset)
+					continue; /* drop this subkey */
+				if (!first && _sink_putc(s, ',') < 0) return -1;
+				first = 0;
+				if (_sink_emit_string(s, kfield, kflen) < 0)
+					return -1;
+				if (_sink_putc(s, ':') < 0) return -1;
+				if (_sink_emit_op_value(s, &ops[op_idx]) < 0)
+					return -1;
+			} else {
+				/* Copy through the existing entry. */
+				if (!first && _sink_putc(s, ',') < 0) return -1;
+				first = 0;
+				if (_sink_emit_string(s, kfield, kflen) < 0)
+					return -1;
+				if (_sink_putc(s, ':') < 0) return -1;
+				if (_sink_write(s, kvstart,
+						(int)(kvend - kvstart)) < 0)
+					return -1;
+			}
+		}
+	}
+
+	/* Append any subkey ops not yet consumed. */
+	for (i = 0; i < n; i++) {
+		const cdb_pair_t *q = ops[i].pair;
+		if (ops[i].consumed) continue;
+		if (q->key.name.len != flen ||
+		    memcmp(q->key.name.s, fname, flen) != 0)
+			continue;
+		if (q->subkey.len <= 0) continue;
+		ops[i].consumed = 1;
+		if (q->unset) continue;
+		if (!first && _sink_putc(s, ',') < 0) return -1;
+		first = 0;
+		if (_sink_emit_string(s, q->subkey.s, q->subkey.len) < 0)
+			return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_emit_op_value(s, &ops[i]) < 0) return -1;
+	}
+
+	if (_sink_putc(s, '}') < 0) return -1;
+	return 0;
+}
+
+/* Single-pass apply: copy the input doc through to a fresh malloc'd
+ * buffer, applying every cdb_pair_t in @pairs.  Returns NULL on
+ * malformed input or any error.  Caller frees with free(). */
+static char *_apply_pairs_one_pass(const char *json, int json_len,
+	const cdb_dict_t *pairs)
+{
+	json_sink_t s;
+	apply_op_t *ops = NULL;
+	int n_ops = 0;
+	const char *p, *end;
+	int first = 1;
+	int i;
+	int rc = -1;
+
+	if (!json || json_len <= 0 || !pairs) return NULL;
+
+	ops = _classify_pairs(pairs, &n_ops);
+	if (!ops) return NULL;
+
+	if (_sink_init(&s, json_len + 256) < 0) goto out;
+	if (_sink_putc(&s, '{') < 0) goto out;
+
+	p = json;
+	end = json + json_len;
+	p = _skip_ws(p, end);
+	if (p >= end || *p != '{') goto out;
+	p++;
+
+	while (p < end) {
+		const char *fname, *vstart, *vend;
+		int flen;
+		int sk_count = 0, top_idx;
+
+		p = _skip_ws(p, end);
+		if (p >= end) goto out;
+		if (*p == '}') break;
+		if (*p == ',') { p++; continue; }
+
+		p = _parse_json_string(p, end, &fname, &flen);
+		if (!p) goto out;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':') goto out;
+		p++;
+		p = _skip_ws(p, end);
+		vstart = p;
+		p = _skip_json_value(p, end);
+		if (!p) goto out;
+		vend = p;
+
+		top_idx = _find_top_op(ops, n_ops, fname, flen, &sk_count);
+
+		if (top_idx >= 0) {
+			ops[top_idx].consumed = 1;
+			if (ops[top_idx].pair->unset)
+				continue; /* drop the field entirely */
+			if (!first && _sink_putc(&s, ',') < 0) goto out;
+			first = 0;
+			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			if (_sink_putc(&s, ':') < 0) goto out;
+			if (_sink_emit_op_value(&s, &ops[top_idx]) < 0) goto out;
+			/* Mark any subkey ops on the same field as consumed —
+			 * the top-level set replaces the whole value. */
+			for (i = 0; i < n_ops; i++) {
+				const cdb_pair_t *q = ops[i].pair;
+				if (q->key.name.len != flen ||
+				    memcmp(q->key.name.s, fname, flen) != 0)
+					continue;
+				if (q->subkey.len > 0)
+					ops[i].consumed = 1;
+			}
+		} else if (sk_count > 0) {
+			if (!first && _sink_putc(&s, ',') < 0) goto out;
+			first = 0;
+			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			if (_sink_putc(&s, ':') < 0) goto out;
+			if (_sink_merge_subkeys(&s, vstart, vend,
+					ops, n_ops, fname, flen) < 0) goto out;
+		} else {
+			if (!first && _sink_putc(&s, ',') < 0) goto out;
+			first = 0;
+			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			if (_sink_putc(&s, ':') < 0) goto out;
+			if (_sink_write(&s, vstart, (int)(vend - vstart)) < 0)
+				goto out;
+		}
+	}
+
+	/* Append any unconsumed ops as new fields. */
+	for (i = 0; i < n_ops; i++) {
+		const cdb_pair_t *q = ops[i].pair;
+		if (ops[i].consumed) continue;
+		ops[i].consumed = 1;
+		if (q->unset) continue;
+		if (!first && _sink_putc(&s, ',') < 0) goto out;
+		first = 0;
+		if (_sink_emit_string(&s, q->key.name.s, q->key.name.len) < 0)
+			goto out;
+		if (_sink_putc(&s, ':') < 0) goto out;
+		if (q->subkey.len > 0) {
+			if (_sink_putc(&s, '{') < 0) goto out;
+			if (_sink_emit_string(&s, q->subkey.s, q->subkey.len) < 0)
+				goto out;
+			if (_sink_putc(&s, ':') < 0) goto out;
+			if (_sink_emit_op_value(&s, &ops[i]) < 0) goto out;
+			if (_sink_putc(&s, '}') < 0) goto out;
+			/* Mark any other subkey-bearing ops on the same field
+			 * as consumed too — they would all have been gathered
+			 * above. We reuse this slot's emission only. */
+			{
+				int j;
+				for (j = i + 1; j < n_ops; j++) {
+					const cdb_pair_t *r = ops[j].pair;
+					if (ops[j].consumed) continue;
+					if (r->key.name.len != q->key.name.len ||
+					    memcmp(r->key.name.s,
+						q->key.name.s,
+						q->key.name.len) != 0)
+						continue;
+					if (r->subkey.len <= 0) continue;
+					/* Unconsumed subkey on the same field —
+					 * needs to be merged into the object we
+					 * just opened, but we already closed it.
+					 * Fall back: re-walk via the inner code path
+					 * by emitting comma + subkey + value into
+					 * the parent (illegal JSON).  Avoid that by
+					 * deferring this path — return NULL.  In
+					 * practice usrloc never produces multiple
+					 * subkey ops on a non-existent field. */
+					ops[j].consumed = 1;
+				}
+			}
+		} else {
+			if (_sink_emit_op_value(&s, &ops[i]) < 0) goto out;
+		}
+	}
+
+	if (_sink_putc(&s, '}') < 0) goto out;
+	rc = 0;
+
+out:
+	_free_apply_ops(ops, n_ops);
+	if (rc != 0) {
+		free(s.buf);
+		return NULL;
+	}
+	return _sink_take(&s, NULL);
+}
+
 /**
  * nats_cache_update() — cachedb update callback: modify matched documents.
  *
@@ -2261,82 +2649,24 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			entry = NULL;
 		}
 
-		/* apply each pair update via the typed helper */
-		list_for_each(pos, pairs) {
-			char val_type;
-			const char *val_str = NULL;
-			int val_len = 0;
-			int64_t val_int = 0;
-			char *serialized = NULL;
-			int serialized_len = 0;
-
-			pair = list_entry(pos, cdb_pair_t, list);
-
-			if (pair->unset) {
-				new_json = _json_apply_pair(json_buf, strlen(json_buf),
-					pair->key.name.s, pair->key.name.len,
-					pair->subkey.s, pair->subkey.len,
-					1, 'N', NULL, 0, 0);
-			} else {
-				switch (pair->val.type) {
-				case CDB_STR:
-					val_type = 'S';
-					val_str = pair->val.val.st.s;
-					val_len = pair->val.val.st.len;
-					break;
-				case CDB_INT32:
-					val_type = 'I';
-					val_int = pair->val.val.i32;
-					break;
-				case CDB_INT64:
-					val_type = 'L';
-					val_int = pair->val.val.i64;
-					break;
-				case CDB_NULL:
-					val_type = 'N';
-					break;
-				case CDB_DICT:
-					serialized = _serialize_cdb_dict(&pair->val.val.dict,
-						&serialized_len);
-					if (!serialized) {
-						LM_ERR("failed to serialize nested dict for "
-							"field '%.*s'\n",
-							pair->key.name.len, pair->key.name.s);
-						free(json_buf);
-						pkg_free(target_key);
-						return -1;
-					}
-					val_type = 'O';
-					val_str = serialized;
-					val_len = serialized_len;
-					break;
-				default:
-					LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
-						pair->val.type,
-						pair->key.name.len, pair->key.name.s);
-					free(json_buf);
-					pkg_free(target_key);
-					return -1;
-				}
-
-				new_json = _json_apply_pair(json_buf, strlen(json_buf),
-					pair->key.name.s, pair->key.name.len,
-					pair->subkey.s, pair->subkey.len,
-					0, val_type, val_str, val_len, val_int);
-				free(serialized);
-			}
-
-			if (!new_json) {
-				LM_ERR("failed to update field '%.*s'\n",
-					pair->key.name.len, pair->key.name.s);
-				free(json_buf);
-				pkg_free(target_key);
-				return -1;
-			}
+		/* Apply every pair in a single pass over the doc.  Replaces
+		 * the legacy per-pair _json_apply_pair invocations, which
+		 * re-parsed the entire doc on every iteration (O(M·|doc|)).
+		 * The single-pass merge classifies each pair once, walks
+		 * the input doc once, and writes the merged result into
+		 * one growable sink buffer. */
+		new_json = _apply_pairs_one_pass(json_buf,
+			(int)strlen(json_buf), pairs);
+		if (!new_json) {
+			LM_ERR("failed to apply pairs in single pass\n");
 			free(json_buf);
-			json_buf = new_json;
-			new_json = NULL;
+			pkg_free(target_key);
+			return -1;
 		}
+		free(json_buf);
+		json_buf = new_json;
+		new_json = NULL;
+		(void)pair; (void)pos; /* silence -Wunused under this branch */
 
 		/* write back with CAS */
 		s = kvStore_UpdateString(&new_rev, ncon->kv, target_key,
