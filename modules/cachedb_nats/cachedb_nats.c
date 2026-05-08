@@ -122,7 +122,13 @@ static int   tls_skip_verify = 0;
 static int   tls_allow_downgrade = 0;  /* require explicit opt-in to plaintext fallback */
 
 /* JSON full-text search parameters */
-char *fts_json_prefix = "json:";
+/* Default uses '_' rather than ':' because NATS-KV rejects ':' in
+ * subject tokens (validate_kv_key in cachedb_nats_dbase.c), and any
+ * key whose underlying form starts with the prefix would therefore be
+ * unstorable. '_' is unambiguously safe across all allowed key
+ * characters; operators may override via modparam if their bucket
+ * convention requires a different separator. */
+char *fts_json_prefix = "json_";
 int   fts_max_results = 100;
 
 /* Maximum bytes accepted in a NATS request/reply response.  Caps
