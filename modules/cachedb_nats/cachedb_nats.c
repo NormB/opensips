@@ -73,6 +73,7 @@
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../timer.h"
 
 #ifdef HAVE_EVI
 #include "../../evi/evi.h"
@@ -82,6 +83,7 @@
 static int mod_init(void);
 static int child_init(int rank);
 static void destroy(void);
+static void _nats_cdb_periodic_resync(unsigned int ticks, void *param);
 
 /* script function wrappers (implementations in cachedb_nats_native.c) */
 static int w_nats_request_wrap(struct sip_msg *msg, str *subject, str *payload,
@@ -111,6 +113,26 @@ char *kv_bucket = "opensips";
 int kv_replicas = 3;
 int kv_history = 5;
 int kv_ttl = 0;
+/* Phase 2 — multi-instance index coordination knobs.
+ *
+ * index_resync_on_reconnect (default 1):
+ *   On a NATS reconnect (epoch change), the watcher rebuilds the
+ *   in-memory JSON index in full so subsequent queries see KV state
+ *   that may have diverged during the disconnect. Phase 1.4 added
+ *   self-healing on stale-index hits in nats_cache_query, so for
+ *   high-churn deployments where reconnects are frequent and the
+ *   O(N) rebuild is expensive, operators may set this to 0 and
+ *   rely on the lazy self-heal path. Default 1 keeps the safer,
+ *   long-standing behaviour.
+ *
+ * index_resync_interval_secs (default 0 = off):
+ *   Optional periodic full rebuild on a timer. Belt-and-braces for
+ *   deployments that want a hard upper bound on how stale any
+ *   process-local index entry can ever be, beyond what reconnects
+ *   and lazy self-heal already guarantee.
+ */
+int index_resync_on_reconnect = 1;
+int index_resync_interval_secs = 0;
 
 /* TLS parameters (mirrored from event_nats for independent pool) */
 static char *nats_url = NULL;      /* NATS server URL(s) -- overrides cachedb_url host */
@@ -197,6 +219,8 @@ static const param_export_t params[] = {
 	{"kv_replicas",    INT_PARAM,                 &kv_replicas},
 	{"kv_history",     INT_PARAM,                 &kv_history},
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
+	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
+	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
 	{"tls_ca",         STR_PARAM,                 &tls_ca},
 	{"tls_cert",       STR_PARAM,                 &tls_cert},
 	{"tls_key",        STR_PARAM,                 &tls_key},
@@ -436,6 +460,21 @@ static int mod_init(void)
 		return -1;
 	}
 
+	/* Periodic index resync: optional belt-and-braces rebuild for
+	 * deployments that want a hard upper bound on per-process index
+	 * staleness regardless of reconnect cadence or self-heal pace.
+	 * Default 0 means no timer is registered. */
+	if (index_resync_interval_secs > 0) {
+		if (register_timer("nats_cdb_resync",
+				_nats_cdb_periodic_resync, NULL,
+				index_resync_interval_secs, 0) < 0) {
+			LM_ERR("failed to register periodic resync timer\n");
+			return -1;
+		}
+		LM_INFO("cachedb_nats: periodic index resync every %d s\n",
+			index_resync_interval_secs);
+	}
+
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
 	 * This avoids the "previously published" warning that occurs when
 	 * both startup_route's subscribe_event() and child_init's
@@ -567,6 +606,38 @@ static void destroy(void)
 	nats_json_index_destroy();
 	cachedb_end_connections(&cache_mod_name);
 	nats_cdb_stats_destroy();
+}
+
+/*
+ * Periodic full-index resync handler, registered when
+ * index_resync_interval_secs > 0. Acquires a fresh KV handle from the
+ * pool and rebuilds the JSON-FTS search index in place. Skips silently
+ * when NATS is disconnected; the next reconnect (or the next tick)
+ * will retry.
+ */
+static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
+{
+	kvStore *kv;
+
+	(void)ticks; (void)param;
+
+	if (!nats_pool_is_connected()) {
+		LM_DBG("periodic resync: NATS disconnected; skipping tick\n");
+		return;
+	}
+
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv) {
+		LM_WARN("periodic resync: failed to get KV handle; "
+			"skipping tick\n");
+		return;
+	}
+
+	if (nats_json_index_rebuild(kv, fts_json_prefix) < 0)
+		LM_WARN("periodic resync: index rebuild failed\n");
+	else
+		LM_DBG("periodic resync: index rebuilt\n");
 }
 
 /**
