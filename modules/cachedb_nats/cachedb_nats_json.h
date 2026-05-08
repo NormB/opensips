@@ -87,7 +87,31 @@ typedef struct _nats_idx_entry {
  * trade-off between memory usage and chain length for typical deployments
  * (hundreds to low thousands of indexed documents).
  */
-#define NATS_IDX_BUCKETS 256
+/*
+ * Hash table sizing.
+ *
+ * NATS_IDX_BUCKETS controls average chain length for an N-entry
+ * index: chain_len ≈ N / NATS_IDX_BUCKETS.  Chain walks happen
+ * inside per-shard mutexes on every lookup, every insert dedup,
+ * and every remove, so chain length directly drives tail latency
+ * at scale.
+ *
+ * Sized for typical usrloc workloads:
+ *   - 20 000 AoRs  ≈ 60 000 entries → chain ≈ 15
+ *   - 100 000 AoRs ≈ 300 000 entries → chain ≈ 73
+ *
+ * For deployments expecting > 100 000 AoRs, raise this further
+ * (32 768 or 65 536) — each doubling cuts chain length in half
+ * for about 32 KB of additional SHM in the buckets[] array, a
+ * trivial cost.  Powers of two keep `% NATS_IDX_BUCKETS`
+ * compiled to a bitmask AND.
+ *
+ * NATS_IDX_SHARDS partitions the bucket array into contiguous
+ * slices, each guarded by its own SHM lock.  Single-bucket ops
+ * lock only their owning shard; whole-index ops acquire all
+ * shards in order.
+ */
+#define NATS_IDX_BUCKETS 4096
 #define NATS_IDX_SHARDS  16
 /* Each shard guards a contiguous slice of buckets; with 256 buckets
  * over 16 shards that's 16 buckets per shard.  Single-bucket
