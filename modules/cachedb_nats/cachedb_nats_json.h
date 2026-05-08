@@ -93,16 +93,26 @@ typedef struct _nats_idx_entry {
  * over 16 shards that's 16 buckets per shard.  Single-bucket
  * operations (lookup, single-key add) take only their owning shard,
  * so concurrent accesses to different shards proceed in parallel.
- * All-bucket operations (remove, rebuild swap) acquire all shards in
+ * All-bucket operations (remove, rebuild) acquire all shards in
  * order.  num_documents is a separate atomic so add and remove can
  * touch it without holding any shard. */
 #define NATS_IDX_SHARD_OF(bucket) ((bucket) / (NATS_IDX_BUCKETS / NATS_IDX_SHARDS))
 
+#include "../../locking.h"
+
 /*
- * Search index — hash table with sharded mutexes for thread-safe access.
+ * Search index — hash table with sharded SHM-backed locks.
  *
- * One global instance per OpenSIPS worker process, allocated in
- * process-local (heap) memory during child_init.
+ * Allocated once in shared memory during mod_init (pre-fork), so all
+ * OpenSIPS workers see the same index instance.  Watcher updates
+ * (running in rank-1) are visible to every reader immediately;
+ * non-rank-1 workers no longer maintain a private copy.  This trades
+ * a per-process index (~5 MB × M workers, ~40 MB at 8 workers / 50k
+ * AoRs) for a single ~5 MB SHM block.
+ *
+ * Synchronisation is via gen_lock_set_t, a SHM-safe lock set.  Each
+ * shard guards a slice of buckets[]; operations acquire only the
+ * shards they touch.
  */
 typedef struct _nats_search_idx {
 	nats_idx_entry *buckets[NATS_IDX_BUCKETS];
@@ -114,12 +124,12 @@ typedef struct _nats_search_idx {
 	                             * tracked across all index entries.
 	                             * Atomic so add/remove can update it
 	                             * without serialising on any shard. */
-	pthread_mutex_t shard_locks[NATS_IDX_SHARDS];
-	                            /* Per-shard mutexes.  Each guards
-	                             * a contiguous slice of buckets[].
-	                             * Single-bucket ops lock only their
-	                             * owning shard; whole-index ops
-	                             * acquire all shards in index order. */
+	gen_lock_set_t *shard_locks;
+	                            /* SHM-backed lock set with
+	                             * NATS_IDX_SHARDS entries.  Single-
+	                             * bucket ops lock only their owning
+	                             * shard; whole-index ops acquire all
+	                             * shards in index order. */
 } nats_search_idx;
 
 /*
