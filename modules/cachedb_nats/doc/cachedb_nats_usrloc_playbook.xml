@@ -147,12 +147,16 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 			Snapshot during a low-traffic window for a
 			point-in-time copy.  After restore, every connected
 			OpenSIPS instance must rebuild its in-memory index;
-			either bounce the instances, set
+			either bounce the instances (cleanest), set
 			<varname>index_resync_on_reconnect = 1</varname> and
-			cycle the broker (see Phase 1.3 KB-style note), or set
+			cycle the broker, or set
 			<varname>index_resync_interval_secs</varname> to a
 			value &le; the longest tolerable staleness window so
-			the periodic timer pulls the new state.
+			the periodic timer pulls the new state.  The lazy
+			self-heal in <function>nats_cache_query</function>
+			will also converge the index naturally as queries
+			arrive, but explicit reconciliation is faster on a
+			large restore.
 		</para>
 	</section>
 
@@ -243,13 +247,18 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		<variablelist>
 			<varlistentry>
 				<term><varname>index_resync_on_reconnect</varname>
-				(int, default 1)</term>
+				(int, default 0)</term>
 				<listitem><para>
 					Whether the KV watcher rebuilds the in-memory
 					index in full after each reconnect.  Phase 1.4
-					self-heal makes this redundant for correctness;
-					operators with hot-reconnect topologies can set
-					this to 0 to save the O(N) round-trip.
+					self-heal evicts stale entries lazily on the
+					first query that hits them, so the default is
+					off: a single brief broker hiccup no longer
+					stalls the watcher for an O(N) bulk rebuild.
+					Set to 1 in deployments with high cross-
+					instance churn or after long outages where the
+					bulk reconciliation is preferable to lazy
+					per-query self-heal.
 				</para></listitem>
 			</varlistentry>
 			<varlistentry>

@@ -115,23 +115,25 @@ int kv_history = 5;
 int kv_ttl = 0;
 /* Phase 2 — multi-instance index coordination knobs.
  *
- * index_resync_on_reconnect (default 1):
- *   On a NATS reconnect (epoch change), the watcher rebuilds the
- *   in-memory JSON index in full so subsequent queries see KV state
- *   that may have diverged during the disconnect. Phase 1.4 added
- *   self-healing on stale-index hits in nats_cache_query, so for
- *   high-churn deployments where reconnects are frequent and the
- *   O(N) rebuild is expensive, operators may set this to 0 and
- *   rely on the lazy self-heal path. Default 1 keeps the safer,
- *   long-standing behaviour.
+ * index_resync_on_reconnect (default 0):
+ *   On a NATS reconnect (epoch change), should the watcher rebuild
+ *   the in-memory JSON index in full?  The rebuild costs O(N)
+ *   round-trips against the bucket and on a 50k-AoR deployment
+ *   stalls the watcher for ~5-10 s.  Phase 1.4's stale-entry
+ *   self-heal in nats_cache_query covers correctness without the
+ *   bulk rebuild, so the default is OFF: stale entries are evicted
+ *   lazily on the first query that hits them.  Operators with
+ *   high cross-instance churn or deep historical drift after
+ *   prolonged outages may set this to 1 to force the bulk
+ *   reconciliation.
  *
  * index_resync_interval_secs (default 0 = off):
- *   Optional periodic full rebuild on a timer. Belt-and-braces for
- *   deployments that want a hard upper bound on how stale any
+ *   Optional periodic full rebuild on a timer.  Belt-and-braces
+ *   for deployments that want a hard upper bound on how stale any
  *   process-local index entry can ever be, beyond what reconnects
  *   and lazy self-heal already guarantee.
  */
-int index_resync_on_reconnect = 1;
+int index_resync_on_reconnect = 0;
 int index_resync_interval_secs = 0;
 
 /* TLS parameters (mirrored from event_nats for independent pool) */
