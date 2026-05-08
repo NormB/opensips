@@ -223,6 +223,10 @@ static const param_export_t params[] = {
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
+	/* Shared lib/nats shutdown drain timeout, ms.  See
+	 * lib/nats/nats_pool.h for the contract; last-writer wins
+	 * across modules. */
+	{"cdb_drain_timeout_ms",        INT_PARAM,    &nats_pool_drain_timeout_ms},
 	{"tls_ca",         STR_PARAM,                 &tls_ca},
 	{"tls_cert",       STR_PARAM,                 &tls_cert},
 	{"tls_key",        STR_PARAM,                 &tls_key},

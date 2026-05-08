@@ -122,6 +122,10 @@ static const param_export_t mod_params[] = {
 	{"tls_hostname",        STR_PARAM, &nats_tls_hostname},
 	{"tls_allow_downgrade", INT_PARAM, &nats_tls_allow_downgrade},
 	{"skip_openssl_init",   INT_PARAM, &nats_skip_openssl_init},
+	/* Tunable shutdown drain timeout, ms.  Sets the shared
+	 * lib/nats nats_pool_drain_timeout_ms global; later modules
+	 * loading the same lib see the same value (last writer wins). */
+	{"nats_drain_timeout_ms", INT_PARAM, &nats_pool_drain_timeout_ms},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
 	{0,0,0}
