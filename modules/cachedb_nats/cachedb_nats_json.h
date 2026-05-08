@@ -88,9 +88,18 @@ typedef struct _nats_idx_entry {
  * (hundreds to low thousands of indexed documents).
  */
 #define NATS_IDX_BUCKETS 256
+#define NATS_IDX_SHARDS  16
+/* Each shard guards a contiguous slice of buckets; with 256 buckets
+ * over 16 shards that's 16 buckets per shard.  Single-bucket
+ * operations (lookup, single-key add) take only their owning shard,
+ * so concurrent accesses to different shards proceed in parallel.
+ * All-bucket operations (remove, rebuild swap) acquire all shards in
+ * order.  num_documents is a separate atomic so add and remove can
+ * touch it without holding any shard. */
+#define NATS_IDX_SHARD_OF(bucket) ((bucket) / (NATS_IDX_BUCKETS / NATS_IDX_SHARDS))
 
 /*
- * Search index — hash table with mutex for thread-safe access.
+ * Search index — hash table with sharded mutexes for thread-safe access.
  *
  * One global instance per OpenSIPS worker process, allocated in
  * process-local (heap) memory during child_init.
@@ -101,14 +110,16 @@ typedef struct _nats_search_idx {
 	                             * Each element is NULL (empty bucket) or
 	                             * points to the first nats_idx_entry in
 	                             * a singly-linked chain. */
-	int num_documents;          /* Total number of unique document keys
+	_Atomic int num_documents;  /* Total number of unique document keys
 	                             * tracked across all index entries.
-	                             * Used for MI status reporting. */
-	pthread_mutex_t lock;       /* Mutex protecting all index state.
-	                             * Must be held during any read or write
-	                             * to buckets[] or num_documents.
-	                             * Contention sources: KV watcher thread
-	                             * (writes) vs. OpenSIPS workers (reads). */
+	                             * Atomic so add/remove can update it
+	                             * without serialising on any shard. */
+	pthread_mutex_t shard_locks[NATS_IDX_SHARDS];
+	                            /* Per-shard mutexes.  Each guards
+	                             * a contiguous slice of buckets[].
+	                             * Single-bucket ops lock only their
+	                             * owning shard; whole-index ops
+	                             * acquire all shards in index order. */
 } nats_search_idx;
 
 /*
