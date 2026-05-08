@@ -61,27 +61,67 @@
  * nats_pool_is_connected() in lib/nats.  Field retained for ABI
  * compatibility; consider removing in a future cleanup.
  */
+/* Per-process upper bound for the SHM stats table.
+ *
+ * Allocated once in mod_init (pre-fork), sized once and forever.
+ * 512 slots × 64 bytes each = 32 KB total — trivial SHM cost in
+ * exchange for keeping every worker's counter increments on its
+ * own cacheline.
+ *
+ * If a deployment ever runs more than 512 OpenSIPS processes,
+ * bumps from process_no >= NATS_STATS_MAX_PROCS are silently
+ * dropped (guarded in the bump path); the MI sum still iterates
+ * the full table.  Bump the cap if that ceiling becomes a real
+ * constraint. */
+#define NATS_STATS_MAX_PROCS 512
+
+/* Per-process counter slot.  Each running OpenSIPS worker writes
+ * exclusively to its own slot indexed by process_no, so the bumps
+ * don't need to be atomic w.r.t. other writers — they're the only
+ * writer for their slot.  Reads from the MI handler still use
+ * relaxed atomic loads to avoid torn reads on the off chance the
+ * compiler decides to split a 64-bit store on a non-64-bit
+ * platform.
+ *
+ * One cacheline per slot keeps the bump path off any other
+ * worker's hot lines. */
 typedef struct _nats_stats {
     volatile int connected;             /* DEPRECATED -- see nats_pool_is_connected() */
 
-    /* Hot counters: written on every publish.  Pad to 64-byte
-     * cache line so a worker bumping `published` does not invalidate
-     * `failed`'s line on a different core. */
-    _Atomic unsigned long published __attribute__((aligned(64)));
-    _Atomic unsigned long failed    __attribute__((aligned(64)));
-
-    /* Cooler per-source breakdown counters: */
+    _Atomic unsigned long published;
+    _Atomic unsigned long failed;
     _Atomic unsigned long evi_published;
     _Atomic unsigned long script_published;
     _Atomic unsigned long reconnects;
     _Atomic unsigned long js_ack_ok;
     _Atomic unsigned long js_ack_failed;
-} nats_stats_t;
+} __attribute__((aligned(64))) nats_stats_t;
 
-/* Global pointer to the shared-memory stats structure.
- * Allocated by nats_stats_init(), freed by nats_stats_destroy().
- * NULL before initialization. */
+/* Pointer to the SHM array of NATS_STATS_MAX_PROCS slots.  Workers
+ * index into it via nats_stats_slot() / nats_stats_sum(). */
 extern nats_stats_t *nats_stats;
+
+/* Helpers — defined in nats_stats.c.  Kept inline at the bump site
+ * via macros below.  Inlined so the hot path is a single store, no
+ * function call. */
+static inline nats_stats_t *nats_stats_slot(void)
+{
+    extern int process_no;
+    if (!nats_stats) return NULL;
+    if (process_no < 0 || process_no >= NATS_STATS_MAX_PROCS)
+        return NULL;
+    return &nats_stats[process_no];
+}
+
+#define NATS_STATS_BUMP(field) do { \
+    nats_stats_t *_s = nats_stats_slot(); \
+    if (_s) atomic_fetch_add_explicit(&_s->field, 1, \
+        memory_order_relaxed); \
+} while (0)
+
+/* Sum a counter across all slots.  Used by the MI handler. */
+unsigned long nats_stats_sum(size_t field_offset);
+#define NATS_STATS_SUM(field) nats_stats_sum(offsetof(nats_stats_t, field))
 
 /*
  * Allocate and zero-initialize the stats structure in shared memory.
