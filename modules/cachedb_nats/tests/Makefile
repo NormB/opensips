@@ -9,7 +9,7 @@ ASAN    := -fsanitize=address
 
 TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_reply_size_cap test_disconnected_fastfail test_timeout_normalize \
-        test_update_nested_dict test_update_creates_doc
+        test_update_nested_dict test_update_creates_doc test_cas_backoff
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -17,7 +17,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
 # arm completes silently and the assertion fails.  Skip both under
 # TSan -- the regression they catch is an ASan-only contract.
 TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
-                  test_disconnected_fastfail test_timeout_normalize
+                  test_disconnected_fastfail test_timeout_normalize \
+                  test_cas_backoff
 
 all: $(TESTS)
 
@@ -45,6 +46,9 @@ test_update_nested_dict: test_update_nested_dict.c
 test_update_creates_doc: test_update_creates_doc.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+test_cas_backoff: test_cas_backoff.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -54,6 +58,7 @@ check: all
 	./test_timeout_normalize
 	./test_update_nested_dict
 	./test_update_creates_doc
+	./test_cas_backoff
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
