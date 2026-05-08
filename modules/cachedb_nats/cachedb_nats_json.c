@@ -1148,8 +1148,22 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		int data_len;
 
 		s = kvStore_Get(&entry, ncon->kv, match_keys[i]);
+		if (s == NATS_NOT_FOUND) {
+			/* In-memory index said hit, KV said miss. Most common
+			 * cause: a sibling OpenSIPS instance deleted the key
+			 * between our index build and this fetch. Evict the
+			 * stale entry and surface the rate via index_miss_kv;
+			 * the truth is the KV, so the result set stays
+			 * complete (this row genuinely no longer exists). */
+			NATS_CDB_STATS_INC(index_miss_kv);
+			nats_json_index_remove(match_keys[i]);
+			LM_DBG("evicted stale index entry for '%s'\n",
+				match_keys[i]);
+			continue;
+		}
 		if (s != NATS_OK) {
-			LM_DBG("skipping key '%s': %s\n",
+			LM_WARN("kvStore_Get failed for key '%s': %s; row "
+				"omitted from query result\n",
 				match_keys[i], natsStatus_GetText(s));
 			continue;
 		}
