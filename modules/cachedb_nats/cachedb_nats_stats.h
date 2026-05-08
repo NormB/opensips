@@ -41,19 +41,39 @@
 #ifndef _CACHEDB_NATS_STATS_H_
 #define _CACHEDB_NATS_STATS_H_
 
+#include <stddef.h>
 #include <stdatomic.h>
 
 #include "../../mi/mi.h"
 
+/* Per-process upper bound for the SHM cdb-stats table.  See the
+ * mirror constant in event_nats/nats_stats.h for the rationale; the
+ * two NATS modules use the same scheme to keep counter bumps off
+ * each others' cachelines. */
+#define NATS_CDB_STATS_MAX_PROCS 512
+
 typedef struct _nats_cdb_stats {
-	_Atomic unsigned long cas_retry     __attribute__((aligned(64)));
-	_Atomic unsigned long cas_exhausted __attribute__((aligned(64)));
+	_Atomic unsigned long cas_retry;
+	_Atomic unsigned long cas_exhausted;
 	_Atomic unsigned long create_doc;
 	_Atomic unsigned long index_miss_kv;
-} nats_cdb_stats_t;
+} __attribute__((aligned(64))) nats_cdb_stats_t;
 
-/* Process-shared pointer; NULL before nats_cdb_stats_init() runs. */
+/* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
 extern nats_cdb_stats_t *nats_cdb_stats;
+
+static inline nats_cdb_stats_t *nats_cdb_stats_slot(void)
+{
+	extern int process_no;
+	if (!nats_cdb_stats) return NULL;
+	if (process_no < 0 || process_no >= NATS_CDB_STATS_MAX_PROCS)
+		return NULL;
+	return &nats_cdb_stats[process_no];
+}
+
+unsigned long nats_cdb_stats_sum(size_t field_offset);
+#define NATS_CDB_STATS_SUM(field) \
+	nats_cdb_stats_sum(offsetof(nats_cdb_stats_t, field))
 
 /*
  * Allocate and zero-initialize the stats structure in shared memory.
@@ -74,11 +94,14 @@ void nats_cdb_stats_destroy(void);
 mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	struct mi_handler *async_hdl);
 
-/* Convenience macros — no-ops if stats are not yet initialized. */
+/* Convenience bump — no-op if stats are not yet initialized.  Each
+ * process writes to its own cacheline-sized slot indexed by
+ * process_no, eliminating inter-process cacheline ping-pong on
+ * publish-rate-bound counters. */
 #define NATS_CDB_STATS_INC(field) do { \
-	if (nats_cdb_stats) \
-		atomic_fetch_add_explicit(&nats_cdb_stats->field, 1, \
-			memory_order_relaxed); \
+	nats_cdb_stats_t *_s = nats_cdb_stats_slot(); \
+	if (_s) atomic_fetch_add_explicit(&_s->field, 1, \
+		memory_order_relaxed); \
 } while (0)
 
 /*

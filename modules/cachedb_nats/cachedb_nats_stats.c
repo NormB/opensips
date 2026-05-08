@@ -39,13 +39,31 @@ nats_cdb_stats_t *nats_cdb_stats = NULL;
 
 int nats_cdb_stats_init(void)
 {
-	nats_cdb_stats = shm_malloc(sizeof(nats_cdb_stats_t));
+	size_t bytes = (size_t)NATS_CDB_STATS_MAX_PROCS *
+		sizeof(nats_cdb_stats_t);
+	nats_cdb_stats = shm_malloc(bytes);
 	if (!nats_cdb_stats) {
-		LM_ERR("oom for cdb stats\n");
+		LM_ERR("oom for per-process cdb stats table (%zu bytes)\n",
+			bytes);
 		return -1;
 	}
-	memset(nats_cdb_stats, 0, sizeof(nats_cdb_stats_t));
+	memset(nats_cdb_stats, 0, bytes);
 	return 0;
+}
+
+unsigned long nats_cdb_stats_sum(size_t field_offset)
+{
+	unsigned long total = 0;
+	int i;
+
+	if (!nats_cdb_stats) return 0;
+	for (i = 0; i < NATS_CDB_STATS_MAX_PROCS; i++) {
+		_Atomic unsigned long *slot =
+			(_Atomic unsigned long *)
+			((char *)&nats_cdb_stats[i] + field_offset);
+		total += atomic_load_explicit(slot, memory_order_relaxed);
+	}
+	return total;
 }
 
 void nats_cdb_stats_destroy(void)
@@ -76,20 +94,16 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	}
 
 	if (add_mi_number(resp_obj, MI_SSTR("cas_retry"),
-		atomic_load_explicit(&nats_cdb_stats->cas_retry,
-			memory_order_relaxed)) < 0)
+		NATS_CDB_STATS_SUM(cas_retry)) < 0)
 		goto error;
 	if (add_mi_number(resp_obj, MI_SSTR("cas_exhausted"),
-		atomic_load_explicit(&nats_cdb_stats->cas_exhausted,
-			memory_order_relaxed)) < 0)
+		NATS_CDB_STATS_SUM(cas_exhausted)) < 0)
 		goto error;
 	if (add_mi_number(resp_obj, MI_SSTR("create_doc"),
-		atomic_load_explicit(&nats_cdb_stats->create_doc,
-			memory_order_relaxed)) < 0)
+		NATS_CDB_STATS_SUM(create_doc)) < 0)
 		goto error;
 	if (add_mi_number(resp_obj, MI_SSTR("index_miss_kv"),
-		atomic_load_explicit(&nats_cdb_stats->index_miss_kv,
-			memory_order_relaxed)) < 0)
+		NATS_CDB_STATS_SUM(index_miss_kv)) < 0)
 		goto error;
 
 	return resp;

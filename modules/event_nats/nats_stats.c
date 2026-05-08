@@ -34,6 +34,8 @@
  * freed during mod_destroy().
  */
 
+#include <stddef.h>
+
 #include "../../mem/shm_mem.h"
 #include "../../dprint.h"
 #include "../../mi/mi.h"
@@ -46,21 +48,22 @@ extern int nats_jetstream;
 nats_stats_t *nats_stats = NULL;
 
 /**
- * nats_stats_init() -- Allocate and zero-initialize the shared stats block.
+ * nats_stats_init() -- Allocate the per-process counter table.
  *
- * Called from mod_init() before forking.  The resulting block is in
- * shared memory and accessible from all worker processes.
- *
- * @return  0 on success, -1 on allocation failure.
+ * Called from mod_init() before forking.  The table is sized once
+ * for NATS_STATS_MAX_PROCS slots; each running worker process bumps
+ * exclusively into its own slot indexed by process_no.  This keeps
+ * the publish hot path off any other worker's cacheline.
  */
 int nats_stats_init(void)
 {
-    nats_stats = shm_malloc(sizeof(nats_stats_t));
+    size_t bytes = (size_t)NATS_STATS_MAX_PROCS * sizeof(nats_stats_t);
+    nats_stats = shm_malloc(bytes);
     if (!nats_stats) {
-        LM_ERR("oom for stats\n");
+        LM_ERR("oom for per-process stats table (%zu bytes)\n", bytes);
         return -1;
     }
-    memset(nats_stats, 0, sizeof(nats_stats_t));
+    memset(nats_stats, 0, bytes);
     return 0;
 }
 
@@ -75,6 +78,30 @@ void nats_stats_destroy(void)
         shm_free(nats_stats);
         nats_stats = NULL;
     }
+}
+
+/**
+ * nats_stats_sum() -- Sum a counter across every per-process slot.
+ *
+ * Used by the MI handler to expose a single aggregate number per
+ * counter despite the per-process write fan-out.  Reads use relaxed
+ * atomic loads — torn reads on a 64-bit field are unlikely on the
+ * supported architectures (aarch64 / x86_64 both guarantee atomic
+ * 64-bit aligned loads), but the explicit load makes it explicit.
+ */
+unsigned long nats_stats_sum(size_t field_offset)
+{
+    unsigned long total = 0;
+    int i;
+
+    if (!nats_stats) return 0;
+    for (i = 0; i < NATS_STATS_MAX_PROCS; i++) {
+        _Atomic unsigned long *slot =
+            (_Atomic unsigned long *)
+            ((char *)&nats_stats[i] + field_offset);
+        total += atomic_load_explicit(slot, memory_order_relaxed);
+    }
+    return total;
 }
 
 /**
@@ -150,25 +177,25 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
     }
 
     if (add_mi_number(resp_obj, MI_SSTR("published"),
-            atomic_load_explicit(&nats_stats->published, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(published)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("evi_published"),
-            atomic_load_explicit(&nats_stats->evi_published, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(evi_published)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("script_published"),
-            atomic_load_explicit(&nats_stats->script_published, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(script_published)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("failed"),
-            atomic_load_explicit(&nats_stats->failed, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(failed)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("reconnects"),
-            atomic_load_explicit(&nats_stats->reconnects, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(reconnects)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("js_ack_ok"),
-            atomic_load_explicit(&nats_stats->js_ack_ok, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(js_ack_ok)) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("js_ack_failed"),
-            atomic_load_explicit(&nats_stats->js_ack_failed, memory_order_relaxed)) < 0)
+            NATS_STATS_SUM(js_ack_failed)) < 0)
         goto error;
 
     return resp;

@@ -502,7 +502,7 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	if (!nats_pool_is_connected()) {
 		LM_DBG("nats_evi_raise: pool disconnected, dropping event\n");
 		evi_free_payload(payload);
-		if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
+		NATS_STATS_BUMP(failed);
 		return -1;
 	}
 	memcpy(subj_buf, sock->address.s, subj_len);
@@ -517,8 +517,8 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	evi_free_payload(payload);
 
 	/* update per-type stats on success */
-	if (rc == 0 && nats_stats)
-		atomic_fetch_add_explicit(&nats_stats->evi_published, 1, memory_order_relaxed);
+	if (rc == 0)
+		NATS_STATS_BUMP(evi_published);
 
 	/* report async status -- non-blocking publish, report immediately */
 	if (async_ctx && async_ctx->status_cb) {
@@ -639,7 +639,7 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 	/* Fast-fail if the pool is disconnected. */
 	if (!nats_pool_is_connected()) {
 		LM_DBG("nats_publish: pool disconnected, dropping message\n");
-		if (nats_stats) atomic_fetch_add_explicit(&nats_stats->failed, 1, memory_order_relaxed);
+		NATS_STATS_BUMP(failed);
 		return -1;
 	}
 	memcpy(subj_buf, subject->s, subj_len);
@@ -652,8 +652,8 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 		rc = nats_publish(subj_buf, payload->s, payload->len);
 
 	/* update per-type stats on success */
-	if (rc == 0 && nats_stats)
-		atomic_fetch_add_explicit(&nats_stats->script_published, 1, memory_order_relaxed);
+	if (rc == 0)
+		NATS_STATS_BUMP(script_published);
 
 	return rc == 0 ? 1 : -1;
 }
@@ -668,11 +668,8 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
  */
 static void nats_evi_js_ack_cb(int success)
 {
-	if (!nats_stats) return;
 	if (success)
-		atomic_fetch_add_explicit(&nats_stats->js_ack_ok, 1,
-			memory_order_relaxed);
+		NATS_STATS_BUMP(js_ack_ok);
 	else
-		atomic_fetch_add_explicit(&nats_stats->js_ack_failed, 1,
-			memory_order_relaxed);
+		NATS_STATS_BUMP(js_ack_failed);
 }
