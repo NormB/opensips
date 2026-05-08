@@ -13,7 +13,7 @@ isbrokenplatform() {
     ;;
   ubuntu*)
     case "${TARGETPLATFORM}" in
-    linux/s390x)
+    linux/s390x | linux/riscv64)
       exit 1
       ;;
     esac
