@@ -1858,6 +1858,47 @@ static char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 	return cur;
 }
 
+static int _kv_char_safe(unsigned char c)
+{
+	if ((c >= '0' && c <= '9') ||
+	    (c >= 'A' && c <= 'Z') ||
+	    (c >= 'a' && c <= 'z'))
+		return 1;
+	switch (c) {
+	case '-': case '_': case '/': case '\\': case '.':
+		return 1;
+	}
+	return 0;
+}
+
+/* Encode @in into NATS-KV-safe form with '=HH' escape for unsafe
+ * bytes. Caller must free(). NATS-KV subject tokens reject
+ * characters outside [-./_=a-zA-Z0-9]; usrloc AoRs commonly contain
+ * '@' which would otherwise produce kvStore "Invalid Argument"
+ * errors and silently drop every REGISTER. The encoding is
+ * round-trippable: literal '=' becomes '=3D'. */
+static char *_kv_encode_key(const char *in, int in_len, int *out_len)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	int i, w = 0;
+	int cap = in_len * 3 + 1;
+	char *out = malloc(cap);
+	if (!out) return NULL;
+	for (i = 0; i < in_len; i++) {
+		unsigned char c = (unsigned char)in[i];
+		if (c != '=' && _kv_char_safe(c)) {
+			out[w++] = (char)c;
+		} else {
+			out[w++] = '=';
+			out[w++] = hex[(c >> 4) & 0xF];
+			out[w++] = hex[c & 0xF];
+		}
+	}
+	out[w] = '\0';
+	if (out_len) *out_len = w;
+	return out;
+}
+
 /* Build a malloc'd seed JSON document {"<field>":"<val>"} for the
  * first-insert path. Both field name and value are RFC 8259 escaped.
  * If field is NULL/empty, returns "{}" so the doc is still a valid JSON
@@ -1967,42 +2008,27 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
-	/* The row_filter identifies the target document.
-	 * If is_pk is set, the value IS the key directly.
-	 * Otherwise, use the index to find the key. */
-	if (row_filter->key.is_pk) {
-		if (!row_filter->val.is_str) {
-			LM_ERR("PK filter must have string value\n");
-			return -1;
-		}
-		/* Build the full KV key with prefix */
-		if (fts_json_prefix && *fts_json_prefix) {
-			int prefix_len = strlen(fts_json_prefix);
-			target_key = pkg_malloc(prefix_len + row_filter->val.s.len + 1);
-			if (!target_key) {
-				LM_ERR("oom\n");
-				return -1;
-			}
-			memcpy(target_key, fts_json_prefix, prefix_len);
-			memcpy(target_key + prefix_len, row_filter->val.s.s,
-				row_filter->val.s.len);
-			target_key[prefix_len + row_filter->val.s.len] = '\0';
-		} else {
-			target_key = pkg_malloc(row_filter->val.s.len + 1);
-			if (!target_key) {
-				LM_ERR("oom\n");
-				return -1;
-			}
-			memcpy(target_key, row_filter->val.s.s, row_filter->val.s.len);
-			target_key[row_filter->val.s.len] = '\0';
-		}
-	} else {
-		/* Use index to find matching document */
-		if (!row_filter->val.is_str || row_filter->op != CDB_OP_EQ) {
-			LM_ERR("unsupported filter for update\n");
-			return -1;
-		}
+	/* Resolve target_key for both PK and non-PK paths.
+	 *
+	 * Filter values are encoded into NATS-KV-safe form via
+	 * _kv_encode_key so that AoR-shaped inputs (containing '@', etc.)
+	 * do not blow up kvStore_Get with "Invalid Argument". The encoded
+	 * form is also used when falling through to first-insert via the
+	 * CAS loop's NATS_NOT_FOUND branch. */
+	if (!row_filter->val.is_str) {
+		LM_ERR("filter must have string value\n");
+		return -1;
+	}
+	if (!row_filter->key.is_pk &&
+	    row_filter->op != CDB_OP_EQ) {
+		LM_ERR("unsupported filter for update\n");
+		return -1;
+	}
 
+	/* Try the index first when the filter is non-PK; on hit, the
+	 * stored key was assigned at insert time and is already
+	 * KV-safe. */
+	if (!row_filter->key.is_pk) {
 		pthread_mutex_lock(&g_idx->lock);
 		e = _lookup(row_filter->key.name.s, row_filter->key.name.len,
 			row_filter->val.s.s, row_filter->val.s.len);
@@ -2014,27 +2040,33 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				return -1;
 			}
 			strcpy(target_key, e->keys[0]);
-			pthread_mutex_unlock(&g_idx->lock);
-		} else {
-			/* No existing match — fall through to insert with the same
-			 * prefix+filter-value key the PK path would mint. The CAS loop
-			 * below will detect NATS_NOT_FOUND and CreateString a seed. */
-			pthread_mutex_unlock(&g_idx->lock);
-			if (fts_json_prefix && *fts_json_prefix) {
-				int prefix_len = strlen(fts_json_prefix);
-				target_key = pkg_malloc(prefix_len + row_filter->val.s.len + 1);
-				if (!target_key) { LM_ERR("oom\n"); return -1; }
-				memcpy(target_key, fts_json_prefix, prefix_len);
-				memcpy(target_key + prefix_len, row_filter->val.s.s,
-					row_filter->val.s.len);
-				target_key[prefix_len + row_filter->val.s.len] = '\0';
-			} else {
-				target_key = pkg_malloc(row_filter->val.s.len + 1);
-				if (!target_key) { LM_ERR("oom\n"); return -1; }
-				memcpy(target_key, row_filter->val.s.s, row_filter->val.s.len);
-				target_key[row_filter->val.s.len] = '\0';
-			}
 		}
+		pthread_mutex_unlock(&g_idx->lock);
+	}
+
+	/* PK path or non-PK index miss: build encoded prefix+filter-value. */
+	if (!target_key) {
+		int enc_len = 0;
+		char *enc = _kv_encode_key(row_filter->val.s.s,
+			row_filter->val.s.len, &enc_len);
+		if (!enc) {
+			LM_ERR("oom\n");
+			return -1;
+		}
+		if (fts_json_prefix && *fts_json_prefix) {
+			int plen = strlen(fts_json_prefix);
+			target_key = pkg_malloc(plen + enc_len + 1);
+			if (!target_key) { free(enc); LM_ERR("oom\n"); return -1; }
+			memcpy(target_key, fts_json_prefix, plen);
+			memcpy(target_key + plen, enc, enc_len);
+			target_key[plen + enc_len] = '\0';
+		} else {
+			target_key = pkg_malloc(enc_len + 1);
+			if (!target_key) { free(enc); LM_ERR("oom\n"); return -1; }
+			memcpy(target_key, enc, enc_len);
+			target_key[enc_len] = '\0';
+		}
+		free(enc);
 	}
 
 	/* CAS loop: fetch (or atomically create a seed), modify, update.
