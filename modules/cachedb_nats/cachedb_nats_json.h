@@ -208,6 +208,32 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
 int nats_json_index_remove(const char *key);
 
 /*
+ * Targeted variant of index_remove that takes the document's old
+ * JSON content and visits ONLY the (field:value) entries the key
+ * appears in, rather than walking every bucket.
+ *
+ * Used by nats_cache_update on a successful CAS write: the
+ * pre-write JSON we already fetched from kvStore_Get tells us
+ * exactly which entries this key was registered against, so we
+ * can remove the key with O(F) work (F = number of indexed
+ * top-level string fields, typically 2-3) instead of O(N) over
+ * the whole index.  Locks one shard at a time.
+ *
+ * Falls back to a no-op if @json_str is NULL or empty; callers
+ * without the old JSON (e.g. the lazy stale-index self-heal in
+ * nats_cache_query) should keep using nats_json_index_remove.
+ *
+ * @param key       Document key string to remove.
+ * @param json_str  Raw JSON of the document the key was indexed against.
+ * @param json_len  Length of json_str in bytes.
+ * @return          0 on success, -1 on parse error.
+ *
+ * Thread safety: takes one shard at a time per field.
+ */
+int nats_json_index_remove_fields(const char *key,
+	const char *json_str, int json_len);
+
+/*
  * Destroy the search index and free all resources.
  *
  * Frees all index entries, document key strings, and the mutex.
