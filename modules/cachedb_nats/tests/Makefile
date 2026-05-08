@@ -8,7 +8,8 @@ ASAN    := -fsanitize=address
 .PHONY: all check check-tsan clean
 
 TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
-        test_reply_size_cap test_disconnected_fastfail test_timeout_normalize
+        test_reply_size_cap test_disconnected_fastfail test_timeout_normalize \
+        test_update_nested_dict
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -38,6 +39,9 @@ test_disconnected_fastfail: test_disconnected_fastfail.c
 test_timeout_normalize: test_timeout_normalize.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_update_nested_dict: test_update_nested_dict.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -45,6 +49,7 @@ check: all
 	./test_reply_size_cap
 	./test_disconnected_fastfail
 	./test_timeout_normalize
+	./test_update_nested_dict
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

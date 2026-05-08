@@ -1428,19 +1428,436 @@ static char *_json_set_field(const char *json, int json_len,
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/*    Typed pair → JSON application (handles non-string and nested)   */
+/* ------------------------------------------------------------------ */
+
+/* Locate the value range of a top-level field in a JSON object.
+ * Returns 0 if found and writes vstart/vend to the value bounds; 1 if
+ * the field does not exist (and insert_pos is set to the position of
+ * the closing brace, plus needs_comma indicates whether a leading
+ * ',' is needed); -1 on parse error.
+ */
+static int _find_field(const char *json, int json_len,
+	const char *field, int flen,
+	const char **vstart, const char **vend,
+	const char **insert_pos, int *needs_comma)
+{
+	const char *p = json, *end = json + json_len;
+	const char *jfield;
+	int jflen;
+	int saw_field = 0;
+
+	p = _skip_ws(p, end);
+	if (p >= end || *p != '{') return -1;
+	p++;
+	while (p < end) {
+		p = _skip_ws(p, end);
+		if (p >= end) return -1;
+		if (*p == '}') {
+			*insert_pos = p;
+			*needs_comma = saw_field;
+			return 1;
+		}
+		if (*p == ',') { p++; continue; }
+		p = _parse_json_string(p, end, &jfield, &jflen);
+		if (!p) return -1;
+		saw_field = 1;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':') return -1;
+		p++;
+		p = _skip_ws(p, end);
+		if (jflen == flen && memcmp(jfield, field, flen) == 0) {
+			*vstart = p;
+			p = _skip_json_value(p, end);
+			if (!p) return -1;
+			*vend = p;
+			return 0;
+		}
+		p = _skip_json_value(p, end);
+		if (!p) return -1;
+	}
+	return -1;
+}
+
+/* Render a leaf value into a malloc'd JSON literal token (no surrounding
+ * key/colon). Returns NULL on alloc failure or invalid type. */
+static char *_render_leaf(char val_type,
+	const char *val_str, int val_len, int64_t val_int, int *out_len)
+{
+	char *buf;
+	int n;
+
+	switch (val_type) {
+	case 'N':
+		buf = malloc(5);
+		if (!buf) return NULL;
+		memcpy(buf, "null", 5);
+		*out_len = 4;
+		return buf;
+	case 'I':
+	case 'L': {
+		char tmp[32];
+		n = snprintf(tmp, sizeof(tmp), "%lld", (long long)val_int);
+		if (n < 0 || n >= (int)sizeof(tmp)) return NULL;
+		buf = malloc(n + 1);
+		if (!buf) return NULL;
+		memcpy(buf, tmp, n + 1);
+		*out_len = n;
+		return buf;
+	}
+	case 'S': {
+		int cap = val_len * 6 + 3;   /* worst-case escape + 2 quotes */
+		buf = malloc(cap);
+		if (!buf) return NULL;
+		buf[0] = '"';
+		n = _json_escape(val_str, val_len, buf + 1, cap - 2);
+		if (n < 0) { free(buf); return NULL; }
+		buf[1 + n] = '"';
+		buf[2 + n] = '\0';
+		*out_len = n + 2;
+		return buf;
+	}
+	case 'O': {
+		buf = malloc(val_len + 1);
+		if (!buf) return NULL;
+		memcpy(buf, val_str, val_len);
+		buf[val_len] = '\0';
+		*out_len = val_len;
+		return buf;
+	}
+	}
+	return NULL;
+}
+
+static char *_splice(const char *json, int json_len,
+	int pre_off, int post_off,
+	const char *middle, int middle_len, int *out_len)
+{
+	int suffix = json_len - post_off;
+	int new_len = pre_off + middle_len + suffix;
+	char *out = malloc(new_len + 1);
+	if (!out) return NULL;
+	memcpy(out, json, pre_off);
+	memcpy(out + pre_off, middle, middle_len);
+	memcpy(out + pre_off + middle_len, json + post_off, suffix);
+	out[new_len] = '\0';
+	*out_len = new_len;
+	return out;
+}
+
+static char *_kv_token(const char *field, int flen,
+	const char *rendered, int rendered_len, int *out_len)
+{
+	int cap = flen * 6 + 4 + rendered_len;
+	int n;
+	char *buf = malloc(cap);
+	if (!buf) return NULL;
+	buf[0] = '"';
+	n = _json_escape(field, flen, buf + 1, cap - 3 - rendered_len);
+	if (n < 0) { free(buf); return NULL; }
+	buf[1 + n]     = '"';
+	buf[1 + n + 1] = ':';
+	memcpy(buf + 1 + n + 2, rendered, rendered_len);
+	buf[1 + n + 2 + rendered_len] = '\0';
+	*out_len = 1 + n + 2 + rendered_len;
+	return buf;
+}
+
+/* Set or unset a top-level field of @json to @rendered. */
+static char *_object_set(const char *json, int json_len,
+	const char *field, int flen,
+	const char *rendered, int rendered_len,
+	int unset, int *out_len)
+{
+	const char *vstart = NULL, *vend = NULL, *ipos = NULL;
+	int needs_comma = 0;
+	int rc = _find_field(json, json_len, field, flen,
+		&vstart, &vend, &ipos, &needs_comma);
+	if (rc < 0) return NULL;
+
+	if (unset) {
+		if (rc == 1) {
+			char *out = malloc(json_len + 1);
+			if (!out) return NULL;
+			memcpy(out, json, json_len);
+			out[json_len] = '\0';
+			*out_len = json_len;
+			return out;
+		}
+		{
+			int kstart = (int)(vstart - json);
+			int kend   = (int)(vend - json);
+			while (kstart > 0) {
+				char c = json[kstart - 1];
+				if (c == ' ' || c == '\t' || c == ':' ||
+				    c == '\n' || c == '\r') {
+					kstart--; continue;
+				}
+				if (c == '"') { kstart--; break; }
+				break;
+			}
+			while (kstart > 0 && json[kstart - 1] != '"') kstart--;
+			if (kstart > 0) kstart--;
+			if (kstart > 0 && json[kstart - 1] == ',') kstart--;
+			else {
+				while (kend < json_len &&
+				    (json[kend] == ' ' || json[kend] == '\t' ||
+				     json[kend] == '\n' || json[kend] == '\r'))
+					kend++;
+				if (kend < json_len && json[kend] == ',') kend++;
+			}
+			return _splice(json, json_len, kstart, kend, "", 0, out_len);
+		}
+	}
+
+	if (rc == 0) {
+		return _splice(json, json_len,
+			(int)(vstart - json), (int)(vend - json),
+			rendered, rendered_len, out_len);
+	}
+	{
+		char *kv;
+		int kvlen;
+		kv = _kv_token(field, flen, rendered, rendered_len, &kvlen);
+		if (!kv) return NULL;
+		{
+			int ipos_off = (int)(ipos - json);
+			char *with_comma = NULL;
+			char *out;
+			int wc_len = 0;
+			if (needs_comma) {
+				with_comma = malloc(1 + kvlen + 1);
+				if (!with_comma) { free(kv); return NULL; }
+				with_comma[0] = ',';
+				memcpy(with_comma + 1, kv, kvlen);
+				with_comma[1 + kvlen] = '\0';
+				wc_len = 1 + kvlen;
+			}
+			out = _splice(json, json_len, ipos_off, ipos_off,
+				needs_comma ? with_comma : kv,
+				needs_comma ? wc_len : kvlen, out_len);
+			free(kv);
+			free(with_comma);
+			return out;
+		}
+	}
+}
+
+/**
+ * _json_apply_pair() — apply one cdb_pair_t-style update to a JSON object.
+ *
+ * Replaces the previous string-only _json_set_field codepath. Handles the
+ * full cdb_pair_t surface: typed leaf values (string, int32, int64, null,
+ * raw JSON object), optional subkey (treats @field as a JSON object of
+ * which @subkey is what gets set/unset — used by usrloc to address one
+ * contact under "contacts"), and the unset flag.
+ *
+ * Returns malloc'd new document, or NULL on error. Caller must free().
+ * The original @json buffer is never modified.
+ */
+static char *_json_apply_pair(const char *json, int json_len,
+	const char *field, int flen,
+	const char *subkey, int sklen,
+	int unset,
+	char val_type,
+	const char *val_str, int val_len,
+	int64_t val_int)
+{
+	int dummy_len;
+
+	if (!json || json_len <= 0 || !field || flen <= 0) return NULL;
+
+	if (sklen <= 0 || !subkey) {
+		if (unset)
+			return _object_set(json, json_len, field, flen,
+				NULL, 0, 1, &dummy_len);
+		{
+			char *rendered;
+			int rlen;
+			char *out;
+			rendered = _render_leaf(val_type, val_str, val_len,
+				val_int, &rlen);
+			if (!rendered) return NULL;
+			out = _object_set(json, json_len, field, flen,
+				rendered, rlen, 0, &dummy_len);
+			free(rendered);
+			return out;
+		}
+	}
+
+	/* subkey path: @field is treated as a JSON object */
+	{
+		const char *vstart = NULL, *vend = NULL, *ipos = NULL;
+		int needs_comma = 0;
+		int rc = _find_field(json, json_len, field, flen,
+			&vstart, &vend, &ipos, &needs_comma);
+		const char *inner;
+		int inner_len;
+		char inner_buf[3] = "{}";
+		char *new_inner;
+		int new_inner_len;
+		char *out;
+
+		if (rc < 0) return NULL;
+		if (rc == 0) {
+			const char *p = _skip_ws(vstart, vend);
+			if (p >= vend || *p != '{') return NULL;
+			inner = vstart;
+			inner_len = (int)(vend - vstart);
+		} else {
+			inner = inner_buf;
+			inner_len = 2;
+		}
+
+		if (unset) {
+			new_inner = _object_set(inner, inner_len,
+				subkey, sklen, NULL, 0, 1, &new_inner_len);
+		} else {
+			char *rendered;
+			int rlen;
+			rendered = _render_leaf(val_type, val_str, val_len,
+				val_int, &rlen);
+			if (!rendered) return NULL;
+			new_inner = _object_set(inner, inner_len,
+				subkey, sklen, rendered, rlen, 0, &new_inner_len);
+			free(rendered);
+		}
+		if (!new_inner) return NULL;
+
+		if (rc == 0) {
+			out = _splice(json, json_len,
+				(int)(vstart - json), (int)(vend - json),
+				new_inner, new_inner_len, &dummy_len);
+			free(new_inner);
+			return out;
+		}
+		{
+			char *kv;
+			int kvlen;
+			kv = _kv_token(field, flen, new_inner, new_inner_len, &kvlen);
+			free(new_inner);
+			if (!kv) return NULL;
+			{
+				int ipos_off = (int)(ipos - json);
+				char *with_comma = NULL;
+				int wc_len = 0;
+				if (needs_comma) {
+					with_comma = malloc(1 + kvlen + 1);
+					if (!with_comma) { free(kv); return NULL; }
+					with_comma[0] = ',';
+					memcpy(with_comma + 1, kv, kvlen);
+					wc_len = 1 + kvlen;
+				}
+				out = _splice(json, json_len, ipos_off, ipos_off,
+					needs_comma ? with_comma : kv,
+					needs_comma ? wc_len : kvlen, &dummy_len);
+				free(kv);
+				free(with_comma);
+				return out;
+			}
+		}
+	}
+}
+
+/* Recursively serialize a cdb_dict_t to a fresh JSON object string.
+ * Returns malloc'd or NULL on error. */
+static char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
+{
+	struct list_head *pos;
+	cdb_pair_t *pair;
+	char *cur, *next;
+	int cur_len;
+
+	cur = malloc(3);
+	if (!cur) return NULL;
+	memcpy(cur, "{}", 3);
+	cur_len = 2;
+
+	list_for_each(pos, dict) {
+		char val_type;
+		const char *val_str = NULL;
+		int val_len = 0;
+		int64_t val_int = 0;
+		char *serialized = NULL;
+		int serialized_len = 0;
+
+		pair = list_entry(pos, cdb_pair_t, list);
+
+		if (pair->unset) {
+			next = _json_apply_pair(cur, cur_len,
+				pair->key.name.s, pair->key.name.len,
+				pair->subkey.s, pair->subkey.len,
+				1, 'N', NULL, 0, 0);
+			free(cur);
+			if (!next) return NULL;
+			cur = next;
+			cur_len = (int)strlen(cur);
+			continue;
+		}
+
+		switch (pair->val.type) {
+		case CDB_STR:
+			val_type = 'S';
+			val_str = pair->val.val.st.s;
+			val_len = pair->val.val.st.len;
+			break;
+		case CDB_INT32:
+			val_type = 'I';
+			val_int = pair->val.val.i32;
+			break;
+		case CDB_INT64:
+			val_type = 'L';
+			val_int = pair->val.val.i64;
+			break;
+		case CDB_NULL:
+			val_type = 'N';
+			break;
+		case CDB_DICT:
+			serialized = _serialize_cdb_dict(&pair->val.val.dict,
+				&serialized_len);
+			if (!serialized) { free(cur); return NULL; }
+			val_type = 'O';
+			val_str = serialized;
+			val_len = serialized_len;
+			break;
+		default:
+			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
+				pair->val.type, pair->key.name.len, pair->key.name.s);
+			free(cur);
+			return NULL;
+		}
+
+		next = _json_apply_pair(cur, cur_len,
+			pair->key.name.s, pair->key.name.len,
+			pair->subkey.s, pair->subkey.len,
+			0, val_type, val_str, val_len, val_int);
+		free(serialized);
+		free(cur);
+		if (!next) return NULL;
+		cur = next;
+		cur_len = (int)strlen(cur);
+	}
+
+	*out_len = cur_len;
+	return cur;
+}
+
 /**
  * nats_cache_update() — cachedb update callback: modify matched documents.
  *
  * Identifies the target document either by primary key (is_pk flag on the
  * filter) or by index lookup (same mechanism as nats_cache_query, but only
  * the first match is used).  Fetches the document from NATS KV, applies
- * each field update from @pairs via _json_set_field(), and writes the
+ * each field update from @pairs via _json_apply_pair(), and writes the
  * modified JSON back using a compare-and-swap (CAS) loop to handle
  * concurrent modifications.  After a successful CAS, the index is updated
  * by removing and re-adding the document.
  *
- * Only string-valued pairs are applied; non-string pairs are skipped.
- * Retries up to NATS_CAS_RETRIES times on CAS conflict.
+ * Handles the full cdb_pair_t type surface (CDB_STR, CDB_INT32, CDB_INT64,
+ * CDB_NULL, CDB_DICT), the subkey field (treats outer key as a JSON object
+ * containing the subkey), and the unset flag (removes the addressed key).
+ * Retries up to nats_cas_retries times on CAS conflict.
  *
  * Returns 0 on success, -1 on error or CAS exhaustion.
  */
@@ -1570,19 +1987,71 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		kvEntry_Destroy(entry);
 		entry = NULL;
 
-		/* apply each pair update */
+		/* apply each pair update via the typed helper */
 		list_for_each(pos, pairs) {
+			char val_type;
+			const char *val_str = NULL;
+			int val_len = 0;
+			int64_t val_int = 0;
+			char *serialized = NULL;
+			int serialized_len = 0;
+
 			pair = list_entry(pos, cdb_pair_t, list);
 
-			if (pair->val.type != CDB_STR) {
-				LM_DBG("skipping non-string pair '%.*s'\n",
-					pair->key.name.len, pair->key.name.s);
-				continue;
+			if (pair->unset) {
+				new_json = _json_apply_pair(json_buf, strlen(json_buf),
+					pair->key.name.s, pair->key.name.len,
+					pair->subkey.s, pair->subkey.len,
+					1, 'N', NULL, 0, 0);
+			} else {
+				switch (pair->val.type) {
+				case CDB_STR:
+					val_type = 'S';
+					val_str = pair->val.val.st.s;
+					val_len = pair->val.val.st.len;
+					break;
+				case CDB_INT32:
+					val_type = 'I';
+					val_int = pair->val.val.i32;
+					break;
+				case CDB_INT64:
+					val_type = 'L';
+					val_int = pair->val.val.i64;
+					break;
+				case CDB_NULL:
+					val_type = 'N';
+					break;
+				case CDB_DICT:
+					serialized = _serialize_cdb_dict(&pair->val.val.dict,
+						&serialized_len);
+					if (!serialized) {
+						LM_ERR("failed to serialize nested dict for "
+							"field '%.*s'\n",
+							pair->key.name.len, pair->key.name.s);
+						free(json_buf);
+						pkg_free(target_key);
+						return -1;
+					}
+					val_type = 'O';
+					val_str = serialized;
+					val_len = serialized_len;
+					break;
+				default:
+					LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
+						pair->val.type,
+						pair->key.name.len, pair->key.name.s);
+					free(json_buf);
+					pkg_free(target_key);
+					return -1;
+				}
+
+				new_json = _json_apply_pair(json_buf, strlen(json_buf),
+					pair->key.name.s, pair->key.name.len,
+					pair->subkey.s, pair->subkey.len,
+					0, val_type, val_str, val_len, val_int);
+				free(serialized);
 			}
 
-			new_json = _json_set_field(json_buf, strlen(json_buf),
-				pair->key.name.s, pair->key.name.len,
-				pair->val.val.st.s, pair->val.val.st.len);
 			if (!new_json) {
 				LM_ERR("failed to update field '%.*s'\n",
 					pair->key.name.len, pair->key.name.s);
