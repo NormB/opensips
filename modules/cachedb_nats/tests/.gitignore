@@ -7,4 +7,5 @@ test_disconnected_fastfail
 test_update_nested_dict
 test_update_creates_doc
 test_cas_backoff
+test_index_stale_recovery
 *.o
