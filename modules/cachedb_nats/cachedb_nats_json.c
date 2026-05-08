@@ -982,6 +982,65 @@ int nats_json_index_remove(const char *key)
 	return 0;
 }
 
+/* Per-field-callback adapter for nats_json_index_remove_fields:
+ * looks up the (field:value) entry, locks just its shard, removes
+ * the doc-key from its keys[] array, releases the shard.  Field +
+ * value byte slices alias into the caller-owned old JSON, which
+ * stays live across this entire call sequence. */
+typedef struct {
+	const char *doc_key;
+} _idx_remove_ctx;
+
+static void _index_remove_field_cb(const char *field, int flen,
+	const char *val, int vlen, void *ctx)
+{
+	_idx_remove_ctx *rctx = ctx;
+	char fv_buf[1024];
+	int fv_len = flen + 1 + vlen;
+	unsigned int bucket;
+	int shard;
+	nats_idx_entry *e;
+
+	if (flen < 0 || vlen < 0) return;
+	if (fv_len >= (int)sizeof(fv_buf)) return;
+	memcpy(fv_buf, field, flen);
+	fv_buf[flen] = ':';
+	memcpy(fv_buf + flen + 1, val, vlen);
+	fv_buf[fv_len] = '\0';
+
+	bucket = _hash(fv_buf, fv_len);
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	_idx_lock_shard(g_idx, shard);
+	e = _find_entry_in(g_idx, fv_buf, fv_len);
+	if (e)
+		_entry_remove_key(e, rctx->doc_key);
+	_idx_unlock_shard(g_idx, shard);
+}
+
+int nats_json_index_remove_fields(const char *key,
+	const char *json_str, int json_len)
+{
+	_idx_remove_ctx ctx;
+	int rc;
+
+	if (!g_idx || !key || !json_str || json_len <= 0)
+		return 0;
+
+	ctx.doc_key = key;
+	rc = _parse_json_fields(json_str, json_len, _index_remove_field_cb,
+		&ctx);
+	if (rc < 0)
+		return -1;
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+
+	LM_DBG("removed key '%s' (%d field entries) from index\n",
+		key, rc);
+	return 0;
+}
+
 /**
  * nats_json_index_rebuild() — Clear the index and rebuild from KV data.
  *
@@ -2448,7 +2507,13 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				return -1;
 			}
 
-			/* make a mutable copy of the JSON */
+			/* make a mutable copy of the JSON; this becomes the
+			 * "old doc" that's still indexed when the CAS lands.
+			 * We keep it across _apply_pairs_one_pass so we can
+			 * pass it to nats_json_index_remove_fields after
+			 * CAS success — that lets us remove only the
+			 * (field:value) entries this key was actually in,
+			 * rather than walking the whole index. */
 			json_buf = malloc(data_len + 1);
 			if (!json_buf) {
 				LM_ERR("oom\n");
@@ -2469,35 +2534,45 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		 * re-parsed the entire doc on every iteration (O(M·|doc|)).
 		 * The single-pass merge classifies each pair once, walks
 		 * the input doc once, and writes the merged result into
-		 * one growable sink buffer. */
-		new_json = _apply_pairs_one_pass(json_buf,
-			(int)strlen(json_buf), pairs);
-		if (!new_json) {
-			LM_ERR("failed to apply pairs in single pass\n");
-			free(json_buf);
-			pkg_free(target_key);
-			return -1;
+		 * one growable sink buffer.  We keep the input buffer
+		 * (json_buf) alive for the targeted index removal below. */
+		{
+			int old_len = (int)strlen(json_buf);
+			new_json = _apply_pairs_one_pass(json_buf, old_len, pairs);
+			if (!new_json) {
+				LM_ERR("failed to apply pairs in single pass\n");
+				free(json_buf);
+				pkg_free(target_key);
+				return -1;
+			}
+			(void)pair; (void)pos; /* silence -Wunused under this branch */
+
+			/* write back with CAS */
+			s = kvStore_UpdateString(&new_rev, ncon->kv, target_key,
+				new_json, rev);
+			if (s == NATS_OK) {
+				/* Targeted index update: remove the key from only
+				 * the entries it was in (derived from the OLD
+				 * JSON we still hold in json_buf), then add it
+				 * to the entries derived from the NEW JSON.
+				 * Replaces the prior O(N) full-bucket-walk
+				 * remove that held all shard locks for the
+				 * duration. */
+				nats_json_index_remove_fields(target_key,
+					json_buf, old_len);
+				nats_json_index_add(target_key, new_json,
+					(int)strlen(new_json));
+
+				LM_DBG("updated key '%s' rev=%llu\n", target_key,
+					(unsigned long long)new_rev);
+				free(new_json);
+				free(json_buf);
+				pkg_free(target_key);
+				return 0;
+			}
+
+			free(new_json);
 		}
-		free(json_buf);
-		json_buf = new_json;
-		new_json = NULL;
-		(void)pair; (void)pos; /* silence -Wunused under this branch */
-
-		/* write back with CAS */
-		s = kvStore_UpdateString(&new_rev, ncon->kv, target_key,
-			json_buf, rev);
-		if (s == NATS_OK) {
-			/* update the index */
-			nats_json_index_remove(target_key);
-			nats_json_index_add(target_key, json_buf, strlen(json_buf));
-
-			LM_DBG("updated key '%s' rev=%llu\n", target_key,
-				(unsigned long long)new_rev);
-			free(json_buf);
-			pkg_free(target_key);
-			return 0;
-		}
-
 		free(json_buf);
 		json_buf = NULL;
 
