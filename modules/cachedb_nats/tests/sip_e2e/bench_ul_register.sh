@@ -1,0 +1,210 @@
+#!/bin/bash
+# Bench harness for the cachedb_nats <-> usrloc full-sharing-cachedb
+# write path.  Drives N concurrent REGISTERs at a configurable RPS,
+# captures end-to-end latency percentiles, the CAS-retry / CAS-
+# exhausted deltas reported via the nats_cdb_stats MI, and the NATS
+# stream growth.  Intended for Phase 3 topology decisions:
+#   - single-instance baseline
+#   - two-instance (run with INSTANCES=2)
+#   - cross-DC RTT (set NATS_URL to a remote broker; tc qdisc on the
+#     loopback if simulating in-host)
+#
+# Required tools: opensips, nats CLI, sipsak, awk, gnu-time, ts (moreutils).
+# Skips with exit 77 when prereqs absent.
+#
+# Environment overrides:
+#   N=1000                    total REGISTERs
+#   RPS=200                   target rate (sustained, simple fork-batched)
+#   AOR_SPACE=200             distinct AoRs (mod-cycled; smaller -> more
+#                             contention)
+#   INSTANCES=1               1 or 2 — 2 splits load across A and B
+#   NATS_URL                  NATS broker URL
+#   KV_BUCKET                 bucket (default ULNATS_E2E_BENCH_<pid>_<ts>)
+#   OUT                       output directory (default $WORKDIR)
+
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+TREE_ROOT="$(cd "${HERE}/../../../.." && pwd)"
+
+OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
+OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
+OPENSIPS_MODULES="${OPENSIPS_MODULES:-${TREE_ROOT}/_modules}"
+NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}"
+KV_BUCKET="${KV_BUCKET:-ULNATS_E2E_BENCH_$$_$(date +%s)}"
+
+N="${N:-1000}"
+RPS="${RPS:-200}"
+AOR_SPACE="${AOR_SPACE:-200}"
+INSTANCES="${INSTANCES:-1}"
+
+WORKDIR="$(mktemp -d -t cachedb-nats-bench.XXXXXX)"
+OUT="${OUT:-$WORKDIR}"
+mkdir -p "$OUT"
+
+OPENSIPS_PID=""
+OPENSIPS_PID_B=""
+
+cleanup() {
+    [ -n "$OPENSIPS_PID" ]   && kill "$OPENSIPS_PID"   2>/dev/null
+    [ -n "$OPENSIPS_PID_B" ] && kill "$OPENSIPS_PID_B" 2>/dev/null
+    wait 2>/dev/null
+    nats --server "$NATS_URL" kv del "$KV_BUCKET" -f >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "missing: $1"; exit 77;
+    }
+}
+need nats; need sipsak; need awk
+
+[ -x "$OPENSIPS_BIN" ] || { echo "no opensips: $OPENSIPS_BIN"; exit 77; }
+[ -d "$OPENSIPS_MODULES" ] || { echo "no modules: $OPENSIPS_MODULES"; exit 77; }
+nats --server "$NATS_URL" server check connection >/dev/null 2>&1 || {
+    echo "NATS unreachable: $NATS_URL"; exit 77;
+}
+
+NATS_HOSTPORT="${NATS_URL#nats://}"; NATS_HOSTPORT="${NATS_HOSTPORT%/}"
+CACHEDB_URL="nats:loc://${NATS_HOSTPORT}/"
+
+nats --server "$NATS_URL" kv add "$KV_BUCKET" --history=3 --replicas=1 \
+    >/dev/null 2>&1 || true
+
+render_cfg() {
+    local out=$1 inst=$2 sip=$3 mi=$4 cport=$5 nid=$6
+    sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
+        -e "s|@@NATS_URL@@|${NATS_URL}|g" \
+        -e "s|@@CACHEDB_URL@@|${CACHEDB_URL}|g" \
+        -e "s|@@SIP_PORT@@|${sip}|g" -e "s|@@MI_PORT@@|${mi}|g" \
+        -e "s|@@CLUSTER_PORT@@|${cport}|g" -e "s|@@NODE_ID@@|${nid}|g" \
+        -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" -e "s|@@INSTANCE@@|${inst}|g" \
+        "${HERE}/opensips.cfg.in" > "$out"
+}
+
+start_instance() {
+    local inst=$1 sip=$2 mi=$3 cport=$4 nid=$5
+    local cfg="$WORKDIR/o_${inst}.cfg"
+    local log="$OUT/opensips_${inst}.log"
+    render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
+    LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+        "$OPENSIPS_BIN" -F -f "$cfg" -m 256 -M 8 > "$log" 2>&1 &
+    local pid=$!
+    sleep 2
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "FATAL: opensips $inst died" >&2
+        tail -20 "$log" >&2
+        exit 1
+    fi
+    echo "$pid"
+}
+
+mi_at() {
+    local port=$1 method=$2
+    printf '{"jsonrpc":"2.0","id":1,"method":"%s"}' "$method" \
+        | timeout 3 nc -u -w 2 127.0.0.1 "$port"
+}
+mi_cdb_stats_at() {
+    mi_at "$1" nats_cdb_stats
+}
+
+OPENSIPS_PID=$(start_instance A 5072 8889 5666 1)
+if [ "$INSTANCES" = 2 ]; then
+    OPENSIPS_PID_B=$(start_instance B 5074 8890 5667 2)
+fi
+
+# Capture the pre-run baseline for both instances
+A_STATS_BEFORE=$(mi_cdb_stats_at 8889)
+[ "$INSTANCES" = 2 ] && B_STATS_BEFORE=$(mi_cdb_stats_at 8890)
+
+echo
+echo "=========================================="
+echo "  cachedb_nats <-> usrloc bench"
+echo "  instances:  $INSTANCES"
+echo "  N:          $N"
+echo "  target RPS: $RPS"
+echo "  AoR space:  $AOR_SPACE"
+echo "  bucket:     $KV_BUCKET"
+echo "  out:        $OUT"
+echo "=========================================="
+
+# Drive REGISTERs: simple fork-batched pacing.  Every 1/RPS s spawn a
+# new sipsak; capture per-call wall time. Round-robin across instances.
+LATENCIES="$OUT/latencies_us.txt"
+: > "$LATENCIES"
+
+start=$(date +%s.%N)
+i=0
+while [ "$i" -lt "$N" ]; do
+    user="bench$((i % AOR_SPACE))"
+    if [ "$INSTANCES" = 2 ] && [ $((i & 1)) = 1 ]; then
+        port=5074
+    else
+        port=5072
+    fi
+    {
+        t0=$(date +%s%N)
+        sipsak -U -C "sip:${user}@127.0.0.1:${port}" \
+            -s "sip:${user}@127.0.0.1:${port}" \
+            -e 60 -t 1 -O 1 >/dev/null 2>&1
+        t1=$(date +%s%N)
+        echo $(( (t1 - t0) / 1000 )) >> "$LATENCIES"
+    } &
+
+    i=$((i + 1))
+    # Crude pacing: sleep based on RPS budget.
+    if [ "$RPS" -gt 0 ]; then
+        # 1/RPS s in microseconds
+        usleep_us=$(( 1000000 / RPS ))
+        # busy-wait via sleep with floats; bash sleep handles fractional s
+        sleep "$(awk -v u=$usleep_us 'BEGIN{printf "%.6f", u/1000000}')"
+    fi
+done
+wait
+
+end=$(date +%s.%N)
+elapsed=$(awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", e - s}')
+
+# Stats deltas
+A_STATS_AFTER=$(mi_cdb_stats_at 8889)
+[ "$INSTANCES" = 2 ] && B_STATS_AFTER=$(mi_cdb_stats_at 8890)
+
+extract() {
+    printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9]*\).*/\1/p'
+}
+delta() {
+    local f=$1 b=$2 a=$3
+    echo $(( $(extract "$a" "$f") - $(extract "$b" "$f") ))
+}
+
+# Latency percentiles via sort + awk.
+if [ -s "$LATENCIES" ]; then
+    sort -n "$LATENCIES" -o "$LATENCIES"
+    P50=$(awk 'NR==int(0.50*ct)' ct="$(wc -l < "$LATENCIES")" "$LATENCIES")
+    P95=$(awk 'NR==int(0.95*ct)' ct="$(wc -l < "$LATENCIES")" "$LATENCIES")
+    P99=$(awk 'NR==int(0.99*ct)' ct="$(wc -l < "$LATENCIES")" "$LATENCIES")
+    PMAX=$(tail -1 "$LATENCIES")
+fi
+
+# Stream depth (KV bucket size, message count)
+STREAM_INFO=$(nats --server "$NATS_URL" stream info "KV_${KV_BUCKET}" 2>/dev/null)
+MSGS=$(printf '%s' "$STREAM_INFO" | sed -n 's/.*Messages:[[:space:]]*\([0-9,]*\).*/\1/p' \
+    | tr -d ',' | head -1)
+
+echo
+echo "=========================================="
+echo "  results"
+echo "  elapsed:               ${elapsed} s"
+echo "  effective RPS:         $(awk -v n=$N -v e=$elapsed 'BEGIN{printf "%.1f", n/e}')"
+echo "  latency p50/p95/p99/max: ${P50:-?}/${P95:-?}/${P99:-?}/${PMAX:-?} us"
+echo "  CAS retry delta A:     $(delta cas_retry "$A_STATS_BEFORE" "$A_STATS_AFTER")"
+echo "  CAS exhausted delta A: $(delta cas_exhausted "$A_STATS_BEFORE" "$A_STATS_AFTER")"
+echo "  create_doc delta A:    $(delta create_doc "$A_STATS_BEFORE" "$A_STATS_AFTER")"
+if [ "$INSTANCES" = 2 ]; then
+    echo "  CAS retry delta B:     $(delta cas_retry "$B_STATS_BEFORE" "$B_STATS_AFTER")"
+    echo "  CAS exhausted delta B: $(delta cas_exhausted "$B_STATS_BEFORE" "$B_STATS_AFTER")"
+    echo "  create_doc delta B:    $(delta create_doc "$B_STATS_BEFORE" "$B_STATS_AFTER")"
+fi
+echo "  KV stream messages:    ${MSGS:-?}"
+echo "=========================================="

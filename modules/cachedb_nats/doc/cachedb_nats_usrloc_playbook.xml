@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding='ISO-8859-1'?>
+<!--
+  Phase 3 operator playbook: cachedb_nats as the storage backend
+  for usrloc in cluster_mode=full-sharing-cachedb.
+
+  This file is a DocBook XML fragment intended to be xi:included
+  from cachedb_nats_admin.xml at the end of the chapter.  It
+  documents the cross-DC topology, bucket sizing, snapshot/restore,
+  alert thresholds, and migration procedures that emerged from
+  Phase 1.5 / Phase 2 integration work.
+-->
+
+<section id="usrloc_storage_playbook" xreflabel="usrloc storage playbook">
+	<title>Operator playbook: NATS as backend store for usrloc</title>
+
+	<para>
+		This section is for operators deploying
+		<varname>usrloc</varname> in
+		<varname>cluster_mode = full-sharing-cachedb</varname> with
+		<varname>cachedb_nats</varname> as the cachedb engine.  In
+		this configuration JetStream KV is the authoritative store
+		for AoR / contact records:
+		<itemizedlist>
+			<listitem><para>SIP REGISTER → <function>save("location")</function>
+				→ usrloc → <function>cdbf.update</function> →
+				<function>kvStore_UpdateString</function> /
+				<function>kvStore_CreateString</function> on
+				<literal>KV_&lt;bucket&gt;.json_&lt;encoded-aor&gt;</literal>.
+			</para></listitem>
+			<listitem><para>SIP lookup → usrloc →
+				<function>cdb_load_urecord</function> →
+				<function>nats_cache_query</function> using the
+				per-process JSON-FTS index over JetStream KV.
+			</para></listitem>
+			<listitem><para>Process restart → usrloc state in shared
+				memory is lost; cachedb_nats's
+				<function>nats_json_index_build</function> rehydrates
+				the index from the bucket.
+			</para></listitem>
+		</itemizedlist>
+		Multiple OpenSIPS instances pointing at the same bucket
+		converge on a consistent view of usrloc state without any
+		clusterer-driven binary replication; the only
+		synchronization between writers is JetStream's per-key CAS.
+	</para>
+
+	<section>
+		<title>Topology by DC count</title>
+		<variablelist>
+			<varlistentry>
+				<term>Single DC, single broker</term>
+				<listitem><para>
+					<varname>kv_replicas = 1</varname>,
+					<varname>kv_history = 3</varname>,
+					File storage.  Use this for development and
+					small single-DC deployments.  Restart hydration
+					is fast (one round-trip per key).
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>Single DC, clustered NATS (3 servers)</term>
+				<listitem><para>
+					<varname>kv_replicas = 3</varname>.  Survives a
+					single broker failure with no AoR loss.  Recommended
+					production baseline.  Inter-broker replication is
+					NATS-internal and adds ~1-2 ms to write latency.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>Multiple DCs, one global bucket</term>
+				<listitem><para>
+					Recommended only when the inter-DC RTT is
+					&lt; 50 ms and concurrent same-AoR writes are
+					rare.  Every <function>kvStore_UpdateString</function>
+					CAS pays full inter-DC RTT.  The Phase 1.3
+					backoff bounds the worst-case at ~50 ms across
+					the default <varname>nats_cas_retries = 10</varname>
+					budget; raise the budget if cross-DC
+					contention drives <literal>cas_exhausted</literal>
+					above zero.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>Multiple DCs, bucket per DC + leafnodes</term>
+				<listitem><para>
+					Lower per-write latency at the cost of cross-DC
+					visibility being asynchronous.  Each DC reads
+					its local bucket; cross-DC AoR resolution
+					happens out of band (e.g.  GSLB or local-fail-
+					through-to-remote logic).  Conflict resolution
+					becomes operator-defined; the simplest policy is
+					"the first DC to see a REGISTER owns the AoR."
+				</para></listitem>
+			</varlistentry>
+		</variablelist>
+	</section>
+
+	<section>
+		<title>Bucket sizing</title>
+		<itemizedlist>
+			<listitem><para><emphasis>Storage:</emphasis>
+				<varname>File</varname> (default).  Memory storage
+				loses AoRs on broker restart, defeating the purpose
+				of using NATS as the backend store.
+			</para></listitem>
+			<listitem><para><emphasis>Replicas:</emphasis> match
+				broker cluster size up to 3.  Replicas &gt; 3 add
+				latency without meaningful availability gains for
+				usrloc workloads.
+			</para></listitem>
+			<listitem><para><emphasis>History:</emphasis>
+				<varname>kv_history = 3</varname> is enough to give
+				operators a short audit trail of recent revisions
+				and to support
+				<function>nats_kv_history</function> calls in
+				routing logic.  Higher values multiply storage
+				without measurable benefit for usrloc.
+			</para></listitem>
+			<listitem><para><emphasis>TTL:</emphasis>
+				<varname>kv_ttl = 0</varname> (no automatic
+				expiry).  AoR expiration is driven by usrloc's
+				timer process, not by bucket-level TTL.
+			</para></listitem>
+			<listitem><para><emphasis>Max bytes / max age:</emphasis>
+				NATS defaults are typically appropriate.  For
+				bounded environments, size the stream for at least
+				<literal>(active_aors × avg_doc_size × kv_history)</literal>
+				bytes.  An average AoR JSON document with a single
+				contact is roughly 400-600 bytes.
+			</para></listitem>
+		</itemizedlist>
+	</section>
+
+	<section>
+		<title>Snapshot and restore</title>
+		<para>
+			JetStream KV buckets are JetStream streams named
+			<literal>KV_&lt;bucket&gt;</literal> under the hood, so
+			they snapshot and restore through the standard stream
+			tooling:
+			<programlisting format="linespecific">
+nats stream snapshot KV_USRLOC ./usrloc-2026-05-08.tar.gz
+nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
+			</programlisting>
+		</para>
+		<para>
+			Snapshot during a low-traffic window for a
+			point-in-time copy.  After restore, every connected
+			OpenSIPS instance must rebuild its in-memory index;
+			either bounce the instances, set
+			<varname>index_resync_on_reconnect = 1</varname> and
+			cycle the broker (see Phase 1.3 KB-style note), or set
+			<varname>index_resync_interval_secs</varname> to a
+			value &le; the longest tolerable staleness window so
+			the periodic timer pulls the new state.
+		</para>
+	</section>
+
+	<section>
+		<title>MI counters and alert thresholds</title>
+		<para>
+			<function>nats_cdb_stats</function> returns a snapshot
+			of four atomic per-process counters tracking the
+			cachedb path:
+			<itemizedlist>
+				<listitem><para>
+					<varname>cas_retry</varname> — bumped per
+					failed UpdateString / CreateString race.  Steady
+					non-zero values are normal under contention; a
+					sustained high rate suggests
+					<varname>nats_cas_retries</varname> is too low
+					or the CAS hot key is genuinely contended.
+				</para></listitem>
+				<listitem><para>
+					<varname>cas_exhausted</varname> — bumped when
+					a CAS gave up after exhausting the budget.
+					<emphasis>Should always be 0</emphasis> in a
+					healthy deployment; non-zero indicates lost
+					writes.  Page on
+					<literal>delta(cas_exhausted) &gt; 0</literal>
+					over any reasonable interval.
+				</para></listitem>
+				<listitem><para>
+					<varname>create_doc</varname> — bumped per
+					first-insert path (<function>kvStore_CreateString</function>
+					of a seed doc).  Roughly equal to the rate of
+					genuinely new AoRs.  A spike usually maps to a
+					burst of new registrations.
+				</para></listitem>
+				<listitem><para>
+					<varname>index_miss_kv</varname> — bumped when
+					<function>nats_cache_query</function> hit an
+					index entry whose KV key was already deleted.
+					Self-heal evicts the entry; a non-zero rate is
+					expected in multi-instance deployments.  A
+					<emphasis>large</emphasis> sustained rate
+					suggests cross-instance churn higher than the
+					self-heal pace; consider enabling
+					<varname>index_resync_interval_secs</varname>.
+				</para></listitem>
+			</itemizedlist>
+		</para>
+	</section>
+
+	<section>
+		<title>Migration from full-sharing-cachedb-cluster</title>
+		<para>
+			The legacy mode <varname>full-sharing-cachedb-cluster</varname>
+			additionally relies on clusterer to broadcast cachedb
+			invalidation events.  With cachedb_nats, the KV watcher
+			thread + Phase 1.4 self-heal subsume that role.  To
+			migrate:
+			<orderedlist>
+				<listitem><para>
+					Take a snapshot of the current bucket (above).
+				</para></listitem>
+				<listitem><para>
+					On each instance, change <varname>cluster_mode</varname>
+					to <varname>full-sharing-cachedb</varname>;
+					keep the existing <varname>location_cluster</varname>
+					(clusterer is still required for shtag /
+					pinging coordination).
+				</para></listitem>
+				<listitem><para>
+					Roll instances one at a time.  Each rolled
+					instance rebuilds its index from KV on
+					<function>child_init</function> and is
+					immediately consistent with peers still on the
+					old mode.
+				</para></listitem>
+				<listitem><para>
+					After all instances are migrated, the
+					clusterer-driven cachedb broadcast capabilities
+					become idle and can be removed at the next
+					maintenance window.
+				</para></listitem>
+			</orderedlist>
+		</para>
+	</section>
+
+	<section>
+		<title>Optional knobs introduced in this work</title>
+		<variablelist>
+			<varlistentry>
+				<term><varname>index_resync_on_reconnect</varname>
+				(int, default 1)</term>
+				<listitem><para>
+					Whether the KV watcher rebuilds the in-memory
+					index in full after each reconnect.  Phase 1.4
+					self-heal makes this redundant for correctness;
+					operators with hot-reconnect topologies can set
+					this to 0 to save the O(N) round-trip.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term><varname>index_resync_interval_secs</varname>
+				(int, default 0 = off)</term>
+				<listitem><para>
+					Periodic full rebuild on a timer.  Belt-and-
+					braces upper bound on per-process index
+					staleness.  Skipped silently while NATS is
+					disconnected.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term><varname>nats_cas_retries</varname>
+				(int, default 10)</term>
+				<listitem><para>
+					CAS budget per
+					<function>nats_cache_update</function> /
+					<function>nats_cache_counter_op</function>
+					call.  Combined with the Phase 1.3 jittered
+					backoff (50&nbsp;us base, 5&nbsp;ms cap),
+					the worst-case per-call latency is
+					~50&nbsp;ms.  Raise only if
+					<varname>cas_exhausted</varname> shows
+					non-zero rates; lowering risks lost writes
+					under contention.
+				</para></listitem>
+			</varlistentry>
+		</variablelist>
+	</section>
+
+</section>
