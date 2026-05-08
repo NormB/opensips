@@ -1777,86 +1777,192 @@ static char *_json_apply_pair(const char *json, int json_len,
 
 /* Recursively serialize a cdb_dict_t to a fresh JSON object string.
  * Returns malloc'd or NULL on error. */
-static char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
+/* ------------------------------------------------------------------ */
+/*  Single-buffer JSON sink — replaces per-pair malloc-then-splice.    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+	char *buf;
+	int   len;
+	int   cap;
+	int   oom;     /* sticky: once set, all subsequent ops are no-ops */
+} json_sink_t;
+
+static int _sink_init(json_sink_t *s, int initial)
+{
+	s->cap = initial > 16 ? initial : 16;
+	s->len = 0;
+	s->oom = 0;
+	s->buf = malloc(s->cap);
+	if (!s->buf) { s->oom = 1; return -1; }
+	s->buf[0] = '\0';
+	return 0;
+}
+
+static int _sink_grow(json_sink_t *s, int need)
+{
+	int newcap;
+	char *nb;
+	if (s->oom) return -1;
+	if (s->len + need < s->cap) return 0;
+	newcap = s->cap;
+	while (newcap <= s->len + need) {
+		if (newcap > INT_MAX / 2) { s->oom = 1; return -1; }
+		newcap *= 2;
+	}
+	nb = realloc(s->buf, newcap);
+	if (!nb) { s->oom = 1; return -1; }
+	s->buf = nb;
+	s->cap = newcap;
+	return 0;
+}
+
+static int _sink_write(json_sink_t *s, const char *p, int n)
+{
+	if (s->oom || n <= 0) return s->oom ? -1 : 0;
+	if (_sink_grow(s, n + 1) < 0) return -1;
+	memcpy(s->buf + s->len, p, n);
+	s->len += n;
+	s->buf[s->len] = '\0';
+	return 0;
+}
+
+static int _sink_putc(json_sink_t *s, char c)
+{
+	return _sink_write(s, &c, 1);
+}
+
+static int _sink_emit_string(json_sink_t *s, const char *p, int n)
+{
+	int needed;
+	if (s->oom) return -1;
+	needed = n * 6 + 2; /* worst-case escape + 2 quotes */
+	if (_sink_grow(s, needed + 1) < 0) return -1;
+	s->buf[s->len++] = '"';
+	{
+		int written = _json_escape(p, n, s->buf + s->len, needed - 1);
+		if (written < 0) { s->oom = 1; return -1; }
+		s->len += written;
+	}
+	s->buf[s->len++] = '"';
+	s->buf[s->len] = '\0';
+	return 0;
+}
+
+static int _sink_emit_int(json_sink_t *s, int64_t v)
+{
+	char tmp[32];
+	int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
+	if (n < 0 || n >= (int)sizeof(tmp)) { s->oom = 1; return -1; }
+	return _sink_write(s, tmp, n);
+}
+
+/* Transfer ownership of the buffer to the caller; sink resets to empty.
+ * Caller frees the returned pointer with free(). */
+static char *_sink_take(json_sink_t *s, int *out_len)
+{
+	char *r;
+	if (s->oom) {
+		free(s->buf);
+		s->buf = NULL; s->len = 0; s->cap = 0;
+		return NULL;
+	}
+	r = s->buf;
+	if (out_len) *out_len = s->len;
+	s->buf = NULL; s->len = 0; s->cap = 0;
+	return r;
+}
+
+/* Recursively emit a cdb_dict_t as a JSON object directly into the
+ * sink — single growable buffer, no per-pair malloc churn.
+ *
+ * Pairs are written in list order with ',' separators.  Subkey-bearing
+ * pairs and pair->unset are honoured: unset subkeys are simply omitted
+ * from the output object (a fresh inner dict has no prior state to
+ * remove from), and subkey-bearing sets emit "field":{ "subkey":val }.
+ *
+ * Returns 0 on success, -1 on OOM or unknown pair type. */
+static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 {
 	struct list_head *pos;
 	cdb_pair_t *pair;
-	char *cur, *next;
-	int cur_len;
+	int first = 1;
 
-	cur = malloc(3);
-	if (!cur) return NULL;
-	memcpy(cur, "{}", 3);
-	cur_len = 2;
+	if (_sink_putc(s, '{') < 0) return -1;
 
 	list_for_each(pos, dict) {
-		char val_type;
-		const char *val_str = NULL;
-		int val_len = 0;
-		int64_t val_int = 0;
-		char *serialized = NULL;
-		int serialized_len = 0;
-
 		pair = list_entry(pos, cdb_pair_t, list);
 
-		if (pair->unset) {
-			next = _json_apply_pair(cur, cur_len,
-				pair->key.name.s, pair->key.name.len,
-				pair->subkey.s, pair->subkey.len,
-				1, 'N', NULL, 0, 0);
-			free(cur);
-			if (!next) return NULL;
-			cur = next;
-			cur_len = (int)strlen(cur);
+		/* Inside a fresh dict, an unset pair simply omits the
+		 * (sub)key.  No prior state to remove from. */
+		if (pair->unset)
 			continue;
+
+		if (!first && _sink_putc(s, ',') < 0) return -1;
+		first = 0;
+
+		if (_sink_emit_string(s, pair->key.name.s,
+				pair->key.name.len) < 0) return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+
+		/* If a subkey is present, the field's JSON value is itself
+		 * an object whose only entry is the subkey -> value pair. */
+		if (pair->subkey.len > 0 && pair->subkey.s) {
+			if (_sink_putc(s, '{') < 0) return -1;
+			if (_sink_emit_string(s, pair->subkey.s,
+					pair->subkey.len) < 0) return -1;
+			if (_sink_putc(s, ':') < 0) return -1;
 		}
 
 		switch (pair->val.type) {
 		case CDB_STR:
-			val_type = 'S';
-			val_str = pair->val.val.st.s;
-			val_len = pair->val.val.st.len;
+			if (_sink_emit_string(s, pair->val.val.st.s,
+					pair->val.val.st.len) < 0) return -1;
 			break;
 		case CDB_INT32:
-			val_type = 'I';
-			val_int = pair->val.val.i32;
+			if (_sink_emit_int(s, pair->val.val.i32) < 0) return -1;
 			break;
 		case CDB_INT64:
-			val_type = 'L';
-			val_int = pair->val.val.i64;
+			if (_sink_emit_int(s, pair->val.val.i64) < 0) return -1;
 			break;
 		case CDB_NULL:
-			val_type = 'N';
+			if (_sink_write(s, "null", 4) < 0) return -1;
 			break;
 		case CDB_DICT:
-			serialized = _serialize_cdb_dict(&pair->val.val.dict,
-				&serialized_len);
-			if (!serialized) { free(cur); return NULL; }
-			val_type = 'O';
-			val_str = serialized;
-			val_len = serialized_len;
+			if (_sink_emit_cdb_dict(s, &pair->val.val.dict) < 0)
+				return -1;
 			break;
 		default:
 			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
-				pair->val.type, pair->key.name.len, pair->key.name.s);
-			free(cur);
-			return NULL;
+				pair->val.type, pair->key.name.len,
+				pair->key.name.s);
+			s->oom = 1;
+			return -1;
 		}
 
-		next = _json_apply_pair(cur, cur_len,
-			pair->key.name.s, pair->key.name.len,
-			pair->subkey.s, pair->subkey.len,
-			0, val_type, val_str, val_len, val_int);
-		free(serialized);
-		free(cur);
-		if (!next) return NULL;
-		cur = next;
-		cur_len = (int)strlen(cur);
+		if (pair->subkey.len > 0 && pair->subkey.s) {
+			if (_sink_putc(s, '}') < 0) return -1;
+		}
 	}
 
-	*out_len = cur_len;
-	return cur;
+	if (_sink_putc(s, '}') < 0) return -1;
+	return 0;
 }
+
+/* Backwards-compatible wrapper: serialize dict into a malloc'd JSON
+ * object string.  Replaces the old per-pair-_json_apply_pair pattern
+ * with a single growable buffer; caller still frees with free(). */
+static char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
+{
+	json_sink_t s;
+	if (_sink_init(&s, 256) < 0) return NULL;
+	if (_sink_emit_cdb_dict(&s, dict) < 0) {
+		free(s.buf);
+		return NULL;
+	}
+	return _sink_take(&s, out_len);
+}
+
 
 static int _kv_char_safe(unsigned char c)
 {
