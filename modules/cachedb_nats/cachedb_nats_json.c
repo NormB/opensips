@@ -561,6 +561,8 @@ static void _index_field_cb(const char *field, int flen,
  */
 int nats_json_index_init(void)
 {
+	int i, j;
+
 	if (g_idx) {
 		LM_WARN("search index already initialized\n");
 		return 0;
@@ -572,16 +574,45 @@ int nats_json_index_init(void)
 		return -1;
 	}
 	memset(g_idx, 0, sizeof(nats_search_idx));
+	atomic_store(&g_idx->num_documents, 0);
 
-	if (pthread_mutex_init(&g_idx->lock, NULL) != 0) {
-		LM_ERR("failed to initialize index mutex\n");
-		free(g_idx);
-		g_idx = NULL;
-		return -1;
+	for (i = 0; i < NATS_IDX_SHARDS; i++) {
+		if (pthread_mutex_init(&g_idx->shard_locks[i], NULL) != 0) {
+			LM_ERR("failed to initialize index shard mutex %d\n", i);
+			for (j = 0; j < i; j++)
+				pthread_mutex_destroy(&g_idx->shard_locks[j]);
+			free(g_idx);
+			g_idx = NULL;
+			return -1;
+		}
 	}
 
-	LM_DBG("search index initialized (%d buckets)\n", NATS_IDX_BUCKETS);
+	LM_DBG("search index initialized (%d buckets, %d shards)\n",
+		NATS_IDX_BUCKETS, NATS_IDX_SHARDS);
 	return 0;
+}
+
+/* Shard-locking helpers.  Whole-index ops acquire shards in index
+ * order to keep the lock hierarchy consistent. */
+static inline void _idx_lock_shard(nats_search_idx *idx, int shard)
+{
+	pthread_mutex_lock(&idx->shard_locks[shard]);
+}
+static inline void _idx_unlock_shard(nats_search_idx *idx, int shard)
+{
+	pthread_mutex_unlock(&idx->shard_locks[shard]);
+}
+static inline void _idx_lock_all(nats_search_idx *idx)
+{
+	int i;
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		pthread_mutex_lock(&idx->shard_locks[i]);
+}
+static inline void _idx_unlock_all(nats_search_idx *idx)
+{
+	int i;
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		pthread_mutex_unlock(&idx->shard_locks[i]);
 }
 
 /* Per-entry callback type used by _drain_kv_snapshot.  Return 0 to
@@ -829,13 +860,14 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 	ctx.doc_key = key;
 	ctx.target = NULL;
 
-	pthread_mutex_lock(&g_idx->lock);
+	_idx_lock_all(g_idx);
 	for (i = 0; i < list.n; i++) {
 		_index_field_cb(list.items[i].field, list.items[i].flen,
 			list.items[i].val,   list.items[i].vlen, &ctx);
 	}
-	g_idx->num_documents++;
-	pthread_mutex_unlock(&g_idx->lock);
+	_idx_unlock_all(g_idx);
+	atomic_fetch_add_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
 
 	_idx_fv_free(&list);
 
@@ -857,7 +889,9 @@ static int _index_add_into(nats_search_idx *target, const char *key,
 	ctx.doc_key = key;
 	ctx.target = target;
 	rc = _parse_json_fields(json_str, json_len, _index_field_cb, &ctx);
-	if (rc >= 0) target->num_documents++;
+	if (rc >= 0)
+		atomic_fetch_add_explicit(&target->num_documents, 1,
+			memory_order_relaxed);
 	return rc < 0 ? -1 : 0;
 }
 
@@ -879,15 +913,17 @@ int nats_json_index_remove(const char *key)
 	if (!g_idx || !key)
 		return -1;
 
-	pthread_mutex_lock(&g_idx->lock);
+	_idx_lock_all(g_idx);
 
 	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
 		for (e = g_idx->buckets[b]; e; e = e->next)
 			_entry_remove_key(e, key);
 	}
-	g_idx->num_documents--;
 
-	pthread_mutex_unlock(&g_idx->lock);
+	_idx_unlock_all(g_idx);
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
 
 	LM_DBG("removed key '%s' from index\n", key);
 	return 0;
@@ -959,18 +995,21 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 		count = 0;
 	}
 
-	/* Step 2: atomic swap under g_idx->lock.  Snapshot the old
+	/* Step 2: atomic swap under all shard locks.  Snapshot the old
 	 * bucket pointers (they remain reachable to readers up until
-	 * we release the lock, after which they're disowned), then
+	 * we release the locks, after which they're disowned), then
 	 * install the shadow's buckets and num_documents.  Queries
-	 * arriving DURING this critical section block on the lock and
-	 * see the new state when they get in. */
-	pthread_mutex_lock(&g_idx->lock);
+	 * arriving DURING this critical section block on whatever
+	 * shard they need and see the new state when they get in. */
+	_idx_lock_all(g_idx);
 	memcpy(old_buckets, g_idx->buckets, sizeof(old_buckets));
-	old_num = g_idx->num_documents;
+	old_num = atomic_load_explicit(&g_idx->num_documents,
+		memory_order_relaxed);
 	memcpy(g_idx->buckets, shadow.buckets, sizeof(g_idx->buckets));
-	g_idx->num_documents = shadow.num_documents;
-	pthread_mutex_unlock(&g_idx->lock);
+	atomic_store_explicit(&g_idx->num_documents,
+		atomic_load_explicit(&shadow.num_documents, memory_order_relaxed),
+		memory_order_relaxed);
+	_idx_unlock_all(g_idx);
 
 	/* Step 3: free the old (now-disowned) bucket entries outside
 	 * the lock, so any blocked readers proceed immediately. */
@@ -1003,7 +1042,7 @@ void nats_json_index_destroy(void)
 	if (!g_idx)
 		return;
 
-	pthread_mutex_lock(&g_idx->lock);
+	_idx_lock_all(g_idx);
 
 	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
 		e = g_idx->buckets[b];
@@ -1014,10 +1053,16 @@ void nats_json_index_destroy(void)
 		}
 		g_idx->buckets[b] = NULL;
 	}
-	g_idx->num_documents = 0;
+	atomic_store_explicit(&g_idx->num_documents, 0,
+		memory_order_relaxed);
 
-	pthread_mutex_unlock(&g_idx->lock);
-	pthread_mutex_destroy(&g_idx->lock);
+	_idx_unlock_all(g_idx);
+
+	{
+		int i;
+		for (i = 0; i < NATS_IDX_SHARDS; i++)
+			pthread_mutex_destroy(&g_idx->shard_locks[i]);
+	}
 
 	free(g_idx);
 	g_idx = NULL;
@@ -1053,6 +1098,26 @@ static nats_idx_entry *_lookup(const char *field, int flen,
 	fv_buf[fv_len] = '\0';
 
 	return _find_entry(fv_buf, fv_len);
+}
+
+/* Same hash as _lookup but returns the shard index instead of the
+ * entry.  Used by query callers that want to lock the right shard
+ * before calling _lookup, so concurrent queries on different shards
+ * proceed without serialising. */
+static int _lookup_shard(const char *field, int flen,
+	const char *val, int vlen)
+{
+	char fv_buf[1024];
+	int fv_len = flen + 1 + vlen;
+	unsigned int b;
+
+	if (fv_len >= (int)sizeof(fv_buf))
+		return -1;
+	memcpy(fv_buf, field, flen);
+	fv_buf[flen] = ':';
+	memcpy(fv_buf + flen + 1, val, vlen);
+	b = _hash(fv_buf, fv_len);
+	return NATS_IDX_SHARD_OF(b);
 }
 
 /**
@@ -1161,10 +1226,16 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		return 0;
 	}
 
-	/* Search the index for each filter (AND logic) */
-	pthread_mutex_lock(&g_idx->lock);
-
+	/* Search the index for each filter (AND logic).  Each filter
+	 * resolves to one shard (its field:value hash), so we lock and
+	 * release per filter rather than holding the whole index for the
+	 * entire AND chain.  Concurrent queries that hash to different
+	 * shards now proceed in parallel. */
 	for (it = filter; it; it = it->next) {
+		char **iter_keys = NULL;
+		int iter_count = 0;
+		int shard;
+
 		if (!it->val.is_str) {
 			LM_DBG("skipping non-string filter for field '%.*s'\n",
 				it->key.name.len, it->key.name.s);
@@ -1174,14 +1245,25 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (it->op != CDB_OP_EQ) {
 			LM_ERR("only CDB_OP_EQ supported for NATS JSON search "
 				"(got op %d)\n", it->op);
-			pthread_mutex_unlock(&g_idx->lock);
+			if (match_keys) {
+				int k;
+				for (k = 0; k < match_count; k++)
+					free(match_keys[k]);
+				free(match_keys);
+			}
 			return -1;
 		}
 
+		shard = _lookup_shard(it->key.name.s, it->key.name.len,
+			it->val.s.s, it->val.s.len);
+		if (shard < 0) continue;
+
+		_idx_lock_shard(g_idx, shard);
 		e = _lookup(it->key.name.s, it->key.name.len,
 			it->val.s.s, it->val.s.len);
 
 		if (!e || e->num_keys == 0) {
+			_idx_unlock_shard(g_idx, shard);
 			/* no match for this filter — intersection is empty */
 			if (match_keys) {
 				int k;
@@ -1194,50 +1276,70 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			break;
 		}
 
-		if (first) {
-			/* first filter — strdup the key list so pointers remain
-			 * valid after we release the index mutex */
-			int k;
-			match_keys = malloc(sizeof(char *) * e->num_keys);
-			if (!match_keys) {
-				LM_ERR("no memory for match keys\n");
-				pthread_mutex_unlock(&g_idx->lock);
-				return -1;
+		/* Snapshot the matching keys into a private array so we can
+		 * release the shard before the per-filter merge work. */
+		iter_keys = malloc(sizeof(char *) * e->num_keys);
+		if (!iter_keys) {
+			LM_ERR("no memory for iter keys\n");
+			_idx_unlock_shard(g_idx, shard);
+			if (match_keys) {
+				int k;
+				for (k = 0; k < match_count; k++)
+					free(match_keys[k]);
+				free(match_keys);
 			}
+			return -1;
+		}
+		{
+			int k;
 			for (k = 0; k < e->num_keys; k++) {
-				match_keys[k] = strdup(e->keys[k]);
-				if (!match_keys[k]) {
-					LM_ERR("no memory for match key strdup\n");
-					while (--k >= 0)
-						free(match_keys[k]);
-					free(match_keys);
-					pthread_mutex_unlock(&g_idx->lock);
+				iter_keys[k] = strdup(e->keys[k]);
+				if (!iter_keys[k]) {
+					int j;
+					LM_ERR("no memory for iter key strdup\n");
+					for (j = 0; j < k; j++)
+						free(iter_keys[j]);
+					free(iter_keys);
+					_idx_unlock_shard(g_idx, shard);
+					if (match_keys) {
+						for (j = 0; j < match_count; j++)
+							free(match_keys[j]);
+						free(match_keys);
+					}
 					return -1;
 				}
 			}
-			match_count = e->num_keys;
+			iter_count = e->num_keys;
+		}
+		_idx_unlock_shard(g_idx, shard);
+
+		if (first) {
+			/* first filter — adopt iter_keys directly */
+			match_keys = iter_keys;
+			match_count = iter_count;
 			first = 0;
 		} else {
-			/* intersect with previous results */
+			/* intersect previous match_keys (strdup'd) with the new
+			 * iter_keys (also strdup'd).  After the intersect we
+			 * own a result array of survivors (pointers aliasing
+			 * match_keys); strdup them, free both inputs, install
+			 * the new survivors as match_keys. */
 			char **new_keys = NULL;
 			int new_count = 0;
 
 			if (_intersect_keys(match_keys, match_count,
-					e->keys, e->num_keys,
+					iter_keys, iter_count,
 					&new_keys, &new_count) < 0) {
+				int k;
 				LM_ERR("intersection failed\n");
-				{
-					int k;
-					for (k = 0; k < match_count; k++)
-						free(match_keys[k]);
-				}
+				for (k = 0; k < iter_count; k++)
+					free(iter_keys[k]);
+				free(iter_keys);
+				for (k = 0; k < match_count; k++)
+					free(match_keys[k]);
 				free(match_keys);
-				pthread_mutex_unlock(&g_idx->lock);
 				return -1;
 			}
-			/* _intersect_keys returns pointers aliased into match_keys.
-			 * strdup the survivors in place BEFORE freeing match_keys,
-			 * otherwise the strdup reads freed memory (UAF). */
 			{
 				int k;
 				for (k = 0; k < new_count; k++) {
@@ -1248,28 +1350,30 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 						for (j = 0; j < k; j++)
 							free(new_keys[j]);
 						free(new_keys);
+						for (j = 0; j < iter_count; j++)
+							free(iter_keys[j]);
+						free(iter_keys);
 						for (j = 0; j < match_count; j++)
 							free(match_keys[j]);
 						free(match_keys);
-						pthread_mutex_unlock(&g_idx->lock);
 						return -1;
 					}
 					new_keys[k] = dup;
 				}
 			}
-			/* now safe to free the previous match_keys */
 			{
 				int k;
+				for (k = 0; k < iter_count; k++)
+					free(iter_keys[k]);
+				free(iter_keys);
 				for (k = 0; k < match_count; k++)
 					free(match_keys[k]);
+				free(match_keys);
 			}
-			free(match_keys);
 			match_keys = new_keys;
 			match_count = new_count;
 		}
 	}
-
-	pthread_mutex_unlock(&g_idx->lock);
 
 	if (match_count == 0) {
 		LM_DBG("no documents match the filter\n");
@@ -2668,19 +2772,25 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	 * stored key was assigned at insert time and is already
 	 * KV-safe. */
 	if (!row_filter->key.is_pk) {
-		pthread_mutex_lock(&g_idx->lock);
-		e = _lookup(row_filter->key.name.s, row_filter->key.name.len,
+		int shard = _lookup_shard(row_filter->key.name.s,
+			row_filter->key.name.len,
 			row_filter->val.s.s, row_filter->val.s.len);
-		if (e && e->num_keys > 0) {
-			target_key = pkg_malloc(strlen(e->keys[0]) + 1);
-			if (!target_key) {
-				pthread_mutex_unlock(&g_idx->lock);
-				LM_ERR("oom\n");
-				return -1;
+		if (shard >= 0) {
+			_idx_lock_shard(g_idx, shard);
+			e = _lookup(row_filter->key.name.s,
+				row_filter->key.name.len,
+				row_filter->val.s.s, row_filter->val.s.len);
+			if (e && e->num_keys > 0) {
+				target_key = pkg_malloc(strlen(e->keys[0]) + 1);
+				if (!target_key) {
+					_idx_unlock_shard(g_idx, shard);
+					LM_ERR("oom\n");
+					return -1;
+				}
+				strcpy(target_key, e->keys[0]);
 			}
-			strcpy(target_key, e->keys[0]);
+			_idx_unlock_shard(g_idx, shard);
 		}
-		pthread_mutex_unlock(&g_idx->lock);
 	}
 
 	/* PK path or non-PK index miss: build encoded prefix+filter-value. */
