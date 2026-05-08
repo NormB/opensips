@@ -53,6 +53,7 @@
 
 #include "../../dprint.h"
 #include "../../mem/mem.h"
+#include "../../mem/shm_mem.h"
 #include "../../cachedb/cachedb.h"
 
 #include "cachedb_nats_json.h"
@@ -366,17 +367,22 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	if (e)
 		return e;
 
-	e = malloc(sizeof(nats_idx_entry));
+	/* SHM allocations: the index lives in shared memory so every
+	 * worker dereferences the same pointers; entry storage must
+	 * follow.  Failures here are unlikely but logged loudly because
+	 * they reflect SHM exhaustion rather than per-process pkg
+	 * pressure. */
+	e = shm_malloc(sizeof(nats_idx_entry));
 	if (!e) {
-		LM_ERR("no memory for index entry\n");
+		LM_ERR("no SHM for index entry\n");
 		return NULL;
 	}
 	memset(e, 0, sizeof(nats_idx_entry));
 
-	e->field_value = malloc(fv_len + 1);
+	e->field_value = shm_malloc(fv_len + 1);
 	if (!e->field_value) {
-		LM_ERR("no memory for field_value string\n");
-		free(e);
+		LM_ERR("no SHM for field_value string\n");
+		shm_free(e);
 		return NULL;
 	}
 	memcpy(e->field_value, fv, fv_len);
@@ -384,11 +390,11 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	e->fv_len = fv_len;
 
 	e->alloc_keys = 8;
-	e->keys = malloc(sizeof(char *) * e->alloc_keys);
+	e->keys = shm_malloc(sizeof(char *) * e->alloc_keys);
 	if (!e->keys) {
-		LM_ERR("no memory for keys array\n");
-		free(e->field_value);
-		free(e);
+		LM_ERR("no SHM for keys array\n");
+		shm_free(e->field_value);
+		shm_free(e);
 		return NULL;
 	}
 	e->num_keys = 0;
@@ -432,19 +438,27 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 	 * logarithmic in the total number of keys. */
 	if (e->num_keys >= e->alloc_keys) {
 		int new_alloc = e->alloc_keys * 2;
-		char **new_keys = realloc(e->keys, sizeof(char *) * new_alloc);
+		/* shm_realloc preserves contents; on failure the original
+		 * block is untouched.  Use shm_realloc rather than malloc-
+		 * copy-free to keep the entry in SHM. */
+		char **new_keys = shm_realloc(e->keys,
+			sizeof(char *) * new_alloc);
 		if (!new_keys) {
-			LM_ERR("no memory to grow keys array\n");
+			LM_ERR("no SHM to grow keys array\n");
 			return -1;
 		}
 		e->keys = new_keys;
 		e->alloc_keys = new_alloc;
 	}
 
-	dup = strdup(key);
-	if (!dup) {
-		LM_ERR("no memory for key string\n");
-		return -1;
+	{
+		int klen = strlen(key);
+		dup = shm_malloc(klen + 1);
+		if (!dup) {
+			LM_ERR("no SHM for key string\n");
+			return -1;
+		}
+		memcpy(dup, key, klen + 1);
 	}
 	e->keys[e->num_keys++] = dup;
 	return 0;
@@ -463,7 +477,7 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 	int i;
 	for (i = 0; i < e->num_keys; i++) {
 		if (strcmp(e->keys[i], key) == 0) {
-			free(e->keys[i]);
+			shm_free(e->keys[i]);
 			/* swap-remove: move the last element into this slot */
 			e->num_keys--;
 			if (i < e->num_keys)
@@ -486,13 +500,13 @@ static void _free_entry(nats_idx_entry *e)
 	if (!e)
 		return;
 	if (e->field_value)
-		free(e->field_value);
+		shm_free(e->field_value);
 	if (e->keys) {
 		for (i = 0; i < e->num_keys; i++)
-			free(e->keys[i]);
-		free(e->keys);
+			shm_free(e->keys[i]);
+		shm_free(e->keys);
 	}
-	free(e);
+	shm_free(e);
 }
 
 /* ------------------------------------------------------------------ */
@@ -561,58 +575,65 @@ static void _index_field_cb(const char *field, int flen,
  */
 int nats_json_index_init(void)
 {
-	int i, j;
-
 	if (g_idx) {
 		LM_WARN("search index already initialized\n");
 		return 0;
 	}
 
-	g_idx = malloc(sizeof(nats_search_idx));
+	/* Allocate the index header in SHM so every forked OpenSIPS
+	 * worker sees the same instance.  Pre-fork allocation matters:
+	 * once child_init runs, each worker maps the same SHM segment
+	 * and dereferences the same pointer values. */
+	g_idx = shm_malloc(sizeof(nats_search_idx));
 	if (!g_idx) {
-		LM_ERR("no memory for search index\n");
+		LM_ERR("no SHM for search index\n");
 		return -1;
 	}
 	memset(g_idx, 0, sizeof(nats_search_idx));
 	atomic_store(&g_idx->num_documents, 0);
 
-	for (i = 0; i < NATS_IDX_SHARDS; i++) {
-		if (pthread_mutex_init(&g_idx->shard_locks[i], NULL) != 0) {
-			LM_ERR("failed to initialize index shard mutex %d\n", i);
-			for (j = 0; j < i; j++)
-				pthread_mutex_destroy(&g_idx->shard_locks[j]);
-			free(g_idx);
-			g_idx = NULL;
-			return -1;
-		}
+	g_idx->shard_locks = lock_set_alloc(NATS_IDX_SHARDS);
+	if (!g_idx->shard_locks) {
+		LM_ERR("no SHM for index lock set\n");
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
+	}
+	if (!lock_set_init(g_idx->shard_locks)) {
+		LM_ERR("failed to initialize index lock set\n");
+		lock_set_dealloc(g_idx->shard_locks);
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
 	}
 
-	LM_DBG("search index initialized (%d buckets, %d shards)\n",
+	LM_DBG("search index initialized in SHM (%d buckets, %d shards)\n",
 		NATS_IDX_BUCKETS, NATS_IDX_SHARDS);
 	return 0;
 }
 
 /* Shard-locking helpers.  Whole-index ops acquire shards in index
- * order to keep the lock hierarchy consistent. */
+ * order to keep the lock hierarchy consistent.  The lock set itself
+ * is SHM-backed so cross-process synchronisation is safe. */
 static inline void _idx_lock_shard(nats_search_idx *idx, int shard)
 {
-	pthread_mutex_lock(&idx->shard_locks[shard]);
+	lock_set_get(idx->shard_locks, shard);
 }
 static inline void _idx_unlock_shard(nats_search_idx *idx, int shard)
 {
-	pthread_mutex_unlock(&idx->shard_locks[shard]);
+	lock_set_release(idx->shard_locks, shard);
 }
 static inline void _idx_lock_all(nats_search_idx *idx)
 {
 	int i;
 	for (i = 0; i < NATS_IDX_SHARDS; i++)
-		pthread_mutex_lock(&idx->shard_locks[i]);
+		lock_set_get(idx->shard_locks, i);
 }
 static inline void _idx_unlock_all(nats_search_idx *idx)
 {
 	int i;
 	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
-		pthread_mutex_unlock(&idx->shard_locks[i]);
+		lock_set_release(idx->shard_locks, i);
 }
 
 /* Per-entry callback type used by _drain_kv_snapshot.  Return 0 to
@@ -1058,13 +1079,12 @@ void nats_json_index_destroy(void)
 
 	_idx_unlock_all(g_idx);
 
-	{
-		int i;
-		for (i = 0; i < NATS_IDX_SHARDS; i++)
-			pthread_mutex_destroy(&g_idx->shard_locks[i]);
+	if (g_idx->shard_locks) {
+		lock_set_destroy(g_idx->shard_locks);
+		lock_set_dealloc(g_idx->shard_locks);
 	}
 
-	free(g_idx);
+	shm_free(g_idx);
 	g_idx = NULL;
 
 	LM_DBG("search index destroyed\n");

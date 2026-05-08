@@ -466,6 +466,16 @@ static int mod_init(void)
 		return -1;
 	}
 
+	/* Allocate the SHM-backed search index BEFORE forking so every
+	 * worker maps the same instance.  Each worker then reads/writes
+	 * via the shared shard locks; rank 1 is responsible for the
+	 * initial KV-driven population (see child_init) and for the
+	 * watcher thread that keeps it live. */
+	if (nats_json_index_init() < 0) {
+		LM_ERR("failed to initialize JSON search index\n");
+		return -1;
+	}
+
 	/* Periodic index resync: optional belt-and-braces rebuild for
 	 * deployments that want a hard upper bound on per-process index
 	 * staleness regardless of reconnect cadence or self-heal pace.
@@ -536,14 +546,12 @@ static int child_init(int rank)
 		return -1;
 	}
 
-	/* initialize the JSON search index */
-	if (nats_json_index_init() < 0) {
-		LM_ERR("failed to initialize JSON search index\n");
-		return -1;
-	}
-
-	/* build the search index from existing KV data */
-	if (nats_json_index_build(kv, fts_json_prefix) < 0) {
+	/* The JSON search index is now SHM-backed and was allocated in
+	 * mod_init pre-fork; every worker dereferences the same g_idx.
+	 * Only rank 1 populates it from KV: the watcher (also rank-1)
+	 * keeps it live thereafter, and every other worker sees those
+	 * updates immediately through the shared SHM mapping. */
+	if (rank == 1 && nats_json_index_build(kv, fts_json_prefix) < 0) {
 		LM_WARN("failed to build initial search index; "
 			"queries may return empty results until index is rebuilt\n");
 	}
