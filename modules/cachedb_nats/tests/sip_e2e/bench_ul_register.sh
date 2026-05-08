@@ -89,7 +89,7 @@ start_instance() {
     local log="$OUT/opensips_${inst}.log"
     render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
     LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
-        "$OPENSIPS_BIN" -F -f "$cfg" -m 256 -M 8 > "$log" 2>&1 &
+        "$OPENSIPS_BIN" -F -f "$cfg" -s HP -m 256 -M 8 > "$log" 2>&1 &
     local pid=$!
     sleep 2
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -171,11 +171,14 @@ A_STATS_AFTER=$(mi_cdb_stats_at 8889)
 [ "$INSTANCES" = 2 ] && B_STATS_AFTER=$(mi_cdb_stats_at 8890)
 
 extract() {
-    printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9]*\).*/\1/p'
+    local v=$(printf '%s' "$1" | sed -n 's/.*"'"$2"'":\([0-9]*\).*/\1/p')
+    echo "${v:-0}"
 }
 delta() {
     local f=$1 b=$2 a=$3
-    echo $(( $(extract "$a" "$f") - $(extract "$b" "$f") ))
+    local va=$(extract "$a" "$f")
+    local vb=$(extract "$b" "$f")
+    echo $(( ${va:-0} - ${vb:-0} ))
 }
 
 # Latency percentiles via sort + awk.

@@ -161,6 +161,53 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 	</section>
 
 	<section>
+		<title>SHM allocator selection</title>
+		<para>
+			OpenSIPS defaults the shared-memory allocator to
+			<varname>Q_MALLOC</varname>, which is single-mutex
+			and serialises every <function>shm_malloc</function>
+			/ <function>shm_free</function> across all worker
+			processes.  At populated index sizes (10k+ AoRs) and
+			sustained REGISTER churn this becomes the dominant
+			tail-latency contributor: the per-CAS path triggers
+			3-5 SHM allocations to add a doc to the in-memory
+			JSON-FTS index, and Q_MALLOC's lock pinches every
+			worker on every alloc.
+		</para>
+		<para>
+			Recommendation: launch <command>opensips</command>
+			with <varname>-s HP</varname> to select
+			<varname>HP_MALLOC</varname> ("optimized for shared
+			memory multiprocessing").  Bench results from the
+			session that introduced this playbook:
+			<itemizedlist>
+				<listitem><para>
+					10k AoRs, single instance:
+					p99 84 ms → 54 ms (−36%);
+					p50 35 ms → 21 ms (−40%).
+				</para></listitem>
+				<listitem><para>
+					20k AoRs, single instance:
+					p99 185 ms → 142 ms (−23%);
+					p50 41 ms → 25 ms (−39%).
+				</para></listitem>
+			</itemizedlist>
+			Combined with the targeted-index-remove change
+			(<function>nats_json_index_remove_fields</function>),
+			the cumulative p99 improvement at 20k AoRs is −63%
+			versus the start of the perf series.  Effective RPS
+			climbs accordingly.
+		</para>
+		<para>
+			Pkg memory (<varname>-k</varname>) is per-process
+			and not contended, so the default
+			<varname>Q_MALLOC</varname> there is fine.  Only
+			the SHM allocator (<varname>-s</varname>) needs the
+			switch.
+		</para>
+	</section>
+
+	<section>
 		<title>MI counters and alert thresholds</title>
 		<para>
 			<function>nats_cdb_stats</function> returns a snapshot
