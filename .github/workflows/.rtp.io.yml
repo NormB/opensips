@@ -70,7 +70,13 @@ jobs:
     name: Build Container (GHCR)
     needs: set_env
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
+    # GHCR push requires the repo's Actions to have write access to the
+    # ghcr.io/<owner>/opensips package.  On the canonical OpenSIPS repo
+    # this is set up; forks do not get write access by default and the
+    # push fails with "permission_denied: write_package".  Forks fall
+    # through to build_rtp_io_dock_local + test_rtp_io_local below,
+    # which keeps build+test coverage but skips the registry write.
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'OpenSIPS' }}
     permissions:
       packages: write
     env:
@@ -131,7 +137,10 @@ jobs:
     name: Build Container (Local)
     needs: set_env
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+    # Used for PRs and for any push on a fork — the path that does not
+    # need GHCR write access.  Image is shipped between jobs as a GHA
+    # artifact rather than via the registry.
+    if: ${{ github.event_name == 'pull_request' || github.repository_owner != 'OpenSIPS' }}
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +214,7 @@ jobs:
     name: Run VoIPTests™ (GHCR)
     needs: [build_rtp_io_dock, set_env]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'OpenSIPS' }}
     permissions:
       packages: read
     strategy:
@@ -249,7 +258,7 @@ jobs:
     name: Run VoIPTests™ (LOCAL)
     needs: [build_rtp_io_dock_local, set_env]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.repository_owner != 'OpenSIPS' }}
     strategy:
       fail-fast: false
       matrix:
