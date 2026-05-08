@@ -71,6 +71,7 @@
 #include "cachedb_nats_json.h"
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
+#include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
 
 #ifdef HAVE_EVI
@@ -258,6 +259,11 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}        /* aliases — required by mi_export_t struct */
 	},
+	{"nats_cdb_stats", 0, 0, 0, {
+		{mi_nats_cdb_stats, {0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
 	{EMPTY_MI_EXPORT}
 };
 
@@ -419,6 +425,11 @@ static int mod_init(void)
 		return -1;
 	}
 
+	if (nats_cdb_stats_init() < 0) {
+		LM_ERR("failed to initialize cdb stats\n");
+		return -1;
+	}
+
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
 	 * This avoids the "previously published" warning that occurs when
 	 * both startup_route's subscribe_event() and child_init's
@@ -549,6 +560,7 @@ static void destroy(void)
 	nats_watch_stop();
 	nats_json_index_destroy();
 	cachedb_end_connections(&cache_mod_name);
+	nats_cdb_stats_destroy();
 }
 
 /**

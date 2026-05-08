@@ -57,6 +57,7 @@
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats.h"
+#include "cachedb_nats_stats.h"
 #include "cachedb_nats_dbase.h"
 
 /* module parameters (defined in cachedb_nats.c) */
@@ -2022,9 +2023,14 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		}
 	}
 
-	/* CAS loop: fetch (or atomically create a seed), modify, update. */
+	/* CAS loop: fetch (or atomically create a seed), modify, update.
+	 * attempt counts iterations starting at 0; used to drive jittered
+	 * exponential backoff between retries. */
 	retries = nats_cas_retries > 0 ? nats_cas_retries : 1;
+	int attempt = 0;
 	while (retries-- > 0) {
+		nats_cas_backoff_sleep(attempt);
+		attempt++;
 		s = kvStore_Get(&entry, ncon->kv, target_key);
 		if (s == NATS_NOT_FOUND) {
 			/* First-insert path: build a {"<filter-field>":"<filter-val>"}
@@ -2055,6 +2061,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			if (s == NATS_OK) {
 				json_buf = seed;        /* hand off ownership */
 				rev = create_rev;
+				NATS_CDB_STATS_INC(create_doc);
 				/* fall through to the apply-pairs block */
 			} else {
 				/* Most likely a race lost (key created by another writer
@@ -2065,6 +2072,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				LM_DBG("seed CreateString lost race or failed for '%s': %s\n",
 					target_key, natsStatus_GetText(s));
 				free(seed);
+				NATS_CDB_STATS_INC(cas_retry);
 				continue;
 			}
 		} else if (s != NATS_OK) {
@@ -2196,9 +2204,11 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		free(json_buf);
 		json_buf = NULL;
 
+		NATS_CDB_STATS_INC(cas_retry);
 		LM_DBG("CAS retry for key '%s'\n", target_key);
 	}
 
+	NATS_CDB_STATS_INC(cas_exhausted);
 	LM_WARN("CAS exhausted after %d retries for key '%s'; update "
 		"dropped (raise nats_cas_retries if this key is "
 		"hot-contested)\n",

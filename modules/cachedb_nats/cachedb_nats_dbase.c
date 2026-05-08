@@ -57,6 +57,7 @@
 
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_watch.h"
+#include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
 
 extern int nats_cas_retries;   /* defined in cachedb_nats.c */
@@ -526,8 +527,13 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 	/* CAS retry loop: each iteration reads the current value and
 	 * attempts a conditional write.  On conflict (another process
 	 * updated the key between our read and write), we re-read and
-	 * try again, up to NATS_CAS_RETRIES times. */
+	 * try again, up to NATS_CAS_RETRIES times. Sleep with jittered
+	 * exponential backoff between attempts to avoid hot-spinning
+	 * the broker under contention. */
+	int attempt = 0;
 	while (retries-- > 0) {
+		nats_cas_backoff_sleep(attempt);
+		attempt++;
 		current = 0;
 		last_rev = 0;
 
@@ -573,10 +579,12 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 
 		/* CAS conflict or key-already-exists — another writer won
 		 * the race.  Loop back to re-read and retry. */
+		NATS_CDB_STATS_INC(cas_retry);
 		LM_DBG("CAS retry for key '%s' (attempt %d)\n",
 			key_buf, max_retries - retries);
 	}
 
+	NATS_CDB_STATS_INC(cas_exhausted);
 	LM_WARN("CAS exhausted for counter '%s' after %d retries; "
 		"increment dropped (raise nats_cas_retries if this key "
 		"is hot-contested)\n",
