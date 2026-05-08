@@ -5,4 +5,5 @@ test_reply_size_cap
 test_timeout_normalize
 test_disconnected_fastfail
 test_update_nested_dict
+test_update_creates_doc
 *.o

@@ -1843,16 +1843,74 @@ static char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 	return cur;
 }
 
+/* Build a malloc'd seed JSON document {"<field>":"<val>"} for the
+ * first-insert path. Both field name and value are RFC 8259 escaped.
+ * If field is NULL/empty, returns "{}" so the doc is still a valid JSON
+ * object. Returns NULL on error. Caller must free(). */
+static char *_build_seed_doc(const char *field, int flen,
+	const char *val, int vlen, int *out_len)
+{
+	char *buf, *esc_field, *esc_val;
+	int esc_field_len, esc_val_len;
+	int new_len;
+
+	if (flen <= 0 || !field) {
+		buf = malloc(3);
+		if (!buf) return NULL;
+		memcpy(buf, "{}", 3);
+		*out_len = 2;
+		return buf;
+	}
+	if (flen > (INT_MAX - 16) / 6 || vlen > (INT_MAX - 16) / 6)
+		return NULL;
+
+	esc_field = malloc(flen * 6 + 1);
+	esc_val   = malloc((vlen > 0 ? vlen : 1) * 6 + 1);
+	if (!esc_field || !esc_val) {
+		free(esc_field); free(esc_val);
+		return NULL;
+	}
+	esc_field_len = _json_escape(field, flen, esc_field, flen * 6 + 1);
+	esc_val_len   = vlen > 0
+		? _json_escape(val, vlen, esc_val, vlen * 6 + 1)
+		: 0;
+	if (esc_field_len < 0 || esc_val_len < 0) {
+		free(esc_field); free(esc_val);
+		return NULL;
+	}
+
+	new_len = 2 + esc_field_len + 3 + esc_val_len + 2;
+	buf = malloc(new_len + 1);
+	if (!buf) { free(esc_field); free(esc_val); return NULL; }
+	buf[0] = '{';
+	buf[1] = '"';
+	memcpy(buf + 2, esc_field, esc_field_len);
+	buf[2 + esc_field_len]     = '"';
+	buf[2 + esc_field_len + 1] = ':';
+	buf[2 + esc_field_len + 2] = '"';
+	memcpy(buf + 2 + esc_field_len + 3, esc_val, esc_val_len);
+	buf[2 + esc_field_len + 3 + esc_val_len]     = '"';
+	buf[2 + esc_field_len + 3 + esc_val_len + 1] = '}';
+	buf[new_len] = '\0';
+	free(esc_field); free(esc_val);
+	*out_len = new_len;
+	return buf;
+}
+
 /**
  * nats_cache_update() — cachedb update callback: modify matched documents.
  *
  * Identifies the target document either by primary key (is_pk flag on the
  * filter) or by index lookup (same mechanism as nats_cache_query, but only
- * the first match is used).  Fetches the document from NATS KV, applies
- * each field update from @pairs via _json_apply_pair(), and writes the
- * modified JSON back using a compare-and-swap (CAS) loop to handle
- * concurrent modifications.  After a successful CAS, the index is updated
- * by removing and re-adding the document.
+ * the first match is used). When neither path finds an existing doc, an
+ * empty seed JSON is created via kvStore_CreateString so that a first
+ * cdbf.update behaves as upsert — required by usrloc full-sharing-cachedb
+ * mode whose cdb_flush_urecord assumes upsert semantics. Fetches the
+ * document from NATS KV, applies each field update from @pairs via
+ * _json_apply_pair(), and writes the modified JSON back using a
+ * compare-and-swap (CAS) loop to handle concurrent modifications. After
+ * a successful CAS, the index is updated by removing and re-adding the
+ * document.
  *
  * Handles the full cdb_pair_t type surface (CDB_STR, CDB_INT32, CDB_INT64,
  * CDB_NULL, CDB_DICT), the subkey field (treats outer key as a JSON object
@@ -1933,59 +1991,115 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		pthread_mutex_lock(&g_idx->lock);
 		e = _lookup(row_filter->key.name.s, row_filter->key.name.len,
 			row_filter->val.s.s, row_filter->val.s.len);
-		if (!e || e->num_keys == 0) {
+		if (e && e->num_keys > 0) {
+			target_key = pkg_malloc(strlen(e->keys[0]) + 1);
+			if (!target_key) {
+				pthread_mutex_unlock(&g_idx->lock);
+				LM_ERR("oom\n");
+				return -1;
+			}
+			strcpy(target_key, e->keys[0]);
 			pthread_mutex_unlock(&g_idx->lock);
-			LM_DBG("no document matches filter\n");
-			return -1;
-		}
-		/* take the first matching key */
-		target_key = pkg_malloc(strlen(e->keys[0]) + 1);
-		if (!target_key) {
+		} else {
+			/* No existing match — fall through to insert with the same
+			 * prefix+filter-value key the PK path would mint. The CAS loop
+			 * below will detect NATS_NOT_FOUND and CreateString a seed. */
 			pthread_mutex_unlock(&g_idx->lock);
-			LM_ERR("oom\n");
-			return -1;
+			if (fts_json_prefix && *fts_json_prefix) {
+				int prefix_len = strlen(fts_json_prefix);
+				target_key = pkg_malloc(prefix_len + row_filter->val.s.len + 1);
+				if (!target_key) { LM_ERR("oom\n"); return -1; }
+				memcpy(target_key, fts_json_prefix, prefix_len);
+				memcpy(target_key + prefix_len, row_filter->val.s.s,
+					row_filter->val.s.len);
+				target_key[prefix_len + row_filter->val.s.len] = '\0';
+			} else {
+				target_key = pkg_malloc(row_filter->val.s.len + 1);
+				if (!target_key) { LM_ERR("oom\n"); return -1; }
+				memcpy(target_key, row_filter->val.s.s, row_filter->val.s.len);
+				target_key[row_filter->val.s.len] = '\0';
+			}
 		}
-		strcpy(target_key, e->keys[0]);
-		pthread_mutex_unlock(&g_idx->lock);
 	}
 
-	/* CAS loop: fetch, modify, update atomically */
+	/* CAS loop: fetch (or atomically create a seed), modify, update. */
 	retries = nats_cas_retries > 0 ? nats_cas_retries : 1;
 	while (retries-- > 0) {
 		s = kvStore_Get(&entry, ncon->kv, target_key);
-		if (s != NATS_OK) {
+		if (s == NATS_NOT_FOUND) {
+			/* First-insert path: build a {"<filter-field>":"<filter-val>"}
+			 * seed and CreateString it atomically. Only run when the filter
+			 * carries a string identity we can stamp into the doc; otherwise
+			 * we couldn't make the new doc indexable / discoverable. */
+			char *seed = NULL;
+			int seed_len = 0;
+			uint64_t create_rev = 0;
+
+			if (!row_filter->val.is_str) {
+				LM_ERR("cannot insert: filter for key '%s' has no "
+					"string identity to seed the document\n", target_key);
+				pkg_free(target_key);
+				return -1;
+			}
+
+			seed = _build_seed_doc(row_filter->key.name.s,
+				row_filter->key.name.len,
+				row_filter->val.s.s, row_filter->val.s.len, &seed_len);
+			if (!seed) {
+				LM_ERR("failed to build seed doc for key '%s'\n", target_key);
+				pkg_free(target_key);
+				return -1;
+			}
+
+			s = kvStore_CreateString(&create_rev, ncon->kv, target_key, seed);
+			if (s == NATS_OK) {
+				json_buf = seed;        /* hand off ownership */
+				rev = create_rev;
+				/* fall through to the apply-pairs block */
+			} else {
+				/* Most likely a race lost (key created by another writer
+				 * between our Get and our Create). Free the seed and let
+				 * the next iteration re-Get the now-existing doc. Hard
+				 * failures (network, etc.) will recur on the next Get and
+				 * be surfaced there. */
+				LM_DBG("seed CreateString lost race or failed for '%s': %s\n",
+					target_key, natsStatus_GetText(s));
+				free(seed);
+				continue;
+			}
+		} else if (s != NATS_OK) {
 			LM_ERR("kvStore_Get failed for key '%s': %s\n",
 				target_key, natsStatus_GetText(s));
 			pkg_free(target_key);
 			return -1;
-		}
+		} else {
+			data = kvEntry_ValueString(entry);
+			data_len = kvEntry_ValueLen(entry);
+			rev = kvEntry_Revision(entry);
 
-		data = kvEntry_ValueString(entry);
-		data_len = kvEntry_ValueLen(entry);
-		rev = kvEntry_Revision(entry);
+			if (!data || data_len <= 0) {
+				LM_ERR("empty document for key '%s'\n", target_key);
+				kvEntry_Destroy(entry);
+				entry = NULL;
+				pkg_free(target_key);
+				return -1;
+			}
 
-		if (!data || data_len <= 0) {
-			LM_ERR("empty document for key '%s'\n", target_key);
+			/* make a mutable copy of the JSON */
+			json_buf = malloc(data_len + 1);
+			if (!json_buf) {
+				LM_ERR("oom\n");
+				kvEntry_Destroy(entry);
+				entry = NULL;
+				pkg_free(target_key);
+				return -1;
+			}
+			memcpy(json_buf, data, data_len);
+			json_buf[data_len] = '\0';
+
 			kvEntry_Destroy(entry);
 			entry = NULL;
-			pkg_free(target_key);
-			return -1;
 		}
-
-		/* make a mutable copy of the JSON */
-		json_buf = malloc(data_len + 1);
-		if (!json_buf) {
-			LM_ERR("oom\n");
-			kvEntry_Destroy(entry);
-			entry = NULL;
-			pkg_free(target_key);
-			return -1;
-		}
-		memcpy(json_buf, data, data_len);
-		json_buf[data_len] = '\0';
-
-		kvEntry_Destroy(entry);
-		entry = NULL;
 
 		/* apply each pair update via the typed helper */
 		list_for_each(pos, pairs) {
