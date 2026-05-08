@@ -124,6 +124,9 @@ typedef struct {
 static kv_cache_entry _kv_cache[NATS_POOL_MAX_KV_BUCKETS];
 static int            _kv_cache_cnt = 0;
 
+/* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
+int nats_pool_drain_timeout_ms = 5000;
+
 /* ----------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------- */
@@ -977,17 +980,25 @@ void nats_pool_destroy(void)
 
 	/* Step 3: Drain then destroy connection.
 	 * Drain flushes pending publishes, waits for acks, then closes.
-	 * Use DrainTimeout with an explicit bound (5 s) so we don't hang
-	 * mod_destroy if the broker is unreachable.  Log non-OK so an
-	 * operator investigating ack-loss has a fingerprint, then
-	 * proceed to Destroy regardless -- shutdown must complete. */
+	 * Use DrainTimeout with an explicit bound (nats_pool_drain_timeout_ms,
+	 * default 5 s, modparam-tunable per loaded module) so we don't
+	 * hang mod_destroy if the broker is unreachable.  Log non-OK
+	 * with the configured budget so an operator investigating
+	 * ack-loss has both a fingerprint and a hint at which knob to
+	 * raise, then proceed to Destroy regardless -- shutdown must
+	 * complete. */
 	if (_nc) {
-		natsStatus ds = natsConnection_DrainTimeout(_nc, 5000);
+		int budget_ms = nats_pool_drain_timeout_ms > 0
+			? nats_pool_drain_timeout_ms : 5000;
+		natsStatus ds = natsConnection_DrainTimeout(_nc, budget_ms);
 		if (ds != NATS_OK) {
-			LM_WARN("NATS pool: connection drain returned %s; "
-				"in-flight JetStream publishes may not have "
-				"acked before destroy\n",
-				natsStatus_GetText(ds));
+			LM_WARN("NATS pool: connection drain returned %s "
+				"after %d ms; in-flight JetStream publishes "
+				"may not have acked before destroy.  Raise "
+				"nats_drain_timeout_ms (event_nats) or "
+				"cdb_drain_timeout_ms (cachedb_nats) if you "
+				"are seeing ack loss on shutdown.\n",
+				natsStatus_GetText(ds), budget_ms);
 		}
 		natsConnection_Destroy(_nc);
 		_nc = NULL;

@@ -236,6 +236,22 @@ int nats_pool_get_reconnect_epoch(void);
 int nats_pool_should_init(int rank);
 
 /*
+ * Drain timeout for nats_pool_finalize, in milliseconds.
+ *
+ * Each module loaded against lib/nats may override this from its own
+ * mod_init (e.g. via a modparam) to tune how long shutdown waits for
+ * outstanding NATS publishes — including JetStream async-pub acks —
+ * to flush before destroying the connection.  The default of 5000 ms
+ * is appropriate for low-latency local brokers; deployments hitting
+ * a remote broker over higher-latency links may want to raise this
+ * to avoid silent drops on shutdown.
+ *
+ * Read from any thread; write only from mod_init (pre-fork, single-
+ * threaded), so no synchronization is required.
+ */
+extern int nats_pool_drain_timeout_ms;
+
+/*
  * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
  *
  * Replaces every "user[:pass]@" segment that appears in the authority
