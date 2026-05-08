@@ -857,7 +857,6 @@ static void _collect_fv_cb(const char *field, int flen,
 int nats_json_index_add(const char *key, const char *json_str, int json_len)
 {
 	_idx_fv_list_t list;
-	idx_add_ctx ctx;
 	int rc, i;
 
 	if (!g_idx || !key || !json_str)
@@ -875,18 +874,51 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		return -1;
 	}
 
-	/* Phase B: take the lock briefly, insert each collected pair.
-	 * Lock-hold time scales with the number of indexed fields
-	 * (typically 2-3 for usrloc), not the document size. */
-	ctx.doc_key = key;
-	ctx.target = NULL;
-
-	_idx_lock_all(g_idx);
+	/* Phase B: per-field shard locking.  Each collected pair hashes
+	 * to one bucket → one shard; we lock only that shard for the
+	 * insert, release between fields.  Two concurrent index_add
+	 * calls whose fields happen to land on disjoint shards
+	 * therefore proceed in parallel rather than serialising on a
+	 * shared lock-all.
+	 *
+	 * Locking order is determined per-field by NATS_IDX_SHARD_OF
+	 * so all callers acquire shards in increasing index order
+	 * whenever they need more than one — but since each iteration
+	 * acquires and immediately releases a single shard, the
+	 * hierarchy is trivial: no thread ever holds two shard locks
+	 * simultaneously here.  This means a high-fan-out doc cannot
+	 * deadlock against a whole-index op (lock_all) — when lock_all
+	 * is contending, our per-field lock waits behind it for that
+	 * shard, then proceeds. */
 	for (i = 0; i < list.n; i++) {
-		_index_field_cb(list.items[i].field, list.items[i].flen,
-			list.items[i].val,   list.items[i].vlen, &ctx);
+		char fv_buf[1024];
+		int  fv_len;
+		unsigned int bucket;
+		int shard;
+		nats_idx_entry *e;
+		const _idx_fv_t *p = &list.items[i];
+
+		if (p->flen < 0 || p->vlen < 0) continue;
+		fv_len = p->flen + 1 + p->vlen;
+		if (fv_len >= (int)sizeof(fv_buf)) {
+			LM_WARN("field:value too long (%d), skipping\n", fv_len);
+			continue;
+		}
+		memcpy(fv_buf, p->field, p->flen);
+		fv_buf[p->flen] = ':';
+		memcpy(fv_buf + p->flen + 1, p->val, p->vlen);
+		fv_buf[fv_len] = '\0';
+
+		bucket = _hash(fv_buf, fv_len);
+		shard  = NATS_IDX_SHARD_OF(bucket);
+
+		_idx_lock_shard(g_idx, shard);
+		e = _get_or_create_entry_in(g_idx, fv_buf, fv_len);
+		if (e)
+			_entry_add_key(e, key);
+		_idx_unlock_shard(g_idx, shard);
 	}
-	_idx_unlock_all(g_idx);
+
 	atomic_fetch_add_explicit(&g_idx->num_documents, 1,
 		memory_order_relaxed);
 
