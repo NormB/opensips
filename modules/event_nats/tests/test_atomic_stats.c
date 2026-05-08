@@ -91,26 +91,43 @@ int main(void)
 	ASSERT(aligned_hot >= 1,
 		"nats_stats.h cache-line aligns at least one hot counter");
 
-	/* CASE 2: increment sites use atomic_fetch_add */
-	int producer_atomic = grep_count(
-		"../nats_producer.c", "atomic_fetch_add");
-	ASSERT(producer_atomic >= 2,
-		"nats_producer.c uses atomic_fetch_add");
+	/* CASE 2: increment sites use the per-process bump macro
+	 * (NATS_STATS_BUMP).  The macro centralises the slot indexing
+	 * by process_no and expands to atomic_fetch_add on the
+	 * caller's private cacheline; we still want the underlying
+	 * atomic op so cross-process MI readers see clean loads, but
+	 * the call sites no longer touch atomic_fetch_add directly. */
+	int producer_bumps = grep_count(
+		"../nats_producer.c", "NATS_STATS_BUMP");
+	ASSERT(producer_bumps >= 2,
+		"nats_producer.c bumps counters via NATS_STATS_BUMP");
 
-	int event_atomic = grep_count(
-		"../event_nats.c", "atomic_fetch_add");
-	ASSERT(event_atomic >= 2,
-		"event_nats.c uses atomic_fetch_add");
+	int event_bumps = grep_count(
+		"../event_nats.c", "NATS_STATS_BUMP");
+	ASSERT(event_bumps >= 2,
+		"event_nats.c bumps counters via NATS_STATS_BUMP");
 
 	int producer_old = grep_count(
 		"../nats_producer.c", "nats_stats->failed++");
 	ASSERT(producer_old == 0,
 		"nats_producer.c no longer uses ++ on counters");
 
-	/* CASE 3: MI reads use atomic_load */
-	int mi_atomic = grep_count("../nats_stats.c", "atomic_load");
-	ASSERT(mi_atomic >= 6,
-		"nats_stats.c MI handler uses atomic_load");
+	/* The underlying NATS_STATS_BUMP macro must still expand to an
+	 * atomic increment so MI readers can sum cleanly across slots. */
+	int macro_atomic = grep_count(
+		"../nats_stats.h", "atomic_fetch_add");
+	ASSERT(macro_atomic >= 1,
+		"NATS_STATS_BUMP macro expands to atomic_fetch_add");
+
+	/* CASE 3: MI reads sum across slots via NATS_STATS_SUM, which
+	 * is implemented by atomic_load_explicit in nats_stats.c. */
+	int sum_uses = grep_count("../nats_stats.c", "NATS_STATS_SUM");
+	ASSERT(sum_uses >= 6,
+		"nats_stats.c MI handler uses NATS_STATS_SUM");
+
+	int sum_atomic = grep_count("../nats_stats.c", "atomic_load");
+	ASSERT(sum_atomic >= 1,
+		"nats_stats_sum() uses atomic_load for cross-slot reads");
 
 	/* CASE 4: functional concurrent-increment check */
 	volatile_ctr = 0;
