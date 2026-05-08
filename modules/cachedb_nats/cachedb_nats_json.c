@@ -731,27 +731,113 @@ int nats_json_index_build(kvStore *kv, const char *prefix)
  *
  * Returns 0 on success, -1 if parsing fails or parameters are NULL.
  */
+/* Two-phase index_add: parse the document into a stack/heap-backed
+ * field-value list outside the lock, then take the lock briefly only
+ * to insert each (field:value, key) pair.  The previous design held
+ * the index mutex for the full duration of _parse_json_fields, which
+ * scaled with document size and serialised concurrent index work
+ * (queries, removes, other adds) on the entire CPU-bound parse.
+ *
+ * For a typical AoR document (~500 bytes, 2-3 top-level string
+ * fields) the lock-held window drops from "parse + N inserts" to
+ * "N inserts", roughly a 10× reduction. */
+
+#define _IDX_FV_INLINE 16
+
+typedef struct {
+	const char *field; int flen;
+	const char *val;   int vlen;
+} _idx_fv_t;
+
+typedef struct {
+	_idx_fv_t  inline_buf[_IDX_FV_INLINE];
+	_idx_fv_t *items;
+	int n;
+	int cap;
+	int oom;
+} _idx_fv_list_t;
+
+static void _idx_fv_init(_idx_fv_list_t *l)
+{
+	l->items = l->inline_buf;
+	l->n = 0;
+	l->cap = _IDX_FV_INLINE;
+	l->oom = 0;
+}
+
+static void _idx_fv_free(_idx_fv_list_t *l)
+{
+	if (l->items != l->inline_buf)
+		free(l->items);
+	l->items = NULL;
+}
+
+static int _idx_fv_grow(_idx_fv_list_t *l)
+{
+	int newcap = l->cap * 2;
+	_idx_fv_t *next;
+	if (l->items == l->inline_buf) {
+		next = malloc(newcap * sizeof(_idx_fv_t));
+		if (!next) return -1;
+		memcpy(next, l->items, l->n * sizeof(_idx_fv_t));
+	} else {
+		next = realloc(l->items, newcap * sizeof(_idx_fv_t));
+		if (!next) return -1;
+	}
+	l->items = next;
+	l->cap = newcap;
+	return 0;
+}
+
+static void _collect_fv_cb(const char *field, int flen,
+	const char *val, int vlen, void *ctx)
+{
+	_idx_fv_list_t *l = ctx;
+	if (l->oom) return;
+	if (flen < 0 || vlen < 0) return;
+	if (l->n == l->cap && _idx_fv_grow(l) < 0) {
+		l->oom = 1;
+		return;
+	}
+	l->items[l->n++] = (_idx_fv_t){field, flen, val, vlen};
+}
+
 int nats_json_index_add(const char *key, const char *json_str, int json_len)
 {
+	_idx_fv_list_t list;
 	idx_add_ctx ctx;
-	int rc;
+	int rc, i;
 
 	if (!g_idx || !key || !json_str)
 		return -1;
 
+	/* Phase A: parse the document into a flat (field, value) list
+	 * with no lock held.  The parser is CPU-bound at ~bytes/cycle,
+	 * so this is where the heavy lifting happens; running it
+	 * unlocked lets concurrent queries / removes / adds proceed. */
+	_idx_fv_init(&list);
+	rc = _parse_json_fields(json_str, json_len, _collect_fv_cb, &list);
+	if (rc < 0 || list.oom) {
+		_idx_fv_free(&list);
+		LM_WARN("failed to parse JSON for key '%s'\n", key);
+		return -1;
+	}
+
+	/* Phase B: take the lock briefly, insert each collected pair.
+	 * Lock-hold time scales with the number of indexed fields
+	 * (typically 2-3 for usrloc), not the document size. */
 	ctx.doc_key = key;
 	ctx.target = NULL;
 
 	pthread_mutex_lock(&g_idx->lock);
-	rc = _parse_json_fields(json_str, json_len, _index_field_cb, &ctx);
-	if (rc >= 0)
-		g_idx->num_documents++;
+	for (i = 0; i < list.n; i++) {
+		_index_field_cb(list.items[i].field, list.items[i].flen,
+			list.items[i].val,   list.items[i].vlen, &ctx);
+	}
+	g_idx->num_documents++;
 	pthread_mutex_unlock(&g_idx->lock);
 
-	if (rc < 0) {
-		LM_WARN("failed to parse JSON for key '%s'\n", key);
-		return -1;
-	}
+	_idx_fv_free(&list);
 
 	LM_DBG("indexed key '%s' (%d fields)\n", key, rc);
 	return 0;
