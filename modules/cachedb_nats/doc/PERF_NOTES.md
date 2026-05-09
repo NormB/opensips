@@ -418,15 +418,68 @@ the real benefit is in the 1–2% range.  The dedicated mode pays
 ~7.5 MB RSS for the extra process.
 
 **At 100k the dedicated mode no longer wins**: median p99 20631
-vs 20420 µs (+1.0%), p50 essentially flat (+0.5%).  Likely
-mechanism: cross-process SHM lock contention on the
-`NATS_IDX_SHARDS=16` index shards exceeds the scheduling-isolation
-benefit at the higher watcher event rate.  The dedicated-proc mode's value at
-this scale is the **orphan-safety + isolation property** (proven
-by the new sip_e2e case 150_orphan_watcher_reap.sh), not raw
-latency.  Operators choosing between rank-1 and dedicated at
-100k+ should base the decision on rank-1's SIP-worker scheduling
-fairness needs, not on this latency table.
+vs 20420 µs (+1.0%), p50 essentially flat (+0.5%).
+
+The first hypothesis we drafted here was "cross-process SHM lock
+contention on the `NATS_IDX_SHARDS=16` index shards exceeds the
+scheduling-isolation benefit."  An investigation pass falsified
+that.  Two reasons it doesn't fit this benchmark:
+
+1. usrloc passes `is_pk=1` on every REGISTER read and write
+   (`modules/usrloc/urecord.c`).  cachedb_nats's PK fast path
+   takes that branch and **never acquires an index shard lock**
+   on the SIP side.  The watcher does take per-field shard
+   locks, but the SIP workers don't contend with it — they're
+   on a different code path.  At 100k AoRs the watcher event
+   rate is ~2000 ev/s × ~5 fields = ~10k acquires/s, all on
+   the watcher side, all on different keys.  Effectively zero
+   cross-process contention.
+
+2. Bumping `NATS_IDX_SHARDS` from 16 to 64 (a 4× reduction in
+   any per-shard contention probability) did not close the gap.
+   N=3 trials at 100k for both shard counts measured the
+   dedicated/rank-1 delta within run-to-run variance (~250 µs
+   spread).  If the hypothesis were correct, 4× more shards
+   should have reduced the delta by ~75%.  It didn't.  The
+   change was reverted; shipping a code change with no
+   measurable win is just churn.
+
+The remaining candidates we did NOT instrument (worth a follow-up
+pass when the host is quiet):
+
+- **Scheduler wakeups.** Dedicated mode adds one runnable
+  process — every KV event that needs to update the SHM index
+  triggers a cross-process wakeup and TLB flush; rank-1 mode
+  is an intra-address-space thread wake.  At ~2000 ev/s this
+  matters more than at the 30k AoR steady-state rate.
+  Validates with `perf stat -e context-switches,cpu-migrations`
+  against the watcher PID in both modes.
+- **HP_MALLOC SHM allocator contention.** `nats_json_index_add`
+  calls `shm_malloc` under the shard lock for new field:value
+  entries.  At 100k cold-fill the watcher does ~400k+
+  allocations that compete with SIP-worker `shm_malloc` on
+  HP_MALLOC's per-pool locks.  Validates with `pkg_status` /
+  `shm_status` deltas across modes.
+- **libnats subscriber-thread placement.** Dedicated proc has
+  its own libnats I/O thread; rank-1 mode shares the SIP
+  worker's NATS connection.  Different topology = different
+  jitter on KV delivery.
+
+The dedicated-proc mode's value at this scale is the
+**orphan-safety + isolation property** (proven by the new
+sip_e2e case 150_orphan_watcher_reap.sh), not raw latency.
+Operators choosing between rank-1 and dedicated at 100k+ should
+base the decision on rank-1's SIP-worker scheduling fairness
+needs, not on this latency table.
+
+Note: this is a `bench_register` REGISTER-only workload, which
+exercises the PK fast path exclusively.  A bench that drives
+non-PK script-level filter queries through `nats_kv_query` would
+exercise the SIP-side index path and produce a fundamentally
+different lock profile.  That's filed as a follow-up — the
+current bench is fit-for-purpose for the usrloc-on-NATS
+deployment shape but does not characterise the index-on-mixed
+workload.
 
 **`enable_search_index=0` is the dominant performance lever at
 every scale**.  At 30k: p50 21× lower (772 vs 16100 µs), p99 6×
