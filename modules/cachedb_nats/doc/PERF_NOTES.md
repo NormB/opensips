@@ -618,16 +618,91 @@ the dedicated/rank-1 gap entirely.  Specific candidates:
 
 Filed for the next iteration.
 
-### Remaining candidate (uninstrumented)
+### libnats subscriber-thread placement: instrumented, hypothesis refined
 
-- **libnats subscriber-thread placement.** Dedicated proc has
-  its own libnats I/O thread; rank-1 mode shares the SIP
-  worker's NATS connection.  Different topology = different
-  jitter on KV delivery.  After confirming HP_MALLOC contention
-  as the dominant 100k cost, the libnats topology is unlikely
-  to add a measurable cost on top — but worth a follow-up if
-  the alloc-rate optimizations don't close the dedicated/rank-1
-  gap.
+After the allocator rework closed the dedicated/rank-1 gap during
+the perf-record pass but NOT during the no-perf-overhead matrix
+(rank-1 p99 9816 vs dedicated p99 13794, +40%), `perf sched record`
+attached to every opensips PID for 30 s of mid-flight 100k bench
+captured per-thread scheduler latency.
+
+**Thread topology turns out to be identical**:
+
+  rank-1 (8 opensips processes)
+    - 4 SIP workers @ 7 threads each (1 main + 6 libnats)
+    - 1 SIP worker @ 8 threads
+    - 1 SIP worker @ **15 threads** (the rank-1 worker that ALSO
+      runs the watcher pthread; watcher's kvWatcher subscription
+      drives the extra libnats delivery threads)
+    - 2 single-threaded (mi_datagram et al.)
+
+  dedicated (9 opensips processes)
+    - 5 SIP workers @ 7 threads each
+    - 2 single-threaded
+    - 1 dedicated proc @ **15 threads** (same libnats thread
+      count as rank-1's heaviest worker; watcher subscription
+      drives the same delivery threads)
+
+So the libnats thread COUNT is the same.  The hypothesis that
+the dedicated proc has a "lighter" / less-warm libnats I/O
+thread that delivers events with extra jitter is wrong on those
+mechanics — the I/O threads in both modes process the same
+event rate against the same connection topology.
+
+**But scheduler latency for active threads differs**:
+
+  Active opensips threads (top by runtime, 30s window)
+  worst max scheduler delay        rank-1     dedicated
+  ----------------------------------------------------
+  worst case                       0.818 ms   5.512 ms     (+6.7x)
+  median across top-10 active      0.42 ms    0.49 ms      (similar)
+  avg across all opensips          0.007 ms   0.007 ms     (identical)
+
+(The aggregate "rank-1 max 200 ms vs dedicated max 5.5 ms"
+reading was a red herring; that 200 ms outlier was on an idle
+mi_datagram-style thread that simply slept for a long stretch
+and resumed once.  Filtering to high-runtime threads — the
+ones doing real work in the bench — shows dedicated mode has
+the worse worst-case wait.)
+
+**Likely mechanism (not the bare libnats threads themselves)**:
+the SHM index's per-shard lock IS taken by both writers (SIP-
+side `nats_cache_update`) and the watcher.  In rank-1 mode
+both contenders are in the same address space; the kernel's
+mutex/futex fast-path is intra-process.  In dedicated mode the
+contenders are in different processes, going through SHM
+gen_lock_set_t (POSIX semaphores on aarch64) — every uncontended
+acquire is similar cost, but contended waits cost more (cross-
+process descheduling and re-wakeup).  When a SIP writer
+contends with the watcher on a shard, the dedicated mode pays
+~few-ms extra wakeup latency on the contended path; that's
+consistent with the 5.5 ms outlier.
+
+**Statistical significance caveat**: with 3 trials per cell,
+the +40 % p99 gap (rank-1 9816, dedicated 13794) sits within
+the 8498..13477 / 12165..14750 trial-range overlap.  The
+medians clearly differ but a single outlier could move them.
+Worth re-confirming with N=5 trials before treating the gap
+as a permanent dedicated-mode tax.
+
+**Mitigation candidates** (if the gap is real and worth closing):
+
+- **Pin the dedicated watcher proc to a CPU.**  `taskset
+  --cpu-list <cpu>` on the dedicated proc should reduce
+  scheduler-driven jitter; the watcher would never migrate
+  off its CPU and its cache state would stay warm.
+- **Bump the dedicated proc's nice priority** so the kernel
+  schedules it ahead of SIP workers when both are runnable.
+  Tradeoff: hurts SIP routing fairness when the watcher is
+  spinning.
+- **Share the connection across watcher + cdb path even in
+  dedicated mode** — i.e., the dedicated proc opens the same
+  connection that all SIP workers use.  Doable architecturally
+  but requires lib/nats refactoring; large change.
+
+None of these are obvious wins over the current state, and the
++1 % p99 absolute (now ~4 ms) is only consequential at very
+high event rates.  Filed at low priority.
 
 The dedicated-proc mode's value at this scale is the
 **orphan-safety + isolation property** (proven by the new
