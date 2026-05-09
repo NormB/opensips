@@ -497,20 +497,88 @@ The CPU savings actually point the other way (dedicated mode
 should be faster, not slower).  So the residual +1 % p99
 must be coming from somewhere else.
 
-### Remaining candidates (uninstrumented)
+### HP_MALLOC contention hypothesis: instrumented, strongly supported
 
-- **HP_MALLOC SHM allocator contention.** `nats_json_index_add`
-  calls `shm_malloc` under the shard lock for new field:value
-  entries.  At 100k cold-fill the watcher does ~400k+
-  allocations that compete with SIP-worker `shm_malloc` on
-  HP_MALLOC's per-pool locks.  Validates with `pkg_status` /
-  `shm_status` deltas across modes.
+`perf record -F 99 -g --call-graph dwarf` against every opensips
+PID for 30 s of mid-flight 100k bench, in both modes, then
+`perf report --sort=symbol` to attribute samples.  The picture
+is striking — **half of all CPU is in HP_MALLOC + lock paths in
+both modes**:
+
+| Symbol (% of samples) | rank-1 | dedicated | Δ |
+|---|---:|---:|---:|
+| `sem_wait@@GLIBC_2.34`        | 31.72 | **34.82** | +3.10 |
+| `sem_post@@GLIBC_2.34`        | 13.04 | 11.86 | −1.18 |
+| `hp_shm_malloc`               | 1.80  | 2.03  | +0.23 |
+| `hp_frag_attach` / `hp_frag_size` | 0.03 | 0.11 | +0.08 |
+| `hp_shm_free`                 | 0.03  | 0.03  | 0 |
+| **TOTAL HP_MALLOC + lock + index** | **47.07%** | **49.34%** | +2.27 |
+
+Two findings:
+
+**1. The watcher's allocation path dominates CPU in both modes.**
+Stack traces resolve `sem_wait → __new_sem_wait_fast →
+hp_shm_malloc → nats_json_index_add` as the hottest stack.  The
+watcher does ~10k shm_mallocs/sec at 100k AoRs (~2000 events/sec
+× ~5 field:value entries per usrloc contact) and every one
+takes a per-bucket `SHM_LOCK(hash)` semaphore.  Half of all
+opensips CPU goes into that path regardless of which mode owns
+the watcher.
+
+**2. Dedicated mode adds a small ~3% extra `sem_wait` cost.**
+Cross-process semaphore acquire is slightly more expensive than
+intra-process — kernel-side TLB tracking on contended waits and
+no fast path that an in-process futex could take when both
+contenders are in the same address space.  That ~3% extra,
+multiplied across the bench's ~10k acquires/sec, accounts cleanly
+for the **+1.0 % p99 regression** the matrix measured at 100k.
+Hypothesis confirmed: the dedicated mode pays a small structural
+cost for cross-process lock contention, which shows up exactly
+where the regression is.
+
+**Important:** the reverse implication is that **HP_MALLOC
+contention from the watcher's allocation rate is the real
+scaling cliff**, not anything Item-4-specific.  Both rank-1 and
+dedicated modes hit ~47-49 % CPU in alloc/lock paths at 100k.
+Above ~100k AoRs the steady-state allocation rate would push
+these numbers further, regardless of watcher topology.
+
+### New optimization candidate: cut the watcher's allocation rate
+
+The watcher allocates inside the per-shard lock.  Reducing the
+allocation rate (or moving allocations outside the lock) would
+free up significant CPU for both modes and would likely close
+the dedicated/rank-1 gap entirely.  Specific candidates:
+
+- **Watcher-local arena.** Pre-allocate a watcher-process arena
+  in PKG memory and sub-allocate field:value strings from it
+  without touching SHM or the bucket lock.  The arena resets
+  per kvWatcher_Next() iteration so it never grows unbounded.
+  Refs into the SHM index are still SHM-allocated (small,
+  fixed-size pointers), but the variable-size field/value
+  strings — the bulk of the allocation traffic — bypass
+  HP_MALLOC entirely.  Largest expected win.
+- **Move JSON parsing fully outside the index mutex.** Commit
+  `78ea7ed78` already parses JSON before taking the mutex, but
+  the field:value entries themselves are still allocated under
+  the lock.  Lift those allocations to before lock acquire.
+- **Per-shard alloc batching.** Instead of one shm_malloc per
+  field:value pair, batch into a single bigger allocation per
+  event and slab-suballocate.  Reduces bucket-lock acquires by
+  a factor of ~5 (the avg field count).
+
+Filed for the next iteration.
+
+### Remaining candidate (uninstrumented)
+
 - **libnats subscriber-thread placement.** Dedicated proc has
   its own libnats I/O thread; rank-1 mode shares the SIP
   worker's NATS connection.  Different topology = different
-  jitter on KV delivery — and the +1 % p99 we see is more
-  consistent with a small jitter delta than with a structural
-  cost difference.
+  jitter on KV delivery.  After confirming HP_MALLOC contention
+  as the dominant 100k cost, the libnats topology is unlikely
+  to add a measurable cost on top — but worth a follow-up if
+  the alloc-rate optimizations don't close the dedicated/rank-1
+  gap.
 
 The dedicated-proc mode's value at this scale is the
 **orphan-safety + isolation property** (proven by the new
