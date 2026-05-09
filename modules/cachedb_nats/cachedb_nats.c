@@ -223,6 +223,27 @@ int   nats_enable_search_index = 1;
  * SCALING.md "Watcher CPU at scale" has the threshold table. */
 int   nats_dedicated_watcher_proc = 0;
 
+/* lib/nats connection-pool tuning.  These three modparams previously
+ * appeared in the admin XML but were never actually exported -- the
+ * values were hardcoded at the nats_pool_register() call site.  They
+ * now match the documented behaviour.
+ *
+ * First-registrant-wins: when event_nats (or any other NATS module)
+ * is loaded before cachedb_nats and has already called
+ * nats_pool_register(), the pool's connection parameters are already
+ * set and these values are ignored.  See lib/nats/README.md
+ * "Registration contract" for the rule.  In practice that means:
+ * load the NATS module whose connection settings should take effect
+ * FIRST (typically event_nats), or load only cachedb_nats and these
+ * settings own the pool.
+ *
+ * Defaults match the previously-hardcoded values so a deployment
+ * that doesn't touch the modparams sees exactly the same behaviour
+ * as before this commit. */
+int   nats_cdb_reconnect_wait_ms = 2000;
+int   nats_cdb_max_reconnect     = 60;
+int   nats_cdb_skip_openssl_init = 1;
+
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
  * When one or more patterns are set, kvStore_WatchMulti() is used.
@@ -286,6 +307,9 @@ static const param_export_t params[] = {
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
 	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
+	{"reconnect_wait",      INT_PARAM,             &nats_cdb_reconnect_wait_ms},
+	{"max_reconnect",       INT_PARAM,             &nats_cdb_max_reconnect},
+	{"skip_openssl_init",   INT_PARAM,             &nats_cdb_skip_openssl_init},
 	{0, 0, 0}
 };
 
@@ -479,7 +503,7 @@ static int mod_init(void)
 			tls_opts.key = tls_key;
 			tls_opts.hostname = tls_hostname;
 			tls_opts.skip_verify = tls_skip_verify;
-			tls_opts.skip_openssl_init = 1;
+			tls_opts.skip_openssl_init = nats_cdb_skip_openssl_init;
 			tls_opts.allow_downgrade = tls_allow_downgrade;
 			tls_ptr = &tls_opts;
 
@@ -492,7 +516,9 @@ static int mod_init(void)
 		}
 
 		if (nats_pool_register(url_to_use, tls_ptr,
-				"cachedb_nats", 2000, 60) < 0) {
+				"cachedb_nats",
+				nats_cdb_reconnect_wait_ms,
+				nats_cdb_max_reconnect) < 0) {
 			LM_ERR("NATS pool registration failed\n");
 			return -1;
 		}
