@@ -438,6 +438,70 @@ static void test_ring_capacity_not_pow2(void)
 	CHECK(err && strstr(err, "power of two") != NULL);
 }
 
+static void test_fetch_batch_ok(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;fetch_batch=128");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->fetch_batch == 128);
+		nats_handle_free(h);
+	}
+}
+
+static void test_fetch_batch_zero_rejected(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;fetch_batch=0");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "fetch_batch") != NULL);
+}
+
+static void test_fetch_batch_too_big(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;fetch_batch=8192");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "fetch_batch") != NULL);
+}
+
+static void test_fetch_timeout_ms_ok(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;fetch_timeout_ms=250");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->fetch_timeout_ms == 250);
+		nats_handle_free(h);
+	}
+}
+
+static void test_fetch_timeout_ms_too_big(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d;fetch_timeout_ms=120000");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h == NULL);
+	CHECK(err && strstr(err, "fetch_timeout_ms") != NULL);
+}
+
+static void test_fetch_defaults_zero_when_unset(void)
+{
+	const char *err = NULL;
+	str cfg = mkstr("id=x;stream=S;durable=d");
+	nats_handle_t *h = nats_handle_parse(&cfg, &err);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK(h->fetch_batch == 0);        /* "use module default" */
+		CHECK(h->fetch_timeout_ms == 0);   /* "use module default" */
+		nats_handle_free(h);
+	}
+}
+
 int main(void)
 {
 	test_minimal_durable();
@@ -474,6 +538,12 @@ int main(void)
 	test_ring_capacity_ok();
 	test_ring_capacity_zero_rejected();
 	test_ring_capacity_not_pow2();
+	test_fetch_batch_ok();
+	test_fetch_batch_zero_rejected();
+	test_fetch_batch_too_big();
+	test_fetch_timeout_ms_ok();
+	test_fetch_timeout_ms_too_big();
+	test_fetch_defaults_zero_when_unset();
 
 	fprintf(stderr, "tests: %d run, %d failed\n", tests_run, tests_fail);
 	return tests_fail == 0 ? 0 : 1;

@@ -136,6 +136,14 @@ typedef struct nats_handle {
 	 * trust the value.  0 = "use default". */
 	uint32_t ring_capacity;
 
+	/* Per-handle Fetch tuning overrides for the consumer process.  0 in
+	 * either field means "use the module-global default" (the
+	 * `fetch_batch` / `fetch_timeout_ms` modparams in nats_consumer.c).
+	 * Non-zero values let high-throughput durables widen the batch
+	 * without affecting low-rate handles on the same opensips. */
+	uint32_t fetch_batch;
+	uint32_t fetch_timeout_ms;
+
 	/* forward-compat */
 	str extra_json;
 
