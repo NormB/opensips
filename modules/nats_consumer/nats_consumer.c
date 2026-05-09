@@ -46,6 +46,7 @@
 #include "../../dprint.h"
 #include "../../lib/nats/nats_pool.h"
 #include "nats_consumer.h"
+#include "nats_handle_parse.h"
 #include "nats_handle_registry.h"
 #include "nats_mi.h"
 #include "nats_ack_ipc.h"
@@ -58,6 +59,68 @@
 static int  mod_init(void);
 static int  child_init(int rank);
 static void mod_destroy(void);
+
+/* w_nats_consumer_bind() -- script wrapper for the bind API.
+ *
+ * Same parse + register sequence as the MI command's mi_consumer_bind
+ * (nats_mi.c:81), expressed as a cmd_export so operators can write the
+ * canonical OpenSIPS pattern:
+ *
+ *     startup_route {
+ *         nats_consumer_bind("id=jobs;stream=jobs;subject=jobs.>");
+ *         nats_consumer_bind("id=audit;stream=audit;subject=audit.>");
+ *     }
+ *
+ * Restricted to STARTUP_ROUTE: bindings define the consumer-process's
+ * fetch handles, which the consumer process reads at child_init.
+ * Calling from request_route would mean "modify the registry mid-flight"
+ * which is doable via the MI path but isn't what the script API is
+ * documented to express.
+ *
+ * Returns 1 on success, -1 on parse/registry/duplicate-id error.  The
+ * specific error reason is logged at LM_ERR; script callers can branch
+ * on $retcode.  Mirrors the MI handler's error mapping (parse -> 400,
+ * dup -> 409, OOM -> 500) but collapses to a single -1 since cmd_export
+ * doesn't carry status codes.
+ */
+static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
+{
+	const char    *err = NULL;
+	nats_handle_t *h;
+	int            rc;
+
+	(void)msg;
+
+	if (!config_str || config_str->len <= 0 || !config_str->s) {
+		LM_ERR("nats_consumer_bind: empty/null config string\n");
+		return -1;
+	}
+
+	h = nats_handle_parse(config_str, &err);
+	if (!h) {
+		if (!err) err = "parse error";
+		LM_ERR("nats_consumer_bind: parse failed: %s\n", err);
+		return -1;
+	}
+
+	rc = nats_registry_bind(h);
+	if (rc == -1) {
+		LM_ERR("nats_consumer_bind: duplicate id '%.*s'\n",
+			h->id.len, h->id.s);
+		nats_handle_free(h);
+		return -1;
+	}
+	if (rc == -2) {
+		LM_ERR("nats_consumer_bind: registry full or OOM\n");
+		nats_handle_free(h);
+		return -1;
+	}
+
+	LM_INFO("nats_consumer: bound handle id=%.*s stream=%.*s "
+		"(via script)\n",
+		h->id.len, h->id.s, h->stream.len, h->stream.s);
+	return 1;
+}
 
 /* ── script-callable commands ────────────────────────────────── */
 
@@ -122,6 +185,13 @@ static const cmd_export_t cmds[] = {
 		{0, 0, 0}},
 		ONREPLY_ROUTE | LOCAL_ROUTE | STARTUP_ROUTE |
 		TIMER_ROUTE | EVENT_ROUTE },
+	/* Script wrapper for the registry bind API.  STARTUP_ROUTE only:
+	 * binds define the consumer-process's pull handles, which are
+	 * read at child_init.  Mid-flight binds belong on the MI path. */
+	{ "nats_consumer_bind", (cmd_function)w_nats_consumer_bind, {
+		{CMD_PARAM_STR, 0, 0},
+		{0, 0, 0}},
+		STARTUP_ROUTE },
 	{ 0, 0, {{0, 0, 0}}, 0 }
 };
 
