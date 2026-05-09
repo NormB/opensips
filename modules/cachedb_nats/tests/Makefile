@@ -12,7 +12,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_update_nested_dict test_update_creates_doc test_cas_backoff \
         test_index_stale_recovery test_kv_key_encode test_resync_modparams \
         test_enable_search_index test_dedicated_watcher_proc \
-        test_intern_wiring
+        test_intern_wiring test_intern_unit test_entry_blob_combine
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -24,7 +24,7 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_cas_backoff test_index_stale_recovery \
                   test_kv_key_encode test_resync_modparams \
                   test_enable_search_index test_dedicated_watcher_proc \
-                  test_intern_wiring
+                  test_intern_wiring test_intern_unit test_entry_blob_combine
 
 all: $(TESTS)
 
@@ -73,6 +73,17 @@ test_dedicated_watcher_proc: test_dedicated_watcher_proc.c
 test_intern_wiring: test_intern_wiring.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Behavioural unit test for the intern table -- carries a stripped-
+# down copy of the production logic so it can run as a normal
+# binary without linking OpenSIPS.  ASan'd so leaks / UAF show.
+test_intern_unit: test_intern_unit.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
+# Structural test for the single-allocation entry blob layout
+# (entry struct + field_value + inline keys[] -> one shm_malloc).
+test_entry_blob_combine: test_entry_blob_combine.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -89,6 +100,8 @@ check: all
 	./test_enable_search_index
 	./test_dedicated_watcher_proc
 	./test_intern_wiring
+	./test_intern_unit
+	./test_entry_blob_combine
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

@@ -13,5 +13,7 @@ test_resync_modparams
 test_enable_search_index
 test_dedicated_watcher_proc
 test_intern_wiring
+test_intern_unit
+test_entry_blob_combine
 sip_e2e/bench_register
 *.o
