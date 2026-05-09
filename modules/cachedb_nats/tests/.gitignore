@@ -12,4 +12,5 @@ test_kv_key_encode
 test_resync_modparams
 test_enable_search_index
 test_dedicated_watcher_proc
+sip_e2e/bench_register
 *.o

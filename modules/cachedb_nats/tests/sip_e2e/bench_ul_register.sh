@@ -145,39 +145,87 @@ echo "  bucket:     $KV_BUCKET"
 echo "  out:        $OUT"
 echo "=========================================="
 
-# Drive REGISTERs: simple fork-batched pacing.  Every 1/RPS s spawn a
-# new sipsak; capture per-call wall time. Round-robin across instances.
+# Drive REGISTERs.
+#
+# Two drivers are supported:
+#   - bench_register (compiled C, multi-threaded; preferred for >150 RPS)
+#   - bash + sipsak per-call (legacy fallback; 7 ms/iter floor caps
+#     effective rate at ~140 RPS regardless of OpenSIPS)
+#
+# The C driver is auto-built once if its source is present and a
+# binary doesn't already exist.  Operators can force the legacy bash
+# driver with BENCH_DRIVER=bash; useful for cross-checking but not
+# recommended for real numbers.
 LATENCIES="$OUT/latencies_us.txt"
 : > "$LATENCIES"
 
-start=$(date +%s.%N)
-i=0
-while [ "$i" -lt "$N" ]; do
-    user="bench$((i % AOR_SPACE))"
-    if [ "$INSTANCES" = 2 ] && [ $((i & 1)) = 1 ]; then
-        port=5074
-    else
-        port=5072
-    fi
-    {
-        t0=$(date +%s%N)
-        sipsak -U -C "sip:${user}@127.0.0.1:${port}" \
-            -s "sip:${user}@127.0.0.1:${port}" \
-            -e 60 -t 1 -O 1 >/dev/null 2>&1
-        t1=$(date +%s%N)
-        echo $(( (t1 - t0) / 1000 )) >> "$LATENCIES"
-    } &
+BENCH_DRIVER="${BENCH_DRIVER:-auto}"
+DRIVER_BIN="${HERE}/bench_register"
 
-    i=$((i + 1))
-    # Crude pacing: sleep based on RPS budget.
-    if [ "$RPS" -gt 0 ]; then
-        # 1/RPS s in microseconds
-        usleep_us=$(( 1000000 / RPS ))
-        # busy-wait via sleep with floats; bash sleep handles fractional s
-        sleep "$(awk -v u=$usleep_us 'BEGIN{printf "%.6f", u/1000000}')"
+if [ "$BENCH_DRIVER" = "auto" ] && [ ! -x "$DRIVER_BIN" ] && \
+        [ -f "${HERE}/bench_register.c" ]; then
+    ( cd "$HERE" && make bench_register >/dev/null 2>&1 ) || true
+fi
+
+if [ "$BENCH_DRIVER" != "bash" ] && [ -x "$DRIVER_BIN" ]; then
+    DRIVER_NAME="bench_register (compiled)"
+else
+    DRIVER_NAME="bash + sipsak (legacy)"
+fi
+echo "  driver:     $DRIVER_NAME"
+
+start=$(date +%s.%N)
+
+if [ "$BENCH_DRIVER" != "bash" ] && [ -x "$DRIVER_BIN" ]; then
+    # Compiled driver: one process, W worker threads, token-bucket
+    # pacing, persistent UDP sockets.  Latencies written directly to
+    # $LATENCIES; stats line emitted on stdout.
+    WORKERS="${BENCH_WORKERS:-8}"
+    TIMEOUT_MS="${BENCH_TIMEOUT_MS:-1000}"
+    "$DRIVER_BIN" \
+        --target "127.0.0.1:5072" \
+        --n "$N" \
+        --rps "$RPS" \
+        --aor-space "$AOR_SPACE" \
+        --workers "$WORKERS" \
+        --timeout-ms "$TIMEOUT_MS" \
+        --user-prefix "bench" \
+        --out "$LATENCIES" \
+        > "$OUT/driver_stats.txt" 2>&1
+    # The driver computes its own elapsed but we re-derive it from
+    # wallclock for parity with the legacy path.
+    if [ "$INSTANCES" = 2 ]; then
+        echo "  note: INSTANCES=2 not yet wired into bench_register; " \
+             "compiled driver targets instance A only" >&2
     fi
-done
-wait
+else
+    # Legacy bash drive loop.
+    i=0
+    while [ "$i" -lt "$N" ]; do
+        user="bench$((i % AOR_SPACE))"
+        if [ "$INSTANCES" = 2 ] && [ $((i & 1)) = 1 ]; then
+            port=5074
+        else
+            port=5072
+        fi
+        {
+            t0=$(date +%s%N)
+            sipsak -U -C "sip:${user}@127.0.0.1:${port}" \
+                -s "sip:${user}@127.0.0.1:${port}" \
+                -e 60 -t 1 -O 1 >/dev/null 2>&1
+            t1=$(date +%s%N)
+            echo $(( (t1 - t0) / 1000 )) >> "$LATENCIES"
+        } &
+
+        i=$((i + 1))
+        # Crude pacing: sleep based on RPS budget.
+        if [ "$RPS" -gt 0 ]; then
+            usleep_us=$(( 1000000 / RPS ))
+            sleep "$(awk -v u=$usleep_us 'BEGIN{printf "%.6f", u/1000000}')"
+        fi
+    done
+    wait
+fi
 
 end=$(date +%s.%N)
 elapsed=$(awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", e - s}')

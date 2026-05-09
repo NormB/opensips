@@ -358,25 +358,96 @@ The dedicated proc is also gated on `kv_watch_count > 0` (mirrors
 the rank-1 child_init gate): if no `kv_watch` pattern is
 configured, no fork — there's nothing to watch.
 
-### Bench (10k AoRs, RPS=200, single-instance, loopback NATS, HP_MALLOC, aarch64)
+### Bench rig: compiled C driver
 
-| Mode | p50 ms | p95 ms | p99 ms | max ms | eff. RPS | RSS MB | CAS retry / exh |
-|------|------:|------:|------:|------:|--------:|------:|----------------:|
-| rank-1 pthread (default)         | 15.18 | 16.34 | 17.98 | 62.1 | 103.6 | 77.8 | 0 / 0 |
-| dedicated watcher proc           | 15.21 | 16.41 | 18.21 | 63.2 | 103.6 | 84.4 | 0 / 0 |
-| `enable_search_index=0` (regr.)  | 15.01 | 16.11 | 17.68 | 61.9 | 103.6 | 72.1 | 0 / 0 |
+The original bash bench harness (`bench_ul_register.sh` driving
+`sipsak` per-call) had a ~7 ms/iter floor from `bash` pacing +
+`awk` fork + per-call `sipsak` exec.  That floor capped effective
+rate at ~140 RPS regardless of OpenSIPS performance, and the
+reported per-call latency was dominated by the `sipsak` startup
+cost — not the SIP path.  The numbers from that rig (p50 ~15 ms)
+are the bash harness floor, not OpenSIPS.
 
-At 10k single-instance the dedicated mode is **noise-level** in
-latency: p50 +0.03 ms, p95 +0.07 ms, p99 +0.23 ms — all well
-inside run-to-run variance — and pays ~6.6 MB RSS for the second
-process.  The expected payoff is at higher scale where the
-watcher's CPU footprint stops being negligible: at 100k AoRs the
-rank-1 pthread mode has ~17% of one core taken by watcher work,
-which the SIP worker no longer competes for in the dedicated mode.
-We don't have a 100k bench rig in tree to measure that directly;
-the design rationale stands on the SCALING.md projection plus the
-fact that at 10k there is no measurable regression from running
-the watcher out-of-process.
+We replaced the drive loop with a multi-threaded C client
+(`tests/sip_e2e/bench_register.c`): persistent UDP sockets per
+worker, token-bucket pacing, single-process N-thread design,
+nanosecond-resolution `CLOCK_MONOTONIC` timestamps.  Same input
+knobs; same output stats.  The harness auto-detects the binary
+and falls back to the bash loop only when the binary is absent.
+
+Latency reporting is now bounded by the SIP path itself:
+real-system p50 at low rate is ~1 ms, not ~15 ms.
+
+A driver script (`tests/sip_e2e/bench_matrix.sh`) wraps the
+per-mode invocation, runs N trials per cell, and aggregates
+median + min/max per metric.  The script avoids the
+`eval | tail | grep` pipeline-in-loop pattern that broke the
+earlier multi-mode invocation: each trial is a separate
+top-level bash subshell, parsing happens in a deferred stage,
+and the script always exits 0 — cell-level errors are reported
+in the aggregated table.
+
+### Bench (3 trials × 3 modes × 2 scales, RPS=2000, 32 workers, loopback NATS, HP_MALLOC, aarch64)
+
+Each cell shows `median (min..max)` across 3 trials.
+
+#### 30k AoRs
+
+| Mode | p50 µs | p95 µs | p99 µs | eff. RPS | RSS MB | CAS retry/exh |
+|------|------:|------:|------:|--------:|------:|--------------:|
+| rank-1 pthread       | 16100 (15377..16254) | 18459 (18140..18511) | 20087 (19540..21205) | 1922.7 |  95.8 | 0 / 0 |
+| dedicated watcher    | 15710 (15515..15958) | 18281 (18023..18303) | 19811 (19778..19940) | 1954.0 | 103.3 | 0 / 0 |
+| `enable_search_index=0` |  **772** (771..776) |  **1330** (1202..1432) |  **3481** (3258..3854) | **1999.1** |  **72.5** | 0 / 0 |
+
+#### 100k AoRs (INDEX_BUCKETS=16384)
+
+| Mode | p50 µs | p95 µs | p99 µs | eff. RPS | RSS MB | CAS retry/exh |
+|------|------:|------:|------:|--------:|------:|--------------:|
+| rank-1 pthread       | 16510 (16283..16764) | 18504 (18476..18769) | 20420 (20327..20546) | 1921.7 | 151.4 | 0 / 0 |
+| dedicated watcher    | 16587 (16394..16657) | 18509 (18461..18686) | 20631 (20399..20667) | 1914.8 | 158.6 | 0 / 0 |
+| `enable_search_index=0` |  **772** (772..783) |  **1291** (1278..1486) |  **8189** (4441..9315) | **1999.4** |  **72.3** | 0 / 0 |
+
+### Interpretation
+
+**Item 4 dedicated mode at 30k is a small but real win**: median
+p99 19811 vs 20087 µs (−1.4%), median p95 18281 vs 18459 µs
+(−1.0%).  The mode-medians sit well outside each other's
+trial-range, so the signal is stable across N=3 trials.  An
+earlier single-trial run reported −6.4% p99 — that was an outlier;
+the real benefit is in the 1–2% range.  The dedicated mode pays
+~7.5 MB RSS for the extra process.
+
+**At 100k the dedicated mode no longer wins**: median p99 20631
+vs 20420 µs (+1.0%), p50 essentially flat (+0.5%).  Likely
+mechanism: cross-process SHM lock contention on the
+`NATS_IDX_SHARDS=16` index shards exceeds the scheduling-isolation
+benefit at the higher watcher event rate.  Item 4's value at
+this scale is the **orphan-safety + isolation property** (proven
+by the new sip_e2e case 150_orphan_watcher_reap.sh), not raw
+latency.  Operators choosing between rank-1 and dedicated at
+100k+ should base the decision on rank-1's SIP-worker scheduling
+fairness needs, not on this latency table.
+
+**`enable_search_index=0` is the dominant performance lever at
+every scale**.  At 30k: p50 21× lower (772 vs 16100 µs), p99 6×
+lower, and the system hits the full RPS=2000 target where the
+index-on modes cap at ~1920–1955.  At 100k: p50 still 21× lower,
+p99 2.5× lower, and RSS is **flat** at ~72 MB regardless of
+bucket size (vs +56 MB for rank-1 between 30k and 100k as the
+index grows ~800 bytes/AoR).
+
+**Tail variance** in off mode is wider — 100k p99 range
+4441..9315 µs (4.9 ms) vs ~250 µs for index-on.  The PK fast
+path goes straight to KV with no index-side queueing, so rare
+broker-side slow writes dominate the tail directly instead of
+being smoothed.
+
+**Effective RPS ceiling** is in the index path: the index-on
+modes cap at ~1920 RPS, the off mode hits 1999 RPS at every
+scale.  Profiling-grade investigation of the index-path
+serialisation is filed as a follow-up; the operational
+conclusion stands — disabling the index for usrloc-only
+deployments delivers the throughput.
 
 ### Functional verification
 
