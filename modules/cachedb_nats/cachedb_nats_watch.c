@@ -52,9 +52,12 @@
  * ensures subsequent KV operations see the new connection state.
  */
 
+#include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 #include <nats/nats.h>
 
@@ -444,8 +447,24 @@ static void _watcher_loop(void)
 
 			s = kvWatcher_Next(&entry, _watcher, 500);
 
-			if (s == NATS_TIMEOUT)
+			if (s == NATS_TIMEOUT) {
+				/* Belt-and-suspenders for the dedicated-process
+				 * topology (Item 4): if our parent died and
+				 * PR_SET_PDEATHSIG somehow didn't fire (kernel
+				 * version with the bug, prctl rejected, etc.),
+				 * the kernel re-parents us to PID 1.  Detect
+				 * that here and exit so we never become an
+				 * orphan watcher.  Cheap on every 500 ms tick;
+				 * no-op for the rank-1 pthread variant where
+				 * getppid() returns the master forever. */
+				if (getppid() == 1) {
+					LM_NOTICE("watcher: parent gone "
+						"(reparented to init); exiting\n");
+					atomic_store(&_watcher_running, 0);
+					break;
+				}
 				continue;
+			}
 
 			if (s != NATS_OK) {
 				if (atomic_load(&_watcher_running))
@@ -647,7 +666,45 @@ void nats_watcher_proc_main(int rank)
 
 	(void)rank;
 
-	LM_INFO("NATS watcher proc starting (pid=%d)\n", (int)getpid());
+	LM_INFO("NATS watcher proc starting (pid=%d, ppid=%d)\n",
+		(int)getpid(), (int)getppid());
+
+	/* Parent-death handling: if the OpenSIPS master process exits
+	 * (orderly shutdown OR a pre-fork abort like a failed
+	 * mi_init_datagram_server), the kernel must reap us.  Without
+	 * this we orphan: linux re-parents to PID 1, the watcher loop
+	 * keeps running forever, and the next OpenSIPS startup races
+	 * with a stale watcher writing to the SHM index of a freshly-
+	 * allocated bucket.  Reproduces 100% of the time when the
+	 * master aborts after the proc_export_t fork but before
+	 * start_module_procs returns successfully -- e.g., when a
+	 * sibling module's pre-fork hook fails.
+	 *
+	 * Use SIGKILL rather than SIGTERM.  OpenSIPS core installs a
+	 * SIGTERM handler in every forked child that does graceful
+	 * shutdown via destroy(); under PDEATHSIG that handler runs
+	 * but its cleanup waits on shared resources owned by the
+	 * already-dead parent, leaving us hung.  SIGKILL is
+	 * uncatchable -- the kernel kills the process immediately
+	 * and reclaims its pages on schedule.  The SHM index is
+	 * parent-owned and is freed when the parent's destroy() path
+	 * runs (orderly shutdown) or when the kernel reaps the SHM
+	 * segment after the last attached process exits. */
+	if (prctl(PR_SET_PDEATHSIG, SIGKILL) == -1) {
+		LM_WARN("watcher proc: prctl(PR_SET_PDEATHSIG) failed: "
+			"%s; orphan-on-parent-death not protected\n",
+			strerror(errno));
+	}
+
+	/* Race window: the parent could have died between our fork() and
+	 * the prctl() above.  prctl arms only future deaths, so we'd miss
+	 * an already-dead parent and run forever.  Re-check getppid: if
+	 * it's 1 we have already been re-parented to init -- exit now. */
+	if (getppid() == 1) {
+		LM_NOTICE("watcher proc: parent died before we armed "
+			"PR_SET_PDEATHSIG (re-parented to init); exiting\n");
+		return;
+	}
 
 	/* Ensure the per-process NATS connection is up.  nats_pool_get()
 	 * is lazy-init: the first call in this process opens the
