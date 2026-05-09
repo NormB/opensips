@@ -444,16 +444,61 @@ that.  Two reasons it doesn't fit this benchmark:
    change was reverted; shipping a code change with no
    measurable win is just churn.
 
-The remaining candidates we did NOT instrument (worth a follow-up
-pass when the host is quiet):
+### Scheduler-wakeup hypothesis: instrumented, partially supported
 
-- **Scheduler wakeups.** Dedicated mode adds one runnable
-  process — every KV event that needs to update the SHM index
-  triggers a cross-process wakeup and TLB flush; rank-1 mode
-  is an intra-address-space thread wake.  At ~2000 ev/s this
-  matters more than at the 30k AoR steady-state rate.
-  Validates with `perf stat -e context-switches,cpu-migrations`
-  against the watcher PID in both modes.
+A `perf stat` pass measured the actual scheduler / TLB cost of
+cross-process wakeups in dedicated mode versus the rank-1 pthread
+mode.  Both runs: 100k AoRs, 2000 RPS target, 32 bench workers,
+`INDEX_BUCKETS=16384`, perf attached to every opensips PID for
+40 s of steady-state mid-flight bench.  Counters via
+`perf stat -p <pids> -e task-clock,context-switches,cpu-migrations,page-faults,minor-faults`.
+
+| Counter (40 s window) | rank-1 (8 pids) | dedicated (9 pids) | Δ |
+|---|---:|---:|---:|
+| task-clock (ms)       | 57,924    | 49,596    | **−14.4 %** |
+| CPUs utilized         | 1.448     | 1.240     | −14.4 % |
+| context-switches      | 1,110,408 | 1,179,528 | +6.2 % |
+| context-switches/sec  | 27,760    | 29,488    | +1,728/sec |
+| cpu-migrations        | 36,275    | 24,172    | **−33.3 %** |
+| page-faults           | 9,016     | 14,307    | **+58.7 %** |
+| minor-faults          | 9,017     | 14,307    | +58.7 % |
+
+The hypothesis predicted dedicated mode would be a net loser
+because cross-process wakeups + TLB flushes outweigh the
+isolation benefit.  The data partially supports it:
+
+- **Page-faults +59 % in dedicated mode** is real signal —
+  ~5,300 extra minor faults over 40 s, all soft (no disk I/O).
+  Consistent with cross-process TLB pressure (the watcher's SHM
+  pages get re-faulted in the SIP workers and vice versa as the
+  index is updated cross-process).
+- **Context-switches +6 %** is real but modest — ~1,728/sec
+  extra, roughly one extra cs per 2-3 KV events.
+
+But the data also actively contradicts other parts of the
+hypothesis:
+
+- **CPU-migrations −33 % in dedicated mode** — fewer scheduler
+  migrations, not more.  The dedicated watcher proc apparently
+  stays put on its CPU; rank-1 mode has more migrations because
+  the SIP worker pthread bounces between SIP-routing and watcher
+  work, providing more re-scheduling opportunities for the
+  scheduler.
+- **Total CPU −14 % in dedicated mode** — a measurable
+  isolation win.  Per-process CPU drops from 18.1 % to 13.8 %;
+  the watcher's work running in its own address space avoids
+  competing with SIP routing for CPU resources (intra-process
+  cache-coherence traffic, libc-malloc lock contention, etc.).
+
+End-to-end p99 effect at 100k was +1.0 % in the multi-trial
+matrix.  The scheduler / TLB cost of dedicated mode (extra cs
++ extra page-faults) does NOT add up to that 1 % regression.
+The CPU savings actually point the other way (dedicated mode
+should be faster, not slower).  So the residual +1 % p99
+must be coming from somewhere else.
+
+### Remaining candidates (uninstrumented)
+
 - **HP_MALLOC SHM allocator contention.** `nats_json_index_add`
   calls `shm_malloc` under the shard lock for new field:value
   entries.  At 100k cold-fill the watcher does ~400k+
@@ -463,7 +508,9 @@ pass when the host is quiet):
 - **libnats subscriber-thread placement.** Dedicated proc has
   its own libnats I/O thread; rank-1 mode shares the SIP
   worker's NATS connection.  Different topology = different
-  jitter on KV delivery.
+  jitter on KV delivery — and the +1 % p99 we see is more
+  consistent with a small jitter delta than with a structural
+  cost difference.
 
 The dedicated-proc mode's value at this scale is the
 **orphan-safety + isolation property** (proven by the new
