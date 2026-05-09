@@ -45,6 +45,7 @@
 #include <stdatomic.h>
 
 #include "../../mi/mi.h"
+#include "../../globals.h"  /* process_no */
 
 /* Per-process upper bound for the SHM cdb-stats table.  See the
  * mirror constant in event_nats/nats_stats.h for the rationale; the
@@ -64,7 +65,6 @@ extern nats_cdb_stats_t *nats_cdb_stats;
 
 static inline nats_cdb_stats_t *nats_cdb_stats_slot(void)
 {
-	extern int process_no;
 	if (!nats_cdb_stats) return NULL;
 	if (process_no < 0 || process_no >= NATS_CDB_STATS_MAX_PROCS)
 		return NULL;

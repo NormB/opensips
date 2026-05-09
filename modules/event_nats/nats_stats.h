@@ -45,6 +45,7 @@
 
 #include "../../mi/mi.h"
 #include "../../statistics.h"
+#include "../../globals.h"  /* process_no */
 
 /*
  * NATS statistics counters, allocated in OpenSIPS shared memory.
@@ -106,7 +107,6 @@ extern nats_stats_t *nats_stats;
  * function call. */
 static inline nats_stats_t *nats_stats_slot(void)
 {
-    extern int process_no;
     if (!nats_stats) return NULL;
     if (process_no < 0 || process_no >= NATS_STATS_MAX_PROCS)
         return NULL;
