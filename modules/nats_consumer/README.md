@@ -320,13 +320,16 @@ Single-instance, loopback NATS, aarch64, defaults (`fetch_batch=10`,
 `fetch_timeout_ms=1000`, default 1 s timer route).  Drain pattern
 matters more than the module knobs; both rows are at N=100 000:
 
-| Drain pattern                     | msgs/sec | Drain elapsed | redeliveries |
-|-----------------------------------|---------:|--------------:|-------------:|
-| `nats_fetch` + `nats_ack` (single)|    2 067 |        48.5 s |          206 |
-| `nats_fetch_batch` + per-msg ack  |  **9 843** |   **10.2 s** |        **0** |
+| Drain pattern                          | msgs/sec | Drain elapsed | redeliveries |
+|----------------------------------------|---------:|--------------:|-------------:|
+| `nats_fetch` + `nats_ack` (single)     |    2 058 |        48.5 s |          206 |
+| `nats_fetch_batch` (`fetch_batch=10`)  |    9 833 |        10.2 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=64`)  |   37 509 |         2.7 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=128`) |   56 085 |         1.8 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=256`) | **89 365** | **1.1 s**   |        **0** |
 
-The 7.6x speedup is unlocked by three fixes that landed together
-(see commit log):
+The 43x speedup over the original single-drain baseline lands via
+four fixes that compound:
 
 1. `nats_fetch_batch`'s opts parser now accepts `expires_ms=` (was
    silently ignored before; only `expires=` was wired up).
@@ -341,6 +344,16 @@ The 7.6x speedup is unlocked by three fixes that landed together
    than the ring saw the broker fill the ref table mid-flight,
    trigger drops, and watch the broker redeliver after `ack_wait`
    --- which stalled the broker-side ack floor.
+4. The consumer process's `pull_one_batch` now clamps the Fetch
+   batch size to the ring's free slots before calling
+   `natsSubscription_Fetch`.  Prior to this clamp, a static
+   `fetch_batch` larger than the worker's transient drain rate
+   would push messages past the ring's capacity, get defer-dropped
+   on push, never be acked, expire `ack_wait`, and trigger a
+   redelivery cascade whose stale-consumer-seq acks could never
+   advance the broker's ack floor --- which is what stalled
+   `fetch_batch` in (16..64) at zero broker-confirmed acks despite
+   tens of thousands of locally-applied acks.
 
 ### Choosing a drain pattern
 
@@ -369,16 +382,13 @@ timer_route[drain, 1] {
 }
 ```
 
-Note: at the time of writing, batch drain at `count > 16` interacts
-badly with the single timer-process drain pattern -- the consumer
-fills the ring faster than the worker can iterate the batch + ack,
-which feeds back into msg-ref pressure.  The cleanest result on
-this hardware is `count=10` with a generous `ring_capacity` /
-`max_ack_pending` bind override.  Higher batches need either a
-multi-process drain (one timer route per worker) or a future
-"drain_all + bulk_ack" script primitive that bypasses per-message
-script-interpreter overhead entirely; both are out of scope for
-this commit.
+Throughput now scales linearly with `count` up to the
+`max_ack_pending` cap.  Pick `count` to match the worker's
+batch-iteration budget under your timer interval (a count=256
+batch takes ~13 ms of script time per drain pass on aarch64).
+Pair it with `ring_capacity >= 4 * count` and
+`max_ack_pending >= ring_capacity` so the consumer-process Fetch
+clamp has room to deliver full batches.
 
 ### Tuning `fetch_batch` and `fetch_timeout_ms`
 

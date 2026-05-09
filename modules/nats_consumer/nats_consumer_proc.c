@@ -1083,11 +1083,46 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	 * mid-pull.  Paired with the dec below. */
 	nats_handle_pending_inc(ss->h_ref);
 
-	memset(&list, 0, sizeof(list));
-	hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
-	s = natsSubscription_Fetch(&list, ss->sub,
-	        eff_fetch_batch(ss->h_ref),
-	        eff_fetch_timeout_ms(ss->h_ref), NULL);
+	/* Dynamic batch sizing: never request more than will fit in the
+	 * ring's free slots.  Prior to this, a static fetch_batch larger
+	 * than the worker's drain rate would push messages until the ring
+	 * filled, then defer-drop the surplus.  Dropped messages are not
+	 * acked, the broker holds them as outstanding, ack_wait expires,
+	 * the broker redelivers under a NEW consumer-seq, and any later
+	 * worker-driven ack of the original consumer-seq is rejected as
+	 * stale -- which is what stalled the broker ack-floor at small N
+	 * for fetch_batch in (16..64).
+	 *
+	 * Clamp to free slots so the Fetch never produces a defer-drop on
+	 * push.  When the ring is completely full, skip the Fetch entirely
+	 * and let the worker drain first; the next consumer-process loop
+	 * iteration will re-evaluate.  This is pure flow-control: the
+	 * un-fetched messages remain owned by the broker and are delivered
+	 * cleanly on the next pull.
+	 *
+	 * Subtract one from depth so we always leave headroom for the
+	 * generation-bump invariant in the ring's CAS push path. */
+	{
+		uint32_t cap     = nats_ring_capacity(ss->ring);
+		uint32_t depth   = nats_ring_depth(ss->ring);
+		int      max_fb  = eff_fetch_batch(ss->h_ref);
+		int      free_sl = (cap > depth) ? (int)(cap - depth) : 0;
+		int      eff_fb;
+
+		if (free_sl <= 1) {
+			ss->total_dropped_backpressure++;
+			goto out;
+		}
+		eff_fb = (max_fb < free_sl) ? max_fb : (free_sl - 1);
+		if (eff_fb < 1)
+			eff_fb = 1;
+
+		memset(&list, 0, sizeof(list));
+		hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
+		s = natsSubscription_Fetch(&list, ss->sub,
+		        eff_fb,
+		        eff_fetch_timeout_ms(ss->h_ref), NULL);
+	}
 
 	/* Fast path on idle: timeout is the steady-state condition when
 	 * the broker has nothing to send us. */
