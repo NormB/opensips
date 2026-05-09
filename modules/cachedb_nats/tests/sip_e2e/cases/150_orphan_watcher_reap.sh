@@ -1,4 +1,4 @@
-# 150 — Item 4 dedicated-watcher orphan reap on master death.
+# 150 — dedicated-watcher orphan reap on master death.
 #
 # When the OpenSIPS master aborts after the dedicated watcher has
 # been forked (e.g., a sibling module's pre-fork hook fails, or

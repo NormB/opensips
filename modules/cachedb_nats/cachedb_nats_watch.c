@@ -449,7 +449,7 @@ static void _watcher_loop(void)
 
 			if (s == NATS_TIMEOUT) {
 				/* Belt-and-suspenders for the dedicated-process
-				 * topology (Item 4): if our parent died and
+				 * topology (dedicated_watcher_proc=1): if our parent died and
 				 * PR_SET_PDEATHSIG somehow didn't fire (kernel
 				 * version with the bug, prctl rejected, etc.),
 				 * the kernel re-parents us to PID 1.  Detect
@@ -629,7 +629,7 @@ void nats_watch_stop(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Item 4 -- dedicated-process watcher entry                          */
+/*  Dedicated-process watcher entry                          */
 /* ------------------------------------------------------------------ */
 
 /* The kv_watch_list / kv_watch_count globals are owned by
@@ -637,7 +637,7 @@ void nats_watch_stop(void)
  * so this translation unit can read them without a duplicate decl. */
 
 /**
- * nats_watcher_proc_main() -- Item 4 dedicated-process entry point.
+ * nats_watcher_proc_main() -- dedicated-process watcher entry point.
  *
  * Forked by the OpenSIPS core via the proc_export_t entry registered
  * in cachedb_nats.c when both `dedicated_watcher_proc` and

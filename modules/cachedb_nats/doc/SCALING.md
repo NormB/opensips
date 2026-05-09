@@ -117,7 +117,7 @@ halves average chain length for ~32 KB more SHM.
 
 The KV watcher processes one event per KV-change.  By default it
 runs as a pthread inside the rank-1 SIP worker; setting
-`dedicated_watcher_proc=1` (Item 4) moves it into its own forked
+`dedicated_watcher_proc=1` moves it into its own forked
 OpenSIPS child process so it stops competing with SIP request
 handling on rank 1.  With re-REGISTER every 60 s, the steady-
 state event rate is `AoRs / 60`:
@@ -138,7 +138,7 @@ index size pushes cache pressure.
 - **At 100k**: single rank-1 watcher uses ~17 % of one core.
   Fine, but rank-1 is also a SIP worker; if its REGISTER
   workload competes for CPU with the watcher, propagation
-  latency stretches.  Set `dedicated_watcher_proc=1` (Item 4)
+  latency stretches.  Set `dedicated_watcher_proc=1`
   to fork a dedicated OpenSIPS child process that owns the
   watcher loop and lets rank 1 stay focused on SIP routing.
 - **At 1MM**: a single watcher can't keep up.  Period.  Even
@@ -175,7 +175,7 @@ index size pushes cache pressure.
   side; the SHM cost of running with the index on (~250 MB at
   1MM) is what makes "off" the obvious answer here.
 - For mixed workloads with the index on: `index_buckets=65536`
-  and `-m 1024`.  Set `dedicated_watcher_proc=1` (Item 4) to
+  and `-m 1024`.  Set `dedicated_watcher_proc=1` to
   keep the rank-1 worker focused on SIP routing.
 - **Sharded deployment** is recommended above ~500k AoRs even
   with the index off, but for SIP-side reasons (UDP port
@@ -198,7 +198,7 @@ The architecture changes substantively:
    path is **PK-only** — both reads (`cdb_load_urecord` at
    `udomain.c:937`) and writes (`cdb_flush_urecord` at
    `urecord.c:600`) construct `cdb_filter_t` with `is_pk = 1`.
-   The PK fast path in `nats_cache_query` (Item 1 of this
+   The PK fast path in `nats_cache_query` (introduced in this
    branch) handles those reads in O(1) broker-side via
    `kvStore_Get(prefix + encode(filter_value))`, bypassing the
    bucket walk entirely.  At 10MM scale, the index would cost
@@ -286,13 +286,13 @@ that depends on it in the registration path.
    error message rather than crashing on a NULL `g_idx`.  For
    pure usrloc deployments this is the canonical setting.
 4. **Dedicated watcher process** (Option B) — **pending**.
-   With Item 3 making the watcher optional, this is now only
+   With `enable_search_index=0` making the watcher optional, this is now only
    meaningful for mixed-workload deployments that keep the
    index on at ≥ 100k AoRs.  ~150 lines.
 5. **Async `nats_request`** — **pending**.  Only meaningful
    for request-route-blocking deployments at non-trivial RPS.
    ~300-500 lines.
 
-Items 1-3 turn cachedb_nats from "works to about 100k AoRs with
+The PK fast path, configurable index_buckets, and optional index turn cachedb_nats from "works to about 100k AoRs with
 care" into "1MM is a single modparam flip from a working 100k
 config".  Items 4-5 are deployment-shape dependent.

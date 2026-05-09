@@ -38,14 +38,14 @@ RPS="${RPS:-200}"
 AOR_SPACE="${AOR_SPACE:-200}"
 INSTANCES="${INSTANCES:-1}"
 
-# Scale-tuning knobs (Items 1-3).  ENABLE_INDEX=0 disables the
+# Scale-tuning knobs.  ENABLE_INDEX=0 disables the
 # in-memory JSON-FTS index entirely; reads/writes use the PK fast
 # path.  This is the recommended setting for usrloc-as-store
 # deployments and the canonical bench mode for measuring the
-# Item 3 win versus the legacy index-on baseline.
+# index-disable win versus the legacy index-on baseline.
 ENABLE_INDEX="${ENABLE_INDEX:-1}"
 INDEX_BUCKETS="${INDEX_BUCKETS:-4096}"
-# Item 4: dedicated KV-watcher process.  When 1 (and the index is on)
+# Dedicated KV-watcher process.  When 1 (and the index is on)
 # OpenSIPS forks one extra child that owns the watcher loop and frees
 # rank 1 from the watcher pthread.  Default 0 keeps the legacy
 # rank-1 pthread topology.

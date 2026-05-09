@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Item 3 wiring test: cachedb_nats exposes an `enable_search_index`
+ * `enable_search_index` wiring test: cachedb_nats exposes an `enable_search_index`
  * modparam (default 1) that lets operators disable the in-memory
  * JSON-FTS index for PK-only workloads (notably usrloc).  When
  * disabled:
