@@ -181,8 +181,30 @@ typedef struct proc_sub_state {
 } proc_sub_state_t;
 
 static proc_sub_state_t *g_subs = NULL;
+
+/* Dense idx -> proc_sub_state_t table maintained alongside g_subs so the
+ * ack drain callback (which only carries the handle_idx via the ack
+ * token) can find the owning subscription's handle in O(1) without
+ * scanning the linked list per ack.  Updated under the same single-
+ * producer assumption as g_subs (the consumer process only). */
+static proc_sub_state_t *g_subs_by_idx[NATS_REGISTRY_MAX_HANDLES] = {0};
+
 static natsConnection   *g_nc   = NULL;
 static jsCtx            *g_js   = NULL;
+
+/* SHM-handle stat bump.  All counters live in the per-handle SHM
+ * struct; producers are this process only, readers are MI in the
+ * attendant process (see nats_mi.c).  Use relaxed atomics so the
+ * reader sees coherent increments without us paying for the per-handle
+ * rwlock on every pull/push/ack.
+ *
+ * Wrapped in a static inline so the call sites stay terse; with NULL
+ * the bump is a no-op (e.g. early TEST_SHIM init). */
+static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
+{
+	if (!h || !field) return;
+	__atomic_fetch_add(field, v, __ATOMIC_RELAXED);
+}
 
 /* ── natsMsg ref table ───────────────────────────────────────── */
 
@@ -789,6 +811,8 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	if (!is_rebuild) {
 		ss->next = g_subs;
 		g_subs = ss;
+		if (ss->handle_idx < NATS_REGISTRY_MAX_HANDLES)
+			g_subs_by_idx[ss->handle_idx] = ss;
 	}
 
 	/* Phase 7: stash the allocations on ss so the retire / rebuild
@@ -1020,6 +1044,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	nats_handle_pending_inc(ss->h_ref);
 
 	memset(&list, 0, sizeof(list));
+	hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
 	s = natsSubscription_Fetch(&list, ss->sub,
 	        PHASE3_FETCH_BATCH, PHASE3_FETCH_TIMEOUT_MS, NULL);
 
@@ -1182,6 +1207,9 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		if (rc == 0) {
 			pushed++;
 			ss->total_pushed++;
+			hstat_add(ss->h_ref, &ss->h_ref->msgs_delivered, 1);
+			if (delivered > 1)
+				hstat_add(ss->h_ref, &ss->h_ref->redeliveries, 1);
 			/* natsMsg stays alive in the ref table until the worker
 			 * sends an ack IPC.  Do NOT destroy it here. */
 			list.Msgs[i] = NULL;
@@ -1209,6 +1237,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 				ss->id.len, ss->id.s,
 				subject_len, data_len, rc);
 			(void)natsMsg_Term(m, NULL);
+			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
 			natsMsg_Destroy(m);
 			list.Msgs[i] = NULL;
 		}
@@ -1252,6 +1281,10 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 	natsMsg    *nmsg;
 	natsStatus  s;
 	drain_ack_ctx_t *ctx = (drain_ack_ctx_t *)user;
+	uint16_t           h_idx = nats_ack_token_handle(m->ack_token);
+	proc_sub_state_t  *cb_ss = (h_idx < NATS_REGISTRY_MAX_HANDLES)
+	                          ? g_subs_by_idx[h_idx] : NULL;
+	nats_handle_t     *cb_h  = cb_ss ? cb_ss->h_ref : NULL;
 
 	nmsg = release_msg_ref(m->ack_token);
 	if (!nmsg) {
@@ -1262,6 +1295,8 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 	switch ((nats_ack_action_e)m->action) {
 		case NATS_ACK_ACTION_ACK:
 			s = natsMsg_Ack(nmsg, NULL);
+			if (s == NATS_OK)
+				hstat_add(cb_h, &cb_h->acks, 1);
 			break;
 		case NATS_ACK_ACTION_ACK_NEXT:
 			/* nats.c 3.13 does not expose the server's +NXT ack-and-pull
@@ -1276,18 +1311,26 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 			 * (finish the current message and immediately hand me the
 			 * next one) without depending on library internals. */
 			s = natsMsg_AckSync(nmsg, NULL, NULL);
+			if (s == NATS_OK)
+				hstat_add(cb_h, &cb_h->acks, 1);
 			if (ctx)
-				next_bits_set(ctx, nats_ack_token_handle(m->ack_token));
+				next_bits_set(ctx, h_idx);
 			break;
 		case NATS_ACK_ACTION_NAK:
 			s = natsMsg_Nak(nmsg, NULL);
+			if (s == NATS_OK)
+				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_NAK_DELAY:
 			s = natsMsg_NakWithDelay(nmsg,
 				(int64_t)m->delay_ms * 1000000LL, NULL);
+			if (s == NATS_OK)
+				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_TERM:
 			s = natsMsg_Term(nmsg, NULL);
+			if (s == NATS_OK)
+				hstat_add(cb_h, &cb_h->terms, 1);
 			break;
 		case NATS_ACK_ACTION_IN_PROGRESS:
 			s = natsMsg_InProgress(nmsg, NULL);
@@ -1421,6 +1464,9 @@ static void tear_down_retired_subs(void)
 		}
 
 		*pp = ss->next;
+		if (ss->handle_idx < NATS_REGISTRY_MAX_HANDLES &&
+		    g_subs_by_idx[ss->handle_idx] == ss)
+			g_subs_by_idx[ss->handle_idx] = NULL;
 
 		/* Clear the handle's subscription publish pointer; the handle
 		 * may still be on the retire list (not yet reaped) and MI
