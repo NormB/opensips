@@ -10,7 +10,8 @@ ASAN    := -fsanitize=address
 TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_reply_size_cap test_disconnected_fastfail test_timeout_normalize \
         test_update_nested_dict test_update_creates_doc test_cas_backoff \
-        test_index_stale_recovery test_kv_key_encode test_resync_modparams
+        test_index_stale_recovery test_kv_key_encode test_resync_modparams \
+        test_enable_search_index test_dedicated_watcher_proc
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -20,7 +21,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
 TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_disconnected_fastfail test_timeout_normalize \
                   test_cas_backoff test_index_stale_recovery \
-                  test_kv_key_encode test_resync_modparams
+                  test_kv_key_encode test_resync_modparams \
+                  test_enable_search_index test_dedicated_watcher_proc
 
 all: $(TESTS)
 
@@ -60,6 +62,12 @@ test_kv_key_encode: test_kv_key_encode.c
 test_resync_modparams: test_resync_modparams.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_enable_search_index: test_enable_search_index.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test_dedicated_watcher_proc: test_dedicated_watcher_proc.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -73,6 +81,8 @@ check: all
 	./test_index_stale_recovery
 	./test_kv_key_encode
 	./test_resync_modparams
+	./test_enable_search_index
+	./test_dedicated_watcher_proc
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

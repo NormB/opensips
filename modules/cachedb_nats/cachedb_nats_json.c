@@ -27,7 +27,9 @@
  * can locate documents without scanning the entire KV store.
  *
  * Index structure:
- *   - Hash table with NATS_IDX_BUCKETS (256) buckets and separate chaining.
+ *   - Hash table with `nats_idx_buckets` buckets (runtime-tunable
+ *     via the `index_buckets` modparam, default 4096) and separate
+ *     chaining.
  *   - Each entry maps a "field:value" string to a dynamic array of document
  *     keys that contain that pair.
  *
@@ -65,6 +67,12 @@
 extern char *fts_json_prefix;
 extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
+extern int   nats_enable_search_index;
+
+/* Forward declarations for helpers that callers earlier in the file
+ * need to reach.  Definitions live further down for locality with
+ * the related JSON-handling code. */
+static char *_kv_encode_key(const char *in, int in_len, int *out_len);
 
 /* ------------------------------------------------------------------ */
 /*                       Global search index                          */
@@ -88,14 +96,21 @@ nats_search_idx *nats_json_get_index(void)
 /*                       djb2 hash function                           */
 /* ------------------------------------------------------------------ */
 
+/* Runtime bucket count (set by nats_json_index_init from the
+ * `index_buckets` modparam).  Default keeps current behaviour for
+ * callers that don't override it. */
+int nats_idx_buckets = NATS_IDX_DEFAULT_BUCKETS;
+int nats_idx_bucket_mask = NATS_IDX_DEFAULT_BUCKETS - 1;
+
 /**
  * _hash() — Compute a bucket index using the djb2 hash algorithm.
  *
  * Takes a byte string of length @len and produces a value in
- * [0, NATS_IDX_BUCKETS).  djb2 is a fast, well-distributed hash suitable
+ * [0, nats_idx_buckets).  djb2 is a fast, well-distributed hash suitable
  * for short strings such as "field:value" index keys.  The magic constant
  * 5381 and the shift-add recurrence (h * 33 + c) are from Dan Bernstein's
- * original comp.lang.c posting.
+ * original comp.lang.c posting.  The bucket count is forced to a power
+ * of two at init, so `& nats_idx_bucket_mask` replaces the modulo.
  */
 static unsigned int _hash(const char *s, int len)
 {
@@ -104,7 +119,7 @@ static unsigned int _hash(const char *s, int len)
 	/* djb2: h = h * 33 + c, expressed as ((h << 5) + h) + c */
 	for (i = 0; i < len; i++)
 		h = ((h << 5) + h) + (unsigned char)s[i];
-	return h % NATS_IDX_BUCKETS;
+	return h & nats_idx_bucket_mask;
 }
 
 /* ------------------------------------------------------------------ */
@@ -573,6 +588,19 @@ static void _index_field_cb(const char *field, int flen,
  *
  * Returns 0 on success, -1 on failure.
  */
+/* Round @v up to the next power of two, with a floor at @min.
+ * Used to coerce the operator-supplied `index_buckets` modparam
+ * into a power-of-two value so `_hash` can use a bitmask. */
+static int _round_up_pow2(int v, int min)
+{
+	int r = 1;
+	if (v < min)
+		v = min;
+	while (r < v)
+		r <<= 1;
+	return r;
+}
+
 int nats_json_index_init(void)
 {
 	if (g_idx) {
@@ -580,35 +608,68 @@ int nats_json_index_init(void)
 		return 0;
 	}
 
+	/* Coerce the requested bucket count into a power of two (so the
+	 * hash can use a bitmask) and at least NATS_IDX_SHARDS (so each
+	 * shard guards exactly buckets/shards buckets). */
+	int requested = nats_idx_buckets > 0
+		? nats_idx_buckets : NATS_IDX_DEFAULT_BUCKETS;
+	int rounded = _round_up_pow2(requested, NATS_IDX_SHARDS);
+	if (rounded != requested)
+		LM_INFO("index_buckets %d rounded up to power of two "
+			"%d (min %d)\n",
+			requested, rounded, NATS_IDX_SHARDS);
+	nats_idx_buckets = rounded;
+	nats_idx_bucket_mask = rounded - 1;
+
 	/* Allocate the index header in SHM so every forked OpenSIPS
 	 * worker sees the same instance.  Pre-fork allocation matters:
 	 * once child_init runs, each worker maps the same SHM segment
 	 * and dereferences the same pointer values. */
 	g_idx = shm_malloc(sizeof(nats_search_idx));
 	if (!g_idx) {
-		LM_ERR("no SHM for search index\n");
+		LM_ERR("index init: shm_malloc for nats_search_idx header "
+			"failed (%zu bytes; tune -m / shared memory size)\n",
+			sizeof(nats_search_idx));
 		return -1;
 	}
 	memset(g_idx, 0, sizeof(nats_search_idx));
 	atomic_store(&g_idx->num_documents, 0);
 
+	g_idx->buckets = shm_malloc(
+		sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+	if (!g_idx->buckets) {
+		LM_ERR("index init: shm_malloc for buckets array failed "
+			"(%d buckets, %zu bytes)\n",
+			nats_idx_buckets,
+			sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
+	}
+	memset(g_idx->buckets, 0,
+		sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+
 	g_idx->shard_locks = lock_set_alloc(NATS_IDX_SHARDS);
 	if (!g_idx->shard_locks) {
-		LM_ERR("no SHM for index lock set\n");
+		LM_ERR("index init: lock_set_alloc(%d) for shard locks "
+			"failed (SHM exhausted?)\n", NATS_IDX_SHARDS);
+		shm_free(g_idx->buckets);
 		shm_free(g_idx);
 		g_idx = NULL;
 		return -1;
 	}
 	if (!lock_set_init(g_idx->shard_locks)) {
-		LM_ERR("failed to initialize index lock set\n");
+		LM_ERR("index init: lock_set_init failed for %d shards\n",
+			NATS_IDX_SHARDS);
 		lock_set_dealloc(g_idx->shard_locks);
+		shm_free(g_idx->buckets);
 		shm_free(g_idx);
 		g_idx = NULL;
 		return -1;
 	}
 
 	LM_DBG("search index initialized in SHM (%d buckets, %d shards)\n",
-		NATS_IDX_BUCKETS, NATS_IDX_SHARDS);
+		nats_idx_buckets, NATS_IDX_SHARDS);
 	return 0;
 }
 
@@ -968,7 +1029,7 @@ int nats_json_index_remove(const char *key)
 
 	_idx_lock_all(g_idx);
 
-	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
 		for (e = g_idx->buckets[b]; e; e = e->next)
 			_entry_remove_key(e, key);
 	}
@@ -1077,10 +1138,11 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	nats_search_idx shadow;
 	struct _rebuild_snapshot_ctx ctx;
 	int count;
-	nats_idx_entry *old_buckets[NATS_IDX_BUCKETS];
+	nats_idx_entry **old_buckets;
 	int old_num;
 	unsigned int b;
 	nats_idx_entry *e, *next;
+	size_t buckets_bytes;
 
 	if (!g_idx) return -1;
 	if (!kv)    { LM_ERR("null KV store\n"); return -1; }
@@ -1088,10 +1150,21 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	LM_INFO("rebuilding search index (shadow build + atomic swap)...\n");
 
 	/* Step 1: build the new state into a thread-local shadow struct.
-	 * The shadow is on the stack; only this caller sees it.  The lock
-	 * field is unused because no other thread can reach `shadow` --
-	 * we pass it explicitly through _index_add_into. */
+	 * The shadow header is on the stack but its buckets array must be
+	 * heap-allocated since the bucket count is now runtime-tunable.
+	 * Only this caller sees the shadow; the lock field is unused
+	 * because no other thread can reach `shadow` -- we pass it
+	 * explicitly through _index_add_into. */
 	memset(&shadow, 0, sizeof(shadow));
+	buckets_bytes = sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets;
+	shadow.buckets = pkg_malloc(buckets_bytes);
+	if (!shadow.buckets) {
+		LM_ERR("rebuild: pkg_malloc for shadow buckets failed "
+			"(%d buckets, %zu bytes)\n",
+			nats_idx_buckets, buckets_bytes);
+		return -1;
+	}
+	memset(shadow.buckets, 0, buckets_bytes);
 
 	ctx.shadow = &shadow;
 	ctx.prefix = prefix;
@@ -1108,16 +1181,30 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	}
 
 	/* Step 2: atomic swap under all shard locks.  Snapshot the old
-	 * bucket pointers (they remain reachable to readers up until
+	 * buckets pointer (entries remain reachable to readers up until
 	 * we release the locks, after which they're disowned), then
 	 * install the shadow's buckets and num_documents.  Queries
 	 * arriving DURING this critical section block on whatever
-	 * shard they need and see the new state when they get in. */
+	 * shard they need and see the new state when they get in.
+	 *
+	 * Note: we swap the pointer-to-buckets, not the buckets bytes.
+	 * The old g_idx->buckets array (SHM) stays put; we copy from
+	 * shadow.buckets into it.  This avoids forcing a SHM realloc
+	 * while shards are locked. */
 	_idx_lock_all(g_idx);
-	memcpy(old_buckets, g_idx->buckets, sizeof(old_buckets));
+	old_buckets = pkg_malloc(buckets_bytes);
+	if (!old_buckets) {
+		_idx_unlock_all(g_idx);
+		pkg_free(shadow.buckets);
+		LM_ERR("rebuild: pkg_malloc for old-buckets snapshot "
+			"failed (%d buckets, %zu bytes)\n",
+			nats_idx_buckets, buckets_bytes);
+		return -1;
+	}
+	memcpy(old_buckets, g_idx->buckets, buckets_bytes);
 	old_num = atomic_load_explicit(&g_idx->num_documents,
 		memory_order_relaxed);
-	memcpy(g_idx->buckets, shadow.buckets, sizeof(g_idx->buckets));
+	memcpy(g_idx->buckets, shadow.buckets, buckets_bytes);
 	atomic_store_explicit(&g_idx->num_documents,
 		atomic_load_explicit(&shadow.num_documents, memory_order_relaxed),
 		memory_order_relaxed);
@@ -1125,7 +1212,7 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 
 	/* Step 3: free the old (now-disowned) bucket entries outside
 	 * the lock, so any blocked readers proceed immediately. */
-	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
 		e = old_buckets[b];
 		while (e) {
 			next = e->next;
@@ -1133,6 +1220,8 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 			e = next;
 		}
 	}
+	pkg_free(old_buckets);
+	pkg_free(shadow.buckets);
 
 	LM_INFO("search index rebuilt: %d docs (was %d)\n", count, old_num);
 	return count;
@@ -1156,7 +1245,7 @@ void nats_json_index_destroy(void)
 
 	_idx_lock_all(g_idx);
 
-	for (b = 0; b < NATS_IDX_BUCKETS; b++) {
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
 		e = g_idx->buckets[b];
 		while (e) {
 			next = e->next;
@@ -1175,6 +1264,8 @@ void nats_json_index_destroy(void)
 		lock_set_dealloc(g_idx->shard_locks);
 	}
 
+	if (g_idx->buckets)
+		shm_free(g_idx->buckets);
 	shm_free(g_idx);
 	g_idx = NULL;
 
@@ -1325,16 +1416,123 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		return -1;
 	}
 
-	if (!g_idx) {
-		LM_ERR("search index not initialized\n");
-		return -1;
-	}
-
 	cdb_res_init(res);
 
 	if (!filter) {
 		LM_DBG("no filter provided, returning empty result\n");
 		return 0;
+	}
+
+	/* PK fast path: if the filter is a single is_pk=1 entry (which is
+	 * what usrloc's cdb_load_urecord at modules/usrloc/udomain.c:937
+	 * always builds — and what most other PK callers build), skip the
+	 * in-memory index entirely.  Compute the target_key directly
+	 * (mirroring nats_cache_update's PK branch), do one kvStore_Get,
+	 * parse, return.  At 100k+ AoR scale this saves the chain walk
+	 * inside the per-shard mutex on every read; for a usrloc-only
+	 * deployment it makes the entire index optional (paired with the
+	 * enable_search_index modparam below). */
+	if (filter && !filter->next && filter->key.is_pk &&
+	    filter->val.is_str && filter->op == CDB_OP_EQ) {
+		char *target_key = NULL;
+		int enc_len = 0;
+		const char *data;
+		int data_len;
+		char *enc;
+
+		enc = _kv_encode_key(filter->val.s.s, filter->val.s.len,
+			&enc_len);
+		if (!enc) {
+			LM_ERR("PK query: malloc for KV-key encode buffer "
+				"failed (filter '%.*s'='%.*s', encode budget "
+				"%d bytes)\n",
+				filter->key.name.len, filter->key.name.s,
+				filter->val.s.len, filter->val.s.s,
+				filter->val.s.len * 3 + 1);
+			return -1;
+		}
+		if (fts_json_prefix && *fts_json_prefix) {
+			int plen = strlen(fts_json_prefix);
+			target_key = pkg_malloc(plen + enc_len + 1);
+			if (!target_key) {
+				free(enc);
+				LM_ERR("PK query: pkg_malloc for target_key "
+					"failed (prefix '%s' + %d-byte encoded "
+					"value, total %d bytes)\n",
+					fts_json_prefix, enc_len,
+					plen + enc_len + 1);
+				return -1;
+			}
+			memcpy(target_key, fts_json_prefix, plen);
+			memcpy(target_key + plen, enc, enc_len);
+			target_key[plen + enc_len] = '\0';
+		} else {
+			target_key = pkg_malloc(enc_len + 1);
+			if (!target_key) {
+				free(enc);
+				LM_ERR("PK query: pkg_malloc for target_key "
+					"failed (no prefix, %d-byte encoded "
+					"value, total %d bytes)\n",
+					enc_len, enc_len + 1);
+				return -1;
+			}
+			memcpy(target_key, enc, enc_len);
+			target_key[enc_len] = '\0';
+		}
+		free(enc);
+
+		s = kvStore_Get(&entry, ncon->kv, target_key);
+		if (s == NATS_NOT_FOUND) {
+			pkg_free(target_key);
+			return 0;   /* empty result, not an error */
+		}
+		if (s != NATS_OK) {
+			LM_WARN("PK kvStore_Get failed for '%s': %s\n",
+				target_key, natsStatus_GetText(s));
+			pkg_free(target_key);
+			return -1;
+		}
+		data = kvEntry_ValueString(entry);
+		data_len = kvEntry_ValueLen(entry);
+		if (data && data_len > 0 && data[0] == '{') {
+			row = pkg_malloc(sizeof *row);
+			if (!row) {
+				LM_ERR("no pkg memory for cdb_row_t\n");
+				kvEntry_Destroy(entry);
+				pkg_free(target_key);
+				return -1;
+			}
+			if (cdb_json_to_dict(data, &row->dict, NULL) != 0) {
+				LM_ERR("PK fast path: failed to parse JSON for "
+					"'%s'\n", target_key);
+				pkg_free(row);
+				kvEntry_Destroy(entry);
+				pkg_free(target_key);
+				return -1;
+			}
+			res->count++;
+			list_add_tail(&row->list, &res->rows);
+		}
+		kvEntry_Destroy(entry);
+		pkg_free(target_key);
+		return 0;
+	}
+
+	if (!g_idx) {
+		if (!nats_enable_search_index) {
+			LM_ERR("query: non-PK filter rejected because the "
+				"search index is disabled (modparam "
+				"enable_search_index=0); only single-condition "
+				"is_pk=1 filters are accepted in this mode "
+				"(filter field '%.*s')\n",
+				filter->key.name.len, filter->key.name.s);
+		} else {
+			LM_ERR("query: search index not initialized; "
+				"non-PK filter cannot be served (filter field "
+				"'%.*s')\n",
+				filter->key.name.len, filter->key.name.s);
+		}
+		return -1;
 	}
 
 	/* Search the index for each filter (AND logic).  Each filter
@@ -1391,7 +1589,13 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		 * release the shard before the per-filter merge work. */
 		iter_keys = malloc(sizeof(char *) * e->num_keys);
 		if (!iter_keys) {
-			LM_ERR("no memory for iter keys\n");
+			LM_ERR("query: malloc for per-filter key snapshot "
+				"failed (filter '%.*s'='%.*s', %d keys, "
+				"%zu bytes)\n",
+				it->key.name.len, it->key.name.s,
+				it->val.s.len, it->val.s.s,
+				e->num_keys,
+				sizeof(char *) * e->num_keys);
 			_idx_unlock_shard(g_idx, shard);
 			if (match_keys) {
 				int k;
@@ -1407,7 +1611,13 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 				iter_keys[k] = strdup(e->keys[k]);
 				if (!iter_keys[k]) {
 					int j;
-					LM_ERR("no memory for iter key strdup\n");
+					LM_ERR("query: strdup for key snapshot "
+						"slot %d/%d failed (filter "
+						"'%.*s'='%.*s', key length %zu)\n",
+						k, e->num_keys,
+						it->key.name.len, it->key.name.s,
+						it->val.s.len, it->val.s.s,
+						strlen(e->keys[k]));
 					for (j = 0; j < k; j++)
 						free(iter_keys[j]);
 					free(iter_keys);
@@ -1457,7 +1667,13 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 					char *dup = strdup(new_keys[k]);
 					if (!dup) {
 						int j;
-						LM_ERR("no memory for intersect key strdup\n");
+						LM_ERR("query: strdup for AND-intersect "
+							"survivor %d/%d failed (filter "
+							"'%.*s'='%.*s', key length %zu)\n",
+							k, new_count,
+							it->key.name.len, it->key.name.s,
+							it->val.s.len, it->val.s.s,
+							strlen(new_keys[k]));
 						for (j = 0; j < k; j++)
 							free(new_keys[j]);
 						free(new_keys);
@@ -2365,10 +2581,12 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
-	if (!g_idx) {
-		LM_ERR("search index not initialized\n");
-		return -1;
-	}
+	/* The search index is required only for the non-PK lookup
+	 * branch below.  PK updates encode the target_key directly
+	 * from the filter and never touch g_idx, so an uninitialised
+	 * (or operator-disabled) index is fine for them.  The non-PK
+	 * branch handles the missing-index case explicitly with a
+	 * dedicated error message; don't pre-empt it here. */
 
 	/* Resolve target_key for both PK and non-PK paths.
 	 *
@@ -2389,7 +2607,19 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 
 	/* Try the index first when the filter is non-PK; on hit, the
 	 * stored key was assigned at insert time and is already
-	 * KV-safe. */
+	 * KV-safe.  When the search index is disabled (modparam
+	 * enable_search_index=0) g_idx is NULL and we reject non-PK
+	 * updates outright -- there's no way to resolve the document
+	 * without scanning the whole bucket. */
+	if (!row_filter->key.is_pk && !g_idx) {
+		LM_ERR("update: non-PK filter rejected because the search "
+			"index is %s (filter field '%.*s'); only "
+			"is_pk=1 filters are accepted in this mode\n",
+			nats_enable_search_index
+				? "not yet initialized" : "disabled",
+			row_filter->key.name.len, row_filter->key.name.s);
+		return -1;
+	}
 	if (!row_filter->key.is_pk) {
 		int shard = _lookup_shard(row_filter->key.name.s,
 			row_filter->key.name.len,
@@ -2400,10 +2630,18 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				row_filter->key.name.len,
 				row_filter->val.s.s, row_filter->val.s.len);
 			if (e && e->num_keys > 0) {
-				target_key = pkg_malloc(strlen(e->keys[0]) + 1);
+				size_t klen = strlen(e->keys[0]);
+				target_key = pkg_malloc(klen + 1);
 				if (!target_key) {
 					_idx_unlock_shard(g_idx, shard);
-					LM_ERR("oom\n");
+					LM_ERR("update: pkg_malloc for indexed "
+						"target_key copy failed (filter "
+						"'%.*s'='%.*s', key length %zu)\n",
+						row_filter->key.name.len,
+						row_filter->key.name.s,
+						row_filter->val.s.len,
+						row_filter->val.s.s,
+						klen);
 					return -1;
 				}
 				strcpy(target_key, e->keys[0]);
@@ -2418,19 +2656,39 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		char *enc = _kv_encode_key(row_filter->val.s.s,
 			row_filter->val.s.len, &enc_len);
 		if (!enc) {
-			LM_ERR("oom\n");
+			LM_ERR("update: malloc for KV-key encode buffer "
+				"failed (filter '%.*s'='%.*s', encode budget "
+				"%d bytes)\n",
+				row_filter->key.name.len, row_filter->key.name.s,
+				row_filter->val.s.len, row_filter->val.s.s,
+				row_filter->val.s.len * 3 + 1);
 			return -1;
 		}
 		if (fts_json_prefix && *fts_json_prefix) {
 			int plen = strlen(fts_json_prefix);
 			target_key = pkg_malloc(plen + enc_len + 1);
-			if (!target_key) { free(enc); LM_ERR("oom\n"); return -1; }
+			if (!target_key) {
+				free(enc);
+				LM_ERR("update: pkg_malloc for target_key "
+					"failed (prefix '%s' + %d-byte encoded "
+					"value, total %d bytes)\n",
+					fts_json_prefix, enc_len,
+					plen + enc_len + 1);
+				return -1;
+			}
 			memcpy(target_key, fts_json_prefix, plen);
 			memcpy(target_key + plen, enc, enc_len);
 			target_key[plen + enc_len] = '\0';
 		} else {
 			target_key = pkg_malloc(enc_len + 1);
-			if (!target_key) { free(enc); LM_ERR("oom\n"); return -1; }
+			if (!target_key) {
+				free(enc);
+				LM_ERR("update: pkg_malloc for target_key "
+					"failed (no prefix, %d-byte encoded "
+					"value, total %d bytes)\n",
+					enc_len, enc_len + 1);
+				return -1;
+			}
 			memcpy(target_key, enc, enc_len);
 			target_key[enc_len] = '\0';
 		}
@@ -2516,7 +2774,10 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			 * rather than walking the whole index. */
 			json_buf = malloc(data_len + 1);
 			if (!json_buf) {
-				LM_ERR("oom\n");
+				LM_ERR("update: malloc for old-JSON snapshot "
+					"failed (key '%s', %d bytes; needed for "
+					"targeted index_remove after CAS)\n",
+					target_key, data_len + 1);
 				kvEntry_Destroy(entry);
 				entry = NULL;
 				pkg_free(target_key);

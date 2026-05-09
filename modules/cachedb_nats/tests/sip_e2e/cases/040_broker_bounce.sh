@@ -46,6 +46,9 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NODE_ID@@|9|g" \
     -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" \
     -e "s|@@INSTANCE@@|BOUNCE|g" \
+    -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
+    -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
+    -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$BOUNCE_CFG"
 
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \

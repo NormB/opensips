@@ -430,7 +430,10 @@ static evi_reply_sock *nats_evi_parse(str socket)
 
 	sock = shm_malloc(sizeof(evi_reply_sock) + socket.len);
 	if (!sock) {
-		LM_ERR("oom!\n");
+		LM_ERR("evi parse: shm_malloc for evi_reply_sock failed "
+			"(socket spec '%.*s', %zu bytes incl. address tail)\n",
+			socket.len, socket.s,
+			sizeof(evi_reply_sock) + socket.len);
 		return NULL;
 	}
 	memset(sock, 0, sizeof(evi_reply_sock) + socket.len);

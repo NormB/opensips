@@ -63,6 +63,9 @@
 #include "../../ipc.h"
 #include "../../mem/shm_mem.h"
 
+/* Module-scope params defined in cachedb_nats.c. */
+extern int index_resync_on_reconnect;
+
 /*
  * EVI support: OpenSIPS 4.x provides evi_publish_event(), evi_raise_event(),
  * etc. in evi/evi.h and evi/evi_params.h.  We conditionally include them
@@ -110,6 +113,7 @@ event_id_t evi_kv_change_id = EVI_ERROR;
 
 /* ---- forward declarations ---- */
 static void *_watcher_thread_fn(void *arg);
+static void  _watcher_loop(void);
 static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
 
 /* ------------------------------------------------------------------ */
@@ -318,14 +322,34 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
  */
 static void *_watcher_thread_fn(void *arg)
 {
+	(void)arg;
+	LM_INFO("NATS KV watcher thread started\n");
+	_watcher_loop();
+	LM_INFO("NATS KV watcher thread stopped\n");
+	return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  _watcher_loop() -- shared self-healing event loop                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The four-phase loop body factored out so both the legacy rank-1
+ * pthread (_watcher_thread_fn) and the dedicated-process main
+ * (nats_watcher_proc_main) call the same code.  Loops while
+ * _watcher_running is non-zero; in the dedicated-process variant
+ * the running flag is set to 1 before this is called and is
+ * cleared only by the OpenSIPS core sending SIGTERM (which
+ * terminates the process directly).
+ */
+static void _watcher_loop(void)
+{
 	kvEntry        *entry = NULL;
 	natsStatus      s;
 	kvWatchOptions  opts;
 	kvStore        *kv;
 	int             last_epoch;
 	int             prefix_len;
-
-	LM_INFO("NATS KV watcher thread started\n");
 
 	prefix_len = fts_json_prefix ? (int)strlen(fts_json_prefix) : 0;
 
@@ -361,7 +385,6 @@ static void *_watcher_thread_fn(void *arg)
 		 * brief window where queries may evict a few stale entries
 		 * before the index converges. */
 		{
-			extern int index_resync_on_reconnect;
 			if (index_resync_on_reconnect)
 				nats_json_index_rebuild(kv, fts_json_prefix);
 			else
@@ -482,9 +505,6 @@ static void *_watcher_thread_fn(void *arg)
 				usleep(1000000); /* 1s -- wait for reconnect */
 		}
 	}
-
-	LM_INFO("NATS KV watcher thread stopped\n");
-	return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -587,4 +607,103 @@ void nats_watch_stop(void)
 		_watch_patterns = NULL;
 		_num_patterns = 0;
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/*  Item 4 -- dedicated-process watcher entry                          */
+/* ------------------------------------------------------------------ */
+
+/* The kv_watch_list / kv_watch_count globals are owned by
+ * cachedb_nats.c; their declarations live in cachedb_nats_watch.h
+ * so this translation unit can read them without a duplicate decl. */
+
+/**
+ * nats_watcher_proc_main() -- Item 4 dedicated-process entry point.
+ *
+ * Forked by the OpenSIPS core via the proc_export_t entry registered
+ * in cachedb_nats.c when both `dedicated_watcher_proc` and
+ * `enable_search_index` are 1.  The function never returns.
+ *
+ * The body mirrors nats_watch_start() / _watcher_thread_fn() but
+ * runs in its own process: it calls nats_pool_get() to bring up the
+ * per-process NATS connection (nats_pool_register having seeded the
+ * shared config in mod_init pre-fork), validates the KV bucket, and
+ * enters the same self-healing four-phase loop.  Index updates are
+ * written to the SHM-backed g_idx that every SIP worker also maps;
+ * the per-shard locks added in commit 43ceca02b serialise the
+ * cross-process writes safely without any new synchronisation.
+ *
+ * Signal handling: relies on the OpenSIPS core's default SIGTERM
+ * delivery to children -- the kernel terminates the process on
+ * shutdown, the SHM handles are released as part of process exit,
+ * and the parent's destroy() path frees g_idx itself.
+ */
+void nats_watcher_proc_main(int rank)
+{
+	kvStore                  *kv;
+	struct kv_watch_entry    *e;
+	const char              **patterns;
+	int                       i;
+
+	(void)rank;
+
+	LM_INFO("NATS watcher proc starting (pid=%d)\n", (int)getpid());
+
+	/* Ensure the per-process NATS connection is up.  nats_pool_get()
+	 * is lazy-init: the first call in this process opens the
+	 * connection from the shared pool config that mod_init built. */
+	if (!nats_pool_get()) {
+		LM_ERR("watcher proc: NATS connection unavailable, exiting\n");
+		return;
+	}
+
+	/* Validate the KV bucket exists.  The watcher loop fetches its
+	 * own KV handle from the pool inside Phase 2 anyway, but we keep
+	 * this gate here for symmetry with the rank-1 child_init flow:
+	 * if the bucket is missing or the broker is unreachable at
+	 * startup, fail loudly rather than silently entering the
+	 * reconnect loop. */
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv) {
+		LM_ERR("watcher proc: failed to open KV bucket '%s'\n",
+			kv_bucket);
+		/* fall through -- the loop's Phase 1 reconnect handling will
+		 * keep trying so a transient broker outage doesn't kill the
+		 * process. */
+	}
+
+	/* Build the patterns array from the modparam-fed kv_watch_list.
+	 * Stays alive for the lifetime of the process; no need to free. */
+	if (kv_watch_count > 0) {
+		patterns = malloc((kv_watch_count + 1) * sizeof(char *));
+		if (!patterns) {
+			LM_ERR("watcher proc: malloc failed for patterns\n");
+			return;
+		}
+		i = 0;
+		for (e = kv_watch_list; e; e = e->next)
+			patterns[i++] = e->pattern;
+		patterns[i] = NULL;
+		_watch_patterns = patterns;
+		_num_patterns = kv_watch_count;
+	} else {
+		_watch_patterns = NULL;
+		_num_patterns = 0;
+	}
+
+	atomic_store(&_watcher_running, 1);
+
+	if (_num_patterns > 0) {
+		LM_INFO("watcher proc: watching %d pattern(s)\n", _num_patterns);
+	} else {
+		LM_INFO("watcher proc: no kv_watch patterns configured; "
+			"loop will block on phase 3 until at least one is set\n");
+	}
+
+	/* Run forever.  SIGTERM from main on shutdown will terminate the
+	 * process directly. */
+	_watcher_loop();
+
+	LM_INFO("NATS watcher proc exiting\n");
 }

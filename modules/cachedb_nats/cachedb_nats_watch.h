@@ -23,6 +23,19 @@
 
 #include <nats/nats.h>
 
+/*
+ * KV watch pattern list, populated by the kv_watch modparam in
+ * cachedb_nats.c.  Exposed here so the dedicated-process watcher
+ * (nats_watcher_proc_main) can build its patterns[] array from the
+ * same source the rank-1 pthread (child_init) uses.
+ */
+struct kv_watch_entry {
+	char                   *pattern;
+	struct kv_watch_entry  *next;
+};
+extern struct kv_watch_entry *kv_watch_list;
+extern int kv_watch_count;
+
 /**
  * nats_watch_start() -- Start the self-healing KV watcher thread.
  *
@@ -55,5 +68,28 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns);
  * Safe to call multiple times or when the watcher was never started.
  */
 void nats_watch_stop(void);
+
+/**
+ * nats_watcher_proc_main() -- Dedicated-process watcher entry point.
+ *
+ * Item 4: when dedicated_watcher_proc=1 (and enable_search_index=1),
+ * the OpenSIPS core forks an extra child process via the
+ * proc_export_t entry in cachedb_nats.c and calls this function as
+ * its main loop.  The function never returns: it joins the shared
+ * NATS pool, acquires the configured KV bucket handle, and runs
+ * the same self-healing watcher loop that the rank-1 pthread runs
+ * in legacy mode.  SIP workers continue to read the SHM-backed
+ * JSON-FTS index that this process keeps live.
+ *
+ * Signal handling: relies on the OpenSIPS core's default SIGTERM
+ * delivery to children, which terminates the process at shutdown.
+ * Process-local NATS handles are released as part of the kernel's
+ * page cleanup; the SHM index is owned by the parent and freed in
+ * destroy().
+ *
+ * @param rank  Rank assigned by the core fork loop (always 0 here:
+ *              we declare exactly one instance).  Unused.
+ */
+void nats_watcher_proc_main(int rank);
 
 #endif /* CACHEDB_NATS_WATCH_H */
