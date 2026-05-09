@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# pre-commit -- block CLAUDE.md (and the .claude/ directory) from
+# being staged.
+#
+# This is the second line of defense after .gitignore.  .gitignore
+# stops accidental `git add CLAUDE.md`, but `git add -f CLAUDE.md`
+# still works.  This hook rejects the commit before it is recorded.
+#
+# Install (run once per clone of this repo):
+#   sh scripts/git-hooks/install.sh
+#
+# Uninstall (debug-only; not recommended):
+#   git config --unset core.hooksPath
+#
+# Why is CLAUDE.md sensitive?  It is a private development aid that
+# describes the local fork's invariants and contains author-internal
+# notes that are not meant for upstream OpenSIPS.  The fork policy
+# is to keep these files local and never push them to GitHub or
+# GitLab.
+
+# List staged files (added/copied/modified, no deletions).
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+bad=$(printf '%s\n' "$staged" | grep -E '(^|/)(CLAUDE\.md|\.claude(/|$))' || true)
+
+if [ -n "$bad" ]; then
+	cat >&2 <<EOF
+pre-commit: refusing to commit private development files:
+
+$bad
+
+These files are .gitignore'd by policy on this fork.  If you
+really need to bypass this hook (almost never the right call),
+use:    git commit --no-verify
+
+Long-term: add the file path to .gitignore and re-stage.
+EOF
+	exit 1
+fi
+
+exit 0
