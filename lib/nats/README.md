@@ -44,6 +44,14 @@ A typical multi-module deployment loads `event_nats` first to set the
 canonical NATS URL, then the others; or any single module alone, in
 which case that module owns the registration.
 
+> **Important:** `nats_consumer` does NOT call `nats_pool_register()`
+> itself — it consumes the connection set up by another module
+> (typically `event_nats`).  A standalone `nats_consumer` deployment
+> will fail at child_init with `NATS pool: not registered (call
+> nats_pool_register first)` and the consumer process will exit.
+> Always load at least one of `event_nats` or `cachedb_nats` *before*
+> `nats_consumer`.
+
 ## TLS handling
 
 `nats_pool` carries a single `natsTLS_t` view of the connection's TLS

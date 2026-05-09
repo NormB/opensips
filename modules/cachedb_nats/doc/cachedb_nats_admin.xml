@@ -29,7 +29,7 @@
 			<listitem><para>
 				<emphasis role="bold">Atomic CAS counters</emphasis> —
 				<function>cache_add</function> and <function>cache_sub</function>
-				use compare-and-swap with up to three retries, giving safe concurrent
+				use compare-and-swap with a configurable retry budget (<varname>nats_cas_retries</varname> default 10), giving safe concurrent
 				counter increments from multiple &osips; worker processes.
 			</para></listitem>
 			<listitem><para>
@@ -353,7 +353,7 @@ modparam("cachedb_nats", "kv_ttl", 3600)
 	</para>
 	<para>
 		<emphasis>
-			Default value is <quote>json:</quote>.
+			Default value is <quote>json_</quote>.
 		</emphasis>
 	</para>
 	<example>
@@ -418,7 +418,7 @@ modparam("cachedb_nats", "fts_max_results", 500)
 	<programlisting format="linespecific">
 ...
 modparam("cachedb_nats", "kv_watch", "usrloc.>")
-modparam("cachedb_nats", "kv_watch", "json:>")
+modparam("cachedb_nats", "kv_watch", "json_>")
 ...
 	</programlisting>
 	</example>
@@ -1296,7 +1296,7 @@ if (!nats_kv_update("calls", "$ci", "ringing", $var(rev))) {
 # Plain key-value
 cache_store("nats", "call.$ci", "$fu|$tu");
 
-# JSON document (auto-indexed because key starts with "json:")
+# JSON document (auto-indexed because key starts with "json_")
 cache_store("nats", "json.user.alice",
     "{\"name\":\"alice\",\"domain\":\"example.com\",\"status\":\"active\"}");
 ...
@@ -1346,7 +1346,7 @@ cache_remove("nats", "call.$ci");
 	<title>cache_add — atomic counter increment</title>
 	<para>
 		Atomically increments an integer counter stored in the KV bucket.
-		The operation uses compare-and-swap (CAS) with up to three retry
+		The operation uses compare-and-swap (CAS) with up to <varname>nats_cas_retries</varname> retry
 		attempts, safely handling concurrent increments from multiple &osips;
 		worker processes.  If the key does not yet exist it is created with
 		an initial value equal to <emphasis>increment</emphasis>.
@@ -1374,7 +1374,7 @@ xlog("$fU has $var(call_count) active calls\n");
 	<para>
 		Atomically decrements an integer counter.  Equivalent to
 		<function>cache_add</function> with a negated increment value.
-		Uses CAS with three retries.
+		Uses the same <varname>nats_cas_retries</varname> budget as <function>cache_add</function> (default 10).
 	</para>
 	<example>
 	<title><function>cache_sub</function> with nats</title>
@@ -1417,7 +1417,7 @@ if ($var(n) > 5) {
 		hash-based search index over JSON documents stored in the KV bucket.
 		Documents are included in the index when their key begins with the
 		string defined by <varname>fts_json_prefix</varname> (default:
-		<emphasis>json:</emphasis>).  All top-level string and integer fields
+		<emphasis>json_</emphasis>).  All top-level string and integer fields
 		of each document are indexed as <emphasis>field:value</emphasis>
 		entries mapping to the document key.
 	</para>
@@ -1698,6 +1698,65 @@ xlog("bucket info: $var(info)\n");
     "history": 5,
     "ttl": 0,
     "connected": "yes"
+}
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_cdb_stats" xreflabel="nats_cdb_stats">
+	<title><function moreinfo="none">nats_cdb_stats</function></title>
+	<para>
+		Returns a snapshot of the cachedb_nats counter set,
+		summed across the per-process slots maintained in
+		shared memory.  Used for alerting and capacity
+		planning; see the usrloc playbook
+		(<xref linkend="usrloc_storage_playbook"/>) for
+		recommended thresholds.
+	</para>
+	<para>
+		Counters in the response:
+	</para>
+	<itemizedlist>
+		<listitem><para>
+			<emphasis>cas_retry</emphasis> — total CAS
+			retries across all <function>cache_add</function>
+			/ <function>cache_sub</function> /
+			<function>cdbf.update</function> calls.  Bumped
+			once per failed
+			<function>kvStore_Update</function>.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>cas_exhausted</emphasis> — total
+			cdbf calls that ran out of
+			<varname>nats_cas_retries</varname> attempts and
+			dropped the write.  Should be 0 in steady state;
+			any non-zero value means writes were lost.
+		</para></listitem>
+		<listitem><para>
+			<emphasis>create_doc</emphasis> — total times
+			<function>nats_cache_update</function> synthesised
+			a seed document and called
+			<function>kvStore_CreateString</function> (the
+			insert path).
+		</para></listitem>
+		<listitem><para>
+			<emphasis>index_miss_kv</emphasis> — query/update
+			found a key in the in-memory search index but the
+			KV store said NOT_FOUND.  Flags index staleness,
+			typically from a sibling-instance delete.
+			Sustained non-zero values indicate cross-instance
+			churn worth investigating.
+		</para></listitem>
+	</itemizedlist>
+	<example>
+	<title><function>nats_cdb_stats</function> MI call</title>
+	<programlisting format="linespecific">
+## opensipsctl mi nats_cdb_stats
+{
+    "cas_retry": 142,
+    "cas_exhausted": 0,
+    "create_doc": 5034,
+    "index_miss_kv": 3
 }
 	</programlisting>
 	</example>
