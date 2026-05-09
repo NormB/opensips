@@ -38,6 +38,19 @@ RPS="${RPS:-200}"
 AOR_SPACE="${AOR_SPACE:-200}"
 INSTANCES="${INSTANCES:-1}"
 
+# Scale-tuning knobs (Items 1-3).  ENABLE_INDEX=0 disables the
+# in-memory JSON-FTS index entirely; reads/writes use the PK fast
+# path.  This is the recommended setting for usrloc-as-store
+# deployments and the canonical bench mode for measuring the
+# Item 3 win versus the legacy index-on baseline.
+ENABLE_INDEX="${ENABLE_INDEX:-1}"
+INDEX_BUCKETS="${INDEX_BUCKETS:-4096}"
+# Item 4: dedicated KV-watcher process.  When 1 (and the index is on)
+# OpenSIPS forks one extra child that owns the watcher loop and frees
+# rank 1 from the watcher pthread.  Default 0 keeps the legacy
+# rank-1 pthread topology.
+DEDICATED_WATCHER="${DEDICATED_WATCHER:-0}"
+
 WORKDIR="$(mktemp -d -t cachedb-nats-bench.XXXXXX)"
 OUT="${OUT:-$WORKDIR}"
 mkdir -p "$OUT"
@@ -80,6 +93,9 @@ render_cfg() {
         -e "s|@@SIP_PORT@@|${sip}|g" -e "s|@@MI_PORT@@|${mi}|g" \
         -e "s|@@CLUSTER_PORT@@|${cport}|g" -e "s|@@NODE_ID@@|${nid}|g" \
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" -e "s|@@INSTANCE@@|${inst}|g" \
+        -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX}|g" \
+        -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS}|g" \
+        -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 
@@ -89,7 +105,7 @@ start_instance() {
     local log="$OUT/opensips_${inst}.log"
     render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
     LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
-        "$OPENSIPS_BIN" -F -f "$cfg" -s HP -m 256 -M 8 > "$log" 2>&1 &
+        "$OPENSIPS_BIN" -F -f "$cfg" -s HP_MALLOC -m 256 -M 8 > "$log" 2>&1 &
     local pid=$!
     sleep 2
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -195,6 +211,17 @@ STREAM_INFO=$(nats --server "$NATS_URL" stream info "KV_${KV_BUCKET}" 2>/dev/nul
 MSGS=$(printf '%s' "$STREAM_INFO" | sed -n 's/.*Messages:[[:space:]]*\([0-9,]*\).*/\1/p' \
     | tr -d ',' | head -1)
 
+# Aggregate RSS (KB) across the opensips A worker tree.  When the
+# index is enabled this captures the SHM-backed bucket array +
+# entries; when ENABLE_INDEX=0 the same workload runs without that
+# allocation and the delta is the index footprint.
+A_RSS_KB=0
+if [ -n "$OPENSIPS_PID" ] && kill -0 "$OPENSIPS_PID" 2>/dev/null; then
+    A_RSS_KB=$(ps -o rss= -p "$OPENSIPS_PID" \
+        $(pgrep -P "$OPENSIPS_PID" 2>/dev/null) 2>/dev/null \
+        | awk '{s+=$1} END{print s+0}')
+fi
+
 echo
 echo "=========================================="
 echo "  results"
@@ -210,4 +237,8 @@ if [ "$INSTANCES" = 2 ]; then
     echo "  create_doc delta B:    $(delta create_doc "$B_STATS_BEFORE" "$B_STATS_AFTER")"
 fi
 echo "  KV stream messages:    ${MSGS:-?}"
+echo "  opensips A RSS (KB):   ${A_RSS_KB}"
+echo "  ENABLE_INDEX:          ${ENABLE_INDEX}"
+echo "  index_buckets:         ${INDEX_BUCKETS}"
+echo "  DEDICATED_WATCHER:     ${DEDICATED_WATCHER}"
 echo "=========================================="

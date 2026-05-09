@@ -177,15 +177,59 @@ int   nats_request_default_timeout_ms = 500;
  * counters; minimum bound is 1. */
 int   nats_cas_retries = 10;
 
+/* Whether to maintain the in-memory JSON-FTS search index.
+ *
+ * Default 1 (enabled) preserves legacy behaviour: the index is
+ * built at startup, kept live by the watcher, and consulted by
+ * non-PK query/update filters.  Set to 0 for usrloc-style PK-only
+ * workloads where every read/write is a is_pk=1 lookup -- the
+ * index is then dead weight (extra SHM, watcher CPU, lock
+ * contention on every set/update/delete) and we route the entire
+ * query/update path through the PK fast path that already exists
+ * in nats_cache_query / nats_cache_update.
+ *
+ * When 0:
+ *   - nats_json_index_init / index_build / watcher start are
+ *     skipped at module init.
+ *   - nats_json_index_add / remove / remove_fields become no-ops
+ *     on the hot path.
+ *   - nats_cache_query rejects any non-PK filter with -1 (the
+ *     PK fast path already handles is_pk=1 without touching
+ *     the index).
+ *   - nats_cache_update likewise rejects non-PK filters.
+ *
+ * For the canonical usrloc-as-store deployment this is the
+ * recommended setting; doc/SCALING.md covers the rationale at
+ * 1MM / 10MM endpoint scales. */
+int   nats_enable_search_index = 1;
+
+/* Item 4 — move the KV watcher out of the rank-1 SIP worker.
+ *
+ * Default 0 preserves legacy behaviour: the watcher runs as a
+ * pthread inside the rank-1 SIP worker and shares its CPU with
+ * SIP request handling.  Set to 1 to fork a dedicated OpenSIPS
+ * child process (declared via proc_export_t) that owns the
+ * watcher loop and writes to the SHM-backed JSON-FTS index.
+ *
+ * Only meaningful when enable_search_index=1.  When the index is
+ * disabled there is no watcher to relocate, so the dedicated
+ * process is neither declared nor forked.
+ *
+ * The benefit is isolation: at >=100k AoRs the steady-state
+ * watcher event rate (~1 700 events/s, ~17 % of one core) no
+ * longer competes with SIP routing on rank 1.  At lower scales
+ * the rank-1 pthread is fine and the dedicated process is just
+ * extra address-space and a duplicate NATS connection.  Doc
+ * SCALING.md "Watcher CPU at scale" has the threshold table. */
+int   nats_dedicated_watcher_proc = 0;
+
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
- * When one or more patterns are set, kvStore_WatchMulti() is used. */
-struct kv_watch_entry {
-	char *pattern;
-	struct kv_watch_entry *next;
-};
-static struct kv_watch_entry *kv_watch_list = NULL;
-static int kv_watch_count = 0;
+ * When one or more patterns are set, kvStore_WatchMulti() is used.
+ * Definition lives in cachedb_nats_watch.h so the dedicated-process
+ * watcher (Item 4) can read it from cachedb_nats_watch.c. */
+struct kv_watch_entry *kv_watch_list = NULL;
+int kv_watch_count = 0;
 
 static int set_connection(unsigned int type, void *val)
 {
@@ -238,6 +282,9 @@ static const param_export_t params[] = {
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
+	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
+	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
+	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{0, 0, 0}
 };
@@ -310,6 +357,23 @@ static const dep_export_t deps = {
 	{
 		{NULL, NULL},
 	},
+};
+
+/* Item 4 — dedicated KV watcher process.
+ *
+ * Declared unconditionally so the symbol resolves at link time, but
+ * only attached to module_exports.procs at runtime in mod_init when
+ * BOTH enable_search_index=1 AND dedicated_watcher_proc=1.  The
+ * core's start_module_procs() walks exports.procs after init_modules
+ * returns, so the late binding is safe.
+ *
+ * Single instance ("no" = 1) -- one watcher is enough; multiplying
+ * watchers does not parallelise the per-event cost (see SCALING.md
+ * "Re-examining option 2 (watcher)") and would just multiply broker
+ * delivery cost. */
+static const proc_export_t nats_watcher_procs[] = {
+	{ "NATS Watcher", 0, 0, nats_watcher_proc_main, 1, 0 },
+	{ 0, 0, 0, 0, 0, 0 }
 };
 
 /** module exports */
@@ -470,25 +534,67 @@ static int mod_init(void)
 	 * worker maps the same instance.  Each worker then reads/writes
 	 * via the shared shard locks; rank 1 is responsible for the
 	 * initial KV-driven population (see child_init) and for the
-	 * watcher thread that keeps it live. */
-	if (nats_json_index_init() < 0) {
-		LM_ERR("failed to initialize JSON search index\n");
-		return -1;
-	}
-
-	/* Periodic index resync: optional belt-and-braces rebuild for
-	 * deployments that want a hard upper bound on per-process index
-	 * staleness regardless of reconnect cadence or self-heal pace.
-	 * Default 0 means no timer is registered. */
-	if (index_resync_interval_secs > 0) {
-		if (register_timer("nats_cdb_resync",
-				_nats_cdb_periodic_resync, NULL,
-				index_resync_interval_secs, 0) < 0) {
-			LM_ERR("failed to register periodic resync timer\n");
+	 * watcher thread that keeps it live.
+	 *
+	 * Gated on enable_search_index so PK-only workloads (usrloc,
+	 * counters) can opt out and skip the SHM cost + watcher CPU. */
+	if (nats_enable_search_index) {
+		if (nats_json_index_init() < 0) {
+			LM_ERR("failed to initialize JSON search index\n");
 			return -1;
 		}
-		LM_INFO("cachedb_nats: periodic index resync every %d s\n",
-			index_resync_interval_secs);
+
+		/* Periodic index resync: optional belt-and-braces rebuild
+		 * for deployments that want a hard upper bound on
+		 * per-process index staleness regardless of reconnect
+		 * cadence or self-heal pace.  Default 0 means no timer is
+		 * registered. */
+		if (index_resync_interval_secs > 0) {
+			if (register_timer("nats_cdb_resync",
+					_nats_cdb_periodic_resync, NULL,
+					index_resync_interval_secs, 0) < 0) {
+				LM_ERR("failed to register periodic "
+					"resync timer\n");
+				return -1;
+			}
+			LM_INFO("cachedb_nats: periodic index resync "
+				"every %d s\n",
+				index_resync_interval_secs);
+		}
+	} else {
+		LM_INFO("cachedb_nats: search index DISABLED "
+			"(enable_search_index=0); query/update accept "
+			"PK-only filters\n");
+		if (nats_dedicated_watcher_proc) {
+			LM_INFO("cachedb_nats: dedicated_watcher_proc=1 "
+				"is meaningless when enable_search_index=0; "
+				"the dedicated process will NOT be forked\n");
+		}
+	}
+
+	/* Item 4 — attach the dedicated watcher process to the module
+	 * exports only when both knobs are on AND at least one
+	 * kv_watch pattern was configured.  start_module_procs()
+	 * (in main_loop) reads exports.procs AFTER init_modules
+	 * returns, so this late assignment is safe and is the cleanest
+	 * way to keep the proc declaration runtime-conditional without
+	 * forking when it isn't wanted.
+	 *
+	 * Mirrors the rank-1 child_init gate (kv_watch_count > 0): if
+	 * the operator hasn't configured any kv_watch patterns there is
+	 * nothing for the watcher to do, so we don't fork the dedicated
+	 * process either. */
+	if (nats_enable_search_index && nats_dedicated_watcher_proc) {
+		if (kv_watch_count > 0) {
+			exports.procs = nats_watcher_procs;
+			LM_INFO("cachedb_nats: dedicated KV watcher process "
+				"ENABLED (rank-1 SIP worker will skip the "
+				"watcher pthread)\n");
+		} else {
+			LM_INFO("cachedb_nats: dedicated_watcher_proc=1 but "
+				"no kv_watch pattern configured; dedicated "
+				"process NOT forked\n");
+		}
 	}
 
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
@@ -550,8 +656,13 @@ static int child_init(int rank)
 	 * mod_init pre-fork; every worker dereferences the same g_idx.
 	 * Only rank 1 populates it from KV: the watcher (also rank-1)
 	 * keeps it live thereafter, and every other worker sees those
-	 * updates immediately through the shared SHM mapping. */
-	if (rank == 1 && nats_json_index_build(kv, fts_json_prefix) < 0) {
+	 * updates immediately through the shared SHM mapping.
+	 *
+	 * Skip both the initial build and the watcher if the index is
+	 * disabled -- there's no SHM index to populate and nothing for
+	 * the watcher to update. */
+	if (nats_enable_search_index && rank == 1 &&
+			nats_json_index_build(kv, fts_json_prefix) < 0) {
 		LM_WARN("failed to build initial search index; "
 			"queries may return empty results until index is rebuilt\n");
 	}
@@ -565,8 +676,14 @@ static int child_init(int rank)
 	 * The HTTPD/MI process (PROC_MODULE) doesn't need a watcher -- it
 	 * only handles MI commands, not SIP routing with index lookups.
 	 * Other SIP workers rely on the initial index build above; live
-	 * updates from the watcher on rank 1 are a best-effort bonus. */
-	if (rank == 1 && kv_watch_count > 0) {
+	 * updates from the watcher on rank 1 are a best-effort bonus.
+	 *
+	 * Item 4: when dedicated_watcher_proc=1 the watcher runs in its
+	 * own forked child (declared via exports.procs), so rank 1 must
+	 * NOT also spawn the pthread -- otherwise we'd have two watchers
+	 * racing each other on the same SHM index. */
+	if (nats_enable_search_index && !nats_dedicated_watcher_proc &&
+			rank == 1 && kv_watch_count > 0) {
 		const char **patterns;
 		struct kv_watch_entry *e;
 		int i = 0;
@@ -616,7 +733,16 @@ static int child_init(int rank)
 static void destroy(void)
 {
 	LM_NOTICE("destroying module cachedb_nats ...\n");
-	nats_watch_stop();
+	/* nats_watch_stop() flips the pthread-running flag and
+	 * pthread_join()s the watcher thread.  In the dedicated-process
+	 * mode the watcher pthread lives in another process entirely,
+	 * so calling it from main would block on a tid that this
+	 * process never spawned.  The OpenSIPS core delivers SIGTERM to
+	 * every child including the dedicated watcher proc, which
+	 * terminates it cleanly via the kernel; we have nothing to do
+	 * here. */
+	if (!nats_dedicated_watcher_proc)
+		nats_watch_stop();
 	nats_json_index_destroy();
 	cachedb_end_connections(&cache_mod_name);
 	nats_cdb_stats_destroy();

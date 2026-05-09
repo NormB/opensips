@@ -35,12 +35,24 @@ check "bucket grew while A was down" \
 start_opensips_a
 sleep 1.5
 
-a_index_built=$(grep "search index built:" "$WORKDIR/opensips.log" 2>/dev/null \
-    | sed -n 's/.*search index built: \([0-9]*\) documents.*/\1/p' \
-    | tail -1)
-check "restarted A rebuilds index from up-to-date KV" \
-    $([ "${a_index_built:-0}" -ge "$b_during" ] && echo ok || echo fail) \
-    "a_index_built=${a_index_built:-0} b_during=$b_during"
+# With the index enabled, A's child_init logs how many docs it
+# rebuilt; with ENABLE_INDEX=0 there is no rebuild because there
+# is no index, and the PK fast path serves directly from KV.
+if [ "${ENABLE_INDEX:-1}" = "0" ]; then
+    disabled=$(grep -c "search index DISABLED" \
+        "$WORKDIR/opensips.log" 2>/dev/null || echo 0)
+    check "restarted A skips index build when index is disabled" \
+        $([ "$disabled" -ge 1 ] && echo ok || echo fail) \
+        "disabled=$disabled"
+else
+    a_index_built=$(grep "search index built:" \
+        "$WORKDIR/opensips.log" 2>/dev/null \
+        | sed -n 's/.*search index built: \([0-9]*\) documents.*/\1/p' \
+        | tail -1)
+    check "restarted A rebuilds index from up-to-date KV" \
+        $([ "${a_index_built:-0}" -ge "$b_during" ] && echo ok || echo fail) \
+        "a_index_built=${a_index_built:-0} b_during=$b_during"
+fi
 
 # A new REGISTER on A should land alongside everything else
 register_one apost 3600 "$SIP_PORT_A"

@@ -63,6 +63,14 @@ modparam("cachedb_nats", "kv_bucket",       "@@KV_BUCKET@@")
 modparam("cachedb_nats", "kv_replicas",     1)
 modparam("cachedb_nats", "kv_history",      3)
 modparam("cachedb_nats", "fts_json_prefix", "json_")
+modparam("cachedb_nats", "enable_search_index",   @@ENABLE_INDEX@@)
+modparam("cachedb_nats", "index_buckets",         @@INDEX_BUCKETS@@)
+modparam("cachedb_nats", "dedicated_watcher_proc", @@DEDICATED_WATCHER@@)
+# Watch every KV mutation; the watcher updates the SHM-backed
+# JSON-FTS index live so cross-instance changes propagate without
+# the per-query lazy self-heal.  Required for Item 4 (the
+# dedicated proc is gated on kv_watch_count > 0).
+modparam("cachedb_nats", "kv_watch", "json_>")
 
 loadmodule "usrloc.so"
 modparam("usrloc", "cluster_mode",     "full-sharing-cachedb")

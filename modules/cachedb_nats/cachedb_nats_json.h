@@ -37,7 +37,8 @@
  *   nats_search_idx  — the hash table with mutex protection
  *
  * Key constants:
- *   NATS_IDX_BUCKETS — number of hash buckets (256)
+ *   nats_idx_buckets — runtime hash bucket count (default 4096,
+ *                       set by the `index_buckets` modparam)
  *
  * Thread safety:
  *   All index operations (add, remove, query, rebuild) acquire the
@@ -90,37 +91,29 @@ typedef struct _nats_idx_entry {
 /*
  * Hash table sizing.
  *
- * NATS_IDX_BUCKETS controls average chain length for an N-entry
- * index: chain_len ≈ N / NATS_IDX_BUCKETS.  Chain walks happen
- * inside per-shard mutexes on every lookup, every insert dedup,
- * and every remove, so chain length directly drives tail latency
- * at scale.
+ * The bucket count is now runtime-tunable via the cachedb_nats
+ * modparam `index_buckets` (default 4096, rounded up to a power
+ * of two at init).  Operators with > 100 000 AoRs should raise it
+ * (32 768 or 65 536).  Each doubling cuts average chain length
+ * in half for about 32 KB of additional SHM in the buckets array.
+ * Powers of two keep `% buckets` compiled to a bitmask AND.
  *
- * Sized for typical usrloc workloads:
- *   - 20 000 AoRs  ≈ 60 000 entries → chain ≈ 15
- *   - 100 000 AoRs ≈ 300 000 entries → chain ≈ 73
- *
- * For deployments expecting > 100 000 AoRs, raise this further
- * (32 768 or 65 536) — each doubling cuts chain length in half
- * for about 32 KB of additional SHM in the buckets[] array, a
- * trivial cost.  Powers of two keep `% NATS_IDX_BUCKETS`
- * compiled to a bitmask AND.
- *
- * NATS_IDX_SHARDS partitions the bucket array into contiguous
- * slices, each guarded by its own SHM lock.  Single-bucket ops
- * lock only their owning shard; whole-index ops acquire all
- * shards in order.
+ * NATS_IDX_SHARDS still partitions the bucket array into 16
+ * contiguous slices, each guarded by its own SHM lock; bucket
+ * count is forced to be a multiple of NATS_IDX_SHARDS at init
+ * so each shard guards exactly buckets/16 buckets.
  */
-#define NATS_IDX_BUCKETS 4096
-#define NATS_IDX_SHARDS  16
-/* Each shard guards a contiguous slice of buckets; with 256 buckets
- * over 16 shards that's 16 buckets per shard.  Single-bucket
- * operations (lookup, single-key add) take only their owning shard,
- * so concurrent accesses to different shards proceed in parallel.
- * All-bucket operations (remove, rebuild) acquire all shards in
- * order.  num_documents is a separate atomic so add and remove can
- * touch it without holding any shard. */
-#define NATS_IDX_SHARD_OF(bucket) ((bucket) / (NATS_IDX_BUCKETS / NATS_IDX_SHARDS))
+#define NATS_IDX_DEFAULT_BUCKETS 4096
+#define NATS_IDX_SHARDS          16
+
+/* Runtime bucket count, set by nats_json_index_init from the
+ * `index_buckets` modparam (rounded to power of two, minimum
+ * NATS_IDX_SHARDS).  Hash + shard helpers read this at runtime;
+ * a power-of-two value lets the compiler reduce `% nats_idx_buckets`
+ * to a bitmask via `nats_idx_bucket_mask`. */
+extern int nats_idx_buckets;
+extern int nats_idx_bucket_mask;   /* nats_idx_buckets - 1, set by init */
+#define NATS_IDX_SHARD_OF(bucket)  ((bucket) / (nats_idx_buckets / NATS_IDX_SHARDS))
 
 #include "../../locking.h"
 
@@ -139,9 +132,11 @@ typedef struct _nats_idx_entry {
  * shards they touch.
  */
 typedef struct _nats_search_idx {
-	nats_idx_entry *buckets[NATS_IDX_BUCKETS];
-	                            /* Array of hash bucket chain heads.
-	                             * Each element is NULL (empty bucket) or
+	nats_idx_entry **buckets;   /* Dynamically allocated array of
+	                             * hash bucket chain heads (length =
+	                             * nats_idx_buckets, set at init from
+	                             * the `index_buckets` modparam).  Each
+	                             * element is NULL (empty bucket) or
 	                             * points to the first nats_idx_entry in
 	                             * a singly-linked chain. */
 	_Atomic int num_documents;  /* Total number of unique document keys

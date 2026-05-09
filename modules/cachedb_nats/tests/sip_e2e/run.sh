@@ -103,6 +103,10 @@ NODE_ID_B="${NODE_ID_B:-2}"
 render_cfg() {
     # render_cfg <out> <instance> <sip-port> <mi-port> <cluster-port> <node-id>
     local out=$1 inst=$2 sip=$3 mi=$4 cport=$5 nid=$6
+    # The cfg template gained `enable_search_index` and `index_buckets`
+    # placeholders for bench_ul_register.sh; integration cases default
+    # both to legacy values (index on, 4096 buckets) unless the case
+    # overrides via env.
     sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
         -e "s|@@NATS_URL@@|${NATS_URL}|g" \
         -e "s|@@CACHEDB_URL@@|${CACHEDB_URL}|g" \
@@ -112,6 +116,9 @@ render_cfg() {
         -e "s|@@NODE_ID@@|${nid}|g" \
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" \
         -e "s|@@INSTANCE@@|${inst}|g" \
+        -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
+        -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
+        -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 
