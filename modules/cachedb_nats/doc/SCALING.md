@@ -195,9 +195,7 @@ The architecture changes substantively:
 1. **The index is off**.  `enable_search_index=0` is mandatory
    here.  The JSON-FTS index exists to accelerate non-PK filter
    queries (script-driven `nats_kv_query` etc.).  usrloc's hot
-   path is **PK-only** — both reads (`cdb_load_urecord` at
-   `udomain.c:937`) and writes (`cdb_flush_urecord` at
-   `urecord.c:600`) construct `cdb_filter_t` with `is_pk = 1`.
+   path is **PK-only** — both reads (`cdb_load_urecord` and `cdb_flush_urecord` in `modules/usrloc/`) construct `cdb_filter_t` with `is_pk = 1`.
    The PK fast path in `nats_cache_query` (introduced in this
    branch) handles those reads in O(1) broker-side via
    `kvStore_Get(prefix + encode(filter_value))`, bypassing the
@@ -285,7 +283,7 @@ that depends on it in the registration path.
    non-PK filters in query/update are rejected with an explicit
    error message rather than crashing on a NULL `g_idx`.  For
    pure usrloc deployments this is the canonical setting.
-4. **Dedicated watcher process** (Option B) — **pending**.
+4. **Dedicated watcher process** — **landed; default off** (legacy rank-1 pthread). Set `dedicated_watcher_proc=1` to opt in. See PERF_NOTES.md §"Dedicated KV-watcher process" for the design and a 30k/100k three-mode bench table.
    With `enable_search_index=0` making the watcher optional, this is now only
    meaningful for mixed-workload deployments that keep the
    index on at ≥ 100k AoRs.  ~150 lines.

@@ -100,7 +100,7 @@ persistence round-trips.
 | `nats_term()`                               | any       | Terminate delivery (no retry). |
 | `nats_hdr_set(name, value)`                 | any       | Stage outgoing header on the worker buffer. |
 | `nats_reply(payload)`                       | any       | Publish to the current message's `reply_to`. |
-| `nats_request(subject, payload, timeout_ms)`| timer / startup | **Sync-only.**  Blocks the worker up to `timeout_ms`. |
+| `nats_request(subject, payload, timeout_ms)`| onreply / local / startup / timer / event | **Sync-only.**  Blocks the worker up to `timeout_ms`. Excluded from `request_route`/`failure_route` (would block SIP processing). |
 
 ### Return codes
 

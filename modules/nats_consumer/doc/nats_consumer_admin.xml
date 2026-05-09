@@ -1,9 +1,9 @@
-<?xml version="1.0" encoding='UTF-8'?>
-<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
-"http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd" [
-<!ENTITY % docentities SYSTEM "../../../doc/entities.xml">
-%docentities;
-]>
+<!-- Module User's Guide.  Included into nats_consumer.xml via the
+     &admin; entity; do NOT add a DOCTYPE or ENTITY declaration here —
+     when this file is spliced into the master book, a second
+     DOCTYPE makes the document a fatal parse error.  All entity
+     references (&osips;, &adminguide;, etc.) resolve through the
+     master book's entity declarations. -->
 
 <chapter>
 
@@ -109,6 +109,55 @@
                 <varname>ack_wait</varname>.
             </para>
         </section>
+
+        <section id="nats_consumer-when-needed">
+            <title>When you need this module / when you don't</title>
+            <para>
+                <emphasis role="bold">Load
+                <emphasis>nats_consumer</emphasis> when:</emphasis>
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    you need explicit-ack JetStream pull-mode
+                    consumption from script
+                    (<function>nats_fetch</function>,
+                    <function>nats_ack</function>,
+                    <function>nats_nak</function>,
+                    <function>nats_term</function>,
+                    <function>nats_ack_progress</function>);
+                </para></listitem>
+                <listitem><para>
+                    you need durable consumers with bounded
+                    redelivery or replay semantics
+                    (<varname>deliver_policy = by_start_seq</varname>);
+                </para></listitem>
+                <listitem><para>
+                    you need synchronous request/reply with NATS as
+                    a transport (<function>nats_request</function>)
+                    from a non-request route;
+                </para></listitem>
+                <listitem><para>
+                    you need fine-grained per-handle counters and a
+                    watchdog endpoint
+                    (<function>nats_consumer_health</function>).
+                </para></listitem>
+            </itemizedlist>
+            <para>
+                <emphasis role="bold">You don't need it when:</emphasis>
+                plain fire-and-forget core-NATS subscription with
+                <varname>event_route[]</varname> dispatch is
+                sufficient — that path is handled by
+                <emphasis>event_nats</emphasis>'s
+                <varname>subscribe</varname> modparam.  The
+                <emphasis>event_nats</emphasis> subscribe path has no
+                script-visible ack, no durable consumer state, no
+                replay, and no per-message flow control, but is also
+                a much smaller config and one fewer dedicated
+                process.  If your handler can tolerate
+                at-most-once-effective semantics from EVI dispatch,
+                prefer that path.
+            </para>
+        </section>
     </section>
 
     <!-- ============================================================ -->
@@ -118,20 +167,37 @@
         <section id="nats_consumer-deps-opensips">
             <title>&osips; Modules</title>
             <para>
-                The <emphasis>nats_consumer</emphasis> module has no
-                mandatory dependency on any other &osips; module.  When
-                TLS is used to reach the NATS cluster, load
-                <emphasis>tls_openssl</emphasis>
+                <emphasis role="bold">Mandatory:</emphasis> at least one
+                other NATS module that calls
+                <function>nats_pool_register()</function> — typically
+                <emphasis>event_nats</emphasis> — must be loaded
                 <emphasis>before</emphasis>
-                <emphasis>nats_consumer</emphasis> so that the nats.c
-                library defers OpenSSL lifecycle management to &osips;.
+                <emphasis>nats_consumer</emphasis>.  The consumer module
+                does not own the shared
+                <filename>lib/nats</filename> pool's transport
+                configuration; it consumes the connection set up by the
+                registrant.  Without a registrant, the consumer
+                process aborts at child_init with
+                <quote>NATS pool: not registered (call
+                nats_pool_register first)</quote>.
+                Recommended load order:
+                <emphasis>event_nats</emphasis> first,
+                <emphasis>nats_consumer</emphasis> second.
             </para>
             <para>
-                It is safe (and typical) to load
-                <emphasis>event_nats</emphasis> and
-                <emphasis>nats_consumer</emphasis> together.  They share
-                the shared nats.c connection pool and do not contend for
+                When TLS is used to reach the NATS cluster, load
+                <emphasis>tls_openssl</emphasis>
+                <emphasis>before</emphasis> the first NATS module so
+                the nats.c library defers OpenSSL lifecycle management
+                to &osips;.
+            </para>
+            <para>
+                Once <emphasis>event_nats</emphasis> and
+                <emphasis>nats_consumer</emphasis> are both loaded, they
+                share one nats.c connection pool and do not contend for
                 the same socket or subject space.
+                <emphasis>cachedb_nats</emphasis> may also be loaded
+                alongside; the same pool is shared three ways.
             </para>
         </section>
 
@@ -234,19 +300,27 @@ modparam("nats_consumer", "persist_path",
             </example>
         </section>
 
-        <para>
-            All NATS transport parameters
-            (<varname>nats_url</varname>, <varname>reconnect_wait</varname>,
-            <varname>max_reconnect</varname>,
-            <varname>tls_skip_verify</varname>, <varname>tls_ca</varname>,
-            <varname>tls_cert</varname>, <varname>tls_key</varname>,
-            <varname>tls_hostname</varname>,
-            <varname>skip_openssl_init</varname>) are owned by
-            <emphasis>event_nats</emphasis> and read through the shared
-            <filename>lib/nats</filename> connection pool.  Set them on
-            the <emphasis>event_nats</emphasis> module; the consumer
-            reuses the pool directly.
-        </para>
+        <section id="param_nats_transport">
+            <title>NATS transport parameters (owned by event_nats)</title>
+            <para>
+                All NATS transport parameters
+                (<varname>nats_url</varname>,
+                <varname>reconnect_wait</varname>,
+                <varname>max_reconnect</varname>,
+                <varname>tls_skip_verify</varname>,
+                <varname>tls_allow_downgrade</varname>,
+                <varname>tls_ca</varname>,
+                <varname>tls_cert</varname>,
+                <varname>tls_key</varname>,
+                <varname>tls_hostname</varname>,
+                <varname>skip_openssl_init</varname>,
+                <varname>nats_drain_timeout_ms</varname>) are owned by
+                <emphasis>event_nats</emphasis> and read through the
+                shared <filename>lib/nats</filename> connection pool.
+                Set them on the <emphasis>event_nats</emphasis> module;
+                the consumer reuses the pool directly.
+            </para>
+        </section>
     </section><!-- /parameters -->
 
     <!-- ============================================================ -->
@@ -422,12 +496,20 @@ timer_route[drain] {
                 </listitem>
                 <listitem>
                     <para>
-                        <function moreinfo="none">nats_nak([delay_ms])</function>
-                        — negative-ack the current message.  When
-                        <emphasis>delay_ms</emphasis> is supplied, the
-                        broker schedules redelivery for that many
-                        milliseconds in the future instead of using the
-                        consumer's <varname>ack_wait</varname>.
+                        <function moreinfo="none">nats_nak()</function>
+                        — negative-ack the current message; the broker
+                        schedules redelivery using the consumer's
+                        <varname>ack_wait</varname>.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_nak_delay(delay_ms)</function>
+                        — same as <function>nats_nak()</function> but the
+                        broker schedules redelivery for
+                        <emphasis>delay_ms</emphasis> milliseconds in the
+                        future instead of using the consumer's
+                        <varname>ack_wait</varname>.
                     </para>
                 </listitem>
                 <listitem>

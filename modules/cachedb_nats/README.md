@@ -32,7 +32,7 @@ with an in-process JSON full-text search index and live KV change watching.
 | `kv_replicas` | int | 3 | Replication factor (only used when creating a new bucket) |
 | `kv_history` | int | 5 | Version history depth per key |
 | `kv_ttl` | int | 0 | Bucket-level TTL in seconds (0 = no expiry). Per-key TTL is not supported by NATS KV. |
-| `fts_json_prefix` | string | `json:` | Key prefix for JSON documents included in the search index |
+| `fts_json_prefix` | string | `json_` | Key prefix for JSON documents included in the search index |
 | `fts_max_results` | int | 100 | Maximum results returned by `cache_query` |
 | `kv_watch` | string | NULL | Key pattern to watch (e.g., `usrloc.>` for wildcard). NULL = watch all keys. |
 | `tls_*`, `reconnect_*`, `max_reconnect` | -- | -- | Same TLS and reconnect params as event_nats |
@@ -68,21 +68,21 @@ nats_kv_history("usrloc.alice", $var(history));
 
 ```
 # Standard KV operations
-cache_store("nats", "call:$ci", "$fu|$tu");
-cache_fetch("nats", "call:$ci", $var(val));
-cache_remove("nats", "call:$ci");
+cache_store("nats", "call.$ci", "$fu|$tu");
+cache_fetch("nats", "call.$ci", $var(val));
+cache_remove("nats", "call.$ci");
 
-# Atomic counters (CAS-based, 3 retries)
-cache_add("nats", "counter:calls", 1, 0);
-cache_counter_fetch("nats", "counter:calls", $var(count));
+# Atomic counters (CAS-based, configurable via nats_cas_retries, default 10)
+cache_add("nats", "counter.calls", 1, 0);
+cache_counter_fetch("nats", "counter.calls", $var(count));
 
 # JSON document storage (indexed if key starts with fts_json_prefix)
-cache_store("nats", "json:user:alice", "{\"name\":\"alice\",\"domain\":\"example.com\"}");
+cache_store("nats", "json.user.alice", "{\"name\":\"alice\",\"domain\":\"example.com\"}");
 ```
 
 ## JSON Search Index
 
-Keys starting with `fts_json_prefix` (default: `json:`) are automatically parsed and
+Keys starting with `fts_json_prefix` (default: `json_`) are automatically parsed and
 indexed. The index supports equality queries via `cache_query`:
 
 ```
@@ -100,13 +100,19 @@ The index is:
 
 ## KV Watcher
 
-Each worker process spawns a pthread that watches the KV bucket for changes. On each
-put/delete/purge event, the watcher:
-1. Updates the in-process search index
+A single watcher pthread is started in the rank-1 SIP worker (or, when
+`dedicated_watcher_proc=1`, in a forked OpenSIPS child process — see
+`PERF_NOTES.md` §"Dedicated KV-watcher process"). The watcher subscribes to
+the KV bucket and on each put/delete/purge event:
+
+1. Updates the SHM-backed search index that every worker reads
 2. Raises an `E_NATS_KV_CHANGE` EVI event (if compiled with `HAVE_EVI`)
 
-On reconnection, the watcher stops, the index is rebuilt from a full KV scan, and the
-watcher restarts.
+By default (`index_resync_on_reconnect=0`) the watcher does not bulk-rebuild
+the index on reconnect; the lazy self-heal path in `nats_cache_query`
+evicts stale entries on first hit. Set `index_resync_on_reconnect=1` only
+for deployments that prefer eager bulk reconciliation over per-query
+self-heal.
 
 ## Cluster Configuration
 
@@ -139,6 +145,7 @@ cache_raw_query("nats", "KV BUCKET INFO", $var(info));
 | Command | Description |
 |---------|-------------|
 | `nats_kv_status` | Bucket name, replicas, history, TTL, connection state |
+| `nats_cdb_stats` | Snapshot of `cas_retry`, `cas_exhausted`, `create_doc`, `index_miss_kv` counters (per-process slots, summed). Used by the playbook for alerting (`cas_exhausted > 0` = lost writes; sustained `index_miss_kv` > 0 = cross-instance churn). |
 
 ## License
 
