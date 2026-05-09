@@ -62,6 +62,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_stats.h"
 #include "cachedb_nats_dbase.h"
+#include "cachedb_nats_intern.h"
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
@@ -466,14 +467,21 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 		e->alloc_keys = new_alloc;
 	}
 
+	/* Intern the doc key instead of strdup'ing.  In the dominant
+	 * re-register workload, the same doc key is shared across all
+	 * 5 indexed fields of an AoR, AND across every re-register of
+	 * that AoR.  The intern table collapses those into a single
+	 * SHM string with a refcount; subsequent acquires are pure
+	 * lookup-under-shard-lock with no shm_malloc -- which was
+	 * costing ~half of all CPU at 100k AoRs (see PERF_NOTES.md
+	 * "HP_MALLOC contention hypothesis"). */
 	{
-		int klen = strlen(key);
-		dup = shm_malloc(klen + 1);
+		int klen = (int)strlen(key);
+		dup = nats_intern_acquire(key, klen);
 		if (!dup) {
-			LM_ERR("no SHM for key string\n");
+			LM_ERR("no SHM for interned key string\n");
 			return -1;
 		}
-		memcpy(dup, key, klen + 1);
 	}
 	e->keys[e->num_keys++] = dup;
 	return 0;
@@ -492,7 +500,11 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 	int i;
 	for (i = 0; i < e->num_keys; i++) {
 		if (strcmp(e->keys[i], key) == 0) {
-			shm_free(e->keys[i]);
+			/* Match the acquire path: release the intern
+			 * refcount instead of shm_free'ing the string
+			 * directly.  The intern entry stays alive until
+			 * the last referent is released. */
+			nats_intern_release(e->keys[i]);
 			/* swap-remove: move the last element into this slot */
 			e->num_keys--;
 			if (i < e->num_keys)
@@ -517,8 +529,11 @@ static void _free_entry(nats_idx_entry *e)
 	if (e->field_value)
 		shm_free(e->field_value);
 	if (e->keys) {
+		/* Match the acquire path: release the intern refcount
+		 * for each key so the underlying SHM string is freed
+		 * only when no other entry still references it. */
 		for (i = 0; i < e->num_keys; i++)
-			shm_free(e->keys[i]);
+			nats_intern_release(e->keys[i]);
 		shm_free(e->keys);
 	}
 	shm_free(e);
