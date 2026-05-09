@@ -22,10 +22,28 @@
  * nats_fetch.c -- implementation of the script-callable fetch path
  * and the per-worker current-message state.
  *
- * Sync path: a single pop attempt plus an optional blocking short-poll
- * on the eventfd for timeout_ms > 0.  Intended for timer_routes and
- * polling scripts; do NOT use from request_route because it blocks
- * the SIP worker.
+ * Sync path: a single pop attempt plus an optional bounded-retry
+ * loop for timeout_ms > 0.  Intended for timer_routes and polling
+ * scripts; do NOT use from request_route because it blocks the SIP
+ * worker.
+ *
+ * Batch path: nats_fetch_batch fills a per-worker batch buffer with
+ * up to opts.count messages; the script then iterates them via
+ * nats_batch_select(i) + nats_ack().  This is the high-throughput
+ * pattern -- it amortizes the OpenSIPS script-interpreter overhead
+ * across the whole batch.  Reference numbers (aarch64 loopback,
+ * N=100 000): the per-message nats_fetch+nats_ack loop runs at
+ * ~2 000 msgs/sec; the batch path at fetch_batch=256 reaches
+ * ~89 000 msgs/sec.
+ *
+ * Cross-process eventfd note:
+ *   The ring carries an eventfd that the consumer process writes
+ *   to on push.  Worker fd-tables do not share that fd (it was
+ *   created post-fork in whichever process allocated the ring),
+ *   so poll(2) on it is undefined.  Both nats_fetch and
+ *   nats_fetch_batch fall back to a 5 ms usleep tick; once
+ *   cross-process eventfd plumbing is in place a smarter wait can
+ *   replace it without changing the API.
  *
  * Async path: short-circuits on ring hit; otherwise registers the
  * per-handle ring eventfd with the reactor and yields.  The resume
