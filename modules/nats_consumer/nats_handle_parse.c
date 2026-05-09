@@ -71,6 +71,8 @@
 #define ERR_OOM             "out of memory"
 #define ERR_SAMPLE_RANGE    "sample_freq out of range 0..100"
 #define ERR_RING_POW2       "ring_capacity must be power of two >= 2"
+#define ERR_FETCH_BATCH     "fetch_batch out of range 1..4096"
+#define ERR_FETCH_TMO       "fetch_timeout_ms out of range 1..60000"
 
 /* ── helpers: trim / case-insensitive compare ─────────────────── */
 
@@ -316,6 +318,8 @@ enum {
 	F_JS_DOMAIN      = 1<<19,
 	F_API_PREFIX     = 1<<20,
 	F_RING_CAPACITY  = 1<<21,
+	F_FETCH_BATCH    = 1<<22,
+	F_FETCH_TMO_MS   = 1<<23,
 };
 
 /* ── extra_json builder ───────────────────────────────────────── */
@@ -537,6 +541,25 @@ nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 			if (h->ring_capacity < 2 ||
 			    (h->ring_capacity & (h->ring_capacity - 1)) != 0)
 				FAIL(ERR_RING_POW2);
+		} else if (ieq(key, keylen, "fetch_batch")) {
+			SETFLAG(F_FETCH_BATCH);
+			if (parse_uint32(val, vallen, &h->fetch_batch) < 0)
+				FAIL(ERR_BAD_UINT);
+			/* Sanity bounds: 0 is "use module default"; otherwise
+			 * 1..4096 because nats.c's max-batch is bounded by the
+			 * server's max_ack_pending and we don't want pathologic
+			 * giant pre-allocations on the consumer process. */
+			if (h->fetch_batch == 0 || h->fetch_batch > 4096)
+				FAIL(ERR_FETCH_BATCH);
+		} else if (ieq(key, keylen, "fetch_timeout_ms")) {
+			SETFLAG(F_FETCH_TMO_MS);
+			if (parse_uint32(val, vallen, &h->fetch_timeout_ms) < 0)
+				FAIL(ERR_BAD_UINT);
+			/* 1ms..60s.  Below 1ms makes the Fetch loop hot-spin;
+			 * above 60s the consumer process would not honour shutdown
+			 * for too long. */
+			if (h->fetch_timeout_ms == 0 || h->fetch_timeout_ms > 60000)
+				FAIL(ERR_FETCH_TMO);
 		} else {
 			/* unknown: forward-compat via extra_json */
 			if (extra_json_append(&h->extra_json, key, keylen,

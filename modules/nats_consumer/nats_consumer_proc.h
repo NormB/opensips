@@ -45,6 +45,12 @@
  * return-from-main as an exiting child and reaps the process. */
 void nats_consumer_proc_main(int rank);
 
+/* Module-global Fetch tuning (definitions in nats_consumer.c).  Read
+ * by the consumer process at every Fetch call; per-handle bind keys
+ * (`fetch_batch=`, `fetch_timeout_ms=`) override these. */
+extern int nats_consumer_fetch_batch;
+extern int nats_consumer_fetch_timeout_ms;
+
 /*
  * SHM-allocated heartbeat block.  The consumer process bumps tick
  * once per loop iteration and writes the current monotonic time

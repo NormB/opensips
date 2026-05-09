@@ -217,9 +217,19 @@ static const acmd_export_t acmds[] = {
 static int persist_handles = 0;
 static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
 
+/* Module-global Fetch tuning.  Per-handle bind keys (`fetch_batch=`,
+ * `fetch_timeout_ms=`) override these for a single handle; the
+ * consumer process resolves the effective values at every Fetch call.
+ * Defaults stay conservative (10 msgs / 1 s) so the module behaves
+ * the same after upgrade for operators who do not set anything. */
+int nats_consumer_fetch_batch      = 10;
+int nats_consumer_fetch_timeout_ms = 1000;
+
 static const param_export_t params[] = {
-	{ "persist_handles", INT_PARAM, &persist_handles },
-	{ "persist_path",    STR_PARAM, &persist_path    },
+	{ "persist_handles",   INT_PARAM, &persist_handles },
+	{ "persist_path",      STR_PARAM, &persist_path    },
+	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
+	{ "fetch_timeout_ms",  INT_PARAM, &nats_consumer_fetch_timeout_ms  },
 	{ 0, 0, 0 }
 };
 

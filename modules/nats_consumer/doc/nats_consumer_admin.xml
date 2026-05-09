@@ -300,6 +300,88 @@ modparam("nats_consumer", "persist_path",
             </example>
         </section>
 
+        <!-- fetch_batch -->
+        <section id="param_fetch_batch">
+            <title><varname>fetch_batch</varname> (integer)</title>
+            <para>
+                Module-global default for the JetStream pull-Fetch
+                batch size used by the dedicated consumer process
+                when calling <function>natsSubscription_Fetch</function>.
+                Each handle may override this with a per-handle
+                <varname>fetch_batch=</varname> bind key.
+            </para>
+            <para>
+                Range: <varname>1</varname>..<varname>4096</varname>.
+                Larger batches reduce the number of pull requests the
+                consumer process issues against the broker (lower
+                <varname>pulls_requested</varname> in MI counters,
+                lower broker CPU per consumer) but require a
+                proportionally larger SHM ring -- see
+                <varname>ring_capacity</varname>; if a Fetch returns
+                more messages than the ring can absorb the surplus
+                is dropped and the broker redelivers after
+                <varname>ack_wait</varname>.  As a rule of thumb,
+                <varname>ring_capacity &gt;= 2 * fetch_batch</varname>.
+            </para>
+            <para>
+                On a loopback bench, raising
+                <varname>fetch_batch</varname> alone does not lift
+                end-to-end throughput because the bottleneck is
+                downstream (in the worker drain loop).  See the
+                README's "Tuning <varname>fetch_batch</varname>"
+                section for a full discussion and the recommended
+                drain pattern.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>10</varname>
+            </para>
+            <example>
+                <title>Set a global default of 32, override one handle</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "fetch_batch", 32)
+
+# Per-handle override: this durable wants a much larger batch.
+nats_consumer_bind("id=ingest;stream=EVENTS;durable=ingest;
+  fetch_batch=128;ring_capacity=512;max_ack_pending=8192");
+                </programlisting>
+            </example>
+        </section>
+
+        <!-- fetch_timeout_ms -->
+        <section id="param_fetch_timeout_ms">
+            <title><varname>fetch_timeout_ms</varname> (integer)</title>
+            <para>
+                Module-global default for the per-Fetch upper-bound
+                wait, in milliseconds.  Each handle may override this
+                with a per-handle <varname>fetch_timeout_ms=</varname>
+                bind key.
+            </para>
+            <para>
+                Range: <varname>1</varname>..<varname>60000</varname>
+                (1 ms .. 60 s).  Lower values reduce shutdown latency
+                (the consumer process polls this timeout between
+                checking for retire/shutdown signals) at the cost of
+                more wakeups on quiet streams.  Higher values reduce
+                idle CPU on streams that rarely have messages, at the
+                cost of slower shutdown.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>1000</varname>
+            </para>
+            <example>
+                <title>Latency-sensitive RPC handle, short timeout</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "fetch_timeout_ms", 1000)
+
+# RPC responder: stays responsive at shutdown by polling more often.
+nats_consumer_bind("id=rpc;stream=API;durable=rpc;
+  fetch_batch=4;fetch_timeout_ms=100");
+                </programlisting>
+            </example>
+        </section>
+
         <section id="param_nats_transport">
             <title>NATS transport parameters (owned by event_nats)</title>
             <para>

@@ -31,8 +31,8 @@
  *     1. reconcile_subs() walks the registry, creating a
  *        proc_sub_state_t + natsSubscription for any handle it has not
  *        yet seen.
- *     2. pull_one_batch() fetches up to PHASE3_FETCH_BATCH messages per
- *        subscription with a PHASE3_FETCH_TIMEOUT_MS timeout, stashes
+ *     2. pull_one_batch() fetches up to `fetch_batch` messages per
+ *        subscription with a `fetch_timeout_ms` timeout, stashes
  *        each natsMsg under a freshly-minted ack_token, then pushes
  *        into the handle's SHM ring.
  *     3. drain_ack_ipc() dequeues every pending ack request from the
@@ -121,8 +121,30 @@ static inline void nats_consumer_hb_tick(void)
 
 /* ── tuning ──────────────────────────────────────────────────── */
 
-#define PHASE3_FETCH_BATCH        10     /* messages per fetch */
-#define PHASE3_FETCH_TIMEOUT_MS   1000   /* block up to 1 s per fetch */
+/* Fetch batch / per-Fetch timeout are operator-tunable.  Module-global
+ * defaults come from the `fetch_batch` / `fetch_timeout_ms` modparams
+ * (see nats_consumer.c).  Each bound handle may override either
+ * value via `fetch_batch=` / `fetch_timeout_ms=` in nats_consumer_bind.
+ * Resolved at every Fetch call so a runtime modparam tweak is picked
+ * up without rebinding (modparams themselves are static-after-startup
+ * in OpenSIPS, but this keeps the resolution logic in one place). */
+static inline int eff_fetch_batch(const nats_handle_t *h)
+{
+	int v = (h && h->fetch_batch) ? (int)h->fetch_batch
+	                              : nats_consumer_fetch_batch;
+	if (v < 1)    v = 1;
+	if (v > 4096) v = 4096;
+	return v;
+}
+
+static inline int eff_fetch_timeout_ms(const nats_handle_t *h)
+{
+	int v = (h && h->fetch_timeout_ms) ? (int)h->fetch_timeout_ms
+	                                   : nats_consumer_fetch_timeout_ms;
+	if (v < 1)     v = 1;
+	if (v > 60000) v = 60000;
+	return v;
+}
 
 /* Phase 5: idle cycle replaces the Phase 4 usleep(50ms) spin with a
  * blocking select() on (ack_fd, retry_timerfd).  The retry timerfd
@@ -664,18 +686,36 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	}
 
 	/* Pre-size the ref row so pull_one_batch doesn't pay for the
-	 * first-use allocation under load.  nats_ring_capacity reads the
-	 * ring's fixed capacity field atomically. */
-	if (ensure_row(h->index, nats_ring_capacity(h->ring)) < 0) {
-		LM_ERR("nats_consumer_proc: ref-row init failed for id='%.*s'\n",
-			h->id.len, h->id.s);
-		if (!is_rebuild) {
-			free(ss->id.s);
-			free(ss);
+	 * first-use allocation under load.
+	 *
+	 * The ref-row capacity must be at least max_ack_pending: the broker
+	 * may deliver that many messages before any acks come back, and
+	 * each delivery occupies one ref slot until acked.  Sizing from
+	 * ring_capacity alone (the original Phase 4 design) caused
+	 * msg-ref-table-full drops at any handle where max_ack_pending >
+	 * ring_capacity, which then triggered ack_wait redeliveries and
+	 * stalled the ack floor at the broker.
+	 *
+	 * Take max(ring_capacity, max_ack_pending) -- ring_capacity is the
+	 * worker-visible buffer; max_ack_pending is the broker's in-flight
+	 * cap; the ref table needs to span the larger of the two.  When
+	 * max_ack_pending is unset (0 = "unlimited"), fall back to
+	 * ring_capacity. */
+	{
+		uint32_t ref_cap = nats_ring_capacity(h->ring);
+		if (h->max_ack_pending > 0 &&
+		    (uint32_t)h->max_ack_pending > ref_cap)
+			ref_cap = (uint32_t)h->max_ack_pending;
+		if (ensure_row(h->index, ref_cap) < 0) {
+			LM_ERR("nats_consumer_proc: ref-row init failed for "
+				"id='%.*s'\n", h->id.len, h->id.s);
+			if (!is_rebuild) {
+				free(ss->id.s);
+				free(ss);
+			}
+			return -1;
 		}
-		return -1;
 	}
-
 	/* Build jsConsumerConfig.  Phase 5 fills in the full matrix. */
 	jsConsumerConfig_Init(&cc);
 
@@ -1046,7 +1086,8 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	memset(&list, 0, sizeof(list));
 	hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
 	s = natsSubscription_Fetch(&list, ss->sub,
-	        PHASE3_FETCH_BATCH, PHASE3_FETCH_TIMEOUT_MS, NULL);
+	        eff_fetch_batch(ss->h_ref),
+	        eff_fetch_timeout_ms(ss->h_ref), NULL);
 
 	/* Fast path on idle: timeout is the steady-state condition when
 	 * the broker has nothing to send us. */

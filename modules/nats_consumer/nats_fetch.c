@@ -489,7 +489,13 @@ static int batch_parse_opts(const str *opts, batch_opts_t *out)
 			if (keylen == 5 && memcmp(key, "count", 5) == 0) {
 				if (batch_parse_int(val, vallen, &out->count) < 0)
 					return -1;
-			} else if (keylen == 7 && memcmp(key, "expires", 7) == 0) {
+			} else if ((keylen == 7 && memcmp(key, "expires", 7) == 0)
+				|| (keylen == 10 && memcmp(key, "expires_ms", 10) == 0)) {
+				/* Accept both "expires" (canonical, takes a duration
+				 * suffix like '100ms', '5s') and "expires_ms" (alias
+				 * documented in the README + admin XML; takes a bare
+				 * integer of milliseconds).  batch_parse_duration_ms
+				 * handles both forms. */
 				if (batch_parse_duration_ms(val, vallen,
 						&out->expires_ms) < 0)
 					return -1;
@@ -532,7 +538,6 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	batch_opts_t     bo = { .count = 1, .expires_ms = 0 };
 	nats_ring_slot_t slot;
 	int              cap, fd;
-	int              deadline_remaining;
 
 	(void)msg;
 
@@ -586,40 +591,39 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 		return g_batch.count > 0 ? g_batch.count : -2;
 	}
 
-	/* Phase 2: wait up to expires_ms total.  We loop on poll() so a
-	 * spurious wake (another worker raced us) doesn't exit early. */
+	/* Phase 2: wait up to expires_ms total.
+	 *
+	 * The single-fetch path (see w_nats_fetch above) documents the
+	 * problem with the ring's eventfd: it is created in the process
+	 * that allocated the ring (typically the MI handler at bind time)
+	 * and worker fd-tables do not share that descriptor.  poll(fd) on
+	 * the worker side is therefore undefined and, in practice, just
+	 * blocks for the full deadline -- collapsing throughput by ~20x
+	 * vs. the single-fetch path's usleep(5ms) tick loop.
+	 *
+	 * Use the same bounded retry pattern as single-fetch: tick every
+	 * 5 ms, pop everything visible on each tick, exit early when we
+	 * fill the batch.  Eventfd is consulted only as a "drain on the
+	 * way out" hint -- there is no wakeup to depend on, but draining
+	 * a stale counter is harmless.  Once cross-process eventfd
+	 * plumbing is in place, a smarter wait can replace this without
+	 * changing the API. */
 	fd = nats_ring_eventfd(h->ring);
-	if (fd < 0) return g_batch.count;
+	(void)fd;
 
-	deadline_remaining = bo.expires_ms;
-	while (g_batch.count < cap && deadline_remaining > 0) {
-		struct pollfd pfd;
-		int prc;
-		struct timespec t0, t1;
-		int elapsed;
+	{
+		const int tick_ms = 5;
+		int       waited  = 0;
 
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
+		while (g_batch.count < cap && waited < bo.expires_ms) {
+			usleep(tick_ms * 1000);
+			waited += tick_ms;
 
-		clock_gettime(CLOCK_MONOTONIC, &t0);
-		do {
-			prc = poll(&pfd, 1, deadline_remaining);
-		} while (prc < 0 && errno == EINTR);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-
-		evfd_drain(fd);
-
-		while (g_batch.count < cap) {
-			if (nats_ring_pop(h->ring, &slot) != 0) break;
-			batch_push_slot(h->index, &slot);
+			while (g_batch.count < cap) {
+				if (nats_ring_pop(h->ring, &slot) != 0) break;
+				batch_push_slot(h->index, &slot);
+			}
 		}
-
-		elapsed = (int)((t1.tv_sec - t0.tv_sec) * 1000 +
-			(t1.tv_nsec - t0.tv_nsec) / 1000000);
-		if (elapsed <= 0) elapsed = 1;
-		deadline_remaining -= elapsed;
-		if (prc == 0) break; /* timeout */
 	}
 
 	return g_batch.count;

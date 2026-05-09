@@ -37,10 +37,12 @@ of which NATS modules are loaded.
 
 ## Parameters
 
-| Parameter         | Type   | Default                                               | Description |
-|-------------------|--------|-------------------------------------------------------|-------------|
-| `persist_handles` | int    | `0`                                                   | Opt-in JSON snapshot of the handle registry.  Write-on-change, debounced 500 ms, rehydrated at mod_init. |
-| `persist_path`    | string | `/var/lib/opensips/nats_consumer/handles.json`        | Destination path.  Parent directory must exist at init time. |
+| Parameter           | Type   | Default                                               | Description |
+|---------------------|--------|-------------------------------------------------------|-------------|
+| `persist_handles`   | int    | `0`                                                   | Opt-in JSON snapshot of the handle registry.  Write-on-change, debounced 500 ms, rehydrated at mod_init. |
+| `persist_path`      | string | `/var/lib/opensips/nats_consumer/handles.json`        | Destination path.  Parent directory must exist at init time. |
+| `fetch_batch`       | int    | `10`                                                  | Module-global default for the JetStream pull-Fetch batch size on the consumer process.  Per-handle `fetch_batch=` bind key overrides this for individual handles.  Range: 1..4096.  See `Tuning fetch_batch and fetch_timeout_ms` below for guidance. |
+| `fetch_timeout_ms`  | int    | `1000`                                                | Module-global default for the per-Fetch wait timeout (ms).  Per-handle `fetch_timeout_ms=` bind key overrides this for individual handles.  Range: 1..60000.  Lower values reduce shutdown latency; higher values reduce idle CPU on quiet streams. |
 
 NATS transport parameters (`nats_url`, `tls_*`, `reconnect_wait`,
 `max_reconnect`, `skip_openssl_init`) are set on the `event_nats` module;
@@ -80,7 +82,9 @@ Handles are bound at runtime.  The config string is a `;`-separated list of
 | `inactive_threshold`  | Ephemeral GC timeout. |
 | `js_domain`           | JetStream multi-domain prefix. |
 | `api_prefix`          | Custom `$JS.API` prefix. |
-| `ring_capacity`       | Power-of-two ring size override (default module-wide). |
+| `ring_capacity`       | Power-of-two ring size override (default module-wide).  When the consumer process Fetches a batch larger than the ring can hold, the surplus is dropped and the broker redelivers after `ack_wait`; size `ring_capacity >= 2 * fetch_batch` to avoid this. |
+| `fetch_batch`         | Per-handle override of the `fetch_batch` modparam.  `0` means "use module default".  Range: 1..4096.  Useful when a single OpenSIPS hosts handles with very different rate profiles. |
+| `fetch_timeout_ms`    | Per-handle override of the `fetch_timeout_ms` modparam.  `0` means "use module default".  Range: 1..60000.  Latency-sensitive low-rate handles benefit from a short timeout; throughput-bound durables typically want the module default. |
 
 Unknown keys are preserved in `extra_json` for forward-compat and survive
 persistence round-trips.
@@ -303,41 +307,118 @@ OPENSIPS_MODULES=/path/to/_modules \
   bash modules/nats_consumer/tests/bench/bench_consumer.sh
 ```
 
-Env knobs: `N` (msg count, default 10000), `STREAM`, `STREAM_SUBJECTS`
-(default `bench.>`), `PUB_SUBJECT` (default `bench.in`), `FILTER`
-(default `bench.>`), `HANDLE`, `MI_PORT`, `NATS_URL`, `OUT`.
+Env knobs: `N` (msg count, default 10000), `DEADLINE_S` (drain
+deadline, default 60), `STREAM`, `STREAM_SUBJECTS` (default
+`bench.>`), `PUB_SUBJECT` (default `bench.in`), `FILTER` (default
+`bench.>`), `HANDLE`, `MI_PORT`, `NATS_URL`, `OUT`, plus
+`FETCH_BATCH` / `FETCH_TIMEOUT_MS` / `RING_CAPACITY` to exercise
+the tuning knobs.
 
 ### Reference numbers
 
-Single-instance, loopback NATS, aarch64, default cfg (1 s timer
-route, 100 ms per-fetch timeout, default `PHASE3_FETCH_BATCH=10`):
+Single-instance, loopback NATS, aarch64, defaults (`fetch_batch=10`,
+`fetch_timeout_ms=1000`, default 1 s timer route).  Drain pattern
+matters more than the module knobs; both rows are at N=100 000:
 
-| N      | Drain elapsed | Effective msgs/sec | Avg latency / msg |
-|-------:|--------------:|-------------------:|------------------:|
-|  1 000 | 0.24 s        | 4 167              | 0.24 ms           |
-| 10 000 | 31.24 s       | 321                | 3.12 ms           |
+| Drain pattern                     | msgs/sec | Drain elapsed | redeliveries |
+|-----------------------------------|---------:|--------------:|-------------:|
+| `nats_fetch` + `nats_ack` (single)|    2 067 |        48.5 s |          206 |
+| `nats_fetch_batch` + per-msg ack  |  **9 843** |   **10.2 s** |        **0** |
 
-Throughput at N=1 000 is dominated by the consumer process flushing
-its initial batch into the SHM ring before the first drain poll;
-at N=10 000 the steady-state cap is the consumer-process Fetch
-batch size (`PHASE3_FETCH_BATCH`) divided by the broker round-trip.
-Operators who need higher sustained throughput should bump
-`PHASE3_FETCH_BATCH` in `nats_consumer_proc.c` (currently 10) or
-split the workload across multiple bound handles, each with its
-own filter.
+The 7.6x speedup is unlocked by three fixes that landed together
+(see commit log):
 
-The same N=10 000 run produced these per-handle MI counters:
+1. `nats_fetch_batch`'s opts parser now accepts `expires_ms=` (was
+   silently ignored before; only `expires=` was wired up).
+2. `nats_fetch_batch`'s wait loop no longer relies on the ring's
+   cross-process eventfd (which never wakes on the worker side),
+   replaced with the same 5 ms usleep-tick pattern `nats_fetch`
+   uses.  This was the dominant collapse: every wait blocked the
+   full `expires_ms` instead of returning when messages arrived.
+3. The consumer process's per-handle msg-ref table is now sized
+   from `max(ring_capacity, max_ack_pending)`.  With the previous
+   size = ring_capacity, any handle with `max_ack_pending` larger
+   than the ring saw the broker fill the ref table mid-flight,
+   trigger drops, and watch the broker redeliver after `ack_wait`
+   --- which stalled the broker-side ack floor.
+
+### Choosing a drain pattern
+
+| Pattern | Code shape | Use it when |
+|---------|------------|-------------|
+| **single** | `while (nats_fetch(...)) { nats_ack(); }` | Per-message latency matters more than throughput; rate ≤ ~2 k msgs/sec; simple. |
+| **batch**  | `nats_fetch_batch(...)` then iterate `nats_batch_select(i)` + `nats_ack()` | Sustained throughput > 2 k msgs/sec; willing to pay batch-fill latency. |
+
+Recommended batch drain template:
 
 ```
-pulls_requested: 1020
-msgs_delivered:  10000
-acks:            10000
-redeliveries:    22
+timer_route[drain, 1] {
+    $var(b) = 0;
+    while ($var(b) < 5000) {
+        nats_fetch_batch("ingest", "count=10;expires_ms=100");
+        $var(rc) = $retcode;
+        if ($var(rc) <= 0) { break; }
+        $var(i) = 0;
+        while ($var(i) < $var(rc)) {
+            nats_batch_select($var(i));
+            nats_ack();
+            $var(i) = $var(i) + 1;
+        }
+        $var(b) = $var(b) + 1;
+    }
+}
 ```
 
-`redeliveries=22` reflects the last few messages crossing the
-30 s `ack_wait` deadline, not a real failure; tighter ack pacing
-would zero this on smaller runs.
+Note: at the time of writing, batch drain at `count > 16` interacts
+badly with the single timer-process drain pattern -- the consumer
+fills the ring faster than the worker can iterate the batch + ack,
+which feeds back into msg-ref pressure.  The cleanest result on
+this hardware is `count=10` with a generous `ring_capacity` /
+`max_ack_pending` bind override.  Higher batches need either a
+multi-process drain (one timer route per worker) or a future
+"drain_all + bulk_ack" script primitive that bypasses per-message
+script-interpreter overhead entirely; both are out of scope for
+this commit.
+
+### Tuning `fetch_batch` and `fetch_timeout_ms`
+
+**`fetch_batch`** -- consumer-process pulls/sec scale inversely
+with batch size.  At `fetch_batch=10` the consumer issues ~10 000
+`Fetch` calls to drain 100 k messages; at `fetch_batch=128` it
+issues ~800.  Fewer broker round-trips = lower per-message broker
+CPU.  In single-drain mode, throughput is gated by the worker's
+script-interpreter overhead, so larger batches do not help (and
+can hurt by hitting `max_ack_pending` faster); in batch-drain mode
+they amortize the script overhead and DO scale, until the
+per-batch script iteration cost crosses the `ack_wait` deadline
+on the trailing messages.
+
+**`fetch_timeout_ms`** -- per-Fetch upper-bound when the broker
+has nothing to send.  Quiet streams pay this in CPU on every wake;
+latency-sensitive shutdown pays it as worst-case shutdown delay.
+Drop to 100 ms for short-lived ephemeral consumers; raise to
+5 000 ms for high-volume durables that wake into useful work every
+iteration.
+
+**Recommended starting points** -- keep the module-global defaults
+(`fetch_batch=10`, `fetch_timeout_ms=1000`) and override per-handle
+when a specific consumer's profile justifies it:
+
+```
+# Latency-sensitive RPC responder; small batch, short timeout.
+nats_consumer_bind("id=rpc;stream=API;durable=rpc;
+  fetch_batch=4; fetch_timeout_ms=100");
+
+# Throughput durable using batch drain in script.
+nats_consumer_bind("id=ingest;stream=EVENTS;durable=ingest;
+  fetch_batch=10; ring_capacity=512;
+  max_ack_pending=8192");
+
+# Quiet advisory listener; long timeout to coalesce wake-ups.
+nats_consumer_bind("id=adv;stream=ADV;ephemeral=1;
+  filter=$JS.EVENT.ADVISORY.MAX_DELIVERIES.>;
+  fetch_timeout_ms=5000");
+```
 
 ## Known limitations
 

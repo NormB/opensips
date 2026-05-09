@@ -61,6 +61,76 @@ FILTER="${FILTER:-bench.>}"
 HANDLE="${HANDLE:-bench}"
 MI_PORT="${MI_PORT:-9888}"
 
+# Module-global Fetch tuning (see modparam("nats_consumer", "fetch_batch", ...)
+# in nats_consumer.c).  Bumping FETCH_BATCH lifts the steady-state
+# per-handle drain cap roughly linearly until the broker's
+# max_ack_pending or scheduler wakeup latency takes over.
+FETCH_BATCH="${FETCH_BATCH:-10}"
+FETCH_TIMEOUT_MS="${FETCH_TIMEOUT_MS:-1000}"
+# Must be a power of 2, >= 2 * FETCH_BATCH to avoid backpressure-
+# induced redeliveries.  Defaults to 4 * batch (rounded up to
+# next pow2) when unset; harness env override is honored verbatim.
+_default_ring=$((FETCH_BATCH * 4))
+_p=2; while [ "$_p" -lt "$_default_ring" ]; do _p=$((_p * 2)); done
+RING_CAPACITY="${RING_CAPACITY:-$_p}"
+
+# Drain mode: 'single' (one fetch+ack per message; default for
+# back-compat with earlier numbers) or 'batch' (amortizes the
+# script overhead over a fetch_batch chunk via nats_fetch_batch).
+DRAIN_MODE="${DRAIN_MODE:-single}"
+TIMER_INTERVAL="${TIMER_INTERVAL:-1}"
+
+case "$DRAIN_MODE" in
+    single)
+        DRAIN_BODY=$(cat <<'EOS'
+$var(n) = 0;
+while (nats_fetch("@@HANDLE_ID@@", 100)) {
+    nats_ack();
+    $var(n) = $var(n) + 1;
+    if ($var(n) >= 5000) { break; }
+}
+EOS
+)
+        ;;
+    batch)
+        # nats_fetch_batch fills an internal slot vector; we then
+        # iterate slots via nats_batch_select(idx).  Drain up to
+        # 5000 batches per tick so a sustained burst doesn't camp
+        # the timer process indefinitely.
+        DRAIN_BODY=$(cat <<'EOS'
+# Drain in batches.  expires_ms=5 keeps the worker in the drain
+# loop as long as messages keep arriving within 5ms (the consumer
+# process refills every ~5ms on a loaded stream).  Without this
+# wait the worker exits on the first empty ring observation
+# between two consumer-process pushes, which collapses throughput
+# to one-burst-per-timer-tick.
+#
+# Note: nats_fetch_batch returns the count via $retcode in
+# OpenSIPS script (not directly assignable to $var()).  Capture
+# $retcode immediately after the call into a $var() so subsequent
+# function calls don't clobber it.
+$var(b) = 0;
+while ($var(b) < 5000) {
+    nats_fetch_batch("@@HANDLE_ID@@", "count=@@FETCH_BATCH@@;expires_ms=100");
+    $var(rc) = $retcode;
+    if ($var(rc) <= 0) { break; }
+    $var(i) = 0;
+    while ($var(i) < $var(rc)) {
+        nats_batch_select($var(i));
+        nats_ack();
+        $var(i) = $var(i) + 1;
+    }
+    $var(b) = $var(b) + 1;
+}
+EOS
+)
+        ;;
+    *)
+        echo "DRAIN_MODE must be 'single' or 'batch', got '$DRAIN_MODE'" >&2
+        exit 2
+        ;;
+esac
+
 OUT="${OUT:-$(mktemp -d -t nats-consumer-bench.XXXXXX)}"
 mkdir -p "$OUT"
 
@@ -68,7 +138,9 @@ OPENSIPS_PID=""
 cleanup() {
     [ -n "$OPENSIPS_PID" ] && kill "$OPENSIPS_PID" 2>/dev/null
     wait 2>/dev/null
-    nats --server "$NATS_URL" stream del "$STREAM" -f >/dev/null 2>&1 || true
+    if [ "${KEEP_STREAM:-0}" != "1" ]; then
+        nats --server "$NATS_URL" stream del "$STREAM" -f >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT
 
@@ -135,7 +207,21 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@STREAM@@|${STREAM}|g" \
     -e "s|@@SUBJECT@@|${FILTER}|g" \
     -e "s|@@HANDLE_ID@@|${HANDLE}|g" \
+    -e "s|@@FETCH_BATCH@@|${FETCH_BATCH}|g" \
+    -e "s|@@FETCH_TIMEOUT_MS@@|${FETCH_TIMEOUT_MS}|g" \
+    -e "s|@@RING_CAPACITY@@|${RING_CAPACITY}|g" \
+    -e "s|@@TIMER_INTERVAL@@|${TIMER_INTERVAL}|g" \
     "${HERE}/opensips.cfg.in" > "$CFG"
+
+# Splice the drain body in (multi-line; sed -e doesn't handle that
+# cleanly across all shells).  Resolve placeholders inside the body
+# first because the awk splice runs AFTER sed.
+DRAIN_BODY="${DRAIN_BODY//@@HANDLE_ID@@/$HANDLE}"
+DRAIN_BODY="${DRAIN_BODY//@@FETCH_BATCH@@/$FETCH_BATCH}"
+awk -v body="$DRAIN_BODY" '
+    /@@DRAIN_BODY@@/ { print body; next }
+    { print }
+' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 
 echo "[bench] starting opensips ..."
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
@@ -191,7 +277,7 @@ done
 #       happen to be broken at the time of writing.
 
 drain_start=$(date +%s.%N)
-deadline=$((SECONDS + 60))
+deadline=$((SECONDS + ${DEADLINE_S:-60}))
 final_acks=0
 while [ "$SECONDS" -lt "$deadline" ]; do
     final_acks=$(acks_of_broker)
