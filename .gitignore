@@ -36,3 +36,9 @@ log
 *.log
 *.html
 modules/target/
+
+# Claude Code working files (private to this fork, never push to upstream)
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+**/.claude/
