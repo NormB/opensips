@@ -88,6 +88,23 @@ int main(void)
 		"nats_watcher_proc_main"),
 		"nats_watcher_proc_main declared in cachedb_nats_watch.h");
 
+	/* Orphan-on-parent-death protection: the dedicated proc must
+	 * arm PR_SET_PDEATHSIG so the kernel reaps it if the master
+	 * OpenSIPS aborts (e.g., a sibling module's pre-fork hook fails)
+	 * after our fork has already returned.  Without this, an aborted
+	 * startup leaves a stale watcher orphaned to PID 1, racing the
+	 * next startup.  Use SIGKILL not SIGTERM: OpenSIPS's core
+	 * SIGTERM handler does graceful cleanup that needs the parent
+	 * alive, so SIGTERM under PDEATHSIG hangs.  SIGKILL is
+	 * uncatchable. */
+	ASSERT(file_contains("../cachedb_nats_watch.c",
+		"PR_SET_PDEATHSIG, SIGKILL"),
+		"watcher arms PR_SET_PDEATHSIG with SIGKILL (uncatchable)");
+	ASSERT(file_contains("../cachedb_nats_watch.c",
+		"getppid() == 1"),
+		"watcher polls getppid in loop as belt-and-suspenders "
+		"backstop for the rare case where PDEATHSIG didn't arm");
+
 	/* The rank-1 pthread spawn must be skipped when the dedicated
 	 * process is in use -- otherwise we'd run the watcher twice. */
 	ASSERT(file_contains("../cachedb_nats.c",
