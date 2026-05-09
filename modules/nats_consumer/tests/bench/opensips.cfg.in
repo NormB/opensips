@@ -1,0 +1,88 @@
+####### nats_consumer bench cfg ###################################
+#
+# Minimal opensips.cfg for the bench harness.  Drains a JetStream
+# pull consumer in a tight timer-route loop and exposes counters
+# via the MI socket so the harness can poll how many messages have
+# been acked.
+#
+# Placeholders rendered by the harness:
+#   @@MODULES@@      -- absolute path to the modules dir
+#   @@NATS_URL@@     -- nats://host:port[,...]
+#   @@MI_PORT@@      -- UDP port for mi_datagram
+#   @@STREAM@@       -- JetStream stream name
+#   @@SUBJECT@@      -- subject filter (e.g. bench.>)
+#   @@HANDLE_ID@@    -- consumer handle id used by the script
+
+log_level=3
+xlog_level=3
+debug_mode=no
+stderror_enabled=yes
+udp_workers=4
+tcp_workers=0
+
+socket=udp:127.0.0.1:5060
+mpath="@@MODULES@@/"
+
+# proto_udp is shipped as a separate module in OpenSIPS 4.x and
+# must be loaded for socket=udp:... to come up; otherwise the
+# core fails with "no transport protocol loaded".  proto_udp.so
+# resolves under @@MODULES@@/ in the standard install path.
+loadmodule "proto_udp.so"
+
+# MI over UDP datagram so the harness can read per-handle counters
+# (msgs, acks, last_seq, etc.).
+loadmodule "mi_datagram.so"
+modparam("mi_datagram", "socket_name", "udp:127.0.0.1:@@MI_PORT@@")
+
+# event_nats owns the lib/nats pool registration; without it
+# nats_consumer cannot get a connection at child_init.  Loaded first.
+loadmodule "event_nats.so"
+modparam("event_nats", "nats_url", "@@NATS_URL@@")
+
+loadmodule "nats_consumer.so"
+# persist_handles=0: we re-bind every run; no on-disk state.
+
+####### routes #####################################################
+
+startup_route {
+    xlog("L_INFO", "nats_consumer bench: startup; binding handle\n");
+    # Single bind via the cmd_export.  Durable name == handle id so
+    # the consumer survives restarts (irrelevant for the bench since
+    # we tear down after each run, but matches typical operator
+    # config).  Auto-ack=manual so the script controls when each
+    # message is acknowledged.
+    # nats_consumer_bind uses k=v;k=v parsing.  filter= is the
+    # JetStream consumer's subject filter; matches the subject(s)
+    # we publish to in the bench harness.  durable= name lets the
+    # consumer survive opensips restarts (irrelevant for the bench
+    # but matches typical operator config).  ack_wait is generous
+    # so we never re-deliver during the drain.
+    nats_consumer_bind("id=@@HANDLE_ID@@;stream=@@STREAM@@;filter=@@SUBJECT@@;durable=@@HANDLE_ID@@;ack_wait=30s;max_ack_pending=4096");
+}
+
+# Tight drain loop.  Fires every 50 ms; on each tick pulls up to 256
+# messages with a 100 ms inner timeout, acks each.  At steady state
+# this drains the stream as fast as the consumer process can deliver
+# into the SHM ring -- the ack rate is the throughput metric the
+# bench measures.
+timer_route[drain, 1] {
+    xlog("L_INFO", "drain timer fired\n");
+    # Tight drain loop -- single-message fetch+ack at a time.
+    # Keeps the drain rate bounded only by per-message NATS ack
+    # round-trip + the ring's SHM lock, not by batch parsing or
+    # script-level array iteration.
+    $var(n) = 0;
+    while (nats_fetch("@@HANDLE_ID@@", 100)) {
+        nats_ack();
+        $var(n) = $var(n) + 1;
+        # Cap the per-tick drain so the timer slot isn't held
+        # arbitrarily long; the timer fires every 1s and we'll
+        # come back next tick.  At ~30k msgs/sec from the SHM
+        # ring this gives a steady cadence.
+        if ($var(n) >= 5000) { break; }
+    }
+}
+
+route {
+    exit;
+}

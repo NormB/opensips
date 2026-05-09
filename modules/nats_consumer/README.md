@@ -134,20 +134,63 @@ persistence round-trips.
 
 ## Usage
 
-### Dynamic bind in `startup_route`
+### Minimum end-to-end setup
+
+The smallest config that exercises every part of the module from scratch.
+Run on the same host as a JetStream-enabled NATS broker on `127.0.0.1:4222`.
+
+**1. Create the stream and seed a few messages (broker-side, before
+opensips starts):**
+
+```sh
+nats stream add WORK --subjects 'work.jobs' --storage memory --defaults
+nats pub work.jobs --count 5 'job-{{Count}}'
+```
+
+**2. Minimum opensips.cfg:**
 
 ```
-loadmodule "event_nats.so"
-loadmodule "nats_consumer.so"
+log_level=3
+xlog_level=3
+stderror_enabled=yes
+udp_workers=1
+socket=udp:127.0.0.1:5060
 
-modparam("event_nats",    "nats_url",        "nats://127.0.0.1:4222")
+mpath="/usr/local/lib64/opensips/modules/"
+loadmodule "proto_udp.so"
+loadmodule "mi_datagram.so"
+modparam("mi_datagram", "socket_name", "udp:127.0.0.1:8888")
+
+loadmodule "event_nats.so"
+modparam("event_nats", "nats_url", "nats://127.0.0.1:4222")
+loadmodule "nats_consumer.so"
 modparam("nats_consumer", "persist_handles", 1)
 
 startup_route {
-    nats_consumer_bind(
-        "id=jobs;stream=WORK;durable=jobs_worker;"
-        "filter=work.jobs;ack_wait=30s;max_deliver=5");
+    # Single-line bind string -- OpenSIPS cfg syntax does NOT
+    # auto-concatenate adjacent string literals.  Keep all k=v
+    # pairs on one line.
+    nats_consumer_bind("id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5");
 }
+
+timer_route[drain, 1] {
+    while (nats_fetch("jobs", 250) > 0) {
+        xlog("L_INFO", "job $nats_seq subj=$nats_subject body=$nats_data\n");
+        nats_ack();
+    }
+}
+
+route { exit; }
+```
+
+**3. Verify after opensips starts:**
+
+```sh
+# The 5 seeded messages should appear in stderr / syslog as
+# "job 1 ... job 5".  Confirm the consumer's ack count is 5:
+echo '{"jsonrpc":"2.0","id":1,"method":"nats_consumer:nats_consumer_list"}' \
+  | nc -u -w 2 127.0.0.1 8888
+# {"id":"jobs", ..., "msgs_delivered":5,"acks":5,"naks":0}
 ```
 
 ### Simple work-queue consumer
@@ -224,6 +267,50 @@ timer_route[check_dlq, 5] {
     }
 }
 ```
+
+## Deployment patterns
+
+These are the four shapes of operator config the test suite + the docs
+optimise for.  Pick the one that matches your workload; they're not
+mutually exclusive (one opensips can run several at once, each with
+its own bound handle).
+
+| Pattern | Stream / consumer config | OpenSIPS-side script |
+|---|---|---|
+| **Durable work queue** -- N opensips instances share work; explicit ack; bounded retry. | `durable=<name>; filter=work.>; ack_wait=30s; max_deliver=5; max_ack_pending=1000` | `timer_route { while (nats_fetch...) { ... nats_ack(); } }` |
+| **Replay from sequence** -- one-shot historical scan. | `ephemeral=1; deliver_policy=by_start_seq; start_seq=12345; inactive_threshold=5m` | same as above; consumer auto-GCs after `inactive_threshold` of no activity. |
+| **Sync RPC server** -- fan in JSON requests, reply on the embedded reply-to subject. | `durable=rpc; filter=rpc.call; ack_wait=5s` | `timer_route { while (nats_fetch...) { nats_reply("..."); nats_ack(); } }` |
+| **Dead-letter listener** -- watch JetStream advisories for max-redelivery exhaustion. | `ephemeral=1; filter=$JS.EVENT.ADVISORY.MAX_DELIVERIES.>; inactive_threshold=5m` | `timer_route { while (nats_fetch...) { xlog("L_ALERT", "dlq: ...\n"); nats_ack(); } }` |
+
+Detailed examples for each pattern are in `### Usage` above.
+
+## Benchmarks
+
+A bench harness lives at `tests/bench/bench_consumer.sh`.  It pre-publishes
+N messages to a JetStream stream, starts an opensips with a tight
+`timer_route` drain loop, and times how long until N messages are acked
+(measured by polling the `nats_consumer:nats_consumer_list` MI command).
+
+```sh
+# Defaults: N=10000, RPS-uncapped, local NATS on 127.0.0.1:4222.
+OPENSIPS_MODULES=/path/to/_modules \
+  bash modules/nats_consumer/tests/bench/bench_consumer.sh
+```
+
+Output reports:
+- pre-publish elapsed
+- drain elapsed
+- effective msgs/sec (acks-per-second sustained)
+- avg latency / msg (drain-elapsed / N)
+
+> **Status:** the harness scaffolding is committed but the integration
+> path (consumer process delivery → SHM ring → `nats_fetch` script-side
+> drain) had a runtime issue under investigation as of the last
+> commit -- see `git log` for the most recent state.  Operators wanting
+> production benchmark numbers should also exercise the
+> `tests/stress_*` scripts in the same directory, which use the
+> docker-compose harness and report broker-driven throughput from a
+> different angle.
 
 ## Known limitations
 
