@@ -315,43 +315,83 @@ modparam("nats_consumer", "persist_path",
                 Larger batches reduce the number of pull requests the
                 consumer process issues against the broker (lower
                 <varname>pulls_requested</varname> in MI counters,
-                lower broker CPU per consumer) but require a
-                proportionally larger SHM ring -- see
-                <varname>ring_capacity</varname>; if a Fetch returns
-                more messages than the ring can absorb the surplus
-                is dropped and the broker redelivers after
-                <varname>ack_wait</varname>.  As a rule of thumb,
-                <varname>ring_capacity &gt;= 2 * fetch_batch</varname>.
+                lower broker CPU per consumer).  The consumer process
+                clamps the request to the ring's currently-free slot
+                count before each <function>natsSubscription_Fetch</function>
+                call, so a <varname>fetch_batch</varname> that
+                exceeds the worker's transient drain rate no longer
+                triggers ring-full defer-drops; the broker simply
+                holds the un-fetched messages until the next loop
+                iteration.  Pair with a generous
+                <varname>ring_capacity</varname>
+                (<varname>&gt;= 4 * fetch_batch</varname> is the
+                recommended ratio) and
+                <varname>max_ack_pending</varname>
+                (<varname>&gt;= ring_capacity</varname>) so the
+                clamp has room to deliver full batches.
             </para>
             <para>
                 The drain pattern in the script matters more than
-                this knob alone: a per-message
-                <function>nats_fetch</function>+<function>nats_ack</function>
-                loop is gated by OpenSIPS script-interpreter
-                overhead at ~2 000 msgs/sec on aarch64 loopback,
-                while a <function>nats_fetch_batch</function>
-                +<function>nats_batch_select</function>+<function>nats_ack</function>
-                loop reaches ~9 800 msgs/sec at the same
-                <varname>fetch_batch=10</varname>.  See the
-                README's "Choosing a drain pattern" and "Tuning
-                <varname>fetch_batch</varname>" sections for
-                templates and the trade-offs at higher batches
-                (where <varname>max_ack_pending</varname> and the
-                consumer-process msg-ref table become the next
-                limits).
+                this knob alone.  Reference numbers, single-instance
+                aarch64 loopback at N=100 000:
+            </para>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <function>nats_fetch</function>+<function>nats_ack</function>
+                        per-message: ~2 000 msgs/sec, gated by the
+                        OpenSIPS script-interpreter overhead.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <function>nats_fetch_batch</function>
+                        +<function>nats_batch_select</function>
+                        +<function>nats_ack</function> at
+                        <varname>fetch_batch=10</varname>:
+                        ~9 800 msgs/sec.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        Same pattern at
+                        <varname>fetch_batch=64</varname>:
+                        ~37 500 msgs/sec.
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        Same pattern at
+                        <varname>fetch_batch=256</varname>:
+                        ~89 000 msgs/sec.
+                    </para>
+                </listitem>
+            </itemizedlist>
+            <para>
+                See the README's "Choosing a drain pattern" and
+                "Tuning <varname>fetch_batch</varname>" sections for
+                the full trade-off matrix.  At very high batches
+                (&gt;= 256) the broker's
+                <varname>max_ack_pending</varname> becomes the next
+                bottleneck; raising it (with
+                <varname>ring_capacity</varname> raised to match)
+                lifts the ceiling further at the cost of broker
+                memory.
             </para>
             <para>
                 <emphasis>Default value:</emphasis>
                 <varname>10</varname>
             </para>
             <example>
-                <title>Set a global default of 32, override one handle</title>
+                <title>High-throughput durable -- override fetch_batch + ring</title>
                 <programlisting format="linespecific">
 modparam("nats_consumer", "fetch_batch", 32)
 
-# Per-handle override: this durable wants a much larger batch.
+# Per-handle override: throughput-bound durable wants 256 per Fetch
+# with a 4x ring and a >= ring max_ack_pending.  Empirical
+# ~89 000 msgs/sec on loopback at this configuration.
 nats_consumer_bind("id=ingest;stream=EVENTS;durable=ingest;
-  fetch_batch=128;ring_capacity=512;max_ack_pending=8192");
+  fetch_batch=256;ring_capacity=1024;max_ack_pending=4096");
                 </programlisting>
             </example>
         </section>
