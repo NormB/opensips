@@ -1,13 +1,17 @@
-<?xml version="1.0" encoding='ISO-8859-1'?>
 <!--
-  Phase 3 operator playbook: cachedb_nats as the storage backend
-  for usrloc in cluster_mode=full-sharing-cachedb.
+  Operator playbook: cachedb_nats as the storage backend for
+  usrloc in cluster_mode=full-sharing-cachedb.
 
-  This file is a DocBook XML fragment intended to be xi:included
-  from cachedb_nats_admin.xml at the end of the chapter.  It
-  documents the cross-DC topology, bucket sizing, snapshot/restore,
-  alert thresholds, and migration procedures that emerged from
-  Phase 1.5 / Phase 2 integration work.
+  This file is a DocBook XML fragment included via an entity
+  reference from cachedb_nats_admin.xml as the closing section
+  of the admin chapter.  It documents topology, bucket sizing,
+  snapshot/restore, alert thresholds, scale tuning (PK fast
+  path, optional index), and migration procedures.
+
+  Do NOT add an XML prolog or DOCTYPE here.  The entity
+  reference splices this file's content directly into the
+  including chapter, and a duplicate prolog mid-document is a
+  fatal parse error.
 -->
 
 <section id="usrloc_storage_playbook" xreflabel="usrloc storage playbook">
@@ -160,6 +164,136 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		</para>
 	</section>
 
+	<section id="usrloc_storage_scale_tuning"
+		xreflabel="usrloc storage: scale tuning">
+		<title>Scale tuning: PK fast path and the optional index</title>
+		<para>
+			usrloc&apos;s read and write path is exclusively
+			<emphasis>primary-key</emphasis>: both
+			<function>cdb_load_urecord</function> (read) and
+			<function>cdb_flush_urecord</function> (write) build
+			<varname>cdb_filter_t</varname> with
+			<varname>is_pk = 1</varname>.  The in-memory JSON-FTS
+			search index that <function>cachedb_nats</function>
+			maintains is therefore <emphasis>optional weight</emphasis>
+			for any deployment that uses the module purely as a
+			usrloc backend.  Three operator knobs control the index
+			behaviour:
+		</para>
+		<variablelist>
+			<varlistentry>
+				<term><varname>dedicated_watcher_proc</varname>
+				(int, default 0)</term>
+				<listitem><para>
+					When set to <literal>1</literal> (and the
+					index is on), the module declares a
+					<varname>proc_export_t</varname> entry and the
+					OpenSIPS core forks a dedicated child process
+					that owns the KV watcher loop.  Rank&apos;s 1
+					SIP worker no longer runs the watcher pthread,
+					so the steady-state watcher event rate
+					(~1 700 events/s at 100k AoRs, ~17 % of one
+					core) stops competing with SIP request
+					handling on rank 1.  Ignored when
+					<varname>enable_search_index = 0</varname>
+					(no index, no watcher).  Only worth flipping
+					when the deployment keeps the index on at
+					&ge; 100k AoRs and rank-1 latency matters.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term><varname>enable_search_index</varname>
+				(int, default 1)</term>
+				<listitem><para>
+					When set to <literal>0</literal>, the module
+					skips <function>nats_json_index_init</function>
+					entirely, never builds the index from KV at
+					startup, and never starts the watcher thread.
+					<function>nats_cache_query</function> handles
+					every read through the new PK fast path
+					(<function>kvStore_Get</function> on the
+					encoded primary key); non-PK or
+					multi-condition filters are rejected with an
+					explicit error.
+					<function>nats_cache_update</function> uses
+					its long-existing PK branch for writes; non-PK
+					updates are likewise rejected.  This is the
+					recommended setting for pure usrloc-as-store
+					deployments at every scale.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term><varname>index_buckets</varname>
+				(int, default 4096)</term>
+				<listitem><para>
+					Hash bucket count for the JSON-FTS index.
+					Init code rounds the value up to the next
+					power of two with a floor of 16
+					(<varname>NATS_IDX_SHARDS</varname>) so the
+					hash can use a bitmask AND.  Each doubling
+					halves average chain length for ~32 KB more
+					SHM.  Only relevant when
+					<varname>enable_search_index = 1</varname>;
+					ignored otherwise.  Recommended values:
+					4096 at &le; 20k AoRs, 16384 at 100k, 65536
+					at 1MM.
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>PK fast path
+					(<function>nats_cache_query</function>)</term>
+				<listitem><para>
+					Always on; no modparam.  When the filter is a
+					single is_pk=1 condition with
+					<varname>val.is_str = 1</varname> and
+					<varname>op = CDB_OP_EQ</varname>, the function
+					encodes the value via
+					<function>_kv_encode_key</function>, builds the
+					prefixed target_key, calls
+					<function>kvStore_Get</function>, parses the
+					returned JSON, and returns one row.  No mutex
+					acquired, no chain walk.  Falls through to the
+					index path for any non-PK or multi-condition
+					filter.
+				</para></listitem>
+			</varlistentry>
+		</variablelist>
+		<para>
+			Scaling guidance is documented in detail in
+			<filename>doc/SCALING.md</filename>; the short version:
+		</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>Pure usrloc workloads at any scale:</emphasis>
+				set <varname>enable_search_index = 0</varname>.
+				No index, no watcher, no per-write index update.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>Mixed workloads (script-driven non-PK
+				queries on the same bucket):</emphasis> leave the
+				index on and tune <varname>index_buckets</varname>.
+				At &ge; 100k AoRs also set
+				<varname>dedicated_watcher_proc = 1</varname> to
+				move the watcher out of the rank-1 SIP worker.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>1MM endpoints:</emphasis> the index off
+				is essentially mandatory (~250 MB SHM saved per
+				instance); the watcher would otherwise saturate
+				one core at the steady-state event rate.  If
+				the index is still kept on for mixed-workload
+				reasons,
+				<varname>dedicated_watcher_proc = 1</varname>
+				is required.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>10MM endpoints:</emphasis> the index
+				off is mandatory.  Sharding remains required for
+				SIP-side reasons.
+			</para></listitem>
+		</itemizedlist>
+	</section>
+
 	<section>
 		<title>SHM allocator selection</title>
 		<para>
@@ -176,7 +310,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		</para>
 		<para>
 			Recommendation: launch <command>opensips</command>
-			with <varname>-s HP</varname> to select
+			with <varname>-s HP_MALLOC</varname> to select
 			<varname>HP_MALLOC</varname> ("optimized for shared
 			memory multiprocessing").  Bench results from the
 			session that introduced this playbook:
@@ -291,6 +425,12 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 
 	<section>
 		<title>Optional knobs introduced in this work</title>
+		<para>
+			See <xref linkend="usrloc_storage_scale_tuning"/> for
+			<varname>enable_search_index</varname> and
+			<varname>index_buckets</varname>, the two scale-tuning
+			knobs.  The remaining knobs are listed below.
+		</para>
 		<variablelist>
 			<varlistentry>
 				<term><varname>index_resync_on_reconnect</varname>

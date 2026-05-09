@@ -1,9 +1,10 @@
 # cachedb_nats / NATS-modules performance notes
 
 This file consolidates the perf series shipped on `feature/nats`
-between `7232b5e18` (master merge) and `398c3e206` (HP_MALLOC
-recommendation).  21 commits in three layered passes (correctness
-→ tier-1/2/3 perf → diagnostics + tuning).
+between `7232b5e18` (master merge) and the latest scale-tuning
+group (PK fast path, runtime-tunable bucket count, optional index
+for PK-only workloads).  Three layered passes (correctness →
+tier-1/2/3 perf → 1MM/10MM scale tuning).
 
 For day-to-day operator guidance, read
 `cachedb_nats_usrloc_playbook.xml` first — it covers topology,
@@ -16,16 +17,25 @@ the measurements showed.
 For production cachedb_nats deployments backing usrloc in
 `cluster_mode = full-sharing-cachedb`:
 
-1. **Launch opensips with `-s HP`** to use HP_MALLOC for the SHM
+1. **Launch opensips with `-s HP_MALLOC`** to use HP_MALLOC for the SHM
    allocator.  This is the single biggest tail-latency win.
-2. **Set `index_resync_on_reconnect=0`** (the new default since
+2. **Set `enable_search_index=0`** for usrloc-only deployments.
+   usrloc reads/writes are PK-only (`is_pk=1`); the in-memory
+   JSON-FTS index is dead weight.  Disabling it saves the SHM
+   footprint, the watcher CPU, and routes every read through
+   the new PK fast path.  See SCALING.md for the threshold
+   guidance at 1MM and 10MM endpoints.
+3. **If the index is enabled**, tune `index_buckets` to keep
+   average chain length ≤ ~5: 4096 (default) at ≤ 20k AoRs,
+   16384 at 100k, 65536 at 1MM.  Power-of-two-rounded at init.
+4. **Set `index_resync_on_reconnect=0`** (the new default since
    commit 05a695f8c).  The Phase-1.4 self-heal makes the bulk
    rebuild redundant for correctness, and saves a 5-10 s stall on
    every brief broker hiccup.
-3. **Monitor `nats_cdb_stats`** counters via MI; alert on
+5. **Monitor `nats_cdb_stats`** counters via MI; alert on
    `cas_exhausted > 0` (lost writes) and watch `index_miss_kv`
    for a churn-rate signal across multi-instance deployments.
-4. **Optionally bump `nats_cas_retries`** above the default 10
+6. **Optionally bump `nats_cas_retries`** above the default 10
    if you see a steady non-zero `cas_exhausted` rate under burst
    contention; the Phase-1.3 jittered backoff bounds total per-
    call latency at ~50 ms.
@@ -35,7 +45,7 @@ For production cachedb_nats deployments backing usrloc in
 Single-instance, loopback NATS broker, aarch64.  All numbers from
 `modules/cachedb_nats/tests/sip_e2e/bench_ul_register.sh`,
 unpaced (RPS=0).  "Original" is the branch state at session
-start; "Final" is `398c3e206` with `-s HP`.
+start; "Final" is `398c3e206` with `-s HP_MALLOC`.
 
 | AoR count | Metric | Original | Final | Δ |
 |-----------|-------|---------:|------:|--:|
@@ -250,7 +260,7 @@ gives:
   20k: p50 41 → 25 ms (−39%), p99 185 → 142 ms (−23%)
 
 No code changes — the allocator is selected at runtime via the
-existing `-s HP` flag.  The bench harness now bakes it in by
+existing `-s HP_MALLOC` flag.  The bench harness now bakes it in by
 default; the playbook calls it out as a production
 recommendation; CLAUDE.md captures the finding so future
 investigations reach for it directly.
@@ -258,32 +268,151 @@ investigations reach for it directly.
 Pkg memory (`-k`) is per-process and not contended; only the
 SHM allocator (`-s`) needs the switch.
 
+## Scale-tuning group (Items 1-3 of the 1MM / 10MM plan)
+
+Three changes that together make cachedb_nats viable as a usrloc
+backend at 1MM endpoints and credible at 10MM, by recognising
+that usrloc's read/write path is PK-only and the JSON-FTS index
+is therefore optional weight on the hot path.
+
+**Item 1 — PK fast path in `nats_cache_query`.**  Added a single-
+condition is_pk=1 short-circuit at the top of `nats_cache_query`
+(mirroring the long-existing PK branch in `nats_cache_update`).
+Encodes the filter value via `_kv_encode_key`, builds the prefixed
+target_key, calls `kvStore_Get`, parses the returned JSON, and
+returns one row.  No mutex acquired, no chain walk, no shard
+locking.  Falls through to the index path for any non-PK or
+multi-condition filter, so script-driven `cdb_query` still works.
+For the canonical usrloc deployment (`cdb_load_urecord` always
+sets `is_pk=1`) this turns every read into a single broker RTT
+plus JSON parse.
+
+**Item 2 — `index_buckets` modparam.**  Promoted the bucket count
+from a 4096 `#define` to a runtime modparam (`index_buckets`,
+default 4096, init-time power-of-two-rounded with a floor of
+`NATS_IDX_SHARDS = 16`).  The buckets array moved from a fixed
+inline `nats_idx_entry *buckets[NATS_IDX_BUCKETS]` to a
+dynamically-allocated SHM array.  `_hash` switched from `% N` to
+`& nats_idx_bucket_mask`.  Operators can now tune for their AoR
+count without recompiling: 16384 at 100k AoRs (avg chain ≈ 6),
+65536 at 1MM (avg chain ≈ 15).  Each doubling halves average
+chain length for ~32 KB additional SHM.
+
+**Item 3 — `enable_search_index` modparam.**  Default 1 preserves
+legacy behaviour.  When set to 0:
+
+  - `nats_json_index_init` is skipped in `mod_init`; `g_idx`
+    stays NULL.
+  - `nats_json_index_build` and the watcher are skipped in
+    `child_init`.
+  - The PK fast path (Item 1) handles every query;
+    `nats_cache_update`'s existing PK branch handles every
+    update.
+  - Non-PK filters in either path are rejected with an explicit
+    error message ("non-PK filter rejected because the search
+    index is disabled") rather than crashing on a NULL `g_idx`.
+  - `nats_json_index_add/remove/remove_fields` natural early-
+    returns make the watcher callsites and CAS update path
+    no-ops (zero JSON parse, zero SHM allocation).
+
+For usrloc-only deployments this is a free win at every scale:
+no SHM cost for the index (saves ~250 MB at 1MM, ~2.5 GB at
+10MM), no watcher CPU (which would otherwise saturate at >100 %
+of one core at 1MM), and no per-write index-update work in the
+CAS loop.
+
+Combined effect: usrloc-on-NATS at 1MM endpoints is now a single
+modparam flip away from a full-sharing-cachedb deployment that
+spends zero SHM and zero CPU on machinery it doesn't need.
+
+## Item 4 — dedicated watcher process
+
+Until Item 4, the KV watcher ran as a pthread inside the rank-1
+SIP worker (`nats_watch_start` → `_watcher_thread_fn`).  At
+≥ 100k AoRs the steady-state event rate (~1 700 events/sec,
+~17% of one core, see SCALING.md) competes with SIP request
+handling on the same scheduler — the SIP worker can be late
+servicing INVITEs because its sibling thread is busy parsing JSON
+and updating the index.
+
+Item 4 adds an opt-in modparam, `dedicated_watcher_proc`, that
+shifts the watcher into its own forked OpenSIPS child process via
+the standard `proc_export_t` mechanism (same shape `event_routing`,
+`pua_dialoginfo`, and `dialog` use).  The dedicated process owns
+its own NATS connection and KV handle; it writes to the same
+SHM-backed `g_idx` every SIP worker maps, using the per-shard
+locks added in commit 43ceca02b — no new synchronisation.
+
+Gating:
+- `dedicated_watcher_proc=0` (default) — legacy rank-1 pthread.
+- `dedicated_watcher_proc=1` — dedicated process, rank-1 pthread
+  is skipped.  `destroy()` also skips `nats_watch_stop()` since
+  there's no in-process pthread to join; SIGTERM from the core
+  reaps the dedicated child cleanly.
+- `enable_search_index=0` overrides both — the dedicated process
+  is not declared and not forked, with an explicit "is meaningless"
+  log line.  The watcher has nothing to update when the index
+  doesn't exist.
+
+The dedicated proc is also gated on `kv_watch_count > 0` (mirrors
+the rank-1 child_init gate): if no `kv_watch` pattern is
+configured, no fork — there's nothing to watch.
+
+### Bench (10k AoRs, RPS=200, single-instance, loopback NATS, HP_MALLOC, aarch64)
+
+| Mode | p50 ms | p95 ms | p99 ms | max ms | eff. RPS | RSS MB | CAS retry / exh |
+|------|------:|------:|------:|------:|--------:|------:|----------------:|
+| rank-1 pthread (default)         | 15.18 | 16.34 | 17.98 | 62.1 | 103.6 | 77.8 | 0 / 0 |
+| dedicated watcher proc           | 15.21 | 16.41 | 18.21 | 63.2 | 103.6 | 84.4 | 0 / 0 |
+| `enable_search_index=0` (regr.)  | 15.01 | 16.11 | 17.68 | 61.9 | 103.6 | 72.1 | 0 / 0 |
+
+At 10k single-instance the dedicated mode is **noise-level** in
+latency: p50 +0.03 ms, p95 +0.07 ms, p99 +0.23 ms — all well
+inside run-to-run variance — and pays ~6.6 MB RSS for the second
+process.  The expected payoff is at higher scale where the
+watcher's CPU footprint stops being negligible: at 100k AoRs the
+rank-1 pthread mode has ~17% of one core taken by watcher work,
+which the SIP worker no longer competes for in the dedicated mode.
+We don't have a 100k bench rig in tree to measure that directly;
+the design rationale stands on the SCALING.md projection plus the
+fact that at 10k there is no measurable regression from running
+the watcher out-of-process.
+
+### Functional verification
+
+sip_e2e was extended to wire `DEDICATED_WATCHER` through
+`opensips.cfg.in`, `run.sh`, `bench_ul_register.sh`, and
+`cases/040_broker_bounce.sh`.  All 30 assertions pass in each of
+three configurations:
+
+- Default (rank-1 pthread) — log shows `_watcher_thread_fn: NATS
+  KV watcher thread started`.
+- `DEDICATED_WATCHER=1` — log shows a separate pid in
+  `nats_watcher_proc_main: NATS watcher proc starting (pid=…)`
+  and the rank-1 pthread is correctly skipped.
+- `ENABLE_INDEX=0` — log shows the `is meaningless` message and
+  neither watcher starts; PK fast path serves all reads/writes.
+
+A structural test (`test_dedicated_watcher_proc.c`) asserts the
+modparam, `proc_export_t`, gate sites in `mod_init` /
+`child_init` / `destroy`, and the cross-file symbol declaration.
+RED-proven: stripping the modparam string from `cachedb_nats.c`
+flips the test red; restoring it flips it green.
+
 ## What's still on the table
 
 Not pursued in this series, listed for the next session:
 
-- **SHM allocator pressure remains the dominant 10k → 20k tail
-  factor even after HP_MALLOC** — p99 still grows 2.6× (54 →
-  142 ms) for 2× more data.  Candidates: hash-bucket chain
-  depth at 80+ entries per chain (256 buckets, 20k entries → ~78
-  avg chain length × 3 indexed fields per AoR), or remaining
-  sustained-alloc pressure.  Worth profiling with perf or
-  `valgrind --tool=callgrind` against a populated index.
+- **Async `nats_request` variant** (Item 5) — `nats_consumer/
+  nats_rpc.c` currently blocks the SIP worker on the RPC call.
+  Synchronous design is fine for non-request-route callers and
+  modest RPS; a deployment running `nats_request` in
+  `request_route` at 1MM-endpoint scale needs async.  Flagged in
+  the original perf review (item #8); not pursued.
 
-- **More buckets** — bumping `NATS_IDX_BUCKETS` from 256 → 4096
-  (16×) would cut average chain length from ~78 to ~5 at 20k
-  entries.  Memory cost ~32 KB extra per process for the
-  `buckets[]` array.  Cheap experiment.
-
-- **Watcher in every worker** — currently rank-1 only, with
-  Tier-2 #4's SHM index meaning all workers see live updates.
-  If we moved the watcher to a dedicated process / thread per
-  worker, we'd eliminate the latency contribution of "this
-  worker's local index hasn't seen the latest update yet"
-  (currently mitigated by lazy self-heal).  More processes,
-  more JS consumers — operator trade-off.
-
-- **`nats_request` async variant** — `nats_consumer/nats_rpc.c`
-  currently blocks the SIP worker on the RPC call.  Async
-  variant flagged in the original perf review (item #8); not
-  pursued.
+- **SHM allocator pressure at non-trivial bucket counts** — at
+  20k AoRs / 256 buckets the residual p99 growth from 10k → 20k
+  (54 → 142 ms) tracked SHM-alloc serialisation.  HP_MALLOC took
+  the worst of it.  Item 2's bigger bucket arrays should narrow
+  it further; re-bench at 100k once the deployment shape calls
+  for it.

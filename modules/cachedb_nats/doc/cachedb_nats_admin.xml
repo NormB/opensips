@@ -35,15 +35,26 @@
 			<listitem><para>
 				<emphasis role="bold">JSON full-text search index</emphasis> —
 				keys whose names begin with <varname>fts_json_prefix</varname> are
-				automatically parsed and indexed in a process-local hash table.
+				automatically parsed and indexed in a SHM-backed hash table
+				(sharded under <varname>NATS_IDX_SHARDS = 16</varname>
+				gen_lock_set locks).
 				<function>cache_query</function> performs O(1) equality lookups
-				against this index without scanning the KV bucket.
+				against this index without scanning the KV bucket.  The bucket
+				count is tunable via the <varname>index_buckets</varname>
+				modparam.  The index can be disabled entirely via
+				<varname>enable_search_index = 0</varname> for PK-only
+				deployments (notably usrloc-as-store), in which case
+				<function>cache_query</function> uses a PK fast path that
+				goes straight to <function>kvStore_Get</function> with no
+				index lookup.
 			</para></listitem>
 			<listitem><para>
 				<emphasis role="bold">Live KV watcher</emphasis> —
 				a self-healing pthread watches the KV bucket in real time, updating
 				the search index on every put/delete/purge and raising the
 				<emphasis>E_NATS_KV_CHANGE</emphasis> EVI event for script reaction.
+				Skipped entirely when
+				<varname>enable_search_index = 0</varname>.
 			</para></listitem>
 			<listitem><para>
 				<emphasis role="bold">nats_request()</emphasis> —
@@ -604,6 +615,287 @@ modparam("cachedb_nats", "nats_request_max_reply", 262144)
 	<para>
 		<emphasis>
 			Default value is <quote>10</quote>.  Minimum bound is 1.
+		</emphasis>
+	</para>
+	</section>
+
+	<section id="param_index_buckets" xreflabel="index_buckets">
+	<title><varname>index_buckets</varname> (integer)</title>
+	<para>
+		Hash bucket count for the in-memory JSON-FTS search index.
+		Higher values reduce average chain length on the lookup
+		path at the cost of a larger fixed allocation for the
+		bucket array (~32 KB per doubling).
+	</para>
+	<para>
+		The init code rounds the requested value up to the next
+		power of two with a floor of <emphasis>16</emphasis>
+		(<varname>NATS_IDX_SHARDS</varname>) so the hash function
+		can use a bitmask AND instead of a modulo.  Operators
+		setting non-power-of-two values will see the rounded
+		count logged at <emphasis>LM_INFO</emphasis> on startup.
+	</para>
+	<para>
+		Recommended values:
+		<emphasis role="bold">4096</emphasis> at &lt;= 20 000 AoRs,
+		<emphasis role="bold">16384</emphasis> at 100 000,
+		<emphasis role="bold">65536</emphasis> at 1 000 000.
+		Above 1 000 000 endpoints the recommended path is to
+		disable the index entirely via
+		<varname>enable_search_index = 0</varname>; see
+		<filename>doc/SCALING.md</filename> for the analysis.
+	</para>
+	<para>
+		Ignored when
+		<varname>enable_search_index = 0</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>4096</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>index_buckets</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "index_buckets", 16384)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_enable_search_index"
+		xreflabel="enable_search_index">
+	<title><varname>enable_search_index</varname> (integer)</title>
+	<para>
+		Whether to maintain the in-memory JSON-FTS search index.
+		When set to <emphasis role="bold">0</emphasis> the module:
+		<itemizedlist>
+			<listitem><para>
+				Skips <function>nats_json_index_init</function>
+				in <function>mod_init</function>; the global
+				index handle stays NULL.
+			</para></listitem>
+			<listitem><para>
+				Skips the initial KV-driven index build and the
+				watcher thread in <function>child_init</function>.
+			</para></listitem>
+			<listitem><para>
+				Routes every <function>cache_query</function>
+				through the PK fast path (single-condition
+				is_pk=1 filter only); non-PK and multi-condition
+				filters are rejected with an explicit error
+				message.
+			</para></listitem>
+			<listitem><para>
+				Routes every <function>cache_update</function>
+				through its long-existing PK branch; non-PK
+				updates are likewise rejected.
+			</para></listitem>
+		</itemizedlist>
+	</para>
+	<para>
+		This is the recommended setting for
+		<varname>cluster_mode = full-sharing-cachedb</varname>
+		usrloc deployments at every scale.  usrloc&apos;s read
+		(<function>cdb_load_urecord</function>) and write
+		(<function>cdb_flush_urecord</function>) paths construct
+		<varname>cdb_filter_t</varname> with
+		<varname>is_pk = 1</varname>, so the index adds only
+		cost.  Disabling it saves the SHM footprint
+		(~250 MB at 1MM endpoints, ~2.5 GB at 10MM), avoids
+		watcher-thread CPU saturation at scale, and removes
+		the per-write index update from the CAS hot path.
+	</para>
+	<para>
+		Leave at <emphasis role="bold">1</emphasis> only for
+		mixed deployments that also serve script-driven non-PK
+		<function>cache_query</function> calls against the
+		same bucket.
+	</para>
+	<para>
+		See <filename>doc/SCALING.md</filename> and the
+		usrloc playbook (<xref
+			linkend="usrloc_storage_scale_tuning"/>) for
+		guidance on when to flip this knob.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>1</quote> (enabled).
+		</emphasis>
+	</para>
+	<example>
+	<title>Disable the search index for usrloc deployments</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "enable_search_index", 0)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_dedicated_watcher_proc"
+		xreflabel="dedicated_watcher_proc">
+	<title><varname>dedicated_watcher_proc</varname>
+	(integer)</title>
+	<para>
+		Whether to move the KV watcher out of the rank-1 SIP
+		worker (where it lives as a pthread) and into a
+		dedicated OpenSIPS child process.  When set to
+		<emphasis role="bold">1</emphasis>:
+		<itemizedlist>
+			<listitem><para>
+				The module attaches a
+				<varname>proc_export_t</varname> entry to its
+				exports, so the OpenSIPS core forks one extra
+				child whose main loop is
+				<function>nats_watcher_proc_main</function>.
+			</para></listitem>
+			<listitem><para>
+				The rank-1 child_init skips
+				<function>pthread_create</function>, so the
+				watcher does not also run inside the SIP
+				worker.
+			</para></listitem>
+			<listitem><para>
+				The dedicated process maps the same SHM-backed
+				JSON-FTS index that every SIP worker reads
+				(<varname>g_idx</varname> is allocated pre-
+				fork in <function>mod_init</function>).  The
+				per-shard locks added in commit
+				<varname>43ceca02b</varname> serialise the
+				cross-process writes safely without any new
+				synchronisation.
+			</para></listitem>
+			<listitem><para>
+				<function>destroy</function> skips
+				<function>nats_watch_stop</function> -- the
+				pthread state lives in another process and
+				<function>pthread_join</function> from main
+				would never return.  The OpenSIPS core
+				delivers SIGTERM to the dedicated process
+				directly at shutdown.
+			</para></listitem>
+		</itemizedlist>
+	</para>
+	<para>
+		Only meaningful when
+		<varname>enable_search_index = 1</varname>.  When the
+		index is disabled there is no watcher to relocate, so
+		the dedicated process is neither declared nor forked
+		regardless of this setting (a warning is logged at
+		<emphasis>LM_INFO</emphasis> if both are set).
+	</para>
+	<para>
+		Worth flipping at <emphasis role="bold">&ge; 100k AoRs</emphasis>
+		with the index on, where the steady-state watcher
+		event rate (~1 700 events/s, ~17 % of one core)
+		stretches rank-1&apos;s SIP request-handling latency.
+		At smaller scales the rank-1 pthread is essentially
+		free; the dedicated process just adds an extra address
+		space and a duplicate NATS connection.  See
+		<filename>doc/SCALING.md</filename> "Watcher CPU at
+		scale" for the threshold table.
+	</para>
+	<para>
+		Has no effect when no <varname>kv_watch</varname>
+		pattern is configured -- there is nothing for the
+		watcher to do, so the dedicated process is not forked
+		(matching the rank-1 pthread gate).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote>
+			(legacy rank-1 pthread topology).
+		</emphasis>
+	</para>
+	<example>
+	<title>Enable the dedicated KV-watcher process</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "enable_search_index", 1)
+modparam("cachedb_nats", "dedicated_watcher_proc", 1)
+modparam("cachedb_nats", "kv_watch", "json_>")
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_index_resync_on_reconnect"
+		xreflabel="index_resync_on_reconnect">
+	<title><varname>index_resync_on_reconnect</varname>
+	(integer)</title>
+	<para>
+		Whether the KV watcher rebuilds the in-memory search
+		index in full after each reconnect to NATS.  The
+		Phase 1.4 stale-entry self-heal in
+		<function>nats_cache_query</function> evicts stale
+		entries lazily on the first query that hits them, so
+		the default is off: a brief broker hiccup no longer
+		stalls the watcher for an O(N) bulk rebuild.
+	</para>
+	<para>
+		Set to <emphasis role="bold">1</emphasis> in
+		deployments with high cross-instance churn or after
+		long outages where bulk reconciliation is preferable
+		to lazy per-query self-heal.
+	</para>
+	<para>
+		Ignored when
+		<varname>enable_search_index = 0</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote>.
+		</emphasis>
+	</para>
+	</section>
+
+	<section id="param_index_resync_interval_secs"
+		xreflabel="index_resync_interval_secs">
+	<title><varname>index_resync_interval_secs</varname>
+	(integer)</title>
+	<para>
+		Periodic full rebuild of the in-memory search index
+		on a timer.  Belt-and-braces upper bound on
+		per-process index staleness regardless of reconnect
+		cadence or self-heal pace.  Skipped silently while
+		NATS is disconnected.
+	</para>
+	<para>
+		Set to a value &lt;= the longest tolerable staleness
+		window in deployments where the lazy self-heal pace is
+		insufficient.  Each tick costs one
+		<function>kvStore_WatchAll</function> snapshot drain.
+	</para>
+	<para>
+		Ignored when
+		<varname>enable_search_index = 0</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote> (disabled).
+		</emphasis>
+	</para>
+	</section>
+
+	<section id="param_cdb_drain_timeout_ms"
+		xreflabel="cdb_drain_timeout_ms">
+	<title><varname>cdb_drain_timeout_ms</varname> (integer)</title>
+	<para>
+		Shutdown drain timeout in milliseconds for the shared
+		<emphasis>lib/nats</emphasis> connection pool.
+		Controls how long
+		<function>nats_pool_finalize</function> waits for
+		in-flight publishes / requests to complete before
+		forcibly closing connections.  Cross-DC deployments
+		with high RTT may need to extend the budget; the
+		underlying setting is shared with
+		<emphasis>event_nats</emphasis> (last writer wins).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>5000</quote> ms.
 		</emphasis>
 	</para>
 	</section>
@@ -1541,5 +1833,7 @@ modparam("cachedb_nats", "kv_watch",    ">")
 	</programlisting>
 	</example>
 	</section>
+
+	&playbook;
 
 </chapter>

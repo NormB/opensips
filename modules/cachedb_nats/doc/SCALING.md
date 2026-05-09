@@ -11,14 +11,27 @@ allocator pressure dominates the residual tail.  As we scale by
 50× to 1MM and 500× to 10MM endpoints, **different bottlenecks
 take over** and the right answer is structural, not parametric.
 
+The four modparams introduced by the scale-tuning group of this
+branch (`index_buckets`, `enable_search_index`, `nats_cas_retries`,
+`dedicated_watcher_proc`) are the levers operators reach for
+first.  Their relationship to the AoR-count thresholds below is
+the central thread of this document.
+
 ## Quick reference
 
-| Scale | Per-instance memory | Bucket count | Watcher | Architecture |
-|-------|--------------------:|-------------:|---------|--------------|
-| ≤ 20k AoRs | ~10 MB | 4 096 | rank-1 | single instance, current code |
-| 100k AoRs | ~30 MB | 16 384 | rank-1 | single instance, current code |
-| 1 MM AoRs | ~250 MB | 65 536 | dedicated proc | shard recommended (10 instances × 100k) |
-| 10 MM AoRs | ~2.5 GB | n/a | n/a | **drop the index entirely**; PK-direct lookups; or shard heavily |
+For pure usrloc-as-store deployments, the simplest answer at every
+scale is **`enable_search_index=0`**.  The PK fast path handles
+every read; `nats_cache_update`'s PK branch handles every write;
+no watcher runs; no SHM index is allocated.  The table below is
+relevant only when the index is left on (e.g. mixed deployments
+that also run script-driven non-PK queries).
+
+| Scale | `enable_search_index=0` (recommended) | `enable_search_index=1` (mixed workloads) |
+|-------|-----------------------------------------|---------------------------------------------|
+| ≤ 20k AoRs | single instance, ~0 MB index, no watcher | `index_buckets=4096`, ~10 MB index, rank-1 watcher (`dedicated_watcher_proc=0`) |
+| 100k AoRs | single instance, ~0 MB index, no watcher | `index_buckets=16384`, ~30 MB index, `dedicated_watcher_proc=1` (~17 % CPU) |
+| 1 MM AoRs | single beefy instance OR shard for SIP-side reasons; no watcher | `index_buckets=65536`, ~250 MB index, `dedicated_watcher_proc=1` required |
+| 10 MM AoRs | shard for SIP-side reasons; no index ever; PK-direct only | **not viable** — index would be ~2.5 GB and watcher unreachable |
 
 ## What's in the index, exactly
 
@@ -82,31 +95,32 @@ deployments.
 
 ## Bucket count sizing
 
-Already bumped to **4 096** in this branch (was 256).  The hash
-distributes via djb2 + bitmask; powers of two keep `% buckets`
-compiled to AND.  Each doubling halves average chain length for
-~32 KB more SHM.
+(Only relevant when `enable_search_index=1`.  PK-only deployments
+should set `enable_search_index=0` and skip the index entirely.)
 
-| Scale | Recommended `NATS_IDX_BUCKETS` | Avg chain | Bucket SHM |
-|------:|-------------------------------:|----------:|-----------:|
-|   1 k |                          4 096 |       0.2 |       32 KB|
-|  20 k |                          4 096 |         5 |       32 KB|
-| 100 k |                         16 384 |         6 |      128 KB|
-|   1 M |                         65 536 |        15 |      512 KB|
-|  10 M | n/a — drop the index (see below) |          |             |
+Default is **4 096** (was 256 before this branch).  Tunable at
+runtime via `modparam("cachedb_nats", "index_buckets", N)`; the
+init code rounds N up to the next power of two with a floor of
+`NATS_IDX_SHARDS = 16`.  The hash distributes via djb2 + bitmask;
+powers of two keep `% buckets` compiled to AND.  Each doubling
+halves average chain length for ~32 KB more SHM.
 
-Today this is a `#define` requiring rebuild.  At 100k+ scale
-operators need to be able to tune without recompiling — promote
-`NATS_IDX_BUCKETS` to a modparam (`index_buckets`, default 4 096,
-power-of-two-rounded at init).  Implementation: ~30 lines, change
-`buckets[NATS_IDX_BUCKETS]` to a runtime-allocated pointer.  Filed
-as a follow-up.
+| Scale | Recommended `index_buckets` | Avg chain | Bucket SHM |
+|------:|----------------------------:|----------:|-----------:|
+|   1 k |                       4 096 |       0.2 |       32 KB|
+|  20 k |                       4 096 |         5 |       32 KB|
+| 100 k |                      16 384 |         6 |      128 KB|
+|   1 M |                      65 536 |        15 |      512 KB|
+|  10 M | n/a — `enable_search_index=0` (see below) |          |             |
 
 ## Watcher CPU at scale
 
-The KV watcher (rank-1 only today) processes one event per
-KV-change.  With re-REGISTER every 60 s, the steady-state event
-rate is `AoRs / 60`:
+The KV watcher processes one event per KV-change.  By default it
+runs as a pthread inside the rank-1 SIP worker; setting
+`dedicated_watcher_proc=1` (Item 4) moves it into its own forked
+OpenSIPS child process so it stops competing with SIP request
+handling on rank 1.  With re-REGISTER every 60 s, the steady-
+state event rate is `AoRs / 60`:
 
 | Scale | Steady event rate | Per-event cost | Watcher CPU |
 |------:|-----------------:|---------------:|------------:|
@@ -124,80 +138,80 @@ index size pushes cache pressure.
 - **At 100k**: single rank-1 watcher uses ~17 % of one core.
   Fine, but rank-1 is also a SIP worker; if its REGISTER
   workload competes for CPU with the watcher, propagation
-  latency stretches.  This is where the dedicated-watcher
-  process (Option B from the previous discussion) earns its
-  keep — isolate the watcher from SIP-worker scheduling.
+  latency stretches.  Set `dedicated_watcher_proc=1` (Item 4)
+  to fork a dedicated OpenSIPS child process that owns the
+  watcher loop and lets rank 1 stay focused on SIP routing.
 - **At 1MM**: a single watcher can't keep up.  Period.  Even
-  Option B doesn't help because the bottleneck is per-event
-  CPU, not scheduling jitter.  Need parallelism.
+  the dedicated-process flavour doesn't help because the
+  bottleneck is per-event CPU, not scheduling jitter.  Need
+  parallelism — and at this scale the architectural answer is
+  to drop the index for usrloc (`enable_search_index=0`),
+  which makes the watcher a no-op.
 - **At 10MM**: hopeless under the current architecture.
 
 ## Architectural recommendations
 
 ### Up to 100k AoRs
 
-- Bucket count: bump `NATS_IDX_BUCKETS` to 16 384 (4× current).
-  Either patch the `#define` or wait for the modparam follow-up.
+- For pure usrloc: `enable_search_index=0` and stop reading.
+  No index, no watcher, no per-write index update.  All reads
+  go through the PK fast path.
+- For mixed workloads (script-driven non-PK queries also in
+  play): leave `enable_search_index=1`, set `index_buckets`
+  to 16384 (4× the default 4096).
 - SHM size: `-m 256`.
-- Allocator: `-s HP` (already in the playbook).
-- Watcher: rank-1 only is fine; consider Option B (dedicated
-  process) if rank-1's SIP load is heavy.
+- Allocator: `-s HP_MALLOC` (always; see playbook).
+- Watcher (only relevant if index enabled): rank-1 only is
+  fine.  Set `dedicated_watcher_proc=1` if rank-1's SIP load
+  is heavy and the propagation-latency floor matters.
 - Index resync: `index_resync_on_reconnect=0` (default since
   this branch).
 - Single instance is OK.
 
 ### 100k – 1MM AoRs
 
-- Bucket count: 65 536 (16× current).
-- SHM size: `-m 1024` or higher.
-- **Sharded deployment**: split AoRs across multiple OpenSIPS
-  instances by AoR-prefix or hash.  10 instances × 100k AoRs
-  apiece keeps each instance in the comfortable single-instance
-  regime.  Add a SIP-layer load balancer (eg. `dispatcher` or
-  `permissions` modules) routing REGISTERs to the right shard.
-- **Watcher**: dedicated process per instance (Option B from
-  the prior write-up).  At 100k AoRs per shard, ~17 % CPU is
-  fine for an isolated process; rank-1 stays focused on SIP
-  routing.
+- For pure usrloc: `enable_search_index=0`.  Single beefy
+  instance is viable up to ~1MM endpoints from the cachedb_nats
+  side; the SHM cost of running with the index on (~250 MB at
+  1MM) is what makes "off" the obvious answer here.
+- For mixed workloads with the index on: `index_buckets=65536`
+  and `-m 1024`.  Set `dedicated_watcher_proc=1` (Item 4) to
+  keep the rank-1 worker focused on SIP routing.
+- **Sharded deployment** is recommended above ~500k AoRs even
+  with the index off, but for SIP-side reasons (UDP port
+  queues, transaction tables, REGISTER fan-out): split AoRs
+  across multiple OpenSIPS instances by AoR-prefix or hash.
+  10 instances × 100k AoRs each keeps every instance in the
+  comfortable single-instance regime.  Add a SIP-layer load
+  balancer (eg. `dispatcher` or `permissions`) routing
+  REGISTERs to the right shard.
 - Each instance has its own NATS bucket, OR one shared bucket
   with each instance subscribing only to its prefix slice.
 
-### 10MM AoRs — drop the index, go PK-direct
+### 10MM AoRs — index off, shard hard
 
 The architecture changes substantively:
 
-1. **Don't index everything**.  The JSON-FTS index exists to
-   accelerate non-PK filter queries (script-driven `nats_kv_query`
-   etc.).  usrloc's hot path is **PK-only** — both reads
-   (`cdb_load_urecord` at `udomain.c:937`) and writes
-   (`cdb_flush_urecord` at `urecord.c:600`) construct
-   `cdb_filter_t` with `is_pk = 1`.
+1. **The index is off**.  `enable_search_index=0` is mandatory
+   here.  The JSON-FTS index exists to accelerate non-PK filter
+   queries (script-driven `nats_kv_query` etc.).  usrloc's hot
+   path is **PK-only** — both reads (`cdb_load_urecord` at
+   `udomain.c:937`) and writes (`cdb_flush_urecord` at
+   `urecord.c:600`) construct `cdb_filter_t` with `is_pk = 1`.
+   The PK fast path in `nats_cache_query` (Item 1 of this
+   branch) handles those reads in O(1) broker-side via
+   `kvStore_Get(prefix + encode(filter_value))`, bypassing the
+   bucket walk entirely.  At 10MM scale, the index would cost
+   ~2.5 GB of SHM and a watcher rate of ~167k events/sec that
+   no single thread can keep up with.
 
-   Today, `nats_cache_query` walks the index regardless of
-   `is_pk`.  Adding a PK fast path that skips the index entirely
-   for `is_pk=1` filters lets reads bypass the bucket walk and go
-   straight to `kvStore_Get(prefix + encode(filter_value))`.
-   The KV store handles the lookup in O(1) broker-side.
-
-   **Filed as a follow-up commit**: PK fast path in
-   `nats_cache_query`.  Mirror the existing PK branch in
-   `nats_cache_update`.
-
-2. **Make the in-memory index optional**.  Add a modparam
-   `enable_search_index` (default 1 for backwards compat).  When
-   set to 0, skip `nats_json_index_init`, skip the watcher, and
-   route every query through the PK fast path.  Non-PK queries
-   from script error out with a clear message.  For
-   usrloc-only deployments this saves the entire 2.5 GB index
-   memory footprint and the watcher's >100 % CPU.
-
-3. **Shard regardless**.  At 10MM total endpoints, even with
+2. **Shard regardless**.  At 10MM total endpoints, even with
    the index disabled, a single OpenSIPS instance holding the
    AoR routing for all of them is impractical for SIP-side
    reasons (UDP port queues, transaction tables, etc.).
    Sharding remains required.
 
-4. **NATS topology**.  A single 10MM-key bucket holds ~5 GB of
+3. **NATS topology**.  A single 10MM-key bucket holds ~5 GB of
    data on each broker replica.  JetStream replication carries
    every write to every replica.  At ~167k writes/sec steady
    state across a 3-replica cluster, that's ~500k×size cross-
@@ -253,23 +267,32 @@ blocking design is fine at any scale.  The investment to add
 async RPC is worth making before committing to a deployment
 that depends on it in the registration path.
 
-## Concrete next steps from this analysis
+## Status of the action items in this analysis
 
-1. **PK fast path in `nats_cache_query`** — biggest immediate
-   win for usrloc workloads of any size, and unblocks the
-   "drop the index" architecture at 10MM scale.  ~50 lines.
-2. **`index_buckets` modparam** — replace the `#define` with a
-   runtime-tunable bucket count, default 4 096, init-time
-   power-of-two-rounded.  ~30 lines.
-3. **`enable_search_index` modparam** — default 1 for backwards
-   compat; when 0 skips index init, watcher, and routes all
-   queries through the PK fast path.  ~50 lines.
-4. **Dedicated watcher process** (Option B) — only meaningful
-   above ~100k AoRs.  ~150 lines.
-5. **Async `nats_request`** — only meaningful for
-   request-route-blocking deployments at non-trivial RPS.
+1. **PK fast path in `nats_cache_query`** — **landed**.  Single-
+   condition is_pk=1 short-circuit at the top of
+   `nats_cache_query`; falls through to the index path for
+   non-PK or multi-condition filters.  Mirrors the long-existing
+   PK branch in `nats_cache_update`.
+2. **`index_buckets` modparam** — **landed**.  Default 4 096,
+   init-time power-of-two-rounded with a floor of 16
+   (`NATS_IDX_SHARDS`).  The buckets array is now SHM-allocated
+   dynamically; `_hash` uses a bitmask AND on
+   `nats_idx_bucket_mask`.
+3. **`enable_search_index` modparam** — **landed**.  Default 1
+   for backwards compatibility.  When 0 skips
+   `nats_json_index_init`, the index build, and the watcher;
+   non-PK filters in query/update are rejected with an explicit
+   error message rather than crashing on a NULL `g_idx`.  For
+   pure usrloc deployments this is the canonical setting.
+4. **Dedicated watcher process** (Option B) — **pending**.
+   With Item 3 making the watcher optional, this is now only
+   meaningful for mixed-workload deployments that keep the
+   index on at ≥ 100k AoRs.  ~150 lines.
+5. **Async `nats_request`** — **pending**.  Only meaningful
+   for request-route-blocking deployments at non-trivial RPS.
    ~300-500 lines.
 
-In rough priority for the next session: **(1) → (2) → (3) →
-benchmark at 100k → (4) if needed → (5) when the deployment
-shape calls for it**.
+Items 1-3 turn cachedb_nats from "works to about 100k AoRs with
+care" into "1MM is a single modparam flip from a working 100k
+config".  Items 4-5 are deployment-shape dependent.
