@@ -286,31 +286,51 @@ Detailed examples for each pattern are in `### Usage` above.
 
 ## Benchmarks
 
-A bench harness lives at `tests/bench/bench_consumer.sh`.  It pre-publishes
-N messages to a JetStream stream, starts an opensips with a tight
-`timer_route` drain loop, and times how long until N messages are acked
-(measured by polling the `nats_consumer:nats_consumer_list` MI command).
+A bench harness lives at `tests/bench/bench_consumer.sh`.  It
+pre-publishes N messages to a JetStream stream, starts an opensips
+with a tight `timer_route` drain loop, and times how long until N
+messages are acknowledged at the broker.  Drain-completion is read
+from the JetStream consumer's "Acknowledgment Floor" -- the
+authoritative broker-side count of acks confirmed.
 
 ```sh
-# Defaults: N=10000, RPS-uncapped, local NATS on 127.0.0.1:4222.
 OPENSIPS_MODULES=/path/to/_modules \
+  N=10000 \
   bash modules/nats_consumer/tests/bench/bench_consumer.sh
 ```
 
-Output reports:
-- pre-publish elapsed
-- drain elapsed
-- effective msgs/sec (acks-per-second sustained)
-- avg latency / msg (drain-elapsed / N)
+Env knobs: `N` (msg count, default 10000), `STREAM`, `STREAM_SUBJECTS`
+(default `bench.>`), `PUB_SUBJECT` (default `bench.in`), `FILTER`
+(default `bench.>`), `HANDLE`, `MI_PORT`, `NATS_URL`, `OUT`.
 
-> **Status:** the harness scaffolding is committed but the integration
-> path (consumer process delivery → SHM ring → `nats_fetch` script-side
-> drain) had a runtime issue under investigation as of the last
-> commit -- see `git log` for the most recent state.  Operators wanting
-> production benchmark numbers should also exercise the
-> `tests/stress_*` scripts in the same directory, which use the
-> docker-compose harness and report broker-driven throughput from a
-> different angle.
+### Reference numbers
+
+Single-instance, loopback NATS, aarch64, default cfg (1 s timer
+route, 100 ms per-fetch timeout, default `PHASE3_FETCH_BATCH=10`):
+
+| N      | Drain elapsed | Effective msgs/sec | Avg latency / msg |
+|-------:|--------------:|-------------------:|------------------:|
+|    200 | 0.24 s        | 833                | 1.20 ms           |
+| 10 000 | 31.04 s       | 323                | 3.10 ms           |
+
+Throughput at N=200 is dominated by the consumer process flushing
+its initial batch into the SHM ring; at N=10 000 the steady-state
+cap is the consumer-process Fetch batch size
+(`PHASE3_FETCH_BATCH`) divided by the broker round-trip.  Operators
+who need higher sustained throughput should bump `PHASE3_FETCH_BATCH`
+in `nats_consumer_proc.c` (currently 10) or split the workload
+across multiple bound handles, each with its own filter.
+
+### Known caveat: opensips-side MI counters
+
+The `nats_consumer:nats_consumer_list` MI command returns
+per-handle `msgs_delivered` / `acks` / `naks` counters that
+**never increment** as of this writing -- the counter struct is
+declared in `nats_handle_registry.h` but no production code path
+bumps the values.  The bench therefore polls the broker
+(`nats consumer info ...`) for drain completion rather than the
+opensips MI.  Filed as a follow-up; doesn't affect functional
+behaviour, only observability.
 
 ## Known limitations
 
