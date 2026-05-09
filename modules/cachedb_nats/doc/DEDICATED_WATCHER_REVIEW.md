@@ -1,11 +1,11 @@
-# Item 4 — Dedicated KV-watcher process: review
+# Dedicated KV-watcher process: review
 
 **Branch:** `feature/nats`
 **Worktree:** `/tmp/feature-nats`
 **Status at write time:** uncommitted on `feature/nats`; all tests
 green; ready for review and commit.
 
-The point of Item 4 is to let operators move the JetStream KV
+The point of this feature is to let operators move the JetStream KV
 watcher out of the rank-1 SIP worker (where it lives as a pthread)
 into a dedicated OpenSIPS child process. At ≥ 100k AoRs the
 watcher event rate (~1 700 events/sec, ~17 % of one core) competes
@@ -136,7 +136,7 @@ shared template.
 
 ### Documentation
 
-- `modules/cachedb_nats/doc/PERF_NOTES.md`: new "Item 4 —
+- `modules/cachedb_nats/doc/PERF_NOTES.md`: new "dedicated KV-watcher process —
   dedicated watcher process" section with the design rationale,
   the gating semantics, and the three-mode bench table from this
   review run. The `dedicated_watcher_proc` bullet was also moved
@@ -172,7 +172,7 @@ A single OpenSIPS child process is the right granularity because:
    scheduling jitter. Splitting the watcher across processes
    wouldn't help past ~1 core's worth (which is also the rank-1
    pthread's ceiling). The architectural answer at 1MM is
-   `enable_search_index=0` (Item 3), not "more watchers."
+   `enable_search_index=0` (`enable_search_index=0`), not "more watchers."
 
 3. **`proc_export_t` is the canonical OpenSIPS pattern.**
    `event_routing`, `pua_dialoginfo`, `dialog`, and others all
@@ -218,7 +218,7 @@ reconnect logic. Sharing wins on every axis.
 | Default value of `dedicated_watcher_proc` | **0** — legacy pthread topology, unchanged |
 | Module load order | Same as before; `proc_export_t` is honored only after `mod_init` returns |
 | Existing deployments | No change unless operator sets the modparam |
-| `enable_search_index=0` interaction | Dedicated proc not forked, with explicit LM_INFO log; rank-1 pthread also skipped (Item 3 behavior, unchanged) |
+| `enable_search_index=0` interaction | Dedicated proc not forked, with explicit LM_INFO log; rank-1 pthread also skipped (`enable_search_index=0` behavior, unchanged) |
 | `kv_watch_count == 0` interaction | Dedicated proc not forked (matches rank-1 pthread gate); LM_INFO message |
 | Shutdown semantics | SIGTERM from core reaps dedicated child; `destroy()` skips `nats_watch_stop()` in dedicated mode so main doesn't deadlock on `pthread_join` |
 | SHM index access | Dedicated process maps the same `g_idx` allocated pre-fork; per-shard locks (commit 43ceca02b) serialise cross-process writes — no new synchronisation |
@@ -325,7 +325,7 @@ projected CPU footprint stops being negligible:
 - 1 MM AoRs: rank-1 watcher saturates; dedicated proc still
   saturates because the bottleneck is per-event CPU, not
   scheduling. Architectural answer at this scale is
-  `enable_search_index=0` (Item 3).
+  `enable_search_index=0` (an `enable_search_index=0` deployment).
 
 We don't have a 100k bench rig in tree to measure that directly.
 The design rationale stands on the SCALING.md projection plus
@@ -357,15 +357,16 @@ regression from running the watcher out-of-process.
   supported. The OpenSIPS core's child-management doesn't
   expose a "restart this child" hook; SIGKILL would leave the
   parent thinking the child is up. Filed.
-- **Item 5 (async `nats_request`) is still on the table.** Item
-  4 doesn't change the synchronous nature of `nats_request`;
-  the rank-1 worker still blocks on RPCs in `request_route`.
+- **Async `nats_request` is still on the table.** The
+  dedicated-watcher feature doesn't change the synchronous
+  nature of `nats_request`; the rank-1 worker still blocks on
+  RPCs in `request_route`.
 
 ---
 
 ## 7. Commit list
 
-This review is being written before commit. There are **no Item 4
+This review is being written before commit. There are **no dedicated-watcher feature
 commits yet** on `feature/nats`. The working tree contains:
 
 - `cachedb_nats.c` — modparam, proc_export_t, gates
@@ -378,24 +379,24 @@ commits yet** on `feature/nats`. The working tree contains:
   fix surfaced by this review)
 - `tests/sip_e2e/run.sh`, `bench_ul_register.sh`,
   `cases/040_broker_bounce.sh` — `DEDICATED_WATCHER` env knob
-- `doc/PERF_NOTES.md` — Item 4 section + bench table
+- `doc/PERF_NOTES.md` — dedicated-watcher section + bench table
 - `doc/cachedb_nats_admin.xml` — `param_dedicated_watcher_proc`
   section
 - `doc/cachedb_nats_usrloc_playbook.xml` — varlistentry +
   scale-tuning paragraph
 
-This is mixed in with Items 1–3 working-tree changes (which
+This is mixed in with the scale-tuning working-tree changes (which
 landed in earlier commits per `git log`, but were rebased into
 the same uncommitted hunks during the work). When committing
-Item 4, suggested split:
+Suggested commit split for the dedicated-watcher work:
 
-1. `cachedb_nats: dedicated KV watcher process (Item 4)` —
+1. `cachedb_nats: dedicated KV watcher process (`dedicated_watcher_proc=1`)` —
    the production source + header + structural test + Makefile.
 2. `cachedb_nats: wire DEDICATED_WATCHER + kv_watch into
    sip_e2e harness` — the `tests/sip_e2e/*` changes. The
-   `kv_watch` addition is independent of Item 4 and is its own
+   `kv_watch` addition is independent of the dedicated-watcher work and is its own
    bug fix; mentioning that in the commit body is accurate.
-3. `cachedb_nats: doc updates for Item 4` — PERF_NOTES + admin
+3. `cachedb_nats: doc updates for the dedicated watcher` — PERF_NOTES + admin
    XML + playbook XML.
 
 ---

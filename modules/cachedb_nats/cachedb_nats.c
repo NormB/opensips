@@ -203,7 +203,7 @@ int   nats_cas_retries = 10;
  * 1MM / 10MM endpoint scales. */
 int   nats_enable_search_index = 1;
 
-/* Item 4 — move the KV watcher out of the rank-1 SIP worker.
+/* dedicated_watcher_proc: move the KV watcher out of the rank-1 SIP worker.
  *
  * Default 0 preserves legacy behaviour: the watcher runs as a
  * pthread inside the rank-1 SIP worker and shares its CPU with
@@ -227,7 +227,7 @@ int   nats_dedicated_watcher_proc = 0;
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
  * When one or more patterns are set, kvStore_WatchMulti() is used.
  * Definition lives in cachedb_nats_watch.h so the dedicated-process
- * watcher (Item 4) can read it from cachedb_nats_watch.c. */
+ * watcher (when running as a dedicated process) can read it from cachedb_nats_watch.c. */
 struct kv_watch_entry *kv_watch_list = NULL;
 int kv_watch_count = 0;
 
@@ -359,7 +359,7 @@ static const dep_export_t deps = {
 	},
 };
 
-/* Item 4 — dedicated KV watcher process.
+/* dedicated KV watcher process.
  *
  * Declared unconditionally so the symbol resolves at link time, but
  * only attached to module_exports.procs at runtime in mod_init when
@@ -572,7 +572,7 @@ static int mod_init(void)
 		}
 	}
 
-	/* Item 4 — attach the dedicated watcher process to the module
+	/* attach the dedicated watcher process to the module
 	 * exports only when both knobs are on AND at least one
 	 * kv_watch pattern was configured.  start_module_procs()
 	 * (in main_loop) reads exports.procs AFTER init_modules
@@ -678,7 +678,7 @@ static int child_init(int rank)
 	 * Other SIP workers rely on the initial index build above; live
 	 * updates from the watcher on rank 1 are a best-effort bonus.
 	 *
-	 * Item 4: when dedicated_watcher_proc=1 the watcher runs in its
+	 * When dedicated_watcher_proc=1 the watcher runs in its
 	 * own forked child (declared via exports.procs), so rank 1 must
 	 * NOT also spawn the pthread -- otherwise we'd have two watchers
 	 * racing each other on the same SHM index. */

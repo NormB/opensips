@@ -72,7 +72,7 @@ void nats_watch_stop(void);
 /**
  * nats_watcher_proc_main() -- Dedicated-process watcher entry point.
  *
- * Item 4: when dedicated_watcher_proc=1 (and enable_search_index=1),
+ * When dedicated_watcher_proc=1 (and enable_search_index=1),
  * the OpenSIPS core forks an extra child process via the
  * proc_export_t entry in cachedb_nats.c and calls this function as
  * its main loop.  The function never returns: it joins the shared

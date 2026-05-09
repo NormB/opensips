@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Item 4 wiring test: cachedb_nats can move the KV watcher out of
+ * Dedicated-watcher wiring test: cachedb_nats can move the KV watcher out of
  * the rank-1 SIP worker (where it lives as a pthread) into a
  * dedicated OpenSIPS child process.
  *
