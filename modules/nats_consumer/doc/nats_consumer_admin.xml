@@ -324,13 +324,21 @@ modparam("nats_consumer", "persist_path",
                 <varname>ring_capacity &gt;= 2 * fetch_batch</varname>.
             </para>
             <para>
-                On a loopback bench, raising
-                <varname>fetch_batch</varname> alone does not lift
-                end-to-end throughput because the bottleneck is
-                downstream (in the worker drain loop).  See the
-                README's "Tuning <varname>fetch_batch</varname>"
-                section for a full discussion and the recommended
-                drain pattern.
+                The drain pattern in the script matters more than
+                this knob alone: a per-message
+                <function>nats_fetch</function>+<function>nats_ack</function>
+                loop is gated by OpenSIPS script-interpreter
+                overhead at ~2 000 msgs/sec on aarch64 loopback,
+                while a <function>nats_fetch_batch</function>
+                +<function>nats_batch_select</function>+<function>nats_ack</function>
+                loop reaches ~9 800 msgs/sec at the same
+                <varname>fetch_batch=10</varname>.  See the
+                README's "Choosing a drain pattern" and "Tuning
+                <varname>fetch_batch</varname>" sections for
+                templates and the trade-offs at higher batches
+                (where <varname>max_ack_pending</varname> and the
+                consumer-process msg-ref table become the next
+                limits).
             </para>
             <para>
                 <emphasis>Default value:</emphasis>
@@ -503,24 +511,50 @@ route[ON_MSG] {
                 <emphasis>opts</emphasis> is a semicolon-separated
                 <literal>k=v</literal> string recognizing
                 <literal>count</literal> (default 16),
-                <literal>expires</literal> (duration, default 100ms),
+                <literal>expires</literal> (duration, default 100ms;
+                accepts a bare integer interpreted as ms, or a
+                suffix of <literal>ms</literal> / <literal>s</literal>
+                / <literal>m</literal> / <literal>h</literal> /
+                <literal>d</literal>),
+                <literal>expires_ms</literal> (alias for
+                <literal>expires</literal>; bare integer ms),
                 and <literal>no_wait</literal> (bool, default 0).
             </para>
             <para>
-                Returns the number of messages staged, or a negative
-                error code identical to <function>nats_fetch()</function>.
+                Returns the number of messages staged in
+                <varname>$retcode</varname>, or a negative error
+                code identical to <function>nats_fetch()</function>.
+                The OpenSIPS script does not allow direct
+                assignment of a function return to a
+                <varname>$var()</varname>; capture
+                <varname>$retcode</varname> immediately after the
+                call.
+            </para>
+            <para>
+                When <varname>expires</varname> is positive, the
+                call waits in 5 ms ticks until the requested
+                <varname>count</varname> is reached or the deadline
+                expires.  This wait is bounded by the
+                worker's request-route processing budget; do not
+                set <varname>expires</varname> longer than the
+                request a route is meant to take.
             </para>
             <example>
-                <title>Drain ten messages in one pass</title>
+                <title>High-throughput batch drain pattern</title>
                 <programlisting format="linespecific">
-timer_route[drain] {
-    $var(n) = nats_fetch_batch("jobs", "count=10;expires=2s");
-    $var(i) = 0;
-    while ($var(i) &lt; $var(n)) {
-        nats_batch_select($var(i));
-        xlog("L_INFO", "job $nats_seq: $nats_data\n");
-        nats_ack();
-        $var(i) = $var(i) + 1;
+timer_route[drain, 1] {
+    $var(b) = 0;
+    while ($var(b) &lt; 5000) {
+        nats_fetch_batch("jobs", "count=10;expires_ms=100");
+        $var(rc) = $retcode;
+        if ($var(rc) &lt;= 0) { break; }
+        $var(i) = 0;
+        while ($var(i) &lt; $var(rc)) {
+            nats_batch_select($var(i));
+            nats_ack();
+            $var(i) = $var(i) + 1;
+        }
+        $var(b) = $var(b) + 1;
     }
 }
                 </programlisting>
