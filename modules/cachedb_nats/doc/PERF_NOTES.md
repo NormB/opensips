@@ -399,13 +399,62 @@ Each cell shows `median (min..max)` across 3 trials.
 | dedicated watcher    | 15710 (15515..15958) | 18281 (18023..18303) | 19811 (19778..19940) | 1954.0 | 103.3 | 0 / 0 |
 | `enable_search_index=0` |  **772** (771..776) |  **1330** (1202..1432) |  **3481** (3258..3854) | **1999.1** |  **72.5** | 0 / 0 |
 
-#### 100k AoRs (INDEX_BUCKETS=16384)
+#### 100k AoRs (INDEX_BUCKETS=16384) — pre-allocator-rework baseline
 
 | Mode | p50 µs | p95 µs | p99 µs | eff. RPS | RSS MB | CAS retry/exh |
 |------|------:|------:|------:|--------:|------:|--------------:|
 | rank-1 pthread       | 16510 (16283..16764) | 18504 (18476..18769) | 20420 (20327..20546) | 1921.7 | 151.4 | 0 / 0 |
 | dedicated watcher    | 16587 (16394..16657) | 18509 (18461..18686) | 20631 (20399..20667) | 1914.8 | 158.6 | 0 / 0 |
 | `enable_search_index=0` |  **772** (772..783) |  **1291** (1278..1486) |  **8189** (4441..9315) | **1999.4** |  **72.3** | 0 / 0 |
+
+#### 100k AoRs (INDEX_BUCKETS=16384) — after intern table + entry blob combine
+
+3-trial run after the doc-key intern table (commit 9e66237083) and
+the single-allocation entry blob (commit ca3d786a9f) landed.  These
+two changes together collapsed the watcher's per-event allocation
+rate from ~10k shm_mallocs/sec (saturating HP_MALLOC's per-bucket
+SHM_LOCK semaphore) to a tiny fraction.
+
+| Mode | p50 µs | p95 µs | p99 µs | eff. RPS | RSS MB | CAS retry/exh |
+|------|------:|------:|------:|--------:|------:|--------------:|
+| rank-1 pthread       |  **877** (875..888) |  **3304** (2565..3878) |  **9816** (8498..13477) | **1999.4** | 146.4 | 0 / 0 |
+| dedicated watcher    |  881 (877..882) |  4148 (3917..4566) | 13794 (12165..14750) | 1999.4 | 153.5 | 0 / 0 |
+| `enable_search_index=0` |  774 (771..777) |  1301 (1243..1496) |  8355 (5426..11412) | 1999.4 |  72.8 | 0 / 0 |
+
+Per-metric improvement vs the pre-allocator-rework baseline:
+
+| Metric (rank-1) | Before | After | Δ |
+|---|---:|---:|---:|
+| p50 µs | 16510 | **877** | **−95% (19×)** |
+| p95 µs | 18504 | **3304** | **−82% (5.6×)** |
+| p99 µs | 20420 | **9816** | **−52% (2.1×)** |
+| eff. RPS | 1921.7 | **1999.4** | hit target (was capped) |
+| RSS MB | 151.4 | 146.4 | −3% |
+
+The headline finding: **the index-on path is no longer
+HP_MALLOC-bottlenecked.**  Effective RPS at 100k is now
+indistinguishable across all three modes (1999.4 / 1999.4 /
+1999.4 — they all hit the bench's 2000-RPS target exactly).  The
+prior "index-on caps at ~1920 RPS while index-off hits 2000" cliff
+disappeared.  rank-1 mode's p50 is within ~100 µs of `index off`
+mode's p50 (877 vs 774), which means the residual cost of
+keeping the index alive is now comparable to a single hash lookup,
+not "structural CPU saturation in the lock path."
+
+Dedicated mode shows a small residual penalty on the tail (p99
+13794 vs rank-1 9816, +40%), wider than the +1% pre-rework gap.
+Likely because the bench is now event-rate-saturating whatever
+was previously absorbed by HP_MALLOC contention; the cross-process
+semaphore overhead surfaces directly.  Filed for follow-up; the
+candidates listed below (libnats subscriber-thread placement, or
+the Item-4 dedicated proc's separate kvWatcher_Next loop) are
+worth investigating once the workload has settled at the new
+performance floor.
+
+`enable_search_index=0` numbers are essentially unchanged
+(774/1301/8355 vs 772/1291/8189 — within noise), confirming that
+the allocator changes didn't break the PK fast path or introduce
+overhead in deployments that don't use the index.
 
 ### Interpretation
 
