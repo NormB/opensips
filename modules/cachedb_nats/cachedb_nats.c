@@ -69,6 +69,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_json.h"
+#include "cachedb_nats_intern.h"
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
@@ -565,6 +566,15 @@ static int mod_init(void)
 	 * Gated on enable_search_index so PK-only workloads (usrloc,
 	 * counters) can opt out and skip the SHM cost + watcher CPU. */
 	if (nats_enable_search_index) {
+		/* The intern table is required by the index's
+		 * _entry_add_key path; allocate it BEFORE the index
+		 * itself.  Skipped when the index is disabled
+		 * (nothing calls intern_acquire then). */
+		if (nats_intern_init() < 0) {
+			LM_ERR("failed to initialise doc-key intern table\n");
+			return -1;
+		}
+
 		if (nats_json_index_init() < 0) {
 			LM_ERR("failed to initialize JSON search index\n");
 			return -1;
@@ -770,6 +780,9 @@ static void destroy(void)
 	if (!nats_dedicated_watcher_proc)
 		nats_watch_stop();
 	nats_json_index_destroy();
+	/* Tear down the doc-key intern table after the index, since
+	 * _free_entry calls nats_intern_release on every key. */
+	nats_intern_destroy();
 	cachedb_end_connections(&cache_mod_name);
 	nats_cdb_stats_destroy();
 }
