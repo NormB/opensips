@@ -63,19 +63,40 @@
  * the set of document keys that contain this field:value pair.
  * The keys array grows dynamically (doubled when full).
  */
+/* Initial capacity of the inline keys[] array packed into the entry
+ * blob.  Chosen so a typical low-fanout (field, value) entry never
+ * triggers a separate keys[] allocation -- 8 doc keys cover the
+ * usrloc "high-uniqueness" fields (aor, contact).  When num_keys
+ * exceeds this, _entry_add_key allocates a fresh keys[] from SHM
+ * and the inline slots become dead memory inside the blob (~64 B
+ * waste per grown entry; trivial against the index footprint). */
+#define NATS_IDX_KEYS_INLINE 8
+
 typedef struct _nats_idx_entry {
-	char *field_value;          /* Concatenated "field:value" string.
-	                             * Heap-allocated; freed when the entry
-	                             * is removed from the index. */
+	char *field_value;          /* "field:value" string.  Points into
+	                             * the same shm_malloc blob as the
+	                             * entry struct itself (single-alloc
+	                             * layout); not separately freed. */
 	unsigned int fv_len;        /* Length of field_value in bytes
 	                             * (excluding null terminator). */
-	char **keys;                /* Array of document key strings.
-	                             * Each element is heap-allocated.
-	                             * Length: num_keys valid entries. */
+	char **keys;                /* Array of document key strings (each
+	                             * is an interned SHM pointer from
+	                             * cachedb_nats_intern.c).  When
+	                             * keys_inline=1 this points into the
+	                             * same blob as the entry; otherwise
+	                             * to a separately-shm_malloc'd array
+	                             * (after at least one geometric
+	                             * growth past NATS_IDX_KEYS_INLINE). */
 	int num_keys;               /* Number of document keys currently
 	                             * stored in the keys array. */
 	int alloc_keys;             /* Allocated capacity of the keys array.
 	                             * Doubles when num_keys == alloc_keys. */
+	int keys_inline;            /* 1 if keys[] still points into the
+	                             * entry blob (initial state); 0 once
+	                             * it has been grown to a separate
+	                             * allocation.  _free_entry uses this
+	                             * to decide whether to shm_free
+	                             * keys[] separately. */
 	struct _nats_idx_entry *next; /* Next entry in the hash bucket chain
 	                               * (singly linked, NULL at tail). */
 } nats_idx_entry;

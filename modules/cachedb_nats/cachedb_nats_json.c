@@ -388,32 +388,51 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	 * follow.  Failures here are unlikely but logged loudly because
 	 * they reflect SHM exhaustion rather than per-process pkg
 	 * pressure. */
-	e = shm_malloc(sizeof(nats_idx_entry));
-	if (!e) {
-		LM_ERR("no SHM for index entry\n");
-		return NULL;
+	/* Single-allocation layout to cut the per-new-entry shm_malloc
+	 * count from 3 to 1.  The blob is sized to hold the entry
+	 * struct + the field_value bytes + an inline keys[] array of
+	 * NATS_IDX_KEYS_INLINE pointers.  field_value and keys are
+	 * pointer-arithmetic'd into the blob; _free_entry releases
+	 * just the blob (no separate shm_free for fv/keys) unless
+	 * keys_inline has been cleared by a later geometric-growth.
+	 *
+	 * Why this matters: the watcher's nats_json_index_add path was
+	 * spending half of opensips CPU on hp_shm_malloc -> sem_wait at
+	 * 100k AoRs (PERF_NOTES "HP_MALLOC contention hypothesis").
+	 * Cutting allocs from 3 to 1 per new entry gives the cold-fill
+	 * path 3x fewer bucket-lock acquires; the re-register hot path
+	 * was already cut to ~zero by the doc-key intern table.
+	 *
+	 * Memory waste: the inline keys[] occupies
+	 * NATS_IDX_KEYS_INLINE * 8 = 64 bytes in the blob.  When the
+	 * key array grows beyond NATS_IDX_KEYS_INLINE, _entry_add_key
+	 * allocates a fresh keys[] separately and clears keys_inline;
+	 * the inline 64 bytes is then dead but stays in the blob until
+	 * the entry itself is freed.  Trivial overhead. */
+	{
+		size_t entry_sz = sizeof(nats_idx_entry);
+		size_t fv_sz    = (size_t)fv_len + 1;
+		size_t keys_sz  = sizeof(char *) * NATS_IDX_KEYS_INLINE;
+		size_t blob_sz  = entry_sz + fv_sz + keys_sz;
+		char  *blob     = shm_malloc(blob_sz);
+		if (!blob) {
+			LM_ERR("no SHM for index entry blob (%zu bytes)\n",
+				blob_sz);
+			return NULL;
+		}
+		memset(blob, 0, blob_sz);
+		e               = (nats_idx_entry *)blob;
+		e->field_value  = blob + entry_sz;
+		e->keys         = (char **)(blob + entry_sz + fv_sz);
+		e->keys_inline  = 1;
 	}
-	memset(e, 0, sizeof(nats_idx_entry));
 
-	e->field_value = shm_malloc(fv_len + 1);
-	if (!e->field_value) {
-		LM_ERR("no SHM for field_value string\n");
-		shm_free(e);
-		return NULL;
-	}
-	memcpy(e->field_value, fv, fv_len);
+	memcpy(e->field_value, fv, (size_t)fv_len);
 	e->field_value[fv_len] = '\0';
 	e->fv_len = fv_len;
 
-	e->alloc_keys = 8;
-	e->keys = shm_malloc(sizeof(char *) * e->alloc_keys);
-	if (!e->keys) {
-		LM_ERR("no SHM for keys array\n");
-		shm_free(e->field_value);
-		shm_free(e);
-		return NULL;
-	}
-	e->num_keys = 0;
+	e->alloc_keys = NATS_IDX_KEYS_INLINE;
+	e->num_keys   = 0;
 
 	bucket = _hash(fv, fv_len);
 	e->next = idx->buckets[bucket];
@@ -449,21 +468,37 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 			return 0;
 	}
 
-	/* Geometric growth (double) when the key array is full.
-	 * This gives amortised O(1) appends and keeps realloc calls
-	 * logarithmic in the total number of keys. */
+	/* Geometric growth (double) when the key array is full.  The
+	 * twist: the initial keys[] is INSIDE the entry's single-alloc
+	 * blob (e->keys_inline=1) and cannot be shm_realloc'd because
+	 * it isn't a separate allocation.  The first time we grow past
+	 * NATS_IDX_KEYS_INLINE we shm_malloc a fresh array, copy the
+	 * inline contents over, clear keys_inline.  Subsequent grows
+	 * use shm_realloc on the now-separate block. */
 	if (e->num_keys >= e->alloc_keys) {
-		int new_alloc = e->alloc_keys * 2;
-		/* shm_realloc preserves contents; on failure the original
-		 * block is untouched.  Use shm_realloc rather than malloc-
-		 * copy-free to keep the entry in SHM. */
-		char **new_keys = shm_realloc(e->keys,
-			sizeof(char *) * new_alloc);
-		if (!new_keys) {
-			LM_ERR("no SHM to grow keys array\n");
-			return -1;
+		int    new_alloc = e->alloc_keys * 2;
+		char **new_keys;
+		if (e->keys_inline) {
+			new_keys = shm_malloc(sizeof(char *) * new_alloc);
+			if (!new_keys) {
+				LM_ERR("no SHM to grow inline keys array\n");
+				return -1;
+			}
+			memcpy(new_keys, e->keys,
+				sizeof(char *) * (size_t)e->num_keys);
+			e->keys         = new_keys;
+			e->keys_inline  = 0;
+		} else {
+			/* shm_realloc preserves contents; on failure the
+			 * original block is untouched. */
+			new_keys = shm_realloc(e->keys,
+				sizeof(char *) * new_alloc);
+			if (!new_keys) {
+				LM_ERR("no SHM to grow keys array\n");
+				return -1;
+			}
+			e->keys = new_keys;
 		}
-		e->keys = new_keys;
 		e->alloc_keys = new_alloc;
 	}
 
@@ -526,16 +561,25 @@ static void _free_entry(nats_idx_entry *e)
 	int i;
 	if (!e)
 		return;
-	if (e->field_value)
-		shm_free(e->field_value);
+
+	/* Release intern refcounts on every doc key.  The underlying
+	 * SHM string is freed only when no other entry still
+	 * references it. */
 	if (e->keys) {
-		/* Match the acquire path: release the intern refcount
-		 * for each key so the underlying SHM string is freed
-		 * only when no other entry still references it. */
 		for (i = 0; i < e->num_keys; i++)
 			nats_intern_release(e->keys[i]);
-		shm_free(e->keys);
 	}
+
+	/* Free the keys[] array only if it has been grown past the
+	 * inline NATS_IDX_KEYS_INLINE slots into a separate SHM
+	 * allocation.  When still inline, it is part of the entry
+	 * blob and freed with the entry below. */
+	if (!e->keys_inline && e->keys)
+		shm_free(e->keys);
+
+	/* The entry struct, the field_value bytes, and (if inline)
+	 * the keys[] slots all live in a single shm_malloc'd blob.
+	 * One free releases the lot. */
 	shm_free(e);
 }
 
