@@ -48,6 +48,14 @@ PUB_RPS="${PUB_RPS:-100}"
 REG_RPS="${REG_RPS:-10}"
 KV_RPS="${KV_RPS:-50}"
 
+# perf snapshot: profile every opensips child for PERF_SAMPLE_S seconds
+# starting at PERF_AT_S into the run.  Used to quantify the memcpy
+# overhead in the SHM ring's pop path (and incidentally any other hot
+# spot) so a future ring-vs-bipbuf decision is data-driven.  Set
+# PERF_SAMPLE_S=0 to disable.
+PERF_SAMPLE_S="${PERF_SAMPLE_S:-30}"
+PERF_AT_S="${PERF_AT_S:-300}"
+
 OUT="${OUT:-/tmp/stress-3way-$$}"
 mkdir -p "$OUT"
 
@@ -330,9 +338,64 @@ DRIVER_PIDS+=("$!")
 
 # ---- 6. sampler loop -------------------------------------------------
 
+PERF_DATA="$OUT/perf.data"
+PERF_SUMMARY="$OUT/perf-memcpy-summary.txt"
+PERF_FIRED=0
+PERF_PID=""
+
+# Locate a working perf binary.  /usr/bin/perf is a wrapper that
+# resolves to a kernel-specific binary; on RT/preempt kernels (e.g.
+# 6.8.12-rt-tegra) no matching package exists and the wrapper fails
+# with "perf not found for kernel".  Fall back to ANY versioned
+# binary under /usr/lib/linux-tools/ whose perf exists -- the
+# host-kernel ABI between perf and recent (>= 5.x) tooling is
+# stable enough for sample-mode profiling.
+PERF_BIN=""
+for cand in "/usr/lib/linux-tools/$(uname -r)/perf" \
+            $(ls -1 /usr/lib/linux-tools-*/perf 2>/dev/null) \
+            "$(command -v perf 2>/dev/null)"; do
+    if [ -x "$cand" ] && [[ "$cand" != "/usr/bin/perf" || -d "/usr/lib/linux-tools/$(uname -r)" ]]; then
+        PERF_BIN="$cand"
+        break
+    fi
+done
+
+fire_perf_snapshot() {
+    [ "$PERF_SAMPLE_S" -le 0 ] && return 0
+    [ -z "$PERF_BIN" ] && return 0
+    [ "$PERF_FIRED" -eq 1 ] && return 0
+    PERF_FIRED=1
+
+    # Profile every opensips child for PERF_SAMPLE_S seconds.  Use
+    # frequency-based sampling (-F 99) -- low overhead, sufficient for
+    # finding any single-digit-percent hotspot.  --call-graph dwarf so
+    # we can attribute time to the function that called memcpy, not
+    # just the libc symbol.
+    local pids
+    pids=$(pgrep -P "$OPENSIPS_PID" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    [ -z "$pids" ] && return 0
+
+    echo "[stress_3way] perf record at uptime=$(($(date +%s)-start_ts))s "\
+        "(targets: $pids, duration: ${PERF_SAMPLE_S}s)" >&2
+
+    # Run perf in the background; the sampler keeps producing CSV rows
+    # while perf records.  Privilege: kernel.perf_event_paranoid=1
+    # allows own-process profiling without sudo, which is the common
+    # case; fall back to sudo -n only if the unprivileged path fails.
+    "$PERF_BIN" record --quiet -F 99 --call-graph dwarf \
+            -p "$pids" -o "$PERF_DATA" -- sleep "$PERF_SAMPLE_S" \
+            2> "$OUT/perf-record.err" &
+    PERF_PID=$!
+}
+
 while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep "$SAMPLE_S"
     write_sample
+
+    # Fire the perf snapshot once we're past the warmup window.
+    if [ "$(($(date +%s) - start_ts))" -ge "$PERF_AT_S" ]; then
+        fire_perf_snapshot
+    fi
 
     # Liveness check: opensips must still be alive.
     if ! kill -0 "$OPENSIPS_PID" 2>/dev/null; then
@@ -341,6 +404,33 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         exit 1
     fi
 done
+
+# Wait specifically for the perf-record subprocess (if any).  We
+# cannot use a bare `wait` -- the driver loops are infinite and
+# would block forever.
+if [ -n "$PERF_PID" ]; then
+    wait "$PERF_PID" 2>/dev/null
+fi
+if [ -f "$PERF_DATA" ] && [ ! -r "$PERF_DATA" ]; then
+    sudo -n chown "$(id -u):$(id -g)" "$PERF_DATA" 2>/dev/null || true
+fi
+
+# Post-process: extract memcpy + ring-pop overhead.
+if [ -f "$PERF_DATA" ] && [ -x "$PERF_BIN" ]; then
+    {
+        echo "perf snapshot: ${PERF_SAMPLE_S}s starting at uptime ${PERF_AT_S}s"
+        echo "--- top symbols (overhead %) ---"
+        "$PERF_BIN" report -i "$PERF_DATA" --stdio --no-children \
+            --sort overhead,symbol --percent-limit 0.3 2>/dev/null \
+            | grep -E "^\s+[0-9]+\.[0-9]+%" | head -30
+        echo
+        echo "--- memcpy / nats_ring* attribution ---"
+        "$PERF_BIN" report -i "$PERF_DATA" --stdio --no-children \
+            --sort symbol 2>/dev/null \
+            | grep -E "memcpy|nats_ring_(push|pop)|natsMsg_Ack|kvStore|natsSubscription_Fetch" \
+            | head -20
+    } > "$PERF_SUMMARY" 2>&1
+fi
 
 # ---- 7. report -------------------------------------------------------
 
@@ -376,5 +466,12 @@ awk -F, -v dur="$DURATION_S" -v csv="$SAMPLES_FILE" '
         printf "========================================\n"
     }
 ' "$SAMPLES_FILE"
+
+if [ -f "$PERF_SUMMARY" ]; then
+    echo
+    echo "==================  perf snapshot  ===================="
+    cat "$PERF_SUMMARY"
+    echo "========================================================"
+fi
 
 exit 0
