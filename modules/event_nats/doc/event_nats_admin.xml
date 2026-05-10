@@ -40,7 +40,7 @@
         <para>
             NATS connections are managed by the shared
             <varname>lib/nats</varname> connection pool
-            (<filename>libnats_pool.a</filename>).  Each qualifying worker
+            (<filename>libnats_pool.so</filename>).  Each qualifying worker
             process obtains its own connection from the pool during
             <function>child_init()</function>.  The pool handles startup
             retries (bounded by <varname>max_reconnect</varname>) and runtime
@@ -436,6 +436,37 @@ modparam("event_nats", "tls_hostname",  "nats-1.example.com")
 loadmodule "tls_openssl.so"
 loadmodule "event_nats.so"
 modparam("event_nats", "skip_openssl_init", 1)
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="param_nats_drain_timeout_ms">
+            <title><varname>nats_drain_timeout_ms</varname> (integer)</title>
+            <para>
+                Shutdown drain timeout, in milliseconds, for the shared
+                <filename>lib/nats</filename> connection pool.  When
+                &osips; shuts down, every NATS connection is drained so
+                in-flight publish acks land on the broker before the
+                process exits; this parameter caps how long that drain
+                may block per connection.
+            </para>
+            <para>
+                Cross-DC deployments with high broker round-trip latency
+                may need a larger budget.  The setting is shared across
+                all NATS modules that link <filename>libnats_pool.so</filename>
+                (notably <emphasis>cachedb_nats</emphasis>'s
+                <varname>cdb_drain_timeout_ms</varname>); the last
+                writer at <function>mod_init()</function> wins because
+                they all map onto the same library-level global.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>5000</varname> (5 seconds)
+            </para>
+            <example>
+                <title>Raise drain timeout for high-latency broker</title>
+                <programlisting format="linespecific">
+modparam("event_nats", "nats_drain_timeout_ms", 15000)
                 </programlisting>
             </example>
         </section>
@@ -866,6 +897,178 @@ opensips-cli -x mi nats_reconnect
                     </para>
                 </listitem>
             </itemizedlist>
+        </section>
+
+        <section id="mi_nats_account_info">
+            <title><function moreinfo="none">nats_account_info</function></title>
+            <para>
+                Report JetStream account-level usage: in-memory bytes,
+                file-storage bytes, total streams, total consumers,
+                API call counts, and any quota limits.  Takes no
+                parameters.
+            </para>
+        </section>
+
+        <section id="mi_nats_stream_list">
+            <title><function moreinfo="none">nats_stream_list</function></title>
+            <para>
+                Return a JSON array of stream summaries (name,
+                message count, byte count, consumer count, replica
+                count) for every stream visible to this account.
+                Takes no parameters.
+            </para>
+        </section>
+
+        <section id="mi_nats_stream_info">
+            <title>
+                <function moreinfo="none">nats_stream_info(stream)</function>
+            </title>
+            <para>
+                Return the full JetStream stream metadata: configured
+                subjects, retention / storage / replicas, current state
+                (first/last sequence, byte count), and cluster info
+                including replica lag.  <emphasis>stream</emphasis> is
+                the stream name.
+            </para>
+        </section>
+
+        <section id="mi_nats_stream_create">
+            <title>
+                <function moreinfo="none">nats_stream_create(name, subjects, [replicas, max_msgs, max_bytes, max_age, retention, storage])</function>
+            </title>
+            <para>
+                Create a stream.  Required: <emphasis>name</emphasis>,
+                <emphasis>subjects</emphasis> (comma-separated subject
+                list).  Optional tuning:
+                <emphasis>replicas</emphasis> (default 1),
+                <emphasis>max_msgs</emphasis> /
+                <emphasis>max_bytes</emphasis> /
+                <emphasis>max_age</emphasis> retention caps
+                (-1 = unlimited), <emphasis>retention</emphasis>
+                policy (<varname>limits</varname> /
+                <varname>interest</varname> /
+                <varname>workqueue</varname>), and
+                <emphasis>storage</emphasis> backend
+                (<varname>file</varname> / <varname>memory</varname>).
+                Three argument arities are accepted by the parser:
+                name+subjects, name+subjects+replicas, and the full
+                eight-parameter form above.
+            </para>
+        </section>
+
+        <section id="mi_nats_stream_delete">
+            <title>
+                <function moreinfo="none">nats_stream_delete(stream)</function>
+            </title>
+            <para>
+                Delete a stream and all its messages.  Irreversible.
+            </para>
+        </section>
+
+        <section id="mi_nats_stream_purge">
+            <title>
+                <function moreinfo="none">nats_stream_purge(stream)</function>
+            </title>
+            <para>
+                Drop every message currently held by
+                <emphasis>stream</emphasis>; the stream definition
+                survives.  Equivalent to
+                <command moreinfo="none">nats stream purge</command>.
+            </para>
+        </section>
+
+        <section id="mi_nats_consumer_list">
+            <title>
+                <function moreinfo="none">nats_consumer_list(stream)</function>
+            </title>
+            <para>
+                Return a JSON array of consumer summaries (name,
+                durable flag, deliver-policy, ack-policy, current
+                pending count) for every consumer attached to
+                <emphasis>stream</emphasis>.
+            </para>
+        </section>
+
+        <section id="mi_nats_consumer_info">
+            <title>
+                <function moreinfo="none">nats_consumer_info(stream, consumer)</function>
+            </title>
+            <para>
+                Return the full per-consumer metadata: filter subject,
+                deliver / ack policy, configured caps, and run-time
+                state (delivered count, ack floor, pending count,
+                redelivered count, num waiting pulls).
+            </para>
+        </section>
+
+        <section id="mi_nats_consumer_create">
+            <title>
+                <function moreinfo="none">nats_consumer_create(stream, name, [filter_subject, deliver_policy, ack_policy])</function>
+            </title>
+            <para>
+                Create a durable consumer on
+                <emphasis>stream</emphasis> with the given
+                <emphasis>name</emphasis>.  Optional tuning:
+                <emphasis>filter_subject</emphasis> (defaults to the
+                stream's wildcard),
+                <emphasis>deliver_policy</emphasis>
+                (<varname>all</varname> /
+                <varname>last</varname> /
+                <varname>new</varname> /
+                <varname>last_per_subject</varname>), and
+                <emphasis>ack_policy</emphasis>
+                (<varname>explicit</varname> /
+                <varname>none</varname> /
+                <varname>all</varname>).  Three argument arities
+                are accepted: stream+name, plus filter_subject, plus
+                the full five-parameter form above.
+            </para>
+            <para>
+                Note: this MI command creates a consumer
+                <emphasis>on the broker</emphasis>; it does not bind
+                that consumer to a script-callable handle in
+                <emphasis>nats_consumer</emphasis>.  Use
+                <emphasis>nats_consumer</emphasis>'s
+                <function moreinfo="none">nats_consumer_bind</function>
+                MI command (or its script wrapper) to attach a handle.
+            </para>
+        </section>
+
+        <section id="mi_nats_consumer_delete">
+            <title>
+                <function moreinfo="none">nats_consumer_delete(stream, consumer)</function>
+            </title>
+            <para>
+                Delete a durable consumer.  Pending deliveries that
+                were already in flight are dropped.
+            </para>
+        </section>
+
+        <section id="mi_nats_msg_get">
+            <title>
+                <function moreinfo="none">nats_msg_get(stream, seq)</function>
+            </title>
+            <para>
+                Fetch a single message from
+                <emphasis>stream</emphasis> by stream sequence number.
+                <emphasis>seq</emphasis> must be ≥ 1; the input
+                validator rejects ≤ 0 with a 400.  Returns the
+                payload, headers, subject, and broker timestamp as
+                JSON.
+            </para>
+        </section>
+
+        <section id="mi_nats_msg_delete">
+            <title>
+                <function moreinfo="none">nats_msg_delete(stream, seq)</function>
+            </title>
+            <para>
+                Delete a specific message from
+                <emphasis>stream</emphasis> by stream sequence
+                number.  <emphasis>seq</emphasis> must be ≥ 1.
+                Equivalent to
+                <command moreinfo="none">nats stream rmm</command>.
+            </para>
         </section>
 
     </section><!-- /mi -->

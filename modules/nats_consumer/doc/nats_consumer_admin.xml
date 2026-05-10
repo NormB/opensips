@@ -676,9 +676,27 @@ timer_route[drain, 1] {
                         semantics still apply on the server side.
                     </para>
                 </listitem>
+                <listitem>
+                    <para>
+                        <function moreinfo="none">nats_in_progress()</function>
+                        — like <function>nats_ack_progress()</function>,
+                        refresh the broker's ack timer to keep the
+                        current delivery alive past
+                        <varname>ack_wait</varname>, but
+                        <emphasis>without</emphasis> clearing the
+                        worker's current-message state.  Subsequent
+                        <function>nats_ack()</function> /
+                        <function>nats_nak()</function> /
+                        <function>nats_term()</function> calls still
+                        target the same delivery.  Use when a long
+                        handler will continue to poll progress and
+                        eventually finalise with one of the standard
+                        acks.
+                    </para>
+                </listitem>
             </itemizedlist>
             <para>
-                All five return <varname>1</varname> on success or
+                All seven return <varname>1</varname> on success or
                 <varname>-1</varname> when there is no current message
                 (or the worker's ack token has already been consumed).
             </para>
