@@ -579,6 +579,9 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
 	if (pthread_create(&_watcher_tid, NULL, _watcher_thread_fn, NULL) != 0) {
 		LM_ERR("failed to create watcher thread\n");
 		atomic_store(&_watcher_running, 0);
+		free(_watch_patterns);
+		_watch_patterns = NULL;
+		_num_patterns   = 0;
 		return -1;
 	}
 
