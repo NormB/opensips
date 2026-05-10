@@ -460,12 +460,33 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 static int _entry_add_key(nats_idx_entry *e, const char *key)
 {
 	int i;
-	char *dup;
+	char *interned;
+	int   klen = (int)strlen(key);
 
-	/* check for duplicate */
+	/* Intern up front so the dup check can compare pointers instead
+	 * of running strcmp on every stored key.  All stored keys are
+	 * already canonical (acquired through nats_intern_acquire); the
+	 * intern table guarantees the same content always resolves to
+	 * the same SHM pointer.  Pointer equality is therefore both
+	 * correct and O(1).
+	 *
+	 * Cost of the upfront acquire: one hash lookup + (if hit) one
+	 * refcount bump.  Cheaper than strcmp over N >= 2 stored keys,
+	 * which is the common case in re-register storms where every
+	 * AoR's 5 indexed fields share the same doc key. */
+	interned = nats_intern_acquire(key, klen);
+	if (!interned) {
+		LM_ERR("no SHM for interned key string\n");
+		return -1;
+	}
+
 	for (i = 0; i < e->num_keys; i++) {
-		if (strcmp(e->keys[i], key) == 0)
+		if (e->keys[i] == interned) {
+			/* duplicate: drop the extra refcount we just took
+			 * so the intern entry's refcount stays balanced. */
+			nats_intern_release(interned);
 			return 0;
+		}
 	}
 
 	/* Geometric growth (double) when the key array is full.  The
@@ -502,23 +523,11 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 		e->alloc_keys = new_alloc;
 	}
 
-	/* Intern the doc key instead of strdup'ing.  In the dominant
-	 * re-register workload, the same doc key is shared across all
-	 * 5 indexed fields of an AoR, AND across every re-register of
-	 * that AoR.  The intern table collapses those into a single
-	 * SHM string with a refcount; subsequent acquires are pure
-	 * lookup-under-shard-lock with no shm_malloc -- which was
-	 * costing ~half of all CPU at 100k AoRs (see PERF_NOTES.md
-	 * "HP_MALLOC contention hypothesis"). */
-	{
-		int klen = (int)strlen(key);
-		dup = nats_intern_acquire(key, klen);
-		if (!dup) {
-			LM_ERR("no SHM for interned key string\n");
-			return -1;
-		}
-	}
-	e->keys[e->num_keys++] = dup;
+	/* New unique key for this entry: store the canonical pointer
+	 * we already acquired at the top of the function.  The intern
+	 * refcount is now owned by this slot in e->keys[]; release
+	 * happens in _entry_remove_key. */
+	e->keys[e->num_keys++] = interned;
 	return 0;
 }
 
@@ -532,14 +541,23 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
  */
 static void _entry_remove_key(nats_idx_entry *e, const char *key)
 {
-	int i;
+	int   i;
+	char *interned;
+	int   klen = (int)strlen(key);
+
+	/* Intern to get the canonical pointer; subsequent scan is O(1)
+	 * pointer compare.  This adds an extra acquire+release per call
+	 * but eliminates the strcmp per stored key. */
+	interned = nats_intern_acquire(key, klen);
+	if (!interned) return;
+
 	for (i = 0; i < e->num_keys; i++) {
-		if (strcmp(e->keys[i], key) == 0) {
-			/* Match the acquire path: release the intern
-			 * refcount instead of shm_free'ing the string
-			 * directly.  The intern entry stays alive until
-			 * the last referent is released. */
+		if (e->keys[i] == interned) {
+			/* Release twice: once for the slot's ref (kept since
+			 * _entry_add_key), once for the acquire we just did
+			 * at the top of this function. */
 			nats_intern_release(e->keys[i]);
+			nats_intern_release(interned);
 			/* swap-remove: move the last element into this slot */
 			e->num_keys--;
 			if (i < e->num_keys)
@@ -547,6 +565,8 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 			return;
 		}
 	}
+	/* Not found: release our extra acquire to balance refcount. */
+	nats_intern_release(interned);
 }
 
 /**
@@ -1395,13 +1415,78 @@ static int _lookup_shard(const char *field, int flen,
  *
  * Returns 0 on success, -1 on allocation failure.
  */
+/* Open-addressed pointer hash set used by _intersect_keys.  Keys
+ * are NUL-terminated strings, but we hash by string content (not
+ * pointer) so the set is correct even if A and B contain
+ * independent strdup'd copies of the same content.  When all keys
+ * are canonical/interned, the FNV hash + strcmp degenerates to
+ * one strcmp per probe but the lookup is still O(1) average. */
+typedef struct {
+	const char **slots;
+	int          mask;     /* capacity - 1; capacity power of two */
+	int          count;
+} _intkeyset_t;
+
+static uint32_t _intkeyset_hash(const char *s)
+{
+	/* FNV-1a 32-bit. */
+	uint32_t h = 2166136261u;
+	while (*s) {
+		h ^= (unsigned char)*s++;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+static int _intkeyset_init(_intkeyset_t *set, int min_capacity)
+{
+	int cap = 8;
+	while (cap < min_capacity * 2) cap <<= 1;
+	set->slots = calloc(cap, sizeof(*set->slots));
+	if (!set->slots) return -1;
+	set->mask  = cap - 1;
+	set->count = 0;
+	return 0;
+}
+
+static void _intkeyset_free(_intkeyset_t *set)
+{
+	free(set->slots);
+	set->slots = NULL;
+}
+
+static int _intkeyset_insert(_intkeyset_t *set, const char *key)
+{
+	uint32_t idx = _intkeyset_hash(key) & set->mask;
+	while (set->slots[idx]) {
+		if (strcmp(set->slots[idx], key) == 0)
+			return 0; /* dup */
+		idx = (idx + 1) & set->mask;
+	}
+	set->slots[idx] = key;
+	set->count++;
+	return 1;
+}
+
+static int _intkeyset_contains(const _intkeyset_t *set, const char *key)
+{
+	uint32_t idx = _intkeyset_hash(key) & set->mask;
+	while (set->slots[idx]) {
+		if (strcmp(set->slots[idx], key) == 0)
+			return 1;
+		idx = (idx + 1) & set->mask;
+	}
+	return 0;
+}
+
 static int _intersect_keys(char **a, int a_count,
 	char **b, int b_count,
 	char ***out_keys, int *out_count)
 {
-	int i, j, n = 0;
+	int i, n = 0;
 	char **result;
 	int alloc = (a_count < b_count) ? a_count : b_count;
+	_intkeyset_t bset;
 
 	if (alloc == 0) {
 		*out_keys = NULL;
@@ -1413,17 +1498,36 @@ static int _intersect_keys(char **a, int a_count,
 	if (!result)
 		return -1;
 
-	/* Set intersection via nested loop: for each key in A, scan B for a
-	 * match.  On match, copy the pointer into the result and break to
-	 * avoid duplicates.  O(n*m) but n and m are typically small. */
-	for (i = 0; i < a_count; i++) {
-		for (j = 0; j < b_count; j++) {
-			if (strcmp(a[i], b[j]) == 0) {
-				result[n++] = a[i];
-				break;
+	/* Build a hash set from B (the smaller of the two arrays is a
+	 * candidate but ownership rules around the result mean we keep
+	 * A on the outer scan -- A's pointers populate `result`).  The
+	 * lookup is O(1) average per A element instead of O(b_count),
+	 * giving us O(a_count + b_count) total instead of O(a_count *
+	 * b_count).  Mattered for high-cardinality AND queries (> 500
+	 * matched keys per filter); below that the constant factors
+	 * cancel.  Falls back to the old nested-loop semantics on
+	 * allocation failure. */
+	if (_intkeyset_init(&bset, b_count) < 0) {
+		int j;
+		for (i = 0; i < a_count; i++) {
+			for (j = 0; j < b_count; j++) {
+				if (strcmp(a[i], b[j]) == 0) {
+					result[n++] = a[i];
+					break;
+				}
 			}
 		}
+		*out_keys = result;
+		*out_count = n;
+		return 0;
 	}
+	for (i = 0; i < b_count; i++)
+		_intkeyset_insert(&bset, b[i]);
+	for (i = 0; i < a_count; i++) {
+		if (_intkeyset_contains(&bset, a[i]))
+			result[n++] = a[i];
+	}
+	_intkeyset_free(&bset);
 
 	*out_keys = result;
 	*out_count = n;
@@ -1975,15 +2079,51 @@ static int _sink_putc(json_sink_t *s, char c)
 	return _sink_write(s, &c, 1);
 }
 
+/* Compute exactly how many bytes _json_escape will emit for `n` input
+ * bytes.  This is a tight character-by-character scan but a single
+ * pass over the input -- much cheaper than over-reserving 6*n bytes
+ * per string and forcing the sink to amortise large growth steps on
+ * a write that almost never escapes (typical SIP URIs / JSON values
+ * escape < 1%).
+ *
+ * Matches the rules in _json_escape exactly:
+ *   '"' '\\' '\b' '\f' '\n' '\r' '\t'  -> 2 bytes each
+ *   any other control char (< 0x20)    -> 6 bytes (\u00xx)
+ *   anything else                      -> 1 byte
+ */
+static int _json_escape_len(const char *in, int in_len)
+{
+	int i, out = 0;
+	for (i = 0; i < in_len; i++) {
+		unsigned char c = (unsigned char)in[i];
+		switch (c) {
+		case '"': case '\\':
+		case '\b': case '\f': case '\n':
+		case '\r': case '\t':
+			out += 2;
+			break;
+		default:
+			out += (c < 0x20) ? 6 : 1;
+		}
+	}
+	return out;
+}
+
 static int _sink_emit_string(json_sink_t *s, const char *p, int n)
 {
+	int esc_len;
 	int needed;
 	if (s->oom) return -1;
-	needed = n * 6 + 2; /* worst-case escape + 2 quotes */
+	/* Two-pass: count exact escape size first, then allocate.
+	 * Saves ~5x on worst-case reservation for typical inputs (no
+	 * escapes), which on a multi-MB doc with many string fields
+	 * eliminates a substantial fraction of grow / memcpy churn. */
+	esc_len = _json_escape_len(p, n);
+	needed  = esc_len + 2; /* + 2 quotes */
 	if (_sink_grow(s, needed + 1) < 0) return -1;
 	s->buf[s->len++] = '"';
-	{
-		int written = _json_escape(p, n, s->buf + s->len, needed - 1);
+	if (esc_len > 0) {
+		int written = _json_escape(p, n, s->buf + s->len, esc_len);
 		if (written < 0) { s->oom = 1; return -1; }
 		s->len += written;
 	}
