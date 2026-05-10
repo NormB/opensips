@@ -199,8 +199,30 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out);
  * Return the read-only eventfd.  The fd becomes readable when the ring
  * transitions from empty to non-empty.  Ownership stays with the ring;
  * callers must NOT close(2) it.
+ *
+ * Caveat: the eventfd is created in whichever process called
+ * nats_ring_create -- typically a worker via the MI bind handler,
+ * post-fork.  Other processes (other workers, the consumer process)
+ * do not have this fd in their file-descriptor table and poll(2)/
+ * select(2) on it is undefined.  Cross-process waiters should use
+ * nats_ring_wait() instead.
  */
 int nats_ring_eventfd(const nats_ring_t *r);
+
+/*
+ * Block until the ring transitions from empty -> non-empty OR
+ * `timeout_ms` elapses.  Returns 0 on wake-up, -1 on timeout.
+ *
+ * Implemented over a SHM futex on the ring's wake_seq counter so it
+ * works across any fork boundary (the SHM page is mapped by every
+ * worker + consumer process).  The standard futex pattern is used:
+ * snapshot wake_seq, do a non-blocking pop to catch races, and if
+ * the ring is still empty FUTEX_WAIT against the snapshot value.
+ * Wake-ups are coalesced -- only the producer that triggers the
+ * empty -> non-empty edge calls FUTEX_WAKE -- so steady-state push
+ * traffic does not pay a syscall per message.
+ */
+int nats_ring_wait(nats_ring_t *r, int timeout_ms);
 
 /*
  * Advisory snapshots.  These use relaxed atomic loads and may race with

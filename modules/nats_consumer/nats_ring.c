@@ -80,6 +80,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
+#include <time.h>
+#include <limits.h>
 
 #include "nats_ring.h"
 
@@ -99,8 +103,21 @@
 struct nats_ring {
 	uint32_t         capacity;   /* power of 2 */
 	uint32_t         mask;       /* capacity - 1 */
-	int              evfd;       /* eventfd(2) fd, inherited by workers */
+	int              evfd;       /* eventfd(2) fd; legacy, see wake_seq */
 	int              _pad;       /* explicit padding for alignment */
+
+	/* Cross-process wakeup primitive.  The eventfd above is created in
+	 * whichever process happens to call nats_ring_create (typically a
+	 * worker via the MI bind handler, post-fork) and is therefore not
+	 * visible in other processes' fd tables.  We retain the fd field
+	 * for source-compat with old call sites but the producer also
+	 * bumps wake_seq + FUTEX_WAKEs on the address, which IS visible
+	 * across processes because the address lives in SHM.  Workers
+	 * snapshot wake_seq before a non-blocking pop and then call
+	 * FUTEX_WAIT against the snapshot -- standard linux futex pattern,
+	 * sub-millisecond wake-up vs. the historical 5 ms usleep tick. */
+	_Atomic uint32_t wake_seq;
+	uint32_t         _pad2;
 
 	/* hot counters -- head is written by producers, tail by consumers;
 	 * they are placed on separate 64-bit slots so the compiler cannot
@@ -293,6 +310,10 @@ int nats_ring_push(nats_ring_t *r,
 	 * for the slot we just published.
 	 */
 	if (h == t) {
+		/* Legacy eventfd path -- kept for source-compat with old
+		 * consumers (lib/nats, async fetch reactor).  Workers that
+		 * forked before this ring was bound cannot see this fd; they
+		 * use the futex path below. */
 		uint64_t one = 1;
 		ssize_t w;
 		do {
@@ -302,6 +323,17 @@ int nats_ring_push(nats_ring_t *r,
 		 * no additional wake is needed because the fd is already
 		 * readable.  Any other error is ignored here -- we do not
 		 * want to fail a committed push on a wake-up glitch. */
+
+		/* Cross-process wake.  Bump wake_seq under release ordering
+		 * so any worker that observed the old value via the FUTEX_WAIT
+		 * compare-and-block path sees the published slot when it
+		 * retries the pop.  FUTEX_WAKE on INT_MAX wakes every waiter
+		 * (typical N <= num workers, so the thundering-herd cost is
+		 * bounded).  Like the eventfd, we only signal on the empty
+		 * -> non-empty edge to avoid waking on every push. */
+		__atomic_fetch_add(&r->wake_seq, 1, __ATOMIC_RELEASE);
+		syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, INT_MAX,
+			NULL, NULL, 0);
 	}
 
 	return 0;
@@ -378,6 +410,35 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 	__atomic_store_n(&slot->consumed_gen, t, __ATOMIC_RELEASE);
 
 	return 0;
+}
+
+int nats_ring_wait(nats_ring_t *r, int timeout_ms)
+{
+	uint32_t seq;
+	uint64_t h, t;
+	struct timespec ts;
+	long rc;
+
+	if (!r) return -1;
+	if (timeout_ms <= 0) return -1;
+
+	/* Sample the wake counter BEFORE checking emptiness; if a producer
+	 * fires between our depth-check and the FUTEX_WAIT, the counter
+	 * will have advanced and the syscall returns EAGAIN immediately. */
+	seq = __atomic_load_n(&r->wake_seq, __ATOMIC_ACQUIRE);
+	h = atomic_load_explicit(&r->head, memory_order_acquire);
+	t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+	if (h > t) return 0;   /* not empty, no wait needed */
+
+	ts.tv_sec  = timeout_ms / 1000;
+	ts.tv_nsec = (timeout_ms % 1000) * 1000000L;
+
+	rc = syscall(SYS_futex, &r->wake_seq, FUTEX_WAIT, seq, &ts, NULL, 0);
+	if (rc == 0) return 0;
+	/* EAGAIN means the value already differed -- producer raced us
+	 * but the data is in the ring already.  Treat as success. */
+	if (errno == EAGAIN) return 0;
+	return -1;
 }
 
 int nats_ring_eventfd(const nats_ring_t *r)

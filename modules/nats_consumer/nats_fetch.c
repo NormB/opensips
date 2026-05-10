@@ -242,34 +242,33 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		goto out;
 	}
 
-	/* Short sync loop: poll the ring for up to tmo ms.
+	/* Block on the cross-process futex wake-up.  The ring's wake_seq
+	 * lives in SHM, so this works regardless of which process
+	 * originally allocated the eventfd.  Loop is bounded by the
+	 * caller's timeout budget; on each wake-up we retry the pop and
+	 * either return success or re-enter the wait with the remaining
+	 * budget.  Sub-ms latency at low rates vs. the 5 ms usleep tick
+	 * the legacy fallback used; no overhead at high rates because
+	 * the first pop hits and we never call futex.
 	 *
-	 * Note: the ring carries an eventfd intended to wake the worker,
-	 * but eventfd(2) is created post-fork in whichever process happens
-	 * to allocate the ring (MI handler in the bind path).  Worker fd
-	 * tables don't share that fd number, so poll(2) on it is undefined
-	 * and the consumer-process write() to it is silently swallowed.
-	 * Until the eventfd plumbing is rebuilt cross-process, fall back
-	 * to a bounded retry loop that ticks every 5 ms.  At 100 ms timeout
-	 * that's at most 20 cheap pops -- no syscalls per iteration.
-	 *
-	 * Suppress the unused-variable warning for fd; we still call
-	 * nats_ring_eventfd() so a later fix can reattach a working poll
-	 * with no further changes to the call site. */
+	 * fd is unused -- kept for source-compat with old consumers
+	 * that may still reference it via nats_ring_eventfd. */
 	fd = nats_ring_eventfd(h->ring);
 	(void)fd;
 	{
-		const int tick_ms = 5;
-		int       waited  = 0;
+		int waited = 0;
 
 		while (waited < tmo) {
+			int slice;
 			rc = nats_ring_pop(h->ring, &slot);
 			if (rc == 0) {
 				ret = cur_set_from_slot(h->index, &slot);
 				goto out;
 			}
-			usleep(tick_ms * 1000);
-			waited += tick_ms;
+			slice = tmo - waited;
+			if (slice > 100) slice = 100; /* re-check connection */
+			(void)nats_ring_wait(h->ring, slice);
+			waited += slice;
 		}
 	}
 
@@ -642,23 +641,20 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	 * blocks for the full deadline -- collapsing throughput by ~20x
 	 * vs. the single-fetch path's usleep(5ms) tick loop.
 	 *
-	 * Use the same bounded retry pattern as single-fetch: tick every
-	 * 5 ms, pop everything visible on each tick, exit early when we
-	 * fill the batch.  Eventfd is consulted only as a "drain on the
-	 * way out" hint -- there is no wakeup to depend on, but draining
-	 * a stale counter is harmless.  Once cross-process eventfd
-	 * plumbing is in place, a smarter wait can replace this without
-	 * changing the API. */
+	 * Use the cross-process futex wait via nats_ring_wait().  Sub-ms
+	 * latency at low arrival rates, no overhead at high rates because
+	 * the first pop always hits. */
 	fd = nats_ring_eventfd(h->ring);
 	(void)fd;
 
 	{
-		const int tick_ms = 5;
-		int       waited  = 0;
+		int waited = 0;
 
 		while (g_batch.count < cap && waited < bo.expires_ms) {
-			usleep(tick_ms * 1000);
-			waited += tick_ms;
+			int slice = bo.expires_ms - waited;
+			if (slice > 100) slice = 100;
+			(void)nats_ring_wait(h->ring, slice);
+			waited += slice;
 
 			while (g_batch.count < cap) {
 				if (nats_ring_pop(h->ring, &slot) != 0) break;
