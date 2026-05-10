@@ -93,7 +93,7 @@
 				<emphasis>None.</emphasis>
 				The module is self-contained and carries its own copy of the
 				shared NATS connection pool (statically linked from
-				<emphasis>lib/nats/libnats_pool.a</emphasis>).  It does not depend
+				<emphasis>lib/nats/libnats_pool.so</emphasis>).  It does not depend
 				on the <emphasis>nats_connection</emphasis> module or any other
 				&osips; module.
 			</para></listitem>
