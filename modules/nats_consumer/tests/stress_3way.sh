@@ -207,9 +207,75 @@ for i in $(seq 1 30); do
     sleep 0.5
 done
 
-# ---- 4. drivers ------------------------------------------------------
+# ---- 4. sampler helpers + baseline sample ---------------------------
+#
+# IMPORTANT ORDERING: the baseline (sample 1) is captured BEFORE the
+# drivers start so that all "delta" metrics in the final summary
+# subtract a true zero-state baseline.  An earlier version started
+# the drivers first and had the baseline sample race the first few
+# acks; that produced a small (~7 of 600,000) delta_acks - delta_delivered
+# discrepancy at sample 1 due to the non-atomic MI snapshot.  By
+# capturing baseline pre-drivers we know msgs_delivered == 0,
+# acks == 0, redeliveries == 0 with no race window.
 
-# 4a. event_nats SIP REGISTER pump (REG_RPS rate).
+mi_call() {
+    printf '{"jsonrpc":"2.0","id":1,"method":"%s"}' "$1" \
+        | timeout 3 nc -u -w 2 127.0.0.1 "$MI_PORT" 2>/dev/null
+}
+
+extract_first_int() {
+    grep -oE "\"$1\":[0-9]+" | head -1 | sed 's/.*://'
+}
+
+write_sample() {
+    local now uptime rss_kb self_rss mi_resp pulls delivered acks naks
+    local terms redeliv stream_msgs kv_keys log_errors log_warns
+    now=$(date +%s)
+    uptime=$((now - start_ts))
+    rss_kb=$(ps --no-headers -o rss --ppid "$OPENSIPS_PID" 2>/dev/null \
+        | awk '{s += $1} END {print s+0}')
+    self_rss=$(ps --no-headers -o rss -p "$OPENSIPS_PID" 2>/dev/null \
+        | awk '{print $1+0}')
+    rss_kb=$((rss_kb + ${self_rss:-0}))
+
+    mi_resp=$(mi_call "nats_consumer:nats_consumer_list")
+    pulls=$(echo "$mi_resp" | extract_first_int "pulls_requested")
+    delivered=$(echo "$mi_resp" | extract_first_int "msgs_delivered")
+    acks=$(echo "$mi_resp" | extract_first_int "acks")
+    naks=$(echo "$mi_resp" | extract_first_int "naks")
+    terms=$(echo "$mi_resp" | extract_first_int "terms")
+    redeliv=$(echo "$mi_resp" | extract_first_int "redeliveries")
+
+    stream_msgs=$(nats --server "$NATS_URL" stream info "$STREAM" \
+            2>/dev/null \
+        | awk '/^[[:space:]]*Messages:[[:space:]]+[0-9,]+/ {
+                gsub(",","",$0); for(i=1;i<=NF;i++) if($i~/^[0-9]+$/) print $i
+              }' | sort -n | tail -1)
+    kv_keys=$(nats --server "$NATS_URL" kv ls "$KV_BUCKET" --names 2>/dev/null \
+        | wc -l)
+
+    log_errors=$(grep -cE "ERROR|CRITICAL|FATAL" "$LOG_FILE" 2>/dev/null)
+    log_warns=$(grep -c "WARN" "$LOG_FILE" 2>/dev/null)
+    : "${log_errors:=0}"
+    : "${log_warns:=0}"
+
+    echo "$now,$uptime,${rss_kb:-0},${pulls:-0},${delivered:-0},${acks:-0},${naks:-0},${terms:-0},${redeliv:-0},${stream_msgs:-0},${kv_keys:-0},${log_errors:-0},${log_warns:-0}" \
+        >> "$SAMPLES_FILE"
+}
+
+echo "ts,uptime_s,rss_kb,pulls,delivered,acks,naks,terms,redeliveries,stream_msgs,kv_keys,log_errors,log_warns" \
+    > "$SAMPLES_FILE"
+
+start_ts=$(date +%s)
+deadline=$((start_ts + DURATION_S))
+
+# Baseline sample.  No drivers running yet -> guaranteed all-zero
+# counters, no race against the consumer process's atomic increments.
+write_sample
+
+# ---- 5. drivers ------------------------------------------------------
+
+# 5a. event_nats SIP REGISTER pump (REG_RPS rate).
 (
     seq=0
     while true; do
@@ -226,7 +292,7 @@ done
 ) >/dev/null 2>&1 &
 DRIVER_PIDS+=("$!")
 
-# 4b. nats_consumer publish pump (PUB_RPS rate).  These messages land
+# 5b. nats_consumer publish pump (PUB_RPS rate).  These messages land
 # on "stress.foo" and the consumer's timer route drains them.
 (
     seq=0
@@ -240,7 +306,7 @@ DRIVER_PIDS+=("$!")
 ) >/dev/null 2>&1 &
 DRIVER_PIDS+=("$!")
 
-# 4c. cachedb_nats KV churn via the nats CLI directly.  The opensips
+# 5c. cachedb_nats KV churn via the nats CLI directly.  The opensips
 # instance's KV watcher will see these mutations and route them
 # through E_NATS_KV_CHANGE on the EVI bus -- exercises the watcher
 # subscribe + dispatch path even without a script handler bound.
@@ -262,78 +328,21 @@ DRIVER_PIDS+=("$!")
 ) >/dev/null 2>&1 &
 DRIVER_PIDS+=("$!")
 
-# ---- 5. sampler ------------------------------------------------------
-
-mi_call() {
-    printf '{"jsonrpc":"2.0","id":1,"method":"%s"}' "$1" \
-        | timeout 3 nc -u -w 2 127.0.0.1 "$MI_PORT" 2>/dev/null
-}
-
-extract_first_int() {
-    grep -oE "\"$1\":[0-9]+" | head -1 | sed 's/.*://'
-}
-
-echo "ts,uptime_s,rss_kb,pulls,delivered,acks,naks,terms,redeliveries,stream_msgs,kv_keys,log_errors,log_warns" \
-    > "$SAMPLES_FILE"
-
-start_ts=$(date +%s)
-deadline=$((start_ts + DURATION_S))
+# ---- 6. sampler loop -------------------------------------------------
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    now=$(date +%s)
-    uptime=$((now - start_ts))
-
-    # opensips RSS (sum across all child processes — the dedicated
-    # consumer + workers + MI handler all matter).
-    rss_kb=$(ps --no-headers -o rss --ppid "$OPENSIPS_PID" 2>/dev/null \
-        | awk '{s += $1} END {print s+0}')
-    self_rss=$(ps --no-headers -o rss -p "$OPENSIPS_PID" 2>/dev/null \
-        | awk '{print $1+0}')
-    rss_kb=$((rss_kb + ${self_rss:-0}))
-
-    # nats_consumer MI counters (single handle).
-    mi_resp=$(mi_call "nats_consumer:nats_consumer_list")
-    pulls=$(echo "$mi_resp" | extract_first_int "pulls_requested")
-    delivered=$(echo "$mi_resp" | extract_first_int "msgs_delivered")
-    acks=$(echo "$mi_resp" | extract_first_int "acks")
-    naks=$(echo "$mi_resp" | extract_first_int "naks")
-    terms=$(echo "$mi_resp" | extract_first_int "terms")
-    redeliv=$(echo "$mi_resp" | extract_first_int "redeliveries")
-
-    # JetStream stream depth.
-    stream_msgs=$(nats --server "$NATS_URL" stream info "$STREAM" \
-            2>/dev/null \
-        | awk '/^[[:space:]]*Messages:[[:space:]]+[0-9,]+/ {
-                gsub(",","",$0); for(i=1;i<=NF;i++) if($i~/^[0-9]+$/) print $i
-              }' | sort -n | tail -1)
-
-    # KV-bucket key count.
-    kv_keys=$(nats --server "$NATS_URL" kv ls "$KV_BUCKET" --names 2>/dev/null \
-        | wc -l)
-
-    # opensips.log error / warn counts (cumulative).  grep -c ALWAYS
-    # prints a single number; the historical `|| echo 0` was wrong --
-    # on no-match grep returns nonzero and the fallback APPENDED a
-    # second "0\n", which corrupted the CSV row.
-    log_errors=$(grep -cE "ERROR|CRITICAL|FATAL" "$LOG_FILE" 2>/dev/null)
-    log_warns=$(grep -c "WARN" "$LOG_FILE" 2>/dev/null)
-    : "${log_errors:=0}"
-    : "${log_warns:=0}"
-
-    echo "$now,$uptime,${rss_kb:-0},${pulls:-0},${delivered:-0},${acks:-0},${naks:-0},${terms:-0},${redeliv:-0},${stream_msgs:-0},${kv_keys:-0},${log_errors:-0},${log_warns:-0}" \
-        >> "$SAMPLES_FILE"
+    sleep "$SAMPLE_S"
+    write_sample
 
     # Liveness check: opensips must still be alive.
     if ! kill -0 "$OPENSIPS_PID" 2>/dev/null; then
-        echo "FATAL: opensips died at uptime=${uptime}s" >&2
+        echo "FATAL: opensips died at uptime=$(( $(date +%s) - start_ts ))s" >&2
         tail -50 "$LOG_FILE" >&2
         exit 1
     fi
-
-    sleep "$SAMPLE_S"
 done
 
-# ---- 6. report -------------------------------------------------------
+# ---- 7. report -------------------------------------------------------
 
 awk -F, -v dur="$DURATION_S" -v csv="$SAMPLES_FILE" '
     NR == 1 { next }
