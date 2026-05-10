@@ -97,10 +97,14 @@ else
 endif
 
 # Take subset of all modules, excluding the exclude_modules and the
-# static_modules.
+# static_modules.  Only directories that ship a Makefile count as
+# modules: this skips non-module siblings under modules/ that the
+# rust workspace places there (Cargo.lock + Cargo.toml at the top
+# level, target/ for cargo's build output cache) without an
+# enumerated exclude list.
 modules=$(filter-out $(addprefix modules/, \
 			$(exclude_modules) $(static_modules)), \
-			$(wildcard modules/*))
+			$(patsubst %/Makefile,%,$(wildcard modules/*/Makefile)))
 # Let modules consist of modules and include_modules (but remove
 # duplicates).
 modules:=$(filter-out $(modules), $(addprefix modules/, $(include_modules) )) \
