@@ -683,17 +683,32 @@ void nats_persist_destroy(void)
 /* ── rehydrate ───────────────────────────────────────────────── */
 
 /* Append a "k=v" pair to an ever-growing malloc'd buffer.
- * Returns 0 on success, -1 on alloc failure. */
+ * Returns 0 on success, -1 on alloc failure or size_t overflow. */
 static int append_kv(char **buf, size_t *len, size_t *cap,
 		const char *k, const char *v, size_t vlen)
 {
 	size_t klen = strlen(k);
-	size_t need = *len + klen + vlen + 3;  /* ';', '=', NUL */
+	size_t need;
+	/* Size-arithmetic overflow on `*len + klen + vlen + 3` would
+	 * wrap to a small value and skip the realloc, after which the
+	 * memcpy below would overrun the buffer.  Realistic only when
+	 * an attacker has staged a single ~SIZE_MAX value in the
+	 * persist file (which itself implies fs-write privilege), so
+	 * this is defence in depth. */
+	if (__builtin_add_overflow(*len, klen, &need)
+	    || __builtin_add_overflow(need, vlen, &need)
+	    || __builtin_add_overflow(need, (size_t)3, &need))
+		return -1;
 	if (need >= *cap) {
 		size_t new_cap = *cap ? *cap * 2 : 256;
 		char *nb;
-		while (new_cap < need)
-			new_cap *= 2;
+		while (new_cap < need) {
+			size_t doubled;
+			if (__builtin_mul_overflow(new_cap, (size_t)2,
+					&doubled))
+				return -1;
+			new_cap = doubled;
+		}
 		nb = (char *)realloc(*buf, new_cap);
 		if (!nb) return -1;
 		*buf = nb;
@@ -739,6 +754,35 @@ static char *build_config_from_json(cJSON *obj)
 		if (c->type & cJSON_String) {
 			v = c->valuestring ? c->valuestring : "";
 			vlen = strlen(v);
+			/* Defence in depth against an attacker-modified
+			 * persist file.  cJSON returns a NUL-terminated C
+			 * string, so a JSON \u0000 escape in the source
+			 * silently truncates vlen at the embedded NUL and
+			 * downstream validators only see the prefix.  Reject
+			 * any field whose serialised value contains a
+			 * control char (0x00..0x1F, 0x7F) -- a legitimate
+			 * serialiser never emits these.  Wildcards '*' and
+			 * '>' are NOT rejected because the `filter` /
+			 * `filters` fields legitimately contain them per the
+			 * NATS subject grammar. */
+			{
+				size_t i;
+				int rejected = 0;
+				for (i = 0; i < vlen; i++) {
+					unsigned char b = (unsigned char)v[i];
+					if (b < 0x20 || b == 0x7F) {
+						LM_WARN("nats_persist: rejecting "
+							"field '%s' with control "
+							"byte 0x%02x at offset %zu\n",
+							c->string ? c->string : "?",
+							b, i);
+						rejected = 1;
+						break;
+					}
+				}
+				if (rejected)
+					continue;
+			}
 		} else if (c->type & cJSON_Number) {
 			/* Use %lld for integer-valued numbers so we don't print
 			 * "1e+18" for fields the JSON happens to round-trip
