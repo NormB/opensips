@@ -43,6 +43,7 @@
 #include "../../lib/list.h"
 
 #include "rtpproxy.h"
+#include "notification_process.h"
 
 #define BUF_LEN				255
 
@@ -83,7 +84,7 @@ static int notification_handler(str *command)
 			LM_INFO("Timeout notification for %.*s\n", param.len, param.s);
 			if (parse_dlg_did(&param, &h_entry, &h_id) < 0)
 				return -1;
-			if(dlg_api.terminate_dlg(NULL, h_entry, h_id, &terminate_reason)< 0)
+			if(run_dlg_api(&dlg_api, terminate_dlg, NULL, h_entry, h_id, &terminate_reason)< 0)
 				LM_ERR("Failed to terminate dialog h_entry=[%u], h_id=[%u]\n", h_entry, h_id);
 			return 0;
 		case 'D':
@@ -199,10 +200,12 @@ static struct rtpp_node *rtpproxy_get_node(union sockaddr_union *rtpp_info)
 static int rtpproxy_io_callback(int fd, void *fs, int was_timeout)
 {
 	struct rtpp_notify *notify = (struct rtpp_notify *)fs;
-	char buffer[BUF_LEN];
+	char buffer[BUF_LEN+1];
 	int len, left, offset;
 	str command;
 	char *p, *start, *sp, *end;
+
+	profiling_proc_start( LEVEL_EXTRAPROCS, 1);
 
 	if (notify && notify->remaining) {
 		memcpy(buffer, notify->remaining, notify->remaining_len);
@@ -229,7 +232,7 @@ static int rtpproxy_io_callback(int fd, void *fs, int was_timeout)
 		}
 		shutdown(fd, SHUT_RDWR);
 		close(fd);
-		return -1;
+		goto err;
 	}
 	if (len == 0) {
 		LM_DBG("closing rtpproxy notify socket\n");
@@ -242,13 +245,16 @@ static int rtpproxy_io_callback(int fd, void *fs, int was_timeout)
 		}
 		shutdown(fd, SHUT_RDWR);
 		close(fd);
-		return 0;
+		goto done;
 	}
 
 	LM_DBG("Notification(s) received: [%.*s]\n", len, buffer);
 	p = buffer;
 	left = len + offset;
 	end = buffer + left;
+	buffer[len] = 0; // make it null terminated
+
+	profiling_proc_enter( LEVEL_EXTRAPROCS, ss_merge256("RTPP_CB ",buffer), 0 );
 
 	do {
 		start = p;
@@ -273,7 +279,7 @@ static int rtpproxy_io_callback(int fd, void *fs, int was_timeout)
 			}
 			shutdown(fd, SHUT_RDWR);
 			close(fd);
-			return -1;
+			goto err1;
 		}
 
 		LM_DBG("Left to process: %d\n[%.*s]\n", left, left, p);
@@ -301,42 +307,55 @@ static int rtpproxy_io_callback(int fd, void *fs, int was_timeout)
 		shutdown(fd, SHUT_RDWR);
 		close(fd);
 	}
+
+	profiling_proc_exit( LEVEL_EXTRAPROCS, "RTPP_CB", 0 );
+
+done:
+	profiling_proc_end( LEVEL_EXTRAPROCS, 0 );
 	return 0;
+err1:
+	profiling_proc_exit( LEVEL_EXTRAPROCS, "RTPP_CB", -1 );
+err:
+	profiling_proc_end( LEVEL_EXTRAPROCS, -1 );
+	return -1;
 }
 
 static int rtpproxy_io_new_callback(int fd, void *fs, int was_timeout)
 {
 	int size;
-	struct sockaddr_storage rtpp_info;
+	struct sockaddr_storage rtpp_info = {0};
 	struct rtpp_node *node;
 	struct rtpp_notify *notify;
 
+	profiling_proc_start( LEVEL_EXTRAPROCS, 1);
+
 	size = sizeof(rtpp_info);
-	memset(&rtpp_info, 0, size);
 	fd = accept(fd, (struct sockaddr *)&rtpp_info, (socklen_t *)&size);
 	if(fd < 0) {
 		LM_ERR("socket accept failed: %s(%d)\n", strerror(errno), errno);
-		return -1;
+		goto err;
 	}
 
-	if (rtpp_notify_socket_un) {
+	profiling_proc_enter( LEVEL_EXTRAPROCS, "RTPP new CB", 0 );
+
+	if (rtpp_notify_cfg.sock.rn_umode == CM_UNIX) {
 		LM_DBG("trusting unix socket connection\n");
 		if (reactor_proc_add_fd(fd, rtpproxy_io_callback, NULL)<0) {
 			LM_CRIT("failed to add RTPProxy new connection to reactor\n");
-			return -1;
+			goto err1;
 		}
-		return 0;
+		goto done;
 	}
 	node = rtpproxy_get_node((union sockaddr_union *)&rtpp_info);
 	if (!node) {
 		LM_WARN("connection from unknown RTPProxy node");
-		return -1;
+		goto err1;
 	}
 
 	notify = pkg_malloc(sizeof *notify);
 	if (!notify) {
 		LM_ERR("could not allocate notify node\n");
-		return -1;
+		goto err1;
 	}
 	memset(notify, 0, sizeof *notify);
 	notify->fd = fd;
@@ -344,10 +363,19 @@ static int rtpproxy_io_new_callback(int fd, void *fs, int was_timeout)
 	if (reactor_proc_add_fd(fd, rtpproxy_io_callback, notify) < 0) {
 		LM_CRIT("failed to add RTPProxy listen socket to reactor\n");
 		pkg_free(notify);
-		return -1;
+		goto err1;
 	}
 	list_add(&notify->list, &rtpp_notify_fds);
+
+done:
+	profiling_proc_exit( LEVEL_EXTRAPROCS, "RTPP new CB", 0 );
+	profiling_proc_end( LEVEL_EXTRAPROCS, 0 );
 	return 0;
+err1:
+	profiling_proc_exit( LEVEL_EXTRAPROCS, "RTPP new CB", -1 );
+err:
+	profiling_proc_end( LEVEL_EXTRAPROCS, -1 );
+	return -1;
 }
 
 int init_rtpp_notify(void)
@@ -357,6 +385,26 @@ int init_rtpp_notify(void)
 		LM_ERR("cannot allocate space for rtpp notify process number\n");
 		return -1;
 	}
+	return 0;
+}
+
+static rtp_io_getrnsock_t
+rtp_io_rnsock_f(void)
+{
+	static rtp_io_getrnsock_t _rtp_io_getrnsock = {0};
+	if (_rtp_io_getrnsock == NULL)
+		_rtp_io_getrnsock = (rtp_io_getrnsock_t)find_export("rtp_io_getrnsock", 0);
+	return _rtp_io_getrnsock;
+}
+
+int fill_rtp_io_rnsock(void)
+{
+
+	rtp_io_getrnsock_t rtp_io_rnsock = rtp_io_rnsock_f();
+	if (rtp_io_rnsock == NULL)
+		return -1;
+	if (rtp_io_rnsock(&rtpp_notify_cfg) != 0)
+		return -1;
 	return 0;
 }
 
@@ -370,30 +418,38 @@ void notification_listener_process(int rank)
 	struct sockaddr* saddr;
 	int len, n;
 	int optval = 1;
-	int socket_fd;
+	int socket_fd = -1;
+	str *rn_name = &rtpp_notify_cfg.name;
+	struct rtpp_sock *rn_sock = &rtpp_notify_cfg.sock;
+
+	if (rn_name->s == NULL) {
+		if (fill_rtp_io_rnsock() != 0)
+			goto serve;
+	}
 
 	*rtpp_notify_process_no = process_no;
 
-	if (!rtpp_notify_socket_un) {
-		p = strrchr(rtpp_notify_socket.s, ':');
+	switch (rn_sock->rn_umode) {
+	case CM_TCP:
+		p = strrchr(rn_name->s, ':');
 		if (!p) {
-			LM_ERR("invalid udp address <%.*s>\n", rtpp_notify_socket.len, rtpp_notify_socket.s);
+			LM_ERR("invalid udp address <%.*s>\n", rn_name->len, rn_name->s);
 			return;
 		}
-		n = p- rtpp_notify_socket.s;
-		rtpp_notify_socket.s[n] = 0;
+		n = p - rn_name->s;
+		rn_name->s[n] = 0;
 
 		id.s = p+1;
-		id.len = rtpp_notify_socket.len - n -1;
+		id.len = rn_name->len - n - 1;
 		port= str2s(id.s, id.len, &n);
 		if(n) {
 			LM_ERR("Bad format for socket name. Expected ip:port\n");
 			return;
 		}
 		/* skip here tcp part */
-		rtpp_notify_socket.s += 4;
+		rn_name->s += 4;
 		memset(&saddr_in, 0, sizeof(saddr_in));
-		saddr_in.sin_addr.s_addr = inet_addr(rtpp_notify_socket.s);
+		saddr_in.sin_addr.s_addr = inet_addr(rn_name->s);
 		saddr_in.sin_family = AF_INET;
 		saddr_in.sin_port = htons(port);
 
@@ -404,8 +460,9 @@ void notification_listener_process(int rank)
 		}
 		saddr = (struct sockaddr*)&saddr_in;
 		len = sizeof(saddr_in);
-		LM_DBG("binding socket %d to %s:%d\n", socket_fd, rtpp_notify_socket.s, port);
-	} else {
+		LM_DBG("binding socket %d to %s:%d\n", socket_fd, rn_name->s, port);
+		break;
+	case CM_UNIX:
 		/* create socket */
 		socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 		if (socket_fd == -1) {
@@ -415,39 +472,55 @@ void notification_listener_process(int rank)
 
 		memset(&saddr_un, 0, sizeof(struct sockaddr_un));
 		saddr_un.sun_family = AF_LOCAL;
-		strncpy(saddr_un.sun_path, rtpp_notify_socket.s,
+		strncpy(saddr_un.sun_path, rn_name->s,
 				sizeof(saddr_un.sun_path) - 1);
 		saddr = (struct sockaddr*)&saddr_un;
 		len = sizeof(saddr_un);
-		LM_DBG("binding unix socket %s\n", rtpp_notify_socket.s);
+		LM_DBG("binding unix socket %s\n", rn_name->s);
+		break;
+	case CM_RTPIO:
+		socket_fd = rn_sock->fd;
+		len = -1;
+		saddr = NULL;
+		LM_INFO("using rtp.io notification socket %d\n", socket_fd);
+		break;
+	default:
+		abort();
 	}
 
-	if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (void*)&optval,
+	if (rn_sock->rn_umode != CM_RTPIO) {
+		if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (void*)&optval,
 				sizeof(optval)) == -1) {
-		LM_ERR("setsockopt failed %s\n", strerror(errno));
-		return;
+			LM_ERR("setsockopt failed %s\n", strerror(errno));
+			return;
+		}
+
+		if (bind(socket_fd, saddr, len) == -1) {
+			LM_ERR("failed to bind to socket: %s\n", strerror(errno));
+			return;
+		}
+
+		/* open socket for listening */
+		if(listen(socket_fd, 10) == -1) {
+			LM_ERR("socket listen failed: %s(%d)\n", strerror(errno), errno);
+			close(socket_fd);
+			return;
+		}
 	}
 
-	if (bind(socket_fd, saddr, len) == -1) {
-		LM_ERR("failed to bind to socket: %s\n", strerror(errno));
-		return;
-	}
-
-	/* open socket for listening */
-	if(listen(socket_fd, 10) == -1) {
-		LM_ERR("socket listen failed: %s(%d)\n", strerror(errno), errno);
-		close(socket_fd);
-		return;
-	}
-
+serve:
 	if (reactor_proc_init("RTPProxy events") < 0) {
 		LM_ERR("failed to init the RTPProxy events\n");
 		return;
 	}
 
-	if (reactor_proc_add_fd( socket_fd, rtpproxy_io_new_callback, NULL) < 0) {
-		LM_CRIT("failed to add RTPProxy listen socket to reactor\n");
-		return;
+	if (socket_fd != -1) {
+		reactor_proc_cb_f cb_f = (rn_sock->rn_umode != CM_RTPIO) ? rtpproxy_io_new_callback :
+		    rtpproxy_io_callback;
+		if (reactor_proc_add_fd(socket_fd, cb_f, NULL) < 0) {
+			LM_CRIT("failed to add RTPProxy listen socket to reactor\n");
+			return;
+		}
 	}
 
 	reactor_proc_loop();
@@ -482,4 +555,15 @@ void update_rtpp_notify(void)
 	}
 	if (ipc_send_rpc(*rtpp_notify_process_no, ipc_update_rtpp_notify, NULL) != 0)
 		LM_ERR("could not send RTPProxy update to notify process!\n");
+}
+
+int rtpproxy_is_nproc(enum inp_op op)
+{
+	static int _rtpproxy_is_nproc = 0;
+	const int lastval = _rtpproxy_is_nproc;
+
+	if (op == NPROC_SET) {
+		_rtpproxy_is_nproc = 1;
+	}
+	return lastval;
 }

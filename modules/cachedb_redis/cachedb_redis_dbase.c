@@ -103,7 +103,8 @@ redisContext *redis_get_ctx(char *ip, int port)
 	}
 
 	if (redis_keepalive > 0) {
-#if defined(HIREDIS_MAJOR) && HIREDIS_MAJOR >= 1
+#if defined(HIREDIS_MAJOR) && (HIREDIS_MAJOR > 1 || \
+	(HIREDIS_MAJOR == 1 && defined(HIREDIS_MINOR) && HIREDIS_MINOR >= 2))
 		if (redisEnableKeepAliveWithInterval(ctx, redis_keepalive) != REDIS_OK)
 #else
 		if (redisEnableKeepAlive(ctx) != REDIS_OK)
@@ -518,6 +519,8 @@ int redis_get_hostport(const str *hostport, char **host, unsigned short *port)
 	str in, out;
 
 	char *p = q_memchr(hostport->s, ':', hostport->len);
+	unsigned int out_port;
+
 	if (!p) {
 		if (pkg_nt_str_dup(&out, hostport) != 0) {
 			LM_ERR("oom\n");
@@ -543,7 +546,6 @@ int redis_get_hostport(const str *hostport, char **host, unsigned short *port)
 			return -1;
 		}
 
-		unsigned int out_port;
 		if (str2int(&in, &out_port) != 0) {
 			LM_ERR("failed to parse Redis port in URL\n");
 			pkg_free(*host);
@@ -863,37 +865,34 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 						match_prefix(reply->str, reply->len, ASK_PREFIX, ASK_PREFIX_LEN)) {
 					int is_ask = match_prefix(reply->str, reply->len,
 						ASK_PREFIX, ASK_PREFIX_LEN);
-					redis_moved moved_info;
+					redis_moved moved_info_s;
+					redis_moved *moved_info = &moved_info_s;
+
 
 					if ((is_ask ?
-							parse_ask_reply(reply, &moved_info) :
-							parse_moved_reply(reply, &moved_info)) < 0) {
+							parse_ask_reply(reply, moved_info) :
+							parse_moved_reply(reply, moved_info)) < 0) {
 						LM_ERR("Unable to parse %s reply\n",
 							is_ask ? "ASK" : "MOVED");
 						freeReplyObject(reply);
 						goto try_next_con;
 					}
 
-					LM_DBG("%s slot: [%d] endpoint: [%.*s] port: [%d]\n",
-						is_ask ? "ASK" : "MOVED",
-						moved_info.slot, moved_info.endpoint.len,
-						moved_info.endpoint.s, moved_info.port);
+					LM_DBG("%s slot: [%d] endpoint: [%.*s] port: [%d]\n", is_ask ? "ASK" : "MOVED",
+							moved_info->slot, moved_info->endpoint.len,
+							moved_info->endpoint.s, moved_info->port);
 
-					if (!is_ask) {
-						node->moved++;
-						update_stat(redis_stat_moved, 1);
-					}
-
-					node = get_redis_connection_by_endpoint(con, &moved_info);
+					node->moved++;
+					update_stat(redis_stat_moved, 1);
+					node = get_redis_connection_by_endpoint(
+						con, moved_info);
 
 					if (node == NULL) {
-						LM_DBG("%s endpoint unknown, creating new node %.*s:%d\n",
-							is_ask ? "ASK" : "MOVED",
-							moved_info.endpoint.len, moved_info.endpoint.s,
-							moved_info.port);
+						LM_DBG("cachedb_redis: MOVED endpoint unknown, creating new node %.*s:%d\n",
+							moved_info->endpoint.len, moved_info->endpoint.s, moved_info->port);
 						node = find_or_create_node(con,
-							moved_info.endpoint.s, moved_info.endpoint.len,
-							(unsigned short)moved_info.port);
+							moved_info->endpoint.s, moved_info->endpoint.len,
+							(unsigned short)moved_info->port);
 					}
 
 					freeReplyObject(reply);
@@ -907,12 +906,14 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 
 					if (node->context == NULL) {
 						if (redis_reconnect_node(con,node) < 0) {
-							LM_ERR("Unable to reconnect to node %s:%d\n",
+							LM_ERR("Unable to reconnect to"
+								" node %s:%d\n",
 								node->ip, node->port);
 							last_err = -1;
 							goto try_next_con;
 						}
 					}
+
 
 					if (is_ask) {
 						/* ASK requires sending ASKING before
@@ -923,22 +924,25 @@ static int _redis_run_command(cachedb_con *connection, redisReply **rpl, str *ke
 						if (!asking_reply ||
 								asking_reply->type ==
 								REDIS_REPLY_ERROR) {
-							LM_ERR("ASKING command failed on %s:%d\n",
+							LM_ERR("ASKING command failed"
+								" on %s:%d\n",
 								node->ip, node->port);
 							if (asking_reply)
-								freeReplyObject(asking_reply);
+								freeReplyObject(
+									asking_reply);
 							last_err = -1;
 							goto try_next_con;
 						}
 						freeReplyObject(asking_reply);
-					} else {
-						/* MOVED — refresh topology so future queries go direct */
-						refresh_cluster_topology(con);
 					}
 
+					/* Refresh topology so future queries go direct */
+					refresh_cluster_topology(con);
 					if (--max_redirects <= 0) {
-						LM_ERR("too many redirects, giving up\n");
-						last_err = -10;
+						LM_ERR("max redirects exceeded\n");
+						freeReplyObject(reply);
+						reply = NULL;
+						last_err = -1;
 						goto try_next_con;
 					}
 					i = QUERY_ATTEMPTS;
@@ -2216,6 +2220,9 @@ int redis_raw_query_send(cachedb_con *connection, redisReply **reply,
 	size_t argvlen[MAP_SET_MAX_FIELDS+1];
 	str key, st;
 	char *p, *lim, *arg = NULL;
+#ifdef EXTRA_DEBUG
+	int i;
+#endif
 
 	st = *attr;
 	trim(&st);
@@ -2277,7 +2284,6 @@ int redis_raw_query_send(cachedb_con *connection, redisReply **reply,
 	key.len = argvlen[1];
 
 #ifdef EXTRA_DEBUG
-	int i;
 	LM_DBG("raw query key: %.*s\n", key.len, key.s);
 	for (i = 0; i < argc; i++)
 		LM_DBG("raw query arg %d: '%.*s' (%d)\n", i, (int)argvlen[i], argv[i],

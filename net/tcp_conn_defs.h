@@ -89,6 +89,7 @@
 #define F_CONN_PROXY_OUT_SENT	(1<<7) /*!< outbound PROXY header already sent */
 #define F_CONN_WRITE_QUEUED		(1<<8) /*!< a TCP main write job is queued/running */
 #define F_CONN_HASHED			(1<<9) /*!< the connection is linked in the shared hashes */
+#define F_CONN_FORCE_CLOSED		(1<<10) /*!< closed explicitly by admin/script */
 
 enum tcp_conn_states { S_CONN_ERROR=-2, S_CONN_BAD=-1, S_CONN_OK=0,
 		S_CONN_CONNECTING, S_CONN_EOF };
@@ -108,6 +109,15 @@ enum tcp_conn_alias_mode {
 	TCP_ALIAS_NEVER,
 	TCP_ALIAS_RFC_5923, /*!< only alias a connection if Via ";alias" exists */
 	TCP_ALIAS_ALWAYS,
+};
+
+/*! \brief Cached TLS metadata stored in shared memory */
+struct tcp_tls_info {
+	char *version;				/*!< negotiated TLS version */
+	char *cipher_name;			/*!< negotiated cipher name */
+	char *cipher_desc;			/*!< negotiated cipher description */
+	unsigned int bits;				/*!< negotiated cipher bits */
+	unsigned char peer_verified;		/*!< normalized peer verification result */
 };
 
 
@@ -136,7 +146,6 @@ struct tcp_conn_profile {
 	unsigned int msg_read_timeout;
 	unsigned int send_threshold;
 	unsigned char no_new_conn:1;
-	unsigned char parallel_read:2;
 
 	enum tcp_conn_alias_mode alias_mode;
 
@@ -174,6 +183,7 @@ struct tcp_connection{
 	struct tcp_req *con_req;	/*!< Per-connection TCP request buffer in TCP-main-private memory */
 	void *proto_req;			/*!< Optional protocol-specific request state in TCP-main-private memory */
 	void *proto_extra_id;		/*!< Optional shared protocol-specific match id */
+	void *shared_data;		/*!< Optional shared attachment exported by the active protocol */
 	unsigned int msg_attempts;	/*!< how many read attempts we have done for the last request */
 	/*!< connection related flags */
 	unsigned short flags;
