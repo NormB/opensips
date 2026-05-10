@@ -170,17 +170,26 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	int               rc;
 	int               tmo;
 	int               fd;
+	int               ret;
 
 	(void)msg;
 
 	nats_fetch_clear();
 	clear_last_error();
 
+	/* Look up first.  Note: nats_registry_lookup() takes the bucket
+	 * read lock for the chain walk and releases it before returning;
+	 * we hold no protection against the handle being retired and
+	 * reaped by the consumer process between the lookup and the
+	 * dereferences below.  Take a pending_ops reference here so the
+	 * reaper (nats_registry_reap()) defers free until we're done. */
 	h = nats_registry_lookup(id);
 	if (!h) {
 		LM_DBG("nats_fetch: unknown handle '%.*s'\n", id->len, id->s);
 		return -3;
 	}
+	nats_handle_pending_inc(h);
+
 	/* Phase 7: a retired handle still lives on the retire list; the
 	 * bucket-chain lookup we just did misses it so a concurrent unbind
 	 * is already visible here.  Defence in depth: if a lookup slipped
@@ -188,12 +197,14 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 		LM_DBG("nats_fetch: handle '%.*s' is retiring\n",
 			id->len, id->s);
-		return -3;
+		ret = -3;
+		goto out;
 	}
 	if (!h->ring) {
 		LM_DBG("nats_fetch: handle '%.*s' has no ring\n",
 			id->len, id->s);
-		return -3;
+		ret = -3;
+		goto out;
 	}
 
 	rc = nats_ring_pop(h->ring, &slot);
@@ -205,7 +216,8 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		 * by the ring's empty->non-empty transition; draining is
 		 * only the responsibility of the process that ACTUALLY
 		 * blocked on the fd and woke from it. */
-		return cur_set_from_slot(h->index, &slot);
+		ret = cur_set_from_slot(h->index, &slot);
+		goto out;
 	}
 
 	/* Phase 7 connection-loss check.  The worker never speaks to NATS
@@ -220,12 +232,15 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		set_last_error("connection lost");
 		LM_DBG("nats_fetch: '%.*s' ring empty and pool disconnected\n",
 			id->len, id->s);
-		return -2;
+		ret = -2;
+		goto out;
 	}
 
 	tmo = timeout_ms ? *timeout_ms : 0;
-	if (tmo <= 0)
-		return 0;   /* non-blocking poll miss */
+	if (tmo <= 0) {
+		ret = 0;   /* non-blocking poll miss */
+		goto out;
+	}
 
 	/* Short sync loop: poll the ring for up to tmo ms.
 	 *
@@ -249,16 +264,20 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 
 		while (waited < tmo) {
 			rc = nats_ring_pop(h->ring, &slot);
-			if (rc == 0)
-				return cur_set_from_slot(h->index, &slot);
+			if (rc == 0) {
+				ret = cur_set_from_slot(h->index, &slot);
+				goto out;
+			}
 			usleep(tick_ms * 1000);
 			waited += tick_ms;
 		}
 	}
 
 	rc = nats_ring_pop(h->ring, &slot);
-	if (rc == 0)
-		return cur_set_from_slot(h->index, &slot);
+	if (rc == 0) {
+		ret = cur_set_from_slot(h->index, &slot);
+		goto out;
+	}
 
 	/* Post-poll: if the pool disconnected during the wait, surface -2.
 	 * Re-checking after the poll catches the (common) case where we
@@ -266,10 +285,14 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	 * mid-wait. */
 	if (!nats_pool_is_connected()) {
 		set_last_error("connection lost");
-		return -2;
+		ret = -2;
+		goto out;
 	}
 
-	return 0;
+	ret = 0;
+out:
+	nats_handle_pending_dec(h);
+	return ret;
 }
 
 /* ── async fetch ────────────────────────────────────────────── */
