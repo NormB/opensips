@@ -63,6 +63,7 @@
 
 #include "../../net/proto_tcp/tcp_common_defs.h"
 #include "../tls_mgm/api.h"
+#include "../tls_mgm/tls_shared_data.h"
 #include "../tls_mgm/tls_trace_common.h"
 
 #include "../../net/trans_trace.h"
@@ -95,10 +96,6 @@ static int tls_port_no = SIPS_PORT;
 
 /* 1 if tls connect & write should be async */
 static int tls_async = 1;
-
-/* Number of milliseconds that a worker will block waiting for a SSL
- * connect handshake to complete */
-static int tls_async_handshake_connect_timeout = 10;
 
 /* maximum number of write chunks that will be queued per tls connection -
   if we exceed this number, we just drop the connection */
@@ -343,8 +340,6 @@ static const param_export_t params[] = {
 	{ "tls_async",                       INT_PARAM, &tls_async               },
 	{ "tls_async_max_postponed_chunks",  INT_PARAM,
 											&tls_async_max_postponed_chunks  },
-	{ "tls_async_handshake_timeout",	 INT_PARAM,
-											&tls_async_handshake_connect_timeout },
 	{ "trace_on",					INT_PARAM, &trace_is_on_tmp           },
 	{ "trace_filter_route",			STR_PARAM, &trace_filter_route        },
 	{ "cert_check_on_conn_reusage",	INT_PARAM, &cert_check_on_conn_reusage},
@@ -460,6 +455,7 @@ static int proto_tls_init(struct proto_info *pi)
 	pi->net.stream.write		= tls_async_write;
 	pi->net.stream.conn.init	= proto_tls_conn_init;
 	pi->net.stream.conn.clean	= proto_tls_conn_clean;
+	pi->net.stream.conn.dump	= tls_shared_info_dump;
 	if (cert_check_on_conn_reusage)
 		pi->net.stream.conn.match	= tls_conn_extra_match;
 	else

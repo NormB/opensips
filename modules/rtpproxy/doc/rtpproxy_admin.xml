@@ -722,7 +722,7 @@ if (is_method("INVITE") &amp;&amp; has_totag()) {
 
         <section id="func_rtpproxy_offer" xreflabel="rtpproxy_offer()">
                 <title>
-                <function moreinfo="none">rtpproxy_offer([[flags][, [ip_address][, [set_id][, [sock_var][, [ret_var][, [body_var]]]]]])</function>
+                <function moreinfo="none">rtpproxy_offer([[flags][, [ip_address][, [set_id][, [sock_var][, [ret_var][, [body_var][, [bind_local]]]]]]]])</function>
                 </title>
                 <para>
                 Rewrites &sdp; body to ensure that media is passed through
@@ -732,13 +732,23 @@ if (is_method("INVITE") &amp;&amp; has_totag()) {
 			</para>
 				<para>
 					The function receives the same parameters as
-					<function>rtpproxy_engage()</function>, as well as an extra
-					parameter named <emphasis>body_var</emphasis> - this parameter
-					is used as an in-out variable for the body that should be used
-					to challenge &rtp; proxy server. If the variable is specified,
-					it is the function uses its content as the body to challenge,
-					and returns the resulted body in it. If not used, the message's
-					body is used, and the outgoing body is changed.
+					<function>rtpproxy_engage()</function>, as well as extra
+					parameters named <emphasis>body_var</emphasis> and
+					<emphasis>bind_local</emphasis>. The <emphasis>body_var</emphasis>
+					parameter is used as an in-out variable for the body that
+					should be used to challenge &rtp; proxy server. If the variable
+					is specified, the function uses its content as the body to
+					challenge, and returns the resulting body in it. If not used,
+					the message's body is used, and the outgoing body is changed.
+				</para>
+				<para>
+					The optional <emphasis>bind_local</emphasis> parameter provides
+					the local bind/interface value directly on the call. When set
+					to a string, its value is appended as
+					<emphasis>l&lt;value&gt;</emphasis> to the RTPProxy U/L command
+					(for example, "[1:2:3]" for IPv6). This applies to both
+					<function>rtpproxy_offer()</function> and
+					<function>rtpproxy_answer()</function>.
 				</para>
 			<para>
 		This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
@@ -782,7 +792,7 @@ onreply_route[2]
 	</section>
         <section id="func_rtpproxy_answer" xreflabel="rtpproxy_answer()">
                 <title>
-                <function moreinfo="none">rtpproxy_answer([[flags][, [ip_address][, [set_id][, [sock_var][, [ret_var][, [body_var]]]]]]])</function>
+                <function moreinfo="none">rtpproxy_answer([[flags][, [ip_address][, [set_id][, [sock_var][, [ret_var][, [body_var][, [bind_local]]]]]]]])</function>
                 </title>
 		<para>
 		Rewrites &sdp; body to ensure that media is passed through
@@ -1276,4 +1286,3 @@ $ opensips-cli -x mi rtpproxy:reload
 </section>
 
 </chapter>
-

@@ -1,4 +1,4 @@
-INSERT INTO version (table_name, table_version) values ('tcp_mgm','1');
+INSERT INTO version (table_name, table_version) values ('tcp_mgm','2');
 CREATE TABLE tcp_mgm (
     id INT(10) UNSIGNED AUTO_INCREMENT PRIMARY KEY NOT NULL,
     proto CHAR(8) DEFAULT 'any' NOT NULL,
@@ -14,7 +14,6 @@ CREATE TABLE tcp_mgm (
     send_threshold INT UNSIGNED DEFAULT 0 NOT NULL,
     no_new_conn INT UNSIGNED DEFAULT 0 NOT NULL,
     alias_mode INT UNSIGNED DEFAULT 0 NOT NULL,
-    parallel_read INT UNSIGNED DEFAULT 0 NOT NULL,
     keepalive INT UNSIGNED DEFAULT 1 NOT NULL,
     keepcount INT UNSIGNED DEFAULT 9 NOT NULL,
     keepidle INT UNSIGNED DEFAULT 7200 NOT NULL,

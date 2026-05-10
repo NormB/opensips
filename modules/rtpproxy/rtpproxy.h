@@ -30,6 +30,7 @@
 #include "../../pvar.h"
 #include "../dialog/dlg_load.h"
 #include "../../rw_locking.h"
+#include "../rtp.io/rtp_io_api.h"
 
 struct rtpproxy_vcmd;
 
@@ -55,6 +56,16 @@ struct rtpp_node {
 	unsigned int		capabilities;
 	union sockaddr_union	addr;
 	struct rtpp_node	*rn_next;
+};
+
+struct rtpp_sock {
+	int fd;
+	enum comm_modes rn_umode;
+};
+
+struct rtpp_notify_cfg {
+	str name;
+	struct rtpp_sock sock;
 };
 
 #define CM_STREAM(ndp) ((ndp)->rn_umode == CM_TCP || (ndp)->rn_umode == CM_TCP6 || \
@@ -150,8 +161,7 @@ struct rtpp_dtmf_event {
 int rtpproxy_raise_dtmf_event(struct rtpp_dtmf_event *dtmf);
 
 extern rw_lock_t *nh_lock;
-extern str rtpp_notify_socket;
-extern int rtpp_notify_socket_un;
+extern struct rtpp_notify_cfg rtpp_notify_cfg;
 extern struct dlg_binds dlg_api;
 extern int detect_rtp_idle;
 extern int rtpproxy_tout;
@@ -159,12 +169,13 @@ extern struct rtpp_set_head ** rtpp_set_list;
 int init_rtpp_notify();
 void update_rtpp_notify();
 void notification_listener_process(int rank);
+int fill_rtp_io_rnsock(void);
 
 /* Functions from nathelper */
 struct rtpp_set *get_rtpp_set(nh_set_param_t *);
 struct rtpp_node *select_rtpp_node(struct sip_msg *, str, struct rtpp_set *, pv_spec_p, int);
 char *send_rtpp_command(struct rtpp_node *, struct rtpproxy_vcmd *, int);
 int force_rtp_proxy_body(struct sip_msg* msg, struct rtpp_args *args,
-               pv_spec_p var, pv_spec_p ipvar, str *body);
+               pv_spec_p var, pv_spec_p ipvar, str *body, str *bind_local);
 
 #endif

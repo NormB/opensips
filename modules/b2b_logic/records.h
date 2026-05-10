@@ -56,6 +56,7 @@ typedef struct b2bl_entity_id
 	int state;
 	int init_maxfwd;
 	unsigned int flags;
+	unsigned int entity_flags;
 	unsigned int last_rcv_code;
 	unsigned short no;
 	unsigned short sdp_type;
@@ -73,6 +74,7 @@ struct b2bl_new_entity {
 	str proxy;
 	str from_dname;
 	str adv_contact;
+	unsigned int entity_flags;
 	int avp_hdrs;
 	int avp_hdr_vals;
 };
@@ -120,6 +122,7 @@ typedef struct b2bl_tuple
 	b2bl_entity_id_t* bridge_entities[MAX_BRIDGE_ENT];
 	b2bl_entity_id_t* bridge_initiator;
 	int bridge_flags;
+	unsigned int init_flags;
 	int to_del;
 	str* extra_headers;
 	struct b2bl_tuple* next;
@@ -128,6 +131,7 @@ typedef struct b2bl_tuple
 	str local_contact;
 	int db_flag;
 	int repl_flag;  /* sent/received through entities replication */
+	unsigned int refer_id;
 	struct b2b_ctx_val *vals;
 	struct b2b_tracer tracer;
 	struct b2bl_cback cb;
@@ -138,7 +142,6 @@ typedef struct b2bl_entry
 	b2bl_tuple_t* first;
 	gen_lock_t lock;
 	int locked_by;
-	int flags;
 }b2bl_entry_t;
 
 typedef b2bl_entry_t* b2bl_table_t;
@@ -239,6 +242,14 @@ b2bl_entity_id_t* b2bl_search_entity(b2bl_tuple_t* tuple, str* key, int src,
 void b2bl_db_delete(b2bl_tuple_t* tuple);
 
 int store_ctx_value(struct b2b_ctx_val **vals, str *name, str *new_val);
+
+int fetch_ctx_value(struct b2b_ctx_val *vals, const str *name, str *out_val);
+
+int get_ctx_vals(struct b2b_ctx_val ***vals, b2bl_tuple_t **tuple, int *locked);
+
+str *b2b_extract_msg_contact_hdrs(struct sip_msg *msg);
+str *b2b_get_msg_contact_hdrs(b2bl_tuple_t *tuple, str *key);
+int b2b_store_msg_contact_hdrs(b2bl_tuple_t *tuple, str *key, str *ct_hdrs);
 
 int b2bl_register_set_tracer_cb( b2bl_set_tracer_f f, unsigned int msg_flag_filter );
 

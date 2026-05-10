@@ -255,9 +255,9 @@ int parse_cluster_shards(redis_con *con, redisReply *reply)
 	size_t i, j, k, n, s;
 	redisReply *shard, *key, *val, *slots_array, *nodes_array;
 	redisReply *node_map, *nk, *nv;
-	const char *master_ip, *role;
-	long long master_port;
-	long long start, end;
+	const char *master_ip, *role, *ip;
+	long long master_port, port;
+	long long start, end, slot;
 	cluster_node *node;
 
 	if (!reply || reply->type != REDIS_REPLY_ARRAY)
@@ -294,8 +294,8 @@ int parse_cluster_shards(redis_con *con, redisReply *reply)
 			if (!node_map || node_map->type != REDIS_REPLY_ARRAY)
 				continue;
 
-			const char *ip = NULL;
-			long long port = 0;
+			ip = NULL;
+			port = 0;
 			role = NULL;
 
 			for (k = 0; k + 1 < node_map->elements; k += 2) {
@@ -332,7 +332,7 @@ int parse_cluster_shards(redis_con *con, redisReply *reply)
 				continue;
 			start = slots_array->element[s]->integer;
 			end = slots_array->element[s + 1]->integer;
-			for (long long slot = start; slot <= end; slot++) {
+			for (slot = start; slot <= end; slot++) {
 				if (slot >= 0 && slot < 16384)
 					con->slot_table[slot] = node;
 			}
@@ -346,7 +346,7 @@ int parse_cluster_slots(redis_con *con, redisReply *reply)
 {
 	size_t i;
 	redisReply *entry, *master;
-	long long start, end;
+	long long start, end, slot;
 	const char *ip;
 	long long port;
 	cluster_node *node;
@@ -382,7 +382,7 @@ int parse_cluster_slots(redis_con *con, redisReply *reply)
 		if (!node)
 			continue;
 
-		for (long long slot = start; slot <= end; slot++) {
+		for (slot = start; slot <= end; slot++) {
 			if (slot >= 0 && slot < 16384)
 				con->slot_table[slot] = node;
 		}
@@ -561,20 +561,19 @@ int parse_redirect_reply(redisReply *reply, redis_moved *out,
 	}
 	p += prefix_len;
 
-	// Parse slot number
+	/* Parse slot number */
 	while (p < end && *p >= '0' && *p <= '9') {
 		slot = slot * 10 + (*p - '0');
 		p++;
+		if (slot > 16383) return ERR_INVALID_SLOT;
 	}
 	if (slot == 0 && (p == reply->str + prefix_len || *(p - 1) < '0' || *(p - 1) > '9'))
 		return ERR_INVALID_SLOT;
-	if (slot > 16383)
-		return ERR_INVALID_SLOT;
 
-	// Skip spaces
+	/* Skip spaces */
 	while (p < end && *p == ' ') p++;
 
-	// Parse host and port
+	/* Parse host and port */
 	host_start = p;
 	while (p < end) {
 		if (*p == ':') {
@@ -591,16 +590,15 @@ int parse_redirect_reply(redisReply *reply, redis_moved *out,
 		out->endpoint.s = host_start;
 		out->endpoint.len = colon - host_start;
 
-		// Parse port
+		/* Parse port */
 		port_start = colon + 1;
 		p = port_start;
 		if (p < end) {
 			port = 0;
 			while (p < end && *p >= '0' && *p <= '9') {
 				port = port * 10 + (*p - '0');
-				if (port > 65535)
-					return ERR_INVALID_PORT;
 				p++;
+				if (port > 65535) return ERR_INVALID_PORT;
 			}
 			if (port < 0 || port > 65535 || port_start == p)
 				return ERR_INVALID_PORT;
@@ -610,11 +608,9 @@ int parse_redirect_reply(redisReply *reply, redis_moved *out,
 		out->endpoint.len = end - host_start;
 	}
 
-	// Fill output
+	/* Fill output */
 	out->slot = slot;
 	out->port = port;
 
 	return 0;
 }
-
-
