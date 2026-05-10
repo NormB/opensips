@@ -16,6 +16,13 @@
 
 name: NATS Sanitizers
 
+# Auto-cancel previous still-pending runs on the same ref when a new
+# push comes in.  Without this, every commit on a busy day stacks
+# more sanitizer jobs into the GitHub-hosted runner concurrency cap.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     paths:

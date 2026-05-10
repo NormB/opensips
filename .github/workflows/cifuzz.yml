@@ -1,4 +1,12 @@
 name: CIFuzz
+
+# Auto-cancel previous still-pending runs on the same ref so a rapid
+# series of pushes doesn't keep an old fuzz run holding a runner
+# slot that the latest commit's run is waiting on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on: [push, pull_request]
 jobs:
   Fuzzing:
