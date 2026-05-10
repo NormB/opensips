@@ -77,6 +77,13 @@ modparam("usrloc", "cluster_mode",     "full-sharing-cachedb")
 modparam("usrloc", "location_cluster", 1)
 modparam("usrloc", "cachedb_url",      "@@CACHEDB_URL@@")
 modparam("usrloc", "nat_bflag",        "NAT")
+# use_domain=1 keeps user@host as the AoR.  The upstream default
+# flipped from 1 to 0 at some point; the e2e suite asserts on
+# "alice@127.0.0.1"-shaped AoR keys so we pin the legacy behaviour
+# explicitly here.  registrar imports this from usrloc at init
+# (see lib/reg/common.c:reg_init_globals), so setting it on
+# usrloc alone is sufficient.
+modparam("usrloc", "use_domain",       1)
 
 loadmodule "registrar.so"
 modparam("registrar", "tcp_persistent_flag", "TCP_PERSISTENT")
