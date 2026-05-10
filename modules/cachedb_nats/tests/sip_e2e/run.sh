@@ -155,15 +155,74 @@ start_opensips_b() {
         "$WORKDIR/opensips_B.cfg" "$WORKDIR/opensips_B.log") || return 1
 }
 
+# kill PID + wait PID reaps the attendant only.  OpenSIPS worker
+# processes (MI Datagram, SIP receivers, timer) are children of the
+# attendant but the SIGTERM-driven shutdown can leave them alive for
+# tens of milliseconds after the attendant exits, still holding the
+# MI port.  The next start_opensips then fails on bind ("Address
+# already in use") and case 020_cold_start_hydration aborts the
+# whole suite.  Wait for the actual MI port to free before returning.
+_wait_port_free() {
+    local port=$1
+    local deadline=$(( $(date +%s) + 5 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ss -lnu 2>/dev/null | grep -q "127.0.0.1:${port}\b" || return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+# Recursively collect every PID under attendant_pid via /proc, then
+# kill them all.  OpenSIPS's SIGTERM handler propagates to children
+# in normal operation, but under load (or just under GitHub-runner
+# scheduler latency) the MI Datagram worker can outlive the
+# attendant by tens to hundreds of milliseconds, holding the MI
+# UDP port.  Hard-kill the whole tree in one shot so the next
+# start_opensips never races bind on the MI port.
+_kill_tree() {
+    local root=$1
+    [ -z "$root" ] && return 0
+    # children-of-PID via /proc/*/stat (pos 4 = ppid).  Recurse first.
+    local pid
+    for pid in $(ps --no-headers -o pid --ppid "$root" 2>/dev/null); do
+        _kill_tree "$pid"
+    done
+    kill -9 "$root" 2>/dev/null
+}
+
 stop_opensips_a() {
-    [ -n "$OPENSIPS_PID" ] && kill "$OPENSIPS_PID" 2>/dev/null
-    wait "$OPENSIPS_PID" 2>/dev/null
+    if [ -n "$OPENSIPS_PID" ]; then
+        kill "$OPENSIPS_PID" 2>/dev/null
+        # Brief grace period for the orderly shutdown path.
+        local deadline=$(( $(date +%s) + 2 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            kill -0 "$OPENSIPS_PID" 2>/dev/null || break
+            sleep 0.05
+        done
+        # Whether the attendant exited or not, hard-kill any straggling
+        # workers under it.  After this, no opensips child can hold the
+        # MI port.
+        _kill_tree "$OPENSIPS_PID"
+        wait "$OPENSIPS_PID" 2>/dev/null
+    fi
+    _wait_port_free "$MI_PORT_A" || \
+        echo "WARN: MI port $MI_PORT_A still held after stop_opensips_a" >&2
     OPENSIPS_PID=""
 }
 
 stop_opensips_b() {
-    [ -n "$OPENSIPS_PID_B" ] && kill "$OPENSIPS_PID_B" 2>/dev/null
-    wait "$OPENSIPS_PID_B" 2>/dev/null
+    if [ -n "$OPENSIPS_PID_B" ]; then
+        kill "$OPENSIPS_PID_B" 2>/dev/null
+        local deadline=$(( $(date +%s) + 2 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            kill -0 "$OPENSIPS_PID_B" 2>/dev/null || break
+            sleep 0.05
+        done
+        _kill_tree "$OPENSIPS_PID_B"
+        wait "$OPENSIPS_PID_B" 2>/dev/null
+    fi
+    _wait_port_free "$MI_PORT_B" || \
+        echo "WARN: MI port $MI_PORT_B still held after stop_opensips_b" >&2
     OPENSIPS_PID_B=""
 }
 
