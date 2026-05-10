@@ -2,6 +2,12 @@
 
 name: rtp.io
 
+# Cancel superseded runs on the same ref so rapid pushes don't pile up
+# behind GitHub's hosted-runner concurrency cap.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Controls when the action will run.
 on:
   # Triggers the workflow on all push or pull request events

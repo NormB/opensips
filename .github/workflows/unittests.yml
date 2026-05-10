@@ -2,7 +2,13 @@
 
 name: Unit Tests
 
-# Controls when the action will run. 
+# Cancel superseded runs of this workflow on the same ref so a rapid
+# series of pushes doesn't pile up the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Controls when the action will run.
 on:
   # Triggers the workflow on all push or pull request events
   push:

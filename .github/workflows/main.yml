@@ -2,6 +2,14 @@
 
 name: Main CI
 
+# Cancel superseded runs on the same ref so a rapid series of pushes
+# doesn't pile up the queue.  Main CI's matrix is ~20 jobs per run;
+# without this, every commit on a busy day stacks ~20 more runner
+# jobs into the GitHub-hosted concurrency cap of 20 (free tier).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Controls when the action will run.
 on:
   # Triggers the workflow on all push or pull request events
