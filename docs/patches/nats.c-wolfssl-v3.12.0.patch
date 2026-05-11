@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 7495fc2a..fcf40c5f 100644
+index 7495fc2a..59b967e5 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -34,6 +34,7 @@ option(NATS_UPDATE_DOC "Update the doc template file" OFF)
@@ -10,7 +10,7 @@ index 7495fc2a..fcf40c5f 100644
  option(NATS_BUILD_TLS_FORCE_HOST_VERIFY "Forces hostname verification" ON)
  option(NATS_BUILD_USE_SODIUM "Build using libsodium library" OFF)
  option(NATS_BUILD_EXAMPLES "Build examples" ON)
-@@ -71,10 +72,46 @@ endif(NATS_COVERAGE)
+@@ -71,10 +72,59 @@ endif(NATS_COVERAGE)
  
  find_package(Threads REQUIRED)
  
@@ -28,19 +28,32 @@ index 7495fc2a..fcf40c5f 100644
 +  find_path(
 +          NATS_WOLFSSL_INCLUDE_DIR
 +          wolfssl/options.h
-+          HINTS
-+          ${NATS_WOLFSSL_DIR}
++          HINTS ${NATS_WOLFSSL_DIR}
++          PATH_SUFFIXES include
 +  )
 +  find_library(NATS_WOLFSSL_LIBRARY
 +          NAMES libwolfssl.so libwolfssl.dylib libwolfssl.a wolfssl.lib wolfssl.dll
 +          HINTS ${NATS_WOLFSSL_DIR}
++          PATH_SUFFIXES lib lib64
 +  )
 +  find_package_handle_standard_args(libwolfssl DEFAULT_MSG
 +          NATS_WOLFSSL_INCLUDE_DIR
 +          NATS_WOLFSSL_LIBRARY
 +  )
 +  if(libwolfssl_FOUND)
-+    set(NATS_WOLFSSL_INCLUDE_DIRS ${NATS_WOLFSSL_INCLUDE_DIR}/wolfssl)
++    # wolfSSL ships its OpenSSL compat headers at
++    # ${INCLUDE_DIR}/wolfssl/openssl/ssl.h (not
++    # ${INCLUDE_DIR}/openssl/ssl.h).  For libnats's existing
++    # `#include <openssl/ssl.h>` lines to resolve to wolfSSL's
++    # compat shim (which renames SSL_* -> wolfSSL_* at preprocess
++    # time), the include path must contain ${INCLUDE_DIR}/wolfssl
++    # AS WELL AS ${INCLUDE_DIR} (the latter so the explicit
++    # `#include <wolfssl/options.h>` in natsp.h still resolves).
++    # Order: wolfssl-subdir first so <openssl/ssl.h> finds the
++    # compat header before any system OpenSSL header.
++    set(NATS_WOLFSSL_INCLUDE_DIRS
++        ${NATS_WOLFSSL_INCLUDE_DIR}/wolfssl
++        ${NATS_WOLFSSL_INCLUDE_DIR})
 +    set(NATS_WOLFSSL_LIBRARIES ${NATS_WOLFSSL_LIBRARY})
 +    mark_as_advanced(
 +            NATS_WOLFSSL_LIBRARY
@@ -59,7 +72,7 @@ index 7495fc2a..fcf40c5f 100644
  
  set(LIBUV_DIR "" CACHE PATH "Libuv install directory")
  set(LIBEVENT_DIR "" CACHE PATH "Libevent install directory")
-@@ -255,13 +292,13 @@ if(UNIX)
+@@ -255,13 +305,13 @@ if(UNIX)
  endif(UNIX)
  add_definitions(-D${NATS_OS})
  add_definitions(-D_REENTRANT)
@@ -76,10 +89,10 @@ index 7495fc2a..fcf40c5f 100644
  
  #------------
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 397c470f..b242034c 100644
+index 397c470f..9823a159 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -5,10 +5,14 @@ include_directories(include)
+@@ -5,10 +5,16 @@ include_directories(include)
  include_directories(${NATS_PLATFORM_INCLUDE})
  include_directories(glib)
  
@@ -91,12 +104,14 @@ index 397c470f..b242034c 100644
 +endif(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
 +
 +if(NATS_BUILD_WITH_WOLFSSL)
-+  include_directories(${NATS_WOLFSSL_INCLUDE_DIRS})
++  # BEFORE: ensure wolfSSL's openssl-compat shim wins over the
++  # system <openssl/ssl.h>.
++  include_directories(BEFORE ${NATS_WOLFSSL_INCLUDE_DIRS})
 +endif(NATS_BUILD_WITH_WOLFSSL)
  
  if(NATS_BUILD_STREAMING)
    include_directories(${NATS_PROTOBUF_INCLUDE_DIRS})
-@@ -37,7 +41,7 @@ endif(NATS_BUILD_STREAMING)
+@@ -37,7 +43,7 @@ endif(NATS_BUILD_STREAMING)
  # --------------------------------------
  if(NATS_BUILD_LIB_SHARED)
    add_library(nats SHARED ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
@@ -105,7 +120,7 @@ index 397c470f..b242034c 100644
    target_link_libraries(nats PRIVATE ${NATS_EXTRA_LIB} ${NATS_PROTOBUF_LIBRARIES} ${NATS_SODIUM_LIBRARIES})
    set_target_properties(nats PROPERTIES
      VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
-@@ -46,7 +50,7 @@ endif(NATS_BUILD_LIB_SHARED)
+@@ -46,7 +52,7 @@ endif(NATS_BUILD_LIB_SHARED)
  
  if(NATS_BUILD_LIB_STATIC)
    add_library(nats_static STATIC ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
@@ -115,7 +130,7 @@ index 397c470f..b242034c 100644
      VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
      SOVERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR})
 diff --git a/src/conn.c b/src/conn.c
-index d7ba4501..627c05c5 100644
+index d7ba4501..81b16d71 100644
 --- a/src/conn.c
 +++ b/src/conn.c
 @@ -44,6 +44,10 @@
@@ -129,16 +144,15 @@ index d7ba4501..627c05c5 100644
  #ifdef DEV_MODE
  // For type safety
  
-@@ -735,9 +739,17 @@ _makeTLSConn(natsConnection *nc)
+@@ -735,9 +739,16 @@ _makeTLSConn(natsConnection *nc)
  #endif
              if (nc->tlsName != NULL)
              {
-+                // The SSL_set_hostflags / SSL_set1_host pair is not part of
-+                // wolfSSL's OpenSSL compatibility layer.  Under wolfSSL we
-+                // fall back to the SNI-only path (SSL_set_tlsext_host_name
-+                // below already handles hostname presentation); the cert
-+                // hostname-verify is then enforced via the verify callback
-+                // and X509_check_host from the compat layer.
++                // SSL_set_hostflags / SSL_set1_host aren't in
++                // wolfSSL's OpenSSL compat layer.  Under wolfSSL
++                // we rely on SSL_set_tlsext_host_name (called
++                // below) plus the verify callback for cert
++                // hostname checking.
 +#if !defined(NATS_HAS_WOLFSSL)
                  SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
                  if (!SSL_set1_host(ssl, nc->tlsName))
@@ -148,17 +162,20 @@ index d7ba4501..627c05c5 100644
              if (s == NATS_OK)
              {
 diff --git a/src/natsp.h b/src/natsp.h
-index edd5da2b..e2d44c92 100644
+index edd5da2b..6ab69eb1 100644
 --- a/src/natsp.h
 +++ b/src/natsp.h
-@@ -20,6 +20,13 @@
+@@ -20,6 +20,16 @@
  # include "include/n-unix.h"
  #endif
  
 +#if defined(NATS_HAS_WOLFSSL)
-+// Must come before <openssl/*> so wolfSSL's compatibility layer
-+// macros (SSL_get_error -> wolfSSL_get_error, etc.) are in effect
-+// when the system <openssl/*.h> are processed.
++// Must come before <openssl/*> so wolfSSL's compatibility-layer
++// macros (SSL_get_error -> wolfSSL_get_error, EVP_sha256 ->
++// wolfSSL_EVP_sha256, etc.) are in effect when the subsequent
++// <openssl/*.h> are processed.  The matching include_directories()
++// `BEFORE` in src/CMakeLists.txt makes <openssl/ssl.h> resolve to
++// wolfSSL's own openssl-compat header rather than the system one.
 +#include <wolfssl/options.h>
 +#endif
 +

@@ -30,10 +30,6 @@ loadmodule "$ROOT/modules/maxfwd/maxfwd.so"
 loadmodule "$ROOT/modules/sipmsgops/sipmsgops.so"
 
 loadmodule "$ROOT/modules/nats_tls_wolfssl/nats_tls_wolfssl.so"
-# CI builds libnats from upstream tag v3.12.0 -> SONAME libnats.so.3.12.
-# Override the wrapper's default path (which points at 3.13).
-modparam("nats_tls_wolfssl", "libnats_path",
-         "/opt/libnats-wolfssl/lib/libnats.so.3.12")
 loadmodule "$ROOT/modules/event_nats/event_nats.so"
 
 route { sl_send_reply(200, "OK"); exit; }

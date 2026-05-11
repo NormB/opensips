@@ -41,40 +41,42 @@
  */
 
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../../sr_module.h"
 #include "../../dprint.h"
 
-/* Path to the wolfSSL-flavoured libnats install.  Default points at
- * the recommended deployment prefix; distros / operators that
- * install elsewhere set this modparam.  Unlike nats_tls_openssl
- * which defaults to a bare SONAME (resolved via ld.so search), this
- * module defaults to an absolute path because wolfSSL-flavoured
- * libnats is not on the system search path on any distro -- it is
- * always a sidecar build. */
-static char *nats_libnats_path = "/opt/libnats-wolfssl/lib/libnats.so.3";
+/* Default path of the wolfSSL-flavoured libnats install.  An env
+ * var override (NATS_TLS_LIBNATS_PATH) lets operators with a
+ * non-default install (different prefix / different minor version)
+ * point at the right file without recompiling this module.
+ *
+ * Why an env var rather than a modparam: modparams are parsed
+ * AFTER mod_load runs, but mod_load is exactly the point at which
+ * we need to dlopen libnats -- it fires before subsequent
+ * loadmodule directives, so the NATS user modules' DT_NEEDED
+ * resolution sees our dlopen. */
+static const char *default_libnats_path =
+	"/opt/libnats-wolfssl/lib/libnats.so.3.12";
 
+static const char *nats_resolved_path = NULL;
 static void *_handle = NULL;
 
+static int mod_load(void);
 static int mod_init(void);
 static void mod_destroy(void);
-
-static const param_export_t params[] = {
-	{"libnats_path", STR_PARAM, &nats_libnats_path},
-	{0, 0, 0}
-};
 
 struct module_exports exports = {
 	"nats_tls_wolfssl",  /* module name */
 	MOD_TYPE_DEFAULT,    /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,
-	0,                   /* load function */
+	mod_load,            /* runs before subsequent loadmodule */
 	NULL,                /* OpenSIPS module dependencies */
 	0,                   /* exported commands */
 	0,                   /* exported async commands */
-	params,              /* module parameters */
+	0,                   /* module parameters (none -- env var) */
 	0,                   /* exported statistics */
 	0,                   /* exported MI functions */
 	0,                   /* exported pseudo-variables */
@@ -88,29 +90,23 @@ struct module_exports exports = {
 	0                    /* reload confirm function */
 };
 
-static int mod_init(void)
+/* mod_load: pre-load libnats so subsequent loadmodule directives
+ * resolve their DT_NEEDED libnats.so against this dlopen.  Fires
+ * before the next loadmodule line; cannot read modparams (those
+ * haven't been processed yet), so the libnats path is sourced
+ * from the env var $NATS_TLS_LIBNATS_PATH or the compile-time
+ * default. */
+static int mod_load(void)
 {
+	const char *env = getenv("NATS_TLS_LIBNATS_PATH");
 	void *sentinel;
 
-	LM_INFO("nats_tls_wolfssl: initializing\n");
+	nats_resolved_path = (env && *env) ? env : default_libnats_path;
 
-	if (module_loaded("nats_tls_openssl")) {
-		LM_ERR("nats_tls_wolfssl: nats_tls_openssl is also loaded; "
-		       "load exactly one TLS-backend wrapper module\n");
-		return -1;
-	}
-
-	if (!nats_libnats_path || !*nats_libnats_path) {
-		LM_ERR("nats_tls_wolfssl: libnats_path modparam is empty -- "
-		       "wolfSSL-flavoured libnats has no system default; "
-		       "set libnats_path to the install location\n");
-		return -1;
-	}
-
-	_handle = dlopen(nats_libnats_path, RTLD_NOW | RTLD_GLOBAL);
+	_handle = dlopen(nats_resolved_path, RTLD_NOW | RTLD_GLOBAL);
 	if (!_handle) {
 		LM_ERR("nats_tls_wolfssl: dlopen('%s') failed: %s\n",
-		       nats_libnats_path, dlerror());
+		       nats_resolved_path, dlerror());
 		return -1;
 	}
 
@@ -118,7 +114,7 @@ static int mod_init(void)
 	if (!sentinel) {
 		LM_ERR("nats_tls_wolfssl: sanity-check failed -- loaded "
 		       "'%s' does not export natsConnection_Connect (%s)\n",
-		       nats_libnats_path,
+		       nats_resolved_path,
 		       dlerror() ? dlerror() : "no error string");
 		dlclose(_handle);
 		_handle = NULL;
@@ -126,7 +122,17 @@ static int mod_init(void)
 	}
 
 	LM_INFO("nats_tls_wolfssl: loaded '%s' (TLS backend = wolfSSL)\n",
-	        nats_libnats_path);
+	        nats_resolved_path);
+	return 0;
+}
+
+static int mod_init(void)
+{
+	if (module_loaded("nats_tls_openssl")) {
+		LM_ERR("nats_tls_wolfssl: nats_tls_openssl is also loaded; "
+		       "load exactly one TLS-backend wrapper module\n");
+		return -1;
+	}
 	return 0;
 }
 
