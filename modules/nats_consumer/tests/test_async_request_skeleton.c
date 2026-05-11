@@ -168,23 +168,37 @@ int main(void)
 			"header includes async.h");
 	}
 
-	/* (5) phase-2 impl: state-machine entry points present, the
-	 * sync fall-through is GONE, and the resume path returns the
-	 * eventfd (async_status = c->eventfd) rather than ASYNC_SYNC. */
+	/* (5) phase-4/5 interim impl: state machine + UUIDv7 + pvar
+	 * surface preserved, but the transport reverted to the
+	 * sync-fall-through after the per-worker subscription
+	 * crashed (PERF_NOTES "Async nats_request" section).  The
+	 * subscription / on_inbox_reply / per-call eventfd
+	 * machinery is still defined in source for phase 5 reuse,
+	 * but w_nats_request_async no longer invokes it. */
 	{
 		ASSERT(strstr(impl, "int w_nats_request_async(") != NULL,
 			"impl defines w_nats_request_async");
-		ASSERT(strstr(impl, "nats_rpc_async_ctx_new") != NULL,
-			"impl allocates ctx via nats_rpc_async_ctx_new");
-		ASSERT(strstr(impl, "natsConnection_PublishMsg") != NULL,
-			"impl publishes with PublishMsg (carries reply-to)");
+		ASSERT(strstr(impl, "nats_rpc_async_uuidv7_mint") != NULL,
+			"impl still mints per-call UUIDv7");
+		ASSERT(strstr(impl, "nats_rpc_async_request_id_set") != NULL,
+			"impl still stashes the request id for $nats_request_id");
+		ASSERT(strstr(impl, "w_nats_request(msg") != NULL,
+			"impl delegates the transport to w_nats_request "
+			"(sync fall-through after the phase-2 transport "
+			"revert)");
+		ASSERT(strstr(impl, "async_status = ASYNC_SYNC") != NULL,
+			"impl reports ASYNC_SYNC so the reactor runs the "
+			"resume route immediately");
+		/* The hash table / subscription / on_inbox_reply code
+		 * is still present in the file for phase 5 reuse,
+		 * even though w_nats_request_async no longer calls
+		 * into it.  We assert that the symbols still exist so
+		 * the phase-5 refactor has something to graft onto. */
 		ASSERT(strstr(impl, "on_inbox_reply") != NULL,
-			"impl wires the inbox-subscription callback");
-		ASSERT(strstr(impl, "async_status = c->eventfd") != NULL,
-			"impl yields to the reactor on the per-call eventfd");
-		ASSERT(strstr(impl, "ASYNC_SYNC") == NULL,
-			"impl no longer falls through to a synchronous "
-			"completion (phase-1 stub removed)");
+			"on_inbox_reply callback still defined (phase 5 "
+			"will reuse it from the consumer-process side)");
+		ASSERT(strstr(impl, "ensure_inbox_subscription") != NULL,
+			"ensure_inbox_subscription still defined for phase 5 reuse");
 	}
 
 	free(src); free(hdr); free(impl);
