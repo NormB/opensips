@@ -497,7 +497,7 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
                 <listitem><para>
                     <emphasis role="bold">FAILURE_ROUTE.</emphasis>
                     Has two invocation paths with different blast
-                    radius:
+                    radius and different async support:
                     <itemizedlist>
                         <listitem><para>
                             <emphasis>Negative-reply trigger</emphasis>
@@ -508,27 +508,50 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
                             (<filename>modules/tm/t_reply.c</filename>:
                             <function>run_failure_handlers</function>).
                             Blast radius identical to
-                            REQUEST_ROUTE blocking on that worker.
+                            REQUEST_ROUTE blocking on that worker;
+                            <function>async()</function> IS
+                            available from this trigger path
+                            because a SIP worker has a full
+                            reactor.
                         </para></listitem>
                         <listitem><para>
                             <emphasis><varname>fr_timer</varname> /
                             <varname>fr_inv_timer</varname> expiry</emphasis>
-                            -- the failure route runs on the
-                            single-threaded
-                            <varname>timer</varname> process
-                            (forked by
+                            -- the failure route runs inline on
+                            the <emphasis>timer ticker</emphasis>
+                            process, which is the
+                            single-threaded process forked by
                             <function>start_timer_processes</function>
-                            in <filename>timer.c</filename>).
-                            Blocking it queues every other
-                            transaction's timer fire <emphasis>plus</emphasis>
-                            every other module's registered
-                            timer (retransmissions, watchdogs)
+                            in <filename>timer.c</filename>
+                            (loop body:
+                            <function>run_timer_process</function>,
+                            a bare
+                            <function>select(0,0,0,0,&amp;tv)</function>
+                            tick driver with no reactor).  This
+                            process exists solely to fire the
+                            C-level callbacks registered via
+                            <function>register_timer()</function>
+                            -- including TM's
+                            <function>final_response_handler</function>,
+                            which in turn calls
+                            <function>fake_reply</function> -&gt;
+                            <function>relay_reply</function>
+                            -&gt;
+                            <function>run_failure_handlers</function>
+                            inline.  Blocking it queues every
+                            other transaction's fr_timer fire,
+                            every other module's tick callback
+                            (retransmissions, watchdogs, etc.)
                             until the block clears.  Worse blast
                             radius than blocking a single SIP
-                            worker, and there is currently
-                            <emphasis>no async alternative</emphasis>
-                            from this trigger path -- async() is
-                            not supported on the timer process.
+                            worker, and
+                            <function>async()</function> is
+                            <emphasis>not</emphasis> available
+                            from this trigger path because the
+                            ticker has no reactor -- there is no
+                            non-blocking option in this module
+                            for fr_timer-triggered failure_route
+                            today.
                         </para></listitem>
                     </itemizedlist>
                 </para></listitem>
@@ -556,15 +579,42 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
                 </para></listitem>
             </itemizedlist>
             <para>
+                <emphasis>Note:</emphasis>
+                <varname>timer_route { ... }</varname> blocks (not
+                to be confused with the C-level
+                <function>register_timer()</function> callbacks
+                described under FAILURE_ROUTE above) execute on a
+                separate <emphasis>Timer handler</emphasis>
+                process that has a full reactor and supports
+                <function>async()</function>.  Calls to bare
+                <function>nats_request</function> from
+                <varname>timer_route</varname> are accepted by
+                the default mask (TIMER_ROUTE is in the safe
+                allow-list) and async() works there too.  The
+                ticker-process limitation discussed under
+                FAILURE_ROUTE / fr_timer is a different process
+                and a different code path.
+            </para>
+            <para>
                 <emphasis>The recommended pattern for any worker
                 route is the async form</emphasis>, which yields
-                the worker on a per-call eventfd while the reply
-                is in flight and does not block SIP processing:
+                on a per-call eventfd while the reply is in flight
+                and does not block SIP processing:
                 <programlisting format="linespecific">async(nats_request(subj, payload, tmo), reply_route)</programlisting>
                 The async form is accepted from every route that
                 supports <function>async()</function> regardless of
-                this modparam.  See
-                <function>nats_request</function> below.
+                this modparam -- request_route, branch_route,
+                error_route, timer_route, event_route,
+                onreply_route, and the reply-triggered branch of
+                failure_route.  The only worker-blocking
+                situation without a non-blocking alternative is
+                failure_route entered through fr_timer /
+                fr_inv_timer expiry; lifting that requires an
+                upstream change in <emphasis>tm</emphasis> that
+                dispatches fr_timer expiry through a Timer
+                handler instead of running it inline on the
+                ticker.  See <function>nats_request</function>
+                below.
             </para>
             <para>
                 Range: <varname>0</varname> (default, safer) or
