@@ -24,10 +24,14 @@ with an in-process JSON full-text search index and live KV change watching.
 
 ## Parameters
 
+The `Default` column wraps multi-line values so its rendered width
+is bounded by the longest single-line value rather than the longest
+full string.  Long defaults split across `<br>` breaks.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cachedb_url` | string (func) | -- | OpenSIPS cachedb URL (e.g., `nats://127.0.0.1:4222/`) |
-| `nats_url` | string | `nats://127.0.0.1:4222` | NATS server seed list. Use DNS hostnames for cluster resilience. |
+| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | NATS server seed list. Use DNS hostnames for cluster resilience. |
 | `kv_bucket` | string | `opensips` | JetStream KV bucket name |
 | `kv_replicas` | int | 3 | Replication factor (only used when creating a new bucket) |
 | `kv_history` | int | 5 | Version history depth per key |
