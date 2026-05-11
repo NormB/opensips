@@ -59,27 +59,36 @@
  *                                per-worker current-message state so
  *                                the script can read $nats_data,
  *                                $nats_subject, $nats_hdr(...), etc.
- *                                Return codes:
+ *                                Return codes (no path returns 0;
+ *                                see action.c:196 -- a 0 return from
+ *                                a script-callable cmd terminates
+ *                                the surrounding route via
+ *                                ACT_FL_EXIT, which is never what
+ *                                we want for an RPC result):
  *                                   1  reply delivered.
- *                                   0  timeout (the broker is still
- *                                      reachable; the responder did
- *                                      not reply in time).
- *                                  -1  internal error (oom, format
- *                                      failure) -- async only.
- *                                  -2  connection lost mid-flight --
- *                                      async only.  The pool epoch
+ *                                  -1  timeout (broker still
+ *                                      reachable; responder did
+ *                                      not reply in time).  Script
+ *                                      may retry with a longer
+ *                                      timeout_ms.
+ *                                  -2  connection lost mid-flight
+ *                                      -- async only.  Pool epoch
  *                                      advanced or is_connected
- *                                      went false during the call;
- *                                      the script should treat this
- *                                      as broker-down rather than
+ *                                      went false during the call.
+ *                                      Distinct from -1: treat as
+ *                                      broker-down rather than
  *                                      retry-with-longer-tmo.
  *                                  -3  NATS unavailable at issue
  *                                      time (no pool connection).
- *                                  -4  request error (subject empty
- *                                      / too long, msg create failed,
- *                                      publish/request failed).
+ *                                  -4  request error (subject
+ *                                      empty / too long, msg
+ *                                      create failed, publish or
+ *                                      sync-request failed).
  *                                  -5  per-worker in-flight cap
  *                                      reached -- async only.
+ *                                  -6  internal error (oom,
+ *                                      format failure, missing
+ *                                      eventfd, etc.).
  */
 
 #ifndef NATS_RPC_H

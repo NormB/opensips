@@ -91,19 +91,19 @@ void              nats_fetch_clear_batch(void);
 
 /* Script-callable: sync-fetch.
  *
- *   timeout_ms == 0  -> non-blocking poll; returns 1 on hit, 0 on empty.
- *   timeout_ms > 0   -> blocks the worker up to timeout_ms; returns 1/0.
+ *   timeout_ms == 0  -> non-blocking poll
+ *   timeout_ms > 0   -> blocks the worker up to timeout_ms
  *
- * Return codes:
+ * Return codes (no path returns 0 -- a 0 return from a script-
+ * callable cmd terminates the calling route via ACT_FL_EXIT):
  *    1   got a message (populated current-msg state).
- *    0   no message within the budget; not an error.
- *   -2   NATS connection lost.  Workers can inspect the textual reason
- *        via nats_last_error() (process-local; valid until the next
- *        fetch / ack call).  The consumer process will refresh its
- *        subscriptions on the next epoch bump once the library
- *        reconnects -- the script should back off and retry.
- *   -3   handle id not found.
- *   -1   internal error (OOM, parser failure). */
+ *   -1   no message within the budget; not an error.  Script may
+ *        retry or fall through.
+ *   -2   NATS connection lost.  Inspect nats_last_error() for
+ *        the textual reason (process-local; valid until the next
+ *        fetch / ack call).
+ *   -3   handle id not found / handle retiring.
+ *   -6   internal error (OOM, missing eventfd, etc.). */
 int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms);
 
 /* Return the most recent per-worker error string.
@@ -126,9 +126,17 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
  *     expires=<dur>     -- total wait budget (ms unless suffixed)
  *     max_bytes=<n>     -- byte cap (advisory, passed through)
  *     no_wait=<0|1>     -- if 1, return immediately with whatever is ready
- * Returns the number of messages retrieved (0..NATS_BATCH_MAX).
- * Populates the per-worker batch buffer; does NOT set g_cur.
- * Returns -3 on unknown handle, -1 on parse / internal error. */
+ *
+ * Return codes (no path returns 0):
+ *    N>0  N messages retrieved (1..NATS_BATCH_MAX); populates the
+ *         per-worker batch buffer.  Iterate via nats_batch_select(i).
+ *   -1   no messages available within the budget; not an error.
+ *        Script writers using `$var(n) = nats_fetch_batch(...)`
+ *        should branch on `$var(n) > 0` for the iteration case
+ *        and treat any value <= 0 as the empty path.
+ *   -2   connection lost; broker is down.
+ *   -3   unknown handle / retiring.
+ *   -4   bad opts string. */
 int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts);
 
 /* Script-callable: async batch fetch.  Same semantics as above; yields

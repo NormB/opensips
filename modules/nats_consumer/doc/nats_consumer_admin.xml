@@ -1147,21 +1147,26 @@ timer_route[drain, 1] {
             </para>
             <para>
                 <emphasis>Return codes.</emphasis>
+                No path returns <varname>0</varname> -- a 0 return
+                from a script-callable cmd sets
+                <emphasis>ACT_FL_EXIT</emphasis> in
+                <function>run_action_list</function>
+                (<filename>action.c</filename>:196) and silently
+                terminates the calling route, which is never
+                correct for an RPC result.  Every outcome is
+                therefore a positive success code or a negative
+                error / non-result code:
             </para>
             <itemizedlist>
                 <listitem><para>
                     <varname>1</varname> — reply delivered.
                 </para></listitem>
                 <listitem><para>
-                    <varname>0</varname> — timeout: the broker
+                    <varname>-1</varname> — timeout: the broker
                     is still reachable but the responder did not
                     reply within
                     <varname>timeout_ms</varname>.  Script may
                     retry with a longer timeout.
-                </para></listitem>
-                <listitem><para>
-                    <varname>-1</varname> — internal error (oom,
-                    snprintf failure).  Async only.
                 </para></listitem>
                 <listitem><para>
                     <varname>-2</varname> —
@@ -1208,9 +1213,13 @@ timer_route[drain, 1] {
                     callers should implement back-pressure when
                     this surfaces.
                 </para></listitem>
+                <listitem><para>
+                    <varname>-6</varname> — internal error
+                    (oom, format failure, missing eventfd, etc.).
+                </para></listitem>
             </itemizedlist>
             <example>
-                <title>Async request with connection-aware error handling</title>
+                <title>Async request with full error-branch handling</title>
                 <programlisting format="linespecific">
 route {
     async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
@@ -1219,7 +1228,7 @@ route {
 route[on_reply] {
     if ($retcode == 1) {
         # success: reply in $nats_data
-    } else if ($retcode == 0) {
+    } else if ($retcode == -1) {
         # timeout: responder slow; maybe retry with longer tmo
         xlog("L_WARN", "rpc id=$nats_request_id timeout\n");
     } else if ($retcode == -2) {
@@ -1227,7 +1236,7 @@ route[on_reply] {
         xlog("L_ERR", "rpc id=$nats_request_id connection lost\n");
         sl_send_reply(503, "Service Unavailable");
     } else {
-        # -3 / -4 / -5: configuration / publish / capacity errors
+        # -3 / -4 / -5 / -6: configuration / publish / capacity / internal
         xlog("L_ERR", "rpc id=$nats_request_id failed rc=$retcode\n");
         sl_send_reply(500, "Internal Server Error");
     }

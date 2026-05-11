@@ -471,6 +471,39 @@ static void test_request_id_user_override(void)
 
 /* ────────────────────────────────────────────────────────────── */
 
+static void test_resume_rc_policy(void)
+{
+	fprintf(stderr, "\n=== resume_rc policy (no zero returns) ===\n");
+
+	/* state == REPLIED (1) is the only "success" path; everything
+	 * else is non-zero negative so a bare nats_* call in a route
+	 * does not trigger ACT_FL_EXIT (action.c:196). */
+	ASSERT(nats_rpc_async_resume_rc(1 /* REPLIED */, 0) == 1,
+		"REPLIED + connected -> 1 (success)");
+	ASSERT(nats_rpc_async_resume_rc(1 /* REPLIED */, 1) == 1,
+		"REPLIED + disconnected -> 1 (reply already in hand)");
+
+	/* INFLIGHT (state 0) + disconnected -> connection lost (-2). */
+	ASSERT(nats_rpc_async_resume_rc(0 /* INFLIGHT */, 1) == -2,
+		"INFLIGHT + disconnected -> -2 (connection lost)");
+
+	/* INFLIGHT + still connected -> clean timeout (-1), NOT 0. */
+	ASSERT(nats_rpc_async_resume_rc(0 /* INFLIGHT */, 0) == -1,
+		"INFLIGHT + connected -> -1 (clean timeout, not 0)");
+
+	/* ABANDONED is the same shape: -1 unless disconnected. */
+	ASSERT(nats_rpc_async_resume_rc(2 /* ABANDONED */, 0) == -1,
+		"ABANDONED + connected -> -1");
+	ASSERT(nats_rpc_async_resume_rc(2 /* ABANDONED */, 1) == -2,
+		"ABANDONED + disconnected -> -2");
+
+	/* Defensive: no path returns 0. */
+	ASSERT(nats_rpc_async_resume_rc(-1, 0) != 0,
+		"unknown state never returns 0 (would trigger ACT_FL_EXIT)");
+	ASSERT(nats_rpc_async_resume_rc(-1, 1) != 0,
+		"unknown state + disconnected never returns 0");
+}
+
 static void test_disconnect_detection(void)
 {
 	struct nats_rpc_async_ctx *c;
@@ -531,6 +564,7 @@ int main(void)
 	test_request_id_stash();
 	test_request_id_user_override();
 	test_disconnect_detection();
+	test_resume_rc_policy();
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

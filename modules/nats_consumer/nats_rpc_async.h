@@ -115,13 +115,25 @@ void     nats_rpc_async_ctx_set_epoch_at_start(struct nats_rpc_async_ctx *c,
 uint32_t nats_rpc_async_ctx_epoch_at_start    (struct nats_rpc_async_ctx *c);
 
 /* Pure decision: should the resume path return -2
- * (connection lost) instead of 0 (timeout) for this ctx given
+ * (connection lost) instead of -1 (timeout) for this ctx given
  * the current pool epoch + connected flag?  Returns 1 = connection
  * lost, 0 = stable.  Exposed for unit tests; the production
  * resume function calls it with the live pool values. */
 int nats_rpc_async_ctx_is_disconnected(struct nats_rpc_async_ctx *c,
                                        uint32_t current_epoch,
                                        int current_connected);
+
+/* Centralised script-rc policy for the async resume path.
+ *
+ *   state == REPLIED       -> 1   (reply delivered)
+ *   state != REPLIED && disconnected   -> -2  (connection lost)
+ *   state != REPLIED && !disconnected  -> -1  (clean timeout)
+ *
+ * No path returns 0 -- a 0 return from a script-callable cmd
+ * sets ACT_FL_EXIT in run_action_list (action.c:196) and
+ * terminates the surrounding route.  Exposed for unit tests so
+ * the policy is locked down without depending on libnats. */
+int nats_rpc_async_resume_rc(int state, int disconnected);
 
 /* Process-wide in-flight count snapshot (advisory, locked). */
 int nats_rpc_async_inflight_count(void);
