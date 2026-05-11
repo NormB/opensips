@@ -181,7 +181,12 @@ SIPP_SCENARIO="$OUT/options_uac.xml"
 cat > "$SIPP_SCENARIO" <<'XML'
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <scenario name="options-uac">
-  <send>
+  <!-- start_rtd="1" starts response-time-duration counter 1 on
+       the outbound send; the matching rtd="1" on the recv
+       records the elapsed time into ResponseTime1.  Without the
+       start_rtd, rtd on recv has nothing to subtract from and
+       sipp records 0. -->
+  <send start_rtd="1">
     <![CDATA[
       OPTIONS sip:bench@[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
@@ -199,16 +204,16 @@ cat > "$SIPP_SCENARIO" <<'XML'
   <!-- Failure branches first.  Each is optional so it doesn't
        block the happy path; if any of them matches the inbound
        response, sipp counts the call as Failed and the scenario
-       ends.  rtd records the response time for the stats CSV. -->
-  <recv response="504" optional="true" rtd="true" next="failed" />
-  <recv response="503" optional="true" rtd="true" next="failed" />
-  <recv response="500" optional="true" rtd="true" next="failed" />
-  <recv response="405" optional="true" rtd="true" next="failed" />
+       ends. -->
+  <recv response="504" optional="true" rtd="1" next="failed" />
+  <recv response="503" optional="true" rtd="1" next="failed" />
+  <recv response="500" optional="true" rtd="1" next="failed" />
+  <recv response="405" optional="true" rtd="1" next="failed" />
 
   <!-- Happy path: mandatory 200 OK.  This is what gives sipp a
        state to block on so the call actually terminates instead
        of sitting in CurrentCall forever. -->
-  <recv response="200" rtd="true" />
+  <recv response="200" rtd="1" />
 
   <label id="failed" />
 </scenario>
@@ -231,52 +236,75 @@ sipp -i 127.0.0.1 -p 0 \
      -sf "$SIPP_SCENARIO" \
      -m "$N" -r "$CPS" -rp 1000 \
      -trace_stat -stf "${SIPP_STATS_BASE}_stats.csv" \
-     -trace_screen -screen_file "${SIPP_STATS_BASE}_screen.log" \
      -fd 1 \
+     -trace_screen -screen_file "${SIPP_STATS_BASE}_screen.log" \
      "127.0.0.1:${SIP_PORT}" > "${SIPP_STATS_BASE}_run.log" 2>&1
 SIPP_RC=$?
 
 ####### parse + report ##########################################
 
-# sipp's last stats row in the CSV has totals.  Pull the final-line
-# fields we care about: successful calls, failed, avg response time.
-# Fields are CSV; the column meanings come from sipp's documented
-# format ("CurrentTime;ElapsedTime;...;FailedCallCnt;...").
+# sipp's stats CSV columns use "(P)" and "(C)" suffixes for the
+# periodic and cumulative variants of each counter.  We always
+# want the cumulative final-row value.
+#
+# RTT: sipp exports only a single ResponseTime1(C) column -- a
+# rolling average -- not min/avg/max.  -trace_rtt has a buffer-
+# overflow bug in the bundled sipp build, so we don't use it.
+# The summary reports the rolling-average alone, which is enough
+# to characterise the workload.  Format is HH:MM:SS:microseconds;
+# we normalise to "Xs Yms" for readability.
+
+normalise_rtd() {
+    # input "HH:MM:SS:uuuuuu" -> "<milliseconds>ms"
+    local raw="$1"
+    [ -z "$raw" ] && { echo "n/a"; return; }
+    echo "$raw" | awk -F: '{
+        if (NF != 4) { print "n/a"; exit }
+        ms = $1*3600000 + $2*60000 + $3*1000 + $4/1000;
+        if (ms < 10) printf "%.3fms\n", ms;
+        else         printf "%.1fms\n", ms;
+    }'
+}
 
 STATS_CSV="${SIPP_STATS_BASE}_stats.csv"
+SUCCEED="n/a"; FAILED="n/a"; UNEXPECTED="n/a"; RT_AVG="n/a"
 if [ -s "$STATS_CSV" ]; then
     HEADER=$(head -1 "$STATS_CSV")
     LAST=$(tail -1 "$STATS_CSV")
-    # extract a few columns by name
     col() {
         local name="$1"
         echo "$HEADER" | awk -F';' -v n="$name" '{
-            for (i=1; i<=NF; i++) if ($i == n) print i }'
+            for (i=1; i<=NF; i++) if ($i == n) { print i; exit } }'
     }
     PICK() {
         local i; i=$(col "$1")
-        [ -n "$i" ] || { echo "n/a"; return; }
+        [ -n "$i" ] || { echo ""; return; }
         echo "$LAST" | awk -F';' -v i="$i" '{ print $i }'
     }
 
-    SUCCEED=$(PICK SuccessfulCall_count)
-    FAILED=$(PICK FailedCall_count)
-    RT_AVG=$(PICK ResponseTime1_avg)
-    RT_MIN=$(PICK ResponseTime1_min)
-    RT_MAX=$(PICK ResponseTime1_max)
+    SUCCEED=$(PICK "SuccessfulCall(C)")
+    FAILED=$(PICK "FailedCall(C)")
+    UNEXPECTED=$(PICK "FailedUnexpectedMessage(C)")
+    RT_AVG=$(normalise_rtd "$(PICK "ResponseTime1(C)")")
 fi
 
 # OpenSIPS-side counters: errors / timeouts surface as non-2xx
-# return paths in our cfg.  Count occurrences in the log.
-TIMEOUTS=$(grep -c "504 Gateway Timeout"     "$OPENSIPS_LOG" 2>/dev/null || echo 0)
-BROKER_DN=$(grep -c "503 Broker Unavailable" "$OPENSIPS_LOG" 2>/dev/null || echo 0)
-INTERNAL=$(grep -c  "500 Internal Server"    "$OPENSIPS_LOG" 2>/dev/null || echo 0)
+# return paths in our cfg.  Count occurrences in the log.  grep -c
+# emits its own "0" on no match and exits 1, so the "|| echo 0"
+# fallback used to double-print -- pipe through head -1 to keep
+# the value single-line.
+TIMEOUTS=$(grep -c "504 Gateway Timeout"     "$OPENSIPS_LOG" 2>/dev/null | head -1)
+BROKER_DN=$(grep -c "503 Broker Unavailable" "$OPENSIPS_LOG" 2>/dev/null | head -1)
+INTERNAL=$(grep -c  "500 Internal Server"    "$OPENSIPS_LOG" 2>/dev/null | head -1)
+TIMEOUTS=${TIMEOUTS:-0}
+BROKER_DN=${BROKER_DN:-0}
+INTERNAL=${INTERNAL:-0}
 
 cat > "$OUT/bench.summary" <<EOF
 N=${N} CPS=${CPS} responder_delay_ms=${RESPONDER_DELAY_MS}
 RPC_TIMEOUT=${RPC_TIMEOUT_MS}ms UDP_WORKERS=${UDP_WORKERS}
-sipp_rc=${SIPP_RC} succeed=${SUCCEED:-?} failed=${FAILED:-?}
-sip_rtt_avg=${RT_AVG:-?} sip_rtt_min=${RT_MIN:-?} sip_rtt_max=${RT_MAX:-?}
+sipp_rc=${SIPP_RC} succeed=${SUCCEED} failed=${FAILED} unexpected=${UNEXPECTED}
+sip_rtt_avg=${RT_AVG}
 opensips_timeouts=${TIMEOUTS} broker_dn=${BROKER_DN} internal=${INTERNAL}
 EOF
 cat "$OUT/bench.summary"
