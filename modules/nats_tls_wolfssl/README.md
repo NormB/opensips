@@ -51,17 +51,20 @@ depends on, hence the version pin.
 
 ### Step 2 — libnats with the vendored wolfSSL patch
 
-Upstream nats.c does **not** support wolfSSL natively yet
-([PR #867](https://github.com/nats-io/nats.c/pull/867) was closed
-without merge on 2025-09-10; upstream's stance is "not at this
-time", not permanent).  We ship a rebased version of that patch
-under `docs/patches/nats.c-wolfssl-v3.12.0.patch` so this build
-recipe actually produces a working library; see
-`docs/patches/README.md` for the full provenance and the
-rationale for shipping it despite upstream's current "no".
-Production wolfSSL deployments are encouraged to leave a comment
-on upstream PR #867 so additional adoption signal accumulates on
-the path to eventual reconsideration.  Apply it before cmake:
+Native wolfSSL support isn't part of upstream nats.c yet.  The
+relevant PR
+([nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867)
+by @kerbert101) closed without merge on 2025-09-10; the upstream
+maintainers weighed the cost of a second TLS backend and decided
+to hold for now.  Until that conversation reopens, we ship a
+rebased version of that patch under
+`docs/patches/nats.c-wolfssl-v3.12.0.patch` so this build recipe
+produces a working library.  See `docs/patches/README.md` for full
+provenance and the wider rationale.  If you deploy this in
+production, a friendly note on upstream PR #867 describing your
+use case helps the upstream maintainers see concrete adoption
+context for the next time they revisit it.  Apply the patch
+before cmake:
 
 ```
 git clone --depth 1 --branch v3.12.0 https://github.com/nats-io/nats.c
@@ -115,7 +118,7 @@ If both `nats_tls_openssl` and `nats_tls_wolfssl` appear in
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `libnats_path` | string | `/opt/libnats-wolfssl/`<br>`lib/libnats.so.3.12` | Path to the wolfSSL-flavoured libnats install.  Must be an absolute path — wolfSSL libnats is not on any standard search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.12` for upstream nats.c 3.13.x). |
+| `libnats_path` | string | `/opt/libnats-wolfssl/`<br>`lib/libnats.so.3.12` | Path to the wolfSSL-flavoured libnats install.  An absolute path is recommended — the sidecar wolfSSL libnats is not on any standard system search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.12` for upstream nats.c v3.12.x). |
 
 ## Diagnostics
 

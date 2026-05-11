@@ -62,25 +62,27 @@ If none of these apply, stay on OpenSSL.
 
 ## Building wolfSSL-backed libnats
 
-Upstream nats.c does **not** support wolfSSL natively yet
-([PR #867](https://github.com/nats-io/nats.c/pull/867) was closed
-without merge on 2025-09-10; upstream's stance is "not at this
-time", not "never").  This repository carries a rebased version
-of that patch at
-[`docs/patches/nats.c-wolfssl-v3.12.0.patch`](patches/nats.c-wolfssl-v3.12.0.patch);
-see [`docs/patches/README.md`](patches/README.md) for the full
-provenance and the rationale for shipping it despite upstream's
-current "no".  The recipe below applies the patch before cmake so
-the wolfSSL backend logic exists in libnats's CMake.
+Native wolfSSL support isn't part of upstream nats.c yet.  The
+upstream PR ([nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867)
+by @kerbert101) closed without merge on 2025-09-10 — the
+maintainers weighed the cost of a second TLS backend and decided
+to hold for now, which is a reasonable call from where they sit.
+In the meantime this repository carries a rebased version of that
+patch at
+[`docs/patches/nats.c-wolfssl-v3.12.0.patch`](patches/nats.c-wolfssl-v3.12.0.patch)
+so operators who need wolfSSL on the NATS side have a working
+build path.  See [`docs/patches/README.md`](patches/README.md) for
+provenance and the rationale.  The recipe below applies the patch
+before cmake so the wolfSSL backend logic is available in libnats's
+CMake.
 
-> **If you deploy this in production**, please consider commenting
-> on [upstream PR #867](https://github.com/nats-io/nats.c/pull/867)
-> with your use case (FIPS audit, footprint, license review,
-> whatever made you pick wolfSSL).  Concrete downstream adoption
-> signals are what we expect to change the upstream calculus over
-> time — every additional voice with a specific deployment makes
-> a reopened PR more persuasive than a closed one with a single
-> contributor.
+> **If you deploy this in production** and your context is something
+> you'd be comfortable sharing, a friendly note on
+> [upstream PR #867](https://github.com/nats-io/nats.c/pull/867)
+> describing your use case (FIPS audit, footprint, embedded target,
+> license review — whatever drove the wolfSSL choice) is genuinely
+> helpful.  It gives the upstream maintainers concrete adoption data
+> if and when they revisit the question.
 
 ```
 # Step 1 — wolfSSL ≥ 5.6.0 with OpenSSL-compat layer

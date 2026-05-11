@@ -14,69 +14,80 @@ itself.
 
 ### Provenance
 
-- **Upstream PR:** [nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867) by [@kerbert101](https://github.com/kerbert101) (Albert Bakker).
-- **Upstream status:** **closed without merge** on 2025-09-10.  The
-  upstream maintainer (kozlovic) explicitly decided libnats will not
-  support alternative TLS backends at this time:
+- **Upstream PR:** [nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867) by [@kerbert101](https://github.com/kerbert101) (Albert Bakker).  Thanks to Albert for the original integration work and the careful CMake structure that made the rebase straightforward.
+- **Upstream status:** closed without merge on 2025-09-10.  The
+  nats.c maintainers weighed adding a second TLS backend and
+  decided to hold for now:
   > *"we needed to decide if we would want to support different SSL
   > backend, and at this stage I would say no."*
+
+  A reasonable call: a second backend roughly doubles the TLS test
+  matrix, and at the time the PR landed there was only one
+  downstream voice asking.  We respect the decision and the
+  maintenance constraints behind it.
 - **Our rebase:** the original PR diff targeted a mid-2025 libnats
   master and doesn't apply cleanly to the v3.12.0 tag (drift in the
   CMake threads-find logic, the OpenSSL 1.1.1 requirement, and the
   removal of OpenSSL 1.0.x compat in src/conn.c).  This file is a
   hand-rebased version that applies cleanly against v3.12.0.
 
-Because upstream rejected the integration, **this patch is now ours
-to maintain forever** — until they reconsider.  Operators who do
-not need wolfSSL should load `nats_tls_openssl.so` instead and
-ignore this patch entirely.
+Until native wolfSSL support is part of upstream, we carry this
+patch in-tree so OpenSIPS operators who need wolfSSL on the NATS
+side have a working path.  Operators who don't need wolfSSL should
+load `nats_tls_openssl.so` instead and skip this patch entirely.
 
 ### Why we ship this anyway
 
-The maintainer's "no" is a *current* stance, not a permanent one.
-The position upstream took is reasonable: maintaining two TLS
-backends doubles the test matrix, and at the time only one
-contributor was asking.  But the calculus shifts as more downstream
-projects adopt wolfSSL for concrete reasons that aren't going away:
+The wolfSSL ask shows up across the broader open-source ecosystem
+for concrete reasons that aren't going away:
 
-- **FIPS 140-2 / 140-3 audit pressure.**  wolfSSL ships
-  FIPS-validated builds that some compliance regimes treat as
-  preferable to OpenSSL's FIPS provider.  Operators in regulated
-  industries (telecom, healthcare, financial messaging) increasingly
-  see "what TLS library?" appear on audit checklists.
+- **FIPS 140-2 / 140-3 audit needs.**  wolfSSL ships FIPS-validated
+  builds that some compliance regimes treat as preferable to
+  OpenSSL's FIPS provider.  Operators in regulated industries
+  (telecom, healthcare, financial messaging) increasingly see
+  "what TLS library?" appear on audit checklists.
 - **Footprint-sensitive deployments.**  wolfSSL is ~600 KB vs
   OpenSSL's ~5 MB.  For OpenSIPS instances running on edge
   appliances, container sidecars, or constrained VMs, that matters.
-- **License surface review.**  OpenSSL is Apache-2.0 with the
-  historical OpenSSL/SSLeay dual license.  wolfSSL is GPLv2 with a
-  commercial option.  Some organizations prefer one over the other
-  for reasons specific to their distribution model.
+- **License surface review.**  OpenSSL is Apache-2.0 (with the
+  historical OpenSSL/SSLeay legacy); wolfSSL is GPLv2 with a
+  commercial option.  Different distribution models settle on
+  different answers.
 
-The OpenSIPS ecosystem already supports both backends on the
-**SIP** side (`tls_mgm` + `tls_openssl` / `tls_wolfssl`).  Operators
-who chose wolfSSL there understandably want the same on the NATS
-side.  Shipping this patch gives them that option **and**
-demonstrates to upstream nats.c that the integration:
+The OpenSIPS ecosystem already offers operators both backends on
+the SIP side (`tls_mgm` + `tls_openssl` / `tls_wolfssl`), so it's
+natural for operators who picked wolfSSL there to want feature
+parity on the NATS side.
 
-1. Is small (~60 LoC across 4 files).
-2. Has been hand-rebased onto a recent tag without trouble.
-3. Has at least one downstream project (OpenSIPS) actively using
-   and maintaining it.
+This patch is a contribution we'd like to share back upstream if
+and when the timing makes sense.  The rebased diff is small
+(~60 LoC across 4 files), green on our CI, and exercised in
+production by the OpenSIPS deployments that adopt it.  That track
+record may be useful evidence if the upstream conversation reopens.
 
-If you are deploying this in production, **please consider
-commenting on [PR #867](https://github.com/nats-io/nats.c/pull/867)
-with your use case** — concrete adoption signals are the most
-likely thing to change upstream's calculus.  A reopened PR with
-multiple downstream voices is much more persuasive than a closed
-one with a single contributor.
+### Helping the upstream conversation along
+
+If you deploy this patch in production and would be willing to
+share that context publicly, leaving a friendly note on
+[upstream PR #867](https://github.com/nats-io/nats.c/pull/867) with
+your specific use case (FIPS audit, footprint, license review,
+embedded target — whatever) is genuinely useful.  Concrete adoption
+data is the most respectful way to ask maintainers to revisit a
+decision; it gives them something they can act on instead of just
+"please".
+
+If you'd rather not engage upstream directly, opening an issue on
+the OpenSIPS side of this repo with your use case also helps —
+we can aggregate context for a future joint conversation.
 
 ### Long-term goal
 
-The intent is for this patch to **disappear from our tree** when
-upstream nats.c adopts native wolfSSL support.  At that point
+The intent is for this patch to **leave our tree** the day upstream
+nats.c adopts native multi-backend TLS support.  At that point
 operators just bump their nats.c version pin; the rebased patch
-becomes the empty file and gets deleted.  Until then we carry it,
-keep it green, and treat it as a transitional cost.
+becomes empty and gets deleted.  Until then we carry it, keep it
+green against current libnats releases, and treat the maintenance
+burden as a transitional cost shared with the wider ecosystem.
 
 ### Applies to
 
