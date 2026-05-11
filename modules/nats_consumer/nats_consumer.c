@@ -55,6 +55,7 @@
 #include "nats_ack.h"
 #include "nats_rpc.h"
 #include "nats_rpc_async.h"
+#include "nats_rpc_slot.h"
 #include "nats_persist.h"
 
 static int  mod_init(void);
@@ -481,6 +482,20 @@ static int mod_init(void)
 	LM_DBG("nats_consumer: ack IPC queue ready (fd=%d)\n",
 		nats_ack_ipc_fd());
 
+	/* Allocate the SHM slot pool + eventfd pool for the
+	 * phase-5 consumer-routed async nats_request transport.
+	 * Must happen pre-fork so every child inherits the
+	 * eventfds at the same numeric fd values.  Tolerant to
+	 * failure (slot allocation requires NATS_RPC_SLOT_COUNT
+	 * fds, which may exceed ulimit on small deployments) --
+	 * we log and continue with the sync fall-through. */
+	if (nats_rpc_slot_init() < 0) {
+		LM_WARN("nats_consumer: rpc slot pool init failed; "
+			"async nats_request will fall back to the sync "
+			"path until the slot pool is available\n");
+		/* deliberately non-fatal */
+	}
+
 	if (nats_consumer_hb_init() < 0) {
 		LM_ERR("nats_consumer: heartbeat SHM alloc failed\n");
 		nats_ack_ipc_destroy();
@@ -543,6 +558,7 @@ static void mod_destroy(void)
 	 * pending writer can race with the registry teardown below. */
 	nats_persist_destroy();
 	nats_ack_ipc_destroy();
+	nats_rpc_slot_destroy();
 	nats_consumer_hb_destroy();
 	nats_registry_destroy();
 }
