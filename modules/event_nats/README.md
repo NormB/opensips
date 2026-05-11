@@ -15,9 +15,13 @@ persistence.
 
 ## Parameters
 
+The `Default` column wraps multi-line values so its rendered width
+is bounded by the longest single-line value rather than the longest
+full string.  Long defaults split across `<br>` breaks.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `nats_url` | string | `nats://127.0.0.1:4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See nats_connection README for topology details. |
+| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See nats_connection README for topology details. |
 | `jetstream` | int | 0 | Enable JetStream for persistent async publish (1=on, 0=off) |
 | `reconnect_wait` | int | 2000 | Milliseconds between startup connection retries |
 | `max_reconnect` | int | 60 | Max startup connection attempts. Does NOT limit runtime reconnection (that is unlimited). |
