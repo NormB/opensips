@@ -1040,9 +1040,47 @@ phase-5 infrastructure (slot pool, IPC queue, consumer-side
 subscription, reply callback) intact -- they only change the
 wake mechanism the worker registers with its reactor.
 
-The current shipped state keeps the sync fall-through that
-works end-to-end; phase-5 is in a clean "infra built, wake
-mechanism rethink pending" state.
+### Phase 5b: timerfd-poll implementation (current)
+
+Option C was chosen and shipped.  Each async() call:
+
+1. Claims a slot from the phase-5 SHM pool and fills out the
+   subject + payload + correlation id.
+2. Transitions the slot CLAIMED -> INFLIGHT and enqueues the
+   `slot_idx` on the worker -> consumer IPC.
+3. Creates a worker-private `timerfd_create(CLOCK_MONOTONIC)`
+   armed with a 1 ms periodic interval.  The fd is created
+   inside the SIP worker (post-fork), so the OpenSIPS reactor
+   accepts it -- the constraint we hit in commit
+   8eae39a5b1 only applies to fork-inherited fds.
+4. Hands `(slot, timerfd, deadline_us)` to the reactor via
+   `ctx->resume_f = resume_nats_request_slot`, `async_status
+   = timerfd`.
+
+The resume fires every 1 ms.  On each tick it:
+
+  * acquire-loads the slot state atomic;
+  * if `DELIVERED`, copies the reply payload, frees the slot,
+    closes the timerfd via `ASYNC_DONE_CLOSE_FD`, and returns
+    1 to run the reply route;
+  * if the per-call deadline elapsed, abandons the slot and
+    returns -1 (or -2 if the pool epoch advanced or the
+    connection dropped during the call);
+  * otherwise sets `async_status = ASYNC_CONTINUE` to keep
+    polling.
+
+Live verification (sipsak OPTIONS against the bench harness):
+single-shot 1.6-2.6 ms RTT; 50 sequential OPTIONS complete
+50/50 in 750 ms (~15 ms wall-clock per request including
+sipsak overhead).  No segfaults; consumer-process subscription
+remains the only libnats async-callback site in the system.
+
+Latency floor is the poll interval; CPU floor is one timerfd
+tick per in-flight call.  For the talk demo workload (≤ 64
+slots) this is acceptable.  Operators that need sub-ms p50 can
+either (a) drop the poll interval to 100 us at proportional
+CPU cost, or (b) switch to option A (SCM_RIGHTS) as a future
+phase-5c.
 
 ### Architectural consequence
 

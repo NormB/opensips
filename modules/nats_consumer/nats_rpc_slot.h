@@ -30,17 +30,16 @@
  *   already runs libnats safely) and hands off in-flight state
  *   between worker and consumer via SHM.
  *
- * Wake mechanism
- *   The reactor in each worker waits on a real file descriptor.
- *   The consumer process needs to be able to write() to that fd.
- *   Cross-process fd sharing in Linux works cleanly when the fd is
- *   created in the parent process pre-fork and inherited verbatim
- *   by every child.  So at mod_init we allocate a pool of
- *   `NATS_RPC_SLOT_COUNT` eventfds; each in-flight call claims
- *   exactly one slot (and therefore one eventfd).  The worker
- *   yields on that fd; the consumer process writes to that fd
- *   when the reply lands.  When the slot is freed the next caller
- *   gets the same fd.
+ * Wake mechanism (phase 5b)
+ *   OpenSIPS's reactor cannot register fork-inherited eventfds
+ *   (proven by the phase-5 diagnostic in commit 8eae39a5b1).
+ *   Instead, each async call creates a fresh worker-private
+ *   timerfd that fires every NATS_RPC_ASYNC_POLL_MS milliseconds;
+ *   the resume function reads the slot's atomic state on each
+ *   tick.  When the consumer writes the reply into the slot and
+ *   transitions state to DELIVERED, the worker's next poll
+ *   pick-up returns the reply.  Latency floor is the poll
+ *   interval; CPU floor is one timerfd tick per in-flight call.
  *
  * State machine
  *
@@ -113,11 +112,6 @@ typedef struct nats_rpc_slot {
 	 * consumer's libnats callback can look up the slot without
 	 * a hash table.  Slot index in g_slots[]. */
 	uint32_t slot_idx;
-
-	/* Pre-allocated wake fd.  Created in mod_init via eventfd();
-	 * inherited by every child process.  Worker yields the async()
-	 * call on this fd; consumer write()s 1 to it on DELIVERED. */
-	int wake_fd;
 
 	/* Correlation id (UUIDv7 string, NUL-terminated).  Stashed
 	 * here so the consumer process can include it in any logs

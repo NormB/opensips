@@ -106,12 +106,13 @@ static int parse_slot_idx(const char *subject, int subject_len,
  * libnats subscription callback.  Runs on a libnats internal
  * thread INSIDE the consumer process -- safe for libnats use
  * but MUST NOT touch OpenSIPS APIs that are worker-private.
- * We only touch:
- *   - the SHM slot (via the slot_idx parsed from the reply
- *     subject suffix);
- *   - write(2) on the slot's pre-allocated wake_fd (which both
- *     the consumer and the worker have in their fd tables via
- *     fork-inheritance).
+ *
+ * We only touch the SHM slot (via the slot_idx parsed from the
+ * reply subject suffix): copy the reply payload into the slot,
+ * transition state INFLIGHT -> DELIVERED with release ordering.
+ * The worker side polls slot->state on each tick of a
+ * worker-private timerfd (phase 5b wake mechanism); we do not
+ * signal any fd from this callback.
  */
 static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
                             natsMsg *msg, void *closure)
@@ -204,27 +205,9 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 
 	/* Publish the slot transition.  Release ordering ensures the
 	 * worker (acquire on state load in the resume function) sees
-	 * the reply_* fields. */
+	 * the reply_* fields on its next timerfd-tick poll. */
 	atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
 		memory_order_release);
-
-	/* Wake the worker by writing to its pre-allocated eventfd.
-	 * Both consumer and worker have this fd in their tables via
-	 * fork inheritance, so a write here is observable by the
-	 * worker's reactor. */
-	if (s->wake_fd >= 0) {
-		uint64_t one = 1;
-		ssize_t  w;
-		do {
-			w = write(s->wake_fd, &one, sizeof(one));
-		} while (w < 0 && errno == EINTR);
-		/* EAGAIN means the eventfd counter is saturated; the
-		 * worker's reactor will still see "readable" because
-		 * the counter is non-zero.  Any other error is
-		 * intentionally swallowed -- we already published
-		 * state=DELIVERED, the worker would resume on the
-		 * async-core timer fallback in the worst case. */
-	}
 
 	natsMsg_Destroy(msg);
 }
@@ -350,13 +333,6 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 			(unsigned)s->slot_idx);
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
-		/* signal wake_fd so the worker doesn't sit on its timer */
-		if (s->wake_fd >= 0) {
-			uint64_t one = 1;
-			ssize_t  w;
-			do { w = write(s->wake_fd, &one, sizeof(one)); }
-			while (w < 0 && errno == EINTR);
-		}
 		return;
 	}
 
@@ -367,11 +343,6 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 			(unsigned)s->slot_idx);
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
-		if (s->wake_fd >= 0) {
-			uint64_t one = 1; ssize_t w;
-			do { w = write(s->wake_fd, &one, sizeof(one)); }
-			while (w < 0 && errno == EINTR);
-		}
 		return;
 	}
 	memcpy(subj_c, s->out_subject, s->out_subject_len);
@@ -384,17 +355,8 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 			(unsigned)s->slot_idx, natsStatus_GetText(st));
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
-		if (s->wake_fd >= 0) {
-			uint64_t one = 1; ssize_t w;
-			do { w = write(s->wake_fd, &one, sizeof(one)); }
-			while (w < 0 && errno == EINTR);
-		}
 		return;
 	}
-
-	/* TODO step 4: walk s->out_headers serialised stream and
-	 * call natsMsgHeader_Set for each entry.  Phase-5 step-3
-	 * publish path is header-less. */
 
 	st = natsConnection_PublishMsg(nc, out);
 	natsMsg_Destroy(out);
@@ -403,16 +365,12 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 			(unsigned)s->slot_idx, natsStatus_GetText(st));
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
-		if (s->wake_fd >= 0) {
-			uint64_t one = 1; ssize_t w;
-			do { w = write(s->wake_fd, &one, sizeof(one)); }
-			while (w < 0 && errno == EINTR);
-		}
 		return;
 	}
 	/* Slot stays INFLIGHT; the reply (matching reply_subject)
 	 * will land in on_inbox_reply and transition the slot to
-	 * DELIVERED. */
+	 * DELIVERED.  The worker side polls the slot state on each
+	 * tick of its private timerfd; no fd signaling needed. */
 }
 
 int nats_rpc_consumer_drain_ipc(void)

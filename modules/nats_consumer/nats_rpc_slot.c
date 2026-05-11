@@ -91,46 +91,24 @@ int nats_rpc_slot_init(void)
 		s->slot_idx = i;
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_FREE,
 			memory_order_relaxed);
-		s->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-		if (s->wake_fd < 0) {
-			LM_ERR("nats_rpc_slot_init: eventfd() failed at "
-				"slot %u (errno=%d); only %u slots allocated -- "
-				"check ulimit -n.\n",
-				i, errno, i);
-			/* roll back: close the fds we did open */
-			while (i-- > 0) {
-				close(g_slots[i].wake_fd);
-				g_slots[i].wake_fd = -1;
-			}
-			shm_free(g_slots);
-			g_slots = NULL;
-			return -1;
-		}
 	}
 
 	g_slot_total = NATS_RPC_SLOT_COUNT;
 	atomic_store_explicit(&g_alloc_hint, 0, memory_order_relaxed);
 	atomic_store_explicit(&g_inflight_count, 0, memory_order_relaxed);
 
-	LM_INFO("nats_rpc_slot: %u slots allocated (%zu KB SHM + %u "
-		"eventfds at boot)\n",
+	LM_INFO("nats_rpc_slot: %u slots allocated (%zu KB SHM); "
+		"wake mechanism is per-call worker-private timerfd "
+		"polling (phase 5b)\n",
 		(unsigned)NATS_RPC_SLOT_COUNT,
-		bytes / 1024,
-		(unsigned)NATS_RPC_SLOT_COUNT);
+		bytes / 1024);
 	return 0;
 }
 
 void nats_rpc_slot_destroy(void)
 {
-	uint32_t i;
 	if (!g_slots)
 		return;
-	for (i = 0; i < g_slot_total; i++) {
-		if (g_slots[i].wake_fd >= 0) {
-			close(g_slots[i].wake_fd);
-			g_slots[i].wake_fd = -1;
-		}
-	}
 	shm_free(g_slots);
 	g_slots = NULL;
 	g_slot_total = 0;

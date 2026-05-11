@@ -110,6 +110,7 @@ typedef int                            natsStatus;
 #include <time.h>
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <sys/types.h>
 #include <sys/random.h>
 
@@ -1125,72 +1126,116 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 }
 
 /*
- * Resume function for the phase-5 SHM-slot transport.
+ * Phase-5b per-call wrapper: pairs the worker-private timerfd
+ * with the SHM slot.  Lives in pkg memory (worker-local) for
+ * the duration of one async() call; freed by resume_nats_
+ * request_slot on completion or timeout.  The timerfd is
+ * created INSIDE the worker (post-fork) so it doesn't trip the
+ * OpenSIPS-reactor-can't-handle-fork-inherited-eventfds bug
+ * isolated in commit 8eae39a5b1.
+ */
+typedef struct nats_rpc_call_wrap {
+	nats_rpc_slot_t *slot;          /* SHM */
+	int              timerfd;       /* worker-private, registered with reactor */
+	int64_t          deadline_us;   /* CLOCK_MONOTONIC, microseconds */
+} nats_rpc_call_wrap_t;
+
+/* Tick interval for the timerfd poll.  1 ms gives sub-ms p50
+ * with a measurable CPU cost (1000 wakes/sec per in-flight
+ * call).  Tunable via a future modparam; for now hard-coded. */
+#define NATS_RPC_ASYNC_POLL_NS 1000000L   /* 1 ms */
+
+static int64_t now_us_monotonic(void)
+{
+	struct timespec ts;
+	(void)clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
+}
+
+/*
+ * Resume function for the phase-5b timerfd-poll transport.
  *
- * Fires when the slot's pre-allocated wake_fd becomes readable
- * (consumer-process callback signaled it) or when the async-
- * core timer expires (was_timeout=1).  The slot's atomic state
- * is the source of truth; we don't need to take a mutex
- * because the consumer publishes state=DELIVERED with release
- * after writing reply_*, and we acquire the state here.
+ * Fires on every tick of the per-call timerfd OR when the
+ * async-core timeout expires (was_timeout=1).  The slot's
+ * atomic state is the source of truth: if DELIVERED, copy the
+ * reply and return 1; if still INFLIGHT and we haven't timed
+ * out, ASYNC_CONTINUE to keep polling; if timed out, transition
+ * to ABANDONED and return -1 (or -2 on connection lost).
  */
 static int resume_nats_request_slot(int fd, struct sip_msg *msg,
                                      void *param)
 {
-	nats_rpc_slot_t *s = (nats_rpc_slot_t *)param;
-	uint64_t         sink;
-	ssize_t          rd;
-	int              state_obs;
-	int              rc;
+	nats_rpc_call_wrap_t *w = (nats_rpc_call_wrap_t *)param;
+	uint64_t              sink;
+	ssize_t               rd;
+	int                   state_obs;
+	int                   rc;
+	nats_rpc_slot_t      *s;
 
 	(void)msg;
-	async_status = ASYNC_DONE;
 
-	if (!s) {
-		LM_ERR("nats_request[async]: resume with NULL slot\n");
+	if (!w || !w->slot) {
+		LM_ERR("nats_request[async]: resume with NULL wrap/slot\n");
+		async_status = ASYNC_DONE;
 		return -6;
 	}
+	s = w->slot;
 
-	/* Drain the wake_fd counter so any next reuse of this slot
-	 * does not see a stale eventfd hit.  Non-blocking; EAGAIN
-	 * is fine (we may have been woken by timeout, not signal). */
+	/* Drain the timerfd counter so the next tick still wakes us. */
 	do { rd = read(fd, &sink, sizeof(sink)); }
 	while (rd < 0 && errno == EINTR);
 
 	state_obs = atomic_load_explicit(&s->state, memory_order_acquire);
 
-	/* Disconnection check -- mirrors the previous phase-2 logic:
-	 * a reconnect-epoch advance or pool-disconnected state during
-	 * the call surfaces -2 rather than -1, regardless of whether
-	 * the slot is DELIVERED, INFLIGHT, or already ABANDONED. */
-	{
-		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
-		int      cur_conn  = nats_pool_is_connected();
-		int      disc = !cur_conn ||
-		                cur_epoch != s->epoch_at_start;
+	if (state_obs == NATS_RPC_SLOT_DELIVERED) {
+		/* Got the reply: copy into cur_msg, free everything,
+		 * report success to the script. */
+		nats_rpc_cur_set_from_buffers(0xFFFF,
+			s->reply_subject,  s->reply_subject_len,
+			s->reply_data,     s->reply_data_len,
+			s->reply_to,       s->reply_to_len,
+			s->reply_has_reply_to,
+			s->reply_headers,  s->reply_headers_len,
+			s->reply_headers_truncated);
 
-		if (state_obs == NATS_RPC_SLOT_DELIVERED) {
-			nats_rpc_cur_set_from_buffers(0xFFFF,
-				s->reply_subject,  s->reply_subject_len,
-				s->reply_data,     s->reply_data_len,
-				s->reply_to,       s->reply_to_len,
-				s->reply_has_reply_to,
-				s->reply_headers,  s->reply_headers_len,
-				s->reply_headers_truncated);
-			rc = 1;
-		} else {
-			/* State is INFLIGHT or ABANDONED.  If still
-			 * INFLIGHT we're here on the async-core timer;
-			 * transition to ABANDONED so a late reply from
-			 * the consumer is dropped instead of writing
-			 * into a recycled slot. */
-			(void)nats_rpc_slot_abandon(s);
-			rc = disc ? -2 : -1;
-		}
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_slot_free(s);
+		pkg_free(w);
+		return 1;
 	}
 
-	nats_rpc_slot_free(s);
-	return rc;
+	if (state_obs == NATS_RPC_SLOT_ABANDONED) {
+		/* Consumer-side abandon (publish failed, etc.).  Tear
+		 * down and report timeout / connection-lost based on
+		 * pool state. */
+		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
+		int      cur_conn  = nats_pool_is_connected();
+		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
+
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_slot_free(s);
+		pkg_free(w);
+		return disc ? -2 : -1;
+	}
+
+	/* state == INFLIGHT.  Check the per-call deadline so we
+	 * surface -1 even though the async core has no built-in
+	 * timeout for raw FDs.  Otherwise re-arm and keep polling. */
+	if (now_us_monotonic() >= w->deadline_us) {
+		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
+		int      cur_conn  = nats_pool_is_connected();
+		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
+
+		(void)nats_rpc_slot_abandon(s);
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_slot_free(s);
+		pkg_free(w);
+		return disc ? -2 : -1;
+	}
+
+	(void)rc;
+	async_status = ASYNC_CONTINUE;
+	return 0;
 }
 
 /*
@@ -1224,35 +1269,48 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
  * out_headers and call natsMsgHeader_Set on the consumer side.
  */
 /*
- * w_nats_request_async -- phase-5 worker side.
+ * w_nats_request_async -- phase-5b worker side.
  *
- * INTERIM SYNC FALL-THROUGH (commit 7731a1c9b4 onwards): the
- * slot_claim + ipc_enqueue + yield-on-wake_fd path is blocked
- * on a design issue isolated this session -- OpenSIPS's reactor
- * cannot register fork-inherited eventfds (the pre-fork pool
- * approach in nats_rpc_slot.c).  Using `async_status =
- * slot->wake_fd` (where wake_fd was created in main pre-fork)
- * segfaults the SIP worker; using a fresh worker-side eventfd
- * does not.  But a fresh worker-side fd cannot be written to
- * by the consumer process, so this approach can't be used as-is.
+ * Flow:
+ *   1. Pre-flight: subject + payload bounds.
+ *   2. Mint/consume UUIDv7 for $nats_request_id (phase 2.5).
+ *   3. Claim a SHM slot.  On full pool surface -5.
+ *   4. Fill the slot's out_subject + out_data + corr_id +
+ *      epoch_at_start.
+ *   5. Transition slot CLAIMED -> INFLIGHT (release) and
+ *      enqueue the slot_idx on the worker -> consumer IPC.
+ *   6. Create a worker-private timerfd that ticks every
+ *      NATS_RPC_ASYNC_POLL_NS ns.  Compute the per-call deadline
+ *      from timeout_ms (caps the polling loop).
+ *   7. Allocate a pkg wrapper, hand control to the reactor:
+ *      async_status = timerfd, ctx->resume_f =
+ *      resume_nats_request_slot, ctx->resume_param = wrap.
  *
- * Phase 5 needs a different cross-process wake mechanism:
- * either SCM_RIGHTS to pass a worker-created eventfd to the
- * consumer, pidfd_getfd to let the consumer acquire a dup, or
- * a polling design where the worker periodically reads slot
- * state via the OpenSIPS timer subsystem.  Each is its own
- * substantial design + implementation effort.
- *
- * Until then this body keeps the sync fall-through so the
- * end-to-end script path keeps working.  The phase-2.5 UUIDv7
- * mint + $nats_request_id stash + auto-stage are preserved.
+ * Headers from nats_rpc_staged are NOT propagated to the
+ * consumer yet -- the slot's out_headers buffer exists but
+ * w_nats_request_async writes only an empty header block.
+ * That's a deliberate phase-5 step-5 deferral; the X-Request-Id
+ * is still observable via $nats_request_id on the script side.
  */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms)
 {
-	int rc;
+	nats_rpc_slot_t        *slot = NULL;
+	nats_rpc_call_wrap_t   *wrap = NULL;
+	nats_rpc_ipc_msg_t      ipc_msg;
+	struct itimerspec       its;
+	int                     tfd = -1;
+	int                     tmo_ms;
+	char                    id_buf[64];
+	int                     id_len = 0;
 
+	(void)msg;
 	(void)ctx;
+	LM_DBG("nats_request[async]: ENTER subject=%p len=%d payload=%p tmo=%p ctx=%p\n",
+		(void*)(subject?subject->s:NULL),
+		subject?subject->len:-1,
+		(void*)(payload?payload->s:NULL),
+		(void*)timeout_ms, (void*)ctx);
 
 	if (!subject || subject->len <= 0 || !subject->s) {
 		LM_DBG("nats_request[async]: empty/null subject\n");
@@ -1267,29 +1325,145 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		async_status = ASYNC_NO_IO;
 		return -4;
 	}
+	if (payload && payload->len > NATS_RING_PAYLOAD_MAX) {
+		LM_ERR("nats_request[async]: payload too long (%d > %d)\n",
+			payload->len, NATS_RING_PAYLOAD_MAX);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -4;
+	}
 
-	/* Mint / stage the per-call UUIDv7 (phase 2.5 behaviour). */
-	{
-		char id_buf[64];
-		int  id_len;
-		id_len = nats_rpc_async_request_id_consume_user(id_buf,
-			sizeof(id_buf));
-		if (id_len == 0)
-			id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
-		if (id_len > 0) {
-			nats_rpc_async_request_id_set(id_buf, id_len);
-			if (nats_request_id_header && nats_request_id_header[0]) {
-				str hname = { nats_request_id_header,
-					(int)strlen(nats_request_id_header) };
-				str hval  = { id_buf, id_len };
-				(void)nats_rpc_staged_set_if_absent(&hname, &hval);
-			}
+	tmo_ms = (timeout_ms && *timeout_ms > 0) ? *timeout_ms : 1000;
+
+	/* Phase 2.5: mint/consume the UUIDv7 + stage X-Request-Id. */
+	id_len = nats_rpc_async_request_id_consume_user(id_buf, sizeof(id_buf));
+	if (id_len == 0)
+		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
+	if (id_len > 0) {
+		nats_rpc_async_request_id_set(id_buf, id_len);
+		if (nats_request_id_header && nats_request_id_header[0]) {
+			str hname = { nats_request_id_header,
+				(int)strlen(nats_request_id_header) };
+			str hval  = { id_buf, id_len };
+			(void)nats_rpc_staged_set_if_absent(&hname, &hval);
 		}
 	}
 
-	rc = w_nats_request(msg, subject, payload, timeout_ms);
-	async_status = ASYNC_SYNC;
-	return rc;
+	LM_DBG("nats_request[async]: about to claim slot\n");
+	slot = nats_rpc_slot_claim();
+	LM_DBG("nats_request[async]: slot=%p idx=%u\n",
+		(void*)slot, slot?slot->slot_idx:0xFFFFFFFFu);
+	if (!slot) {
+		LM_WARN("nats_request[async]: slot pool full (%u in flight)\n",
+			nats_rpc_slot_inflight_count());
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -5;
+	}
+
+	/* Fill outbound + correlation. */
+	memcpy(slot->out_subject, subject->s, (size_t)subject->len);
+	slot->out_subject_len = (uint32_t)subject->len;
+	if (payload && payload->len > 0) {
+		memcpy(slot->out_data, payload->s, (size_t)payload->len);
+		slot->out_data_len = (uint32_t)payload->len;
+	} else {
+		slot->out_data_len = 0;
+	}
+	slot->out_headers_len = 0;
+	if (id_len > 0) {
+		int cp = id_len < (int)sizeof(slot->corr_id) - 1
+			? id_len : (int)sizeof(slot->corr_id) - 1;
+		memcpy(slot->corr_id, id_buf, (size_t)cp);
+		slot->corr_id[cp] = '\0';
+		slot->corr_id_len = (uint32_t)cp;
+	} else {
+		slot->corr_id[0] = '\0';
+		slot->corr_id_len = 0;
+	}
+	slot->epoch_at_start = (uint32_t)nats_pool_get_reconnect_epoch();
+
+	LM_DBG("nats_request[async]: filled slot, about to publish\n");
+	if (nats_rpc_slot_publish(slot) < 0) {
+		LM_ERR("nats_request[async]: slot_publish failed (slot %u)\n",
+			slot->slot_idx);
+		nats_rpc_slot_free(slot);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -6;
+	}
+
+	memset(&ipc_msg, 0, sizeof(ipc_msg));
+	ipc_msg.slot_idx = slot->slot_idx;
+	LM_DBG("nats_request[async]: about to enqueue IPC slot_idx=%u\n",
+		ipc_msg.slot_idx);
+	if (nats_rpc_ipc_enqueue(&ipc_msg) < 0) {
+		LM_WARN("nats_request[async]: IPC full -- dropping (slot %u)\n",
+			slot->slot_idx);
+		(void)nats_rpc_slot_abandon(slot);
+		nats_rpc_slot_free(slot);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -5;
+	}
+
+	/* Worker-private timerfd: created post-fork so the reactor
+	 * can register it (phase-5 root cause). */
+	LM_DBG("nats_request[async]: about to create timerfd\n");
+	tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (tfd < 0) {
+		LM_ERR("nats_request[async]: timerfd_create: %s\n",
+			strerror(errno));
+		(void)nats_rpc_slot_abandon(slot);
+		nats_rpc_slot_free(slot);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -6;
+	}
+	memset(&its, 0, sizeof(its));
+	its.it_value.tv_sec     = 0;
+	its.it_value.tv_nsec    = NATS_RPC_ASYNC_POLL_NS;
+	its.it_interval.tv_sec  = 0;
+	its.it_interval.tv_nsec = NATS_RPC_ASYNC_POLL_NS;
+	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
+		LM_ERR("nats_request[async]: timerfd_settime: %s\n",
+			strerror(errno));
+		close(tfd);
+		(void)nats_rpc_slot_abandon(slot);
+		nats_rpc_slot_free(slot);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -6;
+	}
+
+	LM_DBG("nats_request[async]: timerfd armed tfd=%d, allocating wrap\n", tfd);
+	wrap = (nats_rpc_call_wrap_t *)pkg_malloc(sizeof(*wrap));
+	if (!wrap) {
+		LM_ERR("nats_request[async]: pkg_malloc wrap failed\n");
+		close(tfd);
+		(void)nats_rpc_slot_abandon(slot);
+		nats_rpc_slot_free(slot);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -6;
+	}
+	wrap->slot        = slot;
+	wrap->timerfd     = tfd;
+	wrap->deadline_us = now_us_monotonic() + (int64_t)tmo_ms * 1000;
+
+	/* Hand off to the reactor.  The staged headers were
+	 * "consumed" when we built the slot; clear the staging area
+	 * so the next call starts fresh. */
+	nats_rpc_staged_clear();
+
+	LM_DBG("nats_request[async]: handing off ctx=%p resume_f=%p wrap=%p tfd=%d\n",
+		(void*)ctx, (void*)resume_nats_request_slot,
+		(void*)wrap, tfd);
+	ctx->resume_f      = (void *)resume_nats_request_slot;
+	ctx->resume_f_name = "resume_nats_request_slot";
+	ctx->resume_param  = wrap;
+	async_status       = tfd;
+	return 1;
 }
 
 #endif /* !TEST_SHIM */
