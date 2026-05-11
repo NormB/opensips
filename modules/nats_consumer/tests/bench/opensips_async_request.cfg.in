@@ -1,0 +1,94 @@
+####### nats_consumer async-request bench cfg ####################
+#
+# Minimal opensips.cfg for the bench_async_request.sh harness.
+# Receives SIP OPTIONS on UDP, fires `async(nats_request(...))` per
+# message, and returns the responder's reply to the SIP caller.
+#
+# Placeholders rendered by the harness:
+#   @@MODULES@@      -- absolute path to the modules dir
+#   @@SIP_PORT@@     -- UDP listen port (default 5070)
+#   @@MI_PORT@@      -- MI datagram UDP port (default 8880)
+#   @@RPC_SUBJECT@@  -- NATS subject the responder is subscribed to
+#   @@RPC_TIMEOUT@@  -- per-call timeout in ms (default 500)
+#   @@UDP_WORKERS@@  -- udp_workers value (default 1 for clean numbers)
+
+log_level=3
+xlog_level=3
+debug_mode=no
+stderror_enabled=yes
+syslog_enabled=no
+
+udp_workers=@@UDP_WORKERS@@
+tcp_workers=0
+
+socket=udp:127.0.0.1:@@SIP_PORT@@
+mpath="@@MODULES@@/"
+
+####### loaded modules ###########################################
+
+# In OpenSIPS 4.x UDP is compiled into core; the loadmodule line is a
+# no-op if proto_udp.so is absent, which keeps the cfg portable.
+loadmodule "proto_udp.so"
+
+loadmodule "signaling.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "sipmsgops.so"
+
+loadmodule "mi_datagram.so"
+modparam("mi_datagram", "socket_name", "udp:127.0.0.1:@@MI_PORT@@")
+
+# event_nats registers the shared lib/nats connection pool at
+# mod_init.  nats_consumer fetches a connection from that pool
+# in its own mod_init, so event_nats must be loaded first.
+loadmodule "event_nats.so"
+modparam("event_nats", "nats_url", "@@NATS_URL@@")
+
+loadmodule "nats_consumer.so"
+modparam("nats_consumer", "fetch_batch", 10)
+# Keep the auto-staged header on so the responder side sees the
+# UUIDv7 correlation id and can log it.
+modparam("nats_consumer", "request_id_header", "X-Request-Id")
+
+####### routes ###################################################
+
+startup_route {
+    xlog("L_INFO", "[bench] async-request cfg up; "
+         "RPC subject=@@RPC_SUBJECT@@ tmo=@@RPC_TIMEOUT@@ms\n");
+}
+
+route {
+    if (!mf_process_maxfwd_header(10)) {
+        sl_send_reply(483, "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("OPTIONS")) {
+        # Fire the async RPC.  The script terminates here; the
+        # reactor invokes route[on_reply] when the reply arrives
+        # (or the timer expires).
+        async(nats_request("@@RPC_SUBJECT@@", "ping", @@RPC_TIMEOUT@@),
+              on_reply);
+    }
+
+    sl_send_reply(405, "Method Not Allowed");
+    exit;
+}
+
+route[on_reply] {
+    if ($retcode == 1) {
+        # Reply delivered.  Echo the responder's payload (max 80 bytes)
+        # back in a 200 OK so the bench driver can confirm round-trip.
+        sl_send_reply(200, "OK");
+    } else if ($retcode == -1) {
+        sl_send_reply(504, "Gateway Timeout");
+    } else if ($retcode == -2) {
+        sl_send_reply(503, "Broker Unavailable");
+    } else {
+        xlog("L_ERR", "[bench] async RPC failed rc=$retcode "
+             "id=$nats_request_id\n");
+        sl_send_reply(500, "Internal Server Error");
+    }
+}

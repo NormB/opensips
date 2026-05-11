@@ -54,6 +54,7 @@
 #include "nats_fetch.h"
 #include "nats_ack.h"
 #include "nats_rpc.h"
+#include "nats_rpc_async.h"
 #include "nats_persist.h"
 
 static int  mod_init(void);
@@ -519,6 +520,18 @@ static int child_init(int rank)
 		return 0;
 	}
 	LM_DBG("nats_consumer: child_init rank=%d\n", rank);
+
+	/* Eagerly set up the per-worker inbox subscription for the
+	 * async nats_request path.  Doing this in child_init (rather
+	 * than lazily inside w_nats_request_async on first call) keeps
+	 * libnats's subscription bookkeeping outside the SIP-message
+	 * execution context, where the subscription thread spawn can
+	 * race with active connection usage.  Failure is non-fatal --
+	 * scripts that don't use async nats_request never notice; the
+	 * lazy path inside w_nats_request_async still runs as a
+	 * fallback. */
+	(void)nats_rpc_async_child_init(rank);
+
 	return 0;
 }
 
