@@ -1022,17 +1022,13 @@ int nats_rpc_async_child_init(int rank)
 	return 0;
 }
 
-/* Shared headers helper -- exposed by nats_rpc.c via this name so
- * both the sync and async reply paths produce byte-identical
- * serialised header streams. */
-extern int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
-                                              int *truncated, int *count_out);
-
-/* Forward decl of the staged-headers helper from nats_rpc.c. */
+/* Forward decls of helpers from nats_rpc.c that are not visible
+ * in nats_rpc.h.  nats_rpc_hdr_serialize_from_reply is also
+ * declared earlier in this file; nats_rpc_staged_set_if_absent
+ * is in nats_rpc.h and intentionally not re-declared here. */
 extern void nats_rpc_staged_apply_and_clear_on(natsMsg *out);
 extern const char *nats_rpc_cstr_buf(char *buf, size_t cap,
                                       const char *src, int len);
-extern int nats_rpc_staged_set_if_absent(const str *name, const str *value);
 
 /* Operator-configurable outbound header name carrying the per-call
  * UUIDv7.  Owned by nats_consumer.c via the `request_id_header`
