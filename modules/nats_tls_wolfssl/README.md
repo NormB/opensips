@@ -87,6 +87,24 @@ make -j
 sudo make install
 ```
 
+### Step 3 — register `/opt/wolfssl/lib` with the dynamic linker
+
+The wolfSSL-backed libnats has `DT_NEEDED libwolfssl.so.NN`.  For
+that to resolve at module-dlopen time, `/opt/wolfssl/lib` needs to
+be on the linker's search path.  Once per host:
+
+```
+echo "/opt/wolfssl/lib" | sudo tee /etc/ld.so.conf.d/wolfssl.conf
+sudo ldconfig
+```
+
+Verify:
+
+```
+ldd /opt/libnats-wolfssl/lib/libnats.so | grep wolfssl
+# libwolfssl.so.NN => /opt/wolfssl/lib/libwolfssl.so.NN
+```
+
 After step 2 the install layout is:
 
 ```
