@@ -39,7 +39,13 @@ cd wolfssl
             --enable-tls13 \
             --enable-aesni \
             --enable-curve25519 \
-            --enable-ed25519
+            --enable-ed25519 \
+            --enable-crl \
+            --enable-ocsp \
+            --enable-sni
+# --enable-crl/ocsp/sni are required for the symbol set libnats's
+# TLS code uses (e.g. wolfSSL_X509_STORE_add_crl).  --enable-aesni
+# is x86-only; drop it on aarch64.
 make -j
 sudo make install
 ```
