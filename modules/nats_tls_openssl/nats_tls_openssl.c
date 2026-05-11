@@ -108,14 +108,26 @@ struct module_exports exports = {
 /*
  * Default libnats names tried in order when the operator does not
  * set the `libnats_path` modparam.  libnats's upstream packaging
- * uses MAJOR.MINOR as its SONAME (`libnats.so.3.13` rather than
- * `libnats.so.3`), so the bare major SONAME would never resolve;
- * we therefore try the most-specific name first and fall back
- * through coarser variants.  Operators on non-3.13 libnats
- * versions can override via the `libnats_path` modparam.
+ * uses MAJOR.MINOR as its SONAME (`libnats.so.3.13`, `.3.12`, etc.
+ * rather than `libnats.so.3`), so the bare major SONAME does not
+ * resolve against most installs; we therefore try a window of
+ * recent minor versions before falling back to the dev-package
+ * symlink.  Operators on a libnats outside this window can
+ * override via the `libnats_path` modparam.
+ *
+ * The list is short and the dlopen attempts that miss fail fast
+ * (no disk I/O once ld.so determines the file is absent), so the
+ * startup-time cost is sub-millisecond even when the last entry
+ * is the one that resolves.
  */
 static const char *default_libnats_names[] = {
-	"libnats.so.3.13",   /* current upstream SONAME */
+	"libnats.so.3.13",
+	"libnats.so.3.12",
+	"libnats.so.3.11",
+	"libnats.so.3.10",
+	"libnats.so.3.9",
+	"libnats.so.3.8",
+	"libnats.so.3.7",
 	"libnats.so.3",      /* hypothetical post-realign SONAME */
 	"libnats.so",        /* dev-package symlink */
 	NULL
@@ -163,9 +175,11 @@ static int mod_init(void)
 		}
 		if (!_handle) {
 			LM_ERR("nats_tls_openssl: no libnats build found via "
-			       "default SONAME search (tried: libnats.so.3.13, "
-			       ".so.3, .so).  Install libnats from a distro "
-			       "package or set the libnats_path modparam.\n");
+			       "default SONAME search (tried minor versions "
+			       "3.7 through 3.13, plus libnats.so.3 and "
+			       "libnats.so).  Install libnats from a distro "
+			       "package or set the libnats_path modparam to "
+			       "the exact SONAME / file path.\n");
 			return -1;
 		}
 	}
