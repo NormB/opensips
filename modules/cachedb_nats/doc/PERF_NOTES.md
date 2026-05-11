@@ -901,23 +901,36 @@ on aarch64.  Going forward, any C change touching atomic ops or
 new system headers should be validated with
 `CC=clang make modules=modules/<name> modules` before pushing.
 
-## Async `nats_request` (phase 2 / 2.5 / 3 / rc remap / phase 4)
+## Async `nats_request`
 
-A multi-phase build-out of the script-callable async RPC under
-`modules/nats_consumer/`.  Each phase commits its own tests and
-docs; this section is the engineering record.
+Script-callable async RPC under `modules/nats_consumer/`.
 
-| Phase | What landed | Commit |
-|---|---|---|
-| **1** | Dual cmds[]/acmds[] registration so `async(nats_request(...), rt)` is parser-accepted in worker routes; phase-1 body falls through to the sync path. | `93c0b38879` |
-| **B** | `allow_sync_anywhere` modparam (USE_FUNC_PARAM setter widens the cmd's route mask to ALL_ROUTES); subsequently renamed from `allow_sync_in_request_route` after the user pointed out the misleading "request_route" scope. | `a053f9cc33`, `dac9a26c72` |
-| **2** | Real async impl: per-worker persistent inbox subscription on `_INBOX.opensips.<pid>.>`, per-call eventfd, process-local hash table keyed by correlation suffix, refcount + per-ctx mutex.  Callback-vs-timeout race resolved by state inspection under the mutex. | `a053f9cc33` |
-| **2.5** | UUIDv7 correlation id minted per call (`clock_gettime` + `getrandom(10)` ≈ 200 ns); exposed as `$nats_request_id` (read/write); auto-staged as `X-Request-Id` outbound header (modparam `request_id_header`).  Script can override the auto-mint by assigning the pvar before the call. | `b22bba5600`, `363ab0f371` |
-| **3** | Reconnect-epoch snapshot at ctx alloc; resume function returns `-2` (connection lost) when the epoch advanced or the pool went offline mid-flight, distinct from `-1` (clean timeout). | `8b1587e40d` |
-| **rc remap** | Audit + fix: no `nats_*` script function returns 0, since `core/action.c:196` interprets a 0 return from a cmd as `ACT_FL_EXIT` and terminates the calling route.  Unified rc grammar (`1` / `-1` / `-2` / `-3` / `-4` / `-5` / `-6`). | `2979fba87a` |
-| **4** | Bench scaffolding (`bench_async_request.sh` + `opensips_async_request.cfg.in`) and an eager-subscribe `child_init` hook that moves `natsConnection_Subscribe` out of script-execution context. | this commit |
+Building blocks:
 
-### Bench design (phase 4)
+- **Dual `cmds[]` / `acmds[]` registration.** `nats_request(...)` is
+  the sync entry; `async(nats_request(...), rt)` is the async entry.
+  Dispatch is driven by call-site syntax.
+- **`allow_sync_anywhere` modparam.** A USE_FUNC_PARAM setter widens
+  the sync cmd's route mask to `ALL_ROUTES` when the operator opts
+  in; default mask excludes `REQUEST_ROUTE` / `FAILURE_ROUTE` /
+  `BRANCH_ROUTE`.
+- **UUIDv7 correlation id.** Minted per call
+  (`clock_gettime` + `getrandom(10)` ≈ 200 ns); exposed as the
+  read/write pvar `$nats_request_id`; auto-staged as an
+  `X-Request-Id` outbound header (modparam `request_id_header`).
+  Scripts can override by assigning the pvar before the call.
+- **Reconnect-epoch snapshot at ctx alloc.** The resume function
+  returns `-2` (connection lost) if the pool's reconnect epoch
+  advanced or the pool went offline mid-flight, distinct from
+  `-1` (clean timeout).
+- **Return-code grammar.** No `nats_*` script function returns 0
+  (`core/action.c:196` interprets a 0 return as `ACT_FL_EXIT` and
+  terminates the calling route).  Unified grammar:
+  `1` / `-1` / `-2` / `-3` / `-4` / `-5` / `-6`.
+- **Eager subscribe in `child_init`.** Moves
+  `natsConnection_Subscribe` out of script-execution context.
+
+### Bench design
 
 `modules/nats_consumer/tests/bench/bench_async_request.sh` drives
 SIPp at increasing CPS against a single-worker OpenSIPS that
@@ -942,120 +955,47 @@ What the bench is designed to surface:
   overhead is isolated.
 - **Failure modes**: `RESPONDER_DELAY_MS > RPC_TIMEOUT_MS` exercises
   the `-1` timeout path; killing `nats-server` mid-run exercises
-  the `-2` connection-lost path (phase-3 logic).
+  the `-2` connection-lost path.
 
-### Empirical numbers — blocked on an architecture flaw
+### Architecture: consumer-process-routed transport
 
-**Not yet captured, and not capturable without a refactor.**
-The bench surfaced (and reliably reproduces) a deeper issue:
+`natsConnection_Subscribe` is not safe to call from a SIP UDP
+worker.  Doing so reliably segfaults the worker within a few
+seconds, even with **no SIP traffic ever reaching it**.  The
+pattern works in `event_nats` and in `nats_consumer`'s
+dedicated consumer process because they don't run inside the
+SIP worker reactor.
 
-> Calling `natsConnection_Subscribe` from any OpenSIPS worker
-> process (SIP UDP worker, MI Datagram, Timer handler) segfaults
-> the calling worker within a few seconds, even with **no SIP
-> traffic ever reaching it**.
+The async `nats_request` transport therefore routes the publish
+and the reply through the dedicated `nats_consumer` process,
+which is the only libnats-safe context.  The wiring:
 
-Phase-4 isolation work, in order:
+  * **SHM slot pool.**  Pre-allocated, fixed-size table of
+    per-call records sized for the outbound publish + the
+    reply.  Each call CAS-claims a slot and fills its
+    `out_subject` / `out_data` / `corr_id` fields.
+  * **Worker -> consumer IPC queue.**  Bounded SHM ring + an
+    eventfd inherited via fork().  The worker enqueues a
+    `slot_idx` after transitioning the slot CLAIMED ->
+    INFLIGHT (release ordering); the consumer's main loop
+    acquires INFLIGHT and reads the slot.
+  * **Consumer-side persistent inbox subscription** on
+    `_INBOX.opensips.<consumer_pid>.>` plus an IPC drain
+    loop.  Each drained slot is `PublishMsg`'d with reply-to
+    `<inbox-prefix>.<slot_idx>`.
+  * **On-reply callback** (running on the libnats thread,
+    inside the consumer process) copies the payload into the
+    slot and transitions INFLIGHT -> DELIVERED.
 
-1. Stand up `bench_async_request.sh` against a single-worker
-   opensips.  First OPTIONS via SIPp → SIP worker segfaults.
-2. Move the subscribe from lazy (first call to
-   `w_nats_request_async`) to eager (`child_init`).  Workers
-   still segfault on their own at boot+~3s, without any SIP
-   traffic.  The OPTIONS never makes it through because the
-   worker is already gone.
-3. `#if 0` the eager-subscribe call.  Opensips boots and runs
-   indefinitely with no crash.
+### Wake mechanism: worker-private timerfd poll
 
-Conclusion: `natsConnection_Subscribe` running inside a
-worker process is fundamentally incompatible with how
-OpenSIPS forks and runs its worker pool.  The pattern works
-in `event_nats` and in `nats_consumer`'s dedicated consumer
-process because they don't run inside the SIP worker
-reactor; both `cachedb_nats` and `event_nats` either
-publish-only or operate on a dedicated NATS process, not on
-a SIP-reactor-backed worker.
-
-### Phase-5 attempt -- design flaw identified
-
-Phase-5 (commits `c02d102e7f` → `8789322df3`) built the
-consumer-process-routed infrastructure cleanly:
-
-  * SHM slot pool with a pre-allocated eventfd pool (one
-    eventfd per slot, created in mod_init pre-fork, inherited
-    by every child).
-  * Worker -> consumer publish IPC queue.
-  * Consumer-side persistent inbox subscription
-    (`_INBOX.opensips.<consumer_pid>.>`) + IPC drain loop.
-  * On-reply callback that copies the payload into the slot
-    and would have signaled the slot's wake_fd.
-
-All three layers boot and run cleanly under live opensips.
-The worker-side rewire (`54131313f3`'s parent diff) reliably
-segfaults the SIP UDP worker after a single async() call.
-Step-by-step isolation with LM_INFO checkpoints showed:
-
-  1. Every step inside `w_nats_request_async` completes
-     successfully (slot_claim, fill out_*, slot_publish,
-     ipc_enqueue, ctx setup).
-  2. The crash fires AFTER the function returns -- i.e. it's
-     in the OpenSIPS async core (`tm/async.c`) trying to
-     register the slot's wake_fd with the worker's reactor.
-  3. Substituting `ASYNC_NO_FD` (skip reactor registration)
-     avoids the crash.
-  4. Substituting a FRESH eventfd created inside the worker
-     also avoids the crash.
-
-Conclusion: **OpenSIPS's reactor cannot register
-fork-inherited eventfds.**  The pre-fork-pool approach for
-cross-process wake signaling is a non-starter; phase-5 needs
-a different mechanism.
-
-Three candidate designs for the next attempt:
-
-  A. **SCM_RIGHTS.** Worker creates a fresh eventfd in its
-     own context, sends it to the consumer process via a
-     unix-domain socket with SCM_RIGHTS ancillary data; the
-     consumer adds the dup to its fd table and writes to it
-     on reply.  Standard textbook pattern but needs a
-     UDS-mediated handshake before each call (or a long-lived
-     UDS between worker and consumer with a registration
-     protocol).
-
-  B. **`pidfd_getfd(2)`.** Linux 5.6+ system call that lets a
-     privileged process acquire a duplicate of another
-     process's file descriptor.  Requires `CAP_SYS_PTRACE`
-     (root) or specific yama configuration.  Operationally
-     awkward.
-
-  C. **Worker-private timerfd polling.**  Each worker
-     registers ONE timerfd with the reactor that fires every
-     N ms.  On each fire the resume scans the worker's
-     in-flight slots for state==DELIVERED.  Adds N/2 ms
-     average latency but uses only worker-private fds.
-     Probably the most pragmatic next iteration.
-
-(C) is the simplest correct path; (A) is the proper one for
-operators who want minimal latency.  Both leave the entire
-phase-5 infrastructure (slot pool, IPC queue, consumer-side
-subscription, reply callback) intact -- they only change the
-wake mechanism the worker registers with its reactor.
-
-### Phase 5b: timerfd-poll implementation (current)
-
-Option C was chosen and shipped.  Each async() call:
-
-1. Claims a slot from the phase-5 SHM pool and fills out the
-   subject + payload + correlation id.
-2. Transitions the slot CLAIMED -> INFLIGHT and enqueues the
-   `slot_idx` on the worker -> consumer IPC.
-3. Creates a worker-private `timerfd_create(CLOCK_MONOTONIC)`
-   armed with a 1 ms periodic interval.  The fd is created
-   inside the SIP worker (post-fork), so the OpenSIPS reactor
-   accepts it -- the constraint we hit in commit
-   8eae39a5b1 only applies to fork-inherited fds.
-4. Hands `(slot, timerfd, deadline_us)` to the reactor via
-   `ctx->resume_f = resume_nats_request_slot`, `async_status
-   = timerfd`.
+OpenSIPS's reactor cannot register fork-inherited eventfds
+(diagnosed in commit `8eae39a5b1`).  Each async call therefore
+creates a fresh worker-private `timerfd_create(CLOCK_MONOTONIC)`
+INSIDE the SIP worker (post-fork), armed with a 1 ms periodic
+interval.  The fd is registered with the reactor via
+`ctx->resume_f = resume_nats_request_slot`, `async_status =
+timerfd`.
 
 The resume fires every 1 ms.  On each tick it:
 
@@ -1064,7 +1004,7 @@ The resume fires every 1 ms.  On each tick it:
     closes the timerfd via `ASYNC_DONE_CLOSE_FD`, and returns
     1 to run the reply route;
   * if the per-call deadline elapsed, abandons the slot and
-    returns -1 (or -2 if the pool epoch advanced or the
+    returns `-1` (or `-2` if the pool epoch advanced or the
     connection dropped during the call);
   * otherwise sets `async_status = ASYNC_CONTINUE` to keep
     polling.
@@ -1072,83 +1012,24 @@ The resume fires every 1 ms.  On each tick it:
 Live verification (sipsak OPTIONS against the bench harness):
 single-shot 1.6-2.6 ms RTT; 50 sequential OPTIONS complete
 50/50 in 750 ms (~15 ms wall-clock per request including
-sipsak overhead).  No segfaults; consumer-process subscription
-remains the only libnats async-callback site in the system.
+sipsak overhead).
 
 Latency floor is the poll interval; CPU floor is one timerfd
 tick per in-flight call.  For the talk demo workload (≤ 64
 slots) this is acceptable.  Operators that need sub-ms p50 can
-either (a) drop the poll interval to 100 us at proportional
-CPU cost, or (b) switch to option A (SCM_RIGHTS) as a future
-phase-5c.
-
-### Architectural consequence
-
-Phase 2's implementation places the inbox subscription on the
-SIP worker that issues the request.  That choice was driven by
-"every worker owns its own subscription" / "minimal IPC"
-reasoning, and the design notes (phase 2 commit message,
-`nats_rpc_async.c` header comment) reflect that.  It's now
-clear the choice was wrong: workers cannot safely host
-libnats subscription threads.
-
-The correct architecture is the one I considered and rejected
-during phase 2 scoping (**option B** in that discussion):
-route the publish + reply through the dedicated nats_consumer
-process, which already runs libnats safely.
-
-Sketch of the refactor for a future phase:
-
-1. Consumer process maintains **one** persistent inbox
-   subscription on `_INBOX.opensips.<instance-id>.>`.  No
-   per-worker subs.
-2. Worker's `w_nats_request_async` sends an IPC packet to the
-   consumer process: "publish this subject + payload, my
-   correlation id is `<uuid>`, signal me at eventfd `<fd>`."
-3. Consumer process does the publish + parks the worker's fd
-   in its in-flight hash table.
-4. When the reply lands on the consumer's subscription
-   callback, it copies the payload into a SHM ring (one
-   per worker, similar to the existing fetch ring), then
-   signals the worker's eventfd.
-5. Worker resume reads from its ring, populates
-   `$nats_data` / `$nats_request_id` / `$nats_hdr(...)`,
-   returns.
-
-Cost: one IPC hop per call (worker → consumer → worker) plus
-the broker round-trip.  Benefit: zero worker-side libnats
-threading, no segfaults, all per-worker async state lives in
-SHM rings the consumer process already knows how to talk to.
-
-Until that refactor lands, async `nats_request` is implemented
-correctly at the **state-machine + script-surface** level
-(every unit test passes, the dispatch matrix is green, the
-return-code grammar is sound, the writable pvar works), but it
-**cannot be exercised end-to-end against a live broker**.  The
-sync `nats_request` path is unaffected -- it does its own
-short-lived inbox subscription inside
-`natsConnection_RequestMsg` and tears it down before returning,
-which apparently does not trigger the bug.
-
-The bench scaffolding is committed regardless so the
-reproducer is part of the tree and operators can re-run it as
-soon as the start-path bug is fixed.  At that point this
-section will be filled in with:
-
-| Mode | CPS | responder_delay | p50 / p95 / max SIP RTT | succeeded | failed |
-|---|---|---|---|---|---|
-| _pending_ |   |   |   |   |   |
+drop the poll interval to 100 us at proportional CPU cost; an
+SCM_RIGHTS-based wake mechanism remains a possible future
+alternative.
 
 ### Eager subscribe in `child_init`
 
-Independent of the bench result, phase 4 moved the per-worker
-inbox subscription's `natsConnection_Subscribe` call from the
-lazy "first call to `w_nats_request_async`" path to a new
-`nats_rpc_async_child_init()` hook invoked from
-`nats_consumer.c`'s `child_init()`.  Rationale: the libnats
-subscription thread is spawned synchronously inside that call,
-and spawning a thread from inside a SIP worker that is
-already mid-script-execution races with the connection's
+The per-worker inbox subscription's `natsConnection_Subscribe`
+call is invoked from a `nats_rpc_async_child_init()` hook
+called by `nats_consumer.c`'s `child_init()` rather than lazily
+from the first call to `w_nats_request_async`.  Rationale: the
+libnats subscription thread is spawned synchronously inside
+that call, and spawning a thread from inside a SIP worker that
+is already mid-script-execution races with the connection's
 locking discipline on aarch64 + libnats 3.x.  The lazy fallback
 inside `w_nats_request_async` is retained as a safety net for
 worker types that don't enter `child_init` with the pool

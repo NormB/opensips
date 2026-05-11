@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_rpc_async.c -- async entry point for nats_request (phase 2).
+ * nats_rpc_async.c -- async entry point for nats_request.
  *
  * Implements a non-blocking JetStream/core NATS request/reply RPC
  * that yields the worker on an eventfd while the reply is in
@@ -71,12 +71,11 @@
  * which we then promote to ABANDONED before releasing the hash's
  * ref.
  *
- * Phase scope: this file implements the steady-state happy path,
- * the timeout path, and the callback/timeout race resolution.
- * Phase 3 will add connection-drop reaping (the reconnect callback
- * walks the hash and abandons every entry, similar to a synthetic
- * timeout).  Until phase 3 lands, a broker crash mid-flight will
- * surface as a timeout after `timeout_ms`; no leaked ctxs.
+ * Scope: this file implements the steady-state happy path, the
+ * timeout path, the callback/timeout race resolution, and
+ * connection-drop detection (the resume path returns -2 if the
+ * pool's reconnect epoch changed mid-flight, distinguishing a
+ * broker crash from a clean timeout).
  */
 
 #ifdef TEST_SHIM
@@ -1055,11 +1054,11 @@ extern void nats_rpc_cur_set_from_buffers(uint32_t handle_idx,
                                            uint8_t   hdr_truncated);
 
 /*
- * Phase-5b per-call wrapper: pairs the worker-private timerfd
- * with the SHM slot.  Lives in pkg memory (worker-local) for
- * the duration of one async() call; freed by resume_nats_
- * request_slot on completion or timeout.  The timerfd is
- * created INSIDE the worker (post-fork) so it doesn't trip the
+ * Per-call wrapper: pairs the worker-private timerfd with the
+ * SHM slot.  Lives in pkg memory (worker-local) for the duration
+ * of one async() call; freed by resume_nats_request_slot on
+ * completion or timeout.  The timerfd is created INSIDE the
+ * worker (post-fork) so it doesn't trip the
  * OpenSIPS-reactor-can't-handle-fork-inherited-eventfds bug
  * isolated in commit 8eae39a5b1.
  */
@@ -1082,7 +1081,7 @@ static int64_t now_us_monotonic(void)
 }
 
 /*
- * Resume function for the phase-5b timerfd-poll transport.
+ * Resume function for the worker-private timerfd-poll transport.
  *
  * Fires on every tick of the per-call timerfd OR when the
  * async-core timeout expires (was_timeout=1).  The slot's
@@ -1168,46 +1167,18 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 }
 
 /*
- * w_nats_request_async -- async acmd entry point (phase 5).
+ * w_nats_request_async -- async acmd entry point.
  *
  * Worker side of the consumer-process-routed transport:
  *
- *   1. Pre-flight: subject length, payload bounds.
- *   2. Pick / mint the UUIDv7 correlation id (phase 2.5).
- *   3. Claim a SHM slot from the pool (phase-5 step 1).
- *   4. Fill the slot's out_subject / out_data + epoch_at_start
- *      + corr_id.
- *   5. Transition the slot from CLAIMED to INFLIGHT (release
- *      ordering -- the consumer's IPC drain acquires this).
- *   6. Enqueue the slot_idx on the worker -> consumer IPC
- *      (phase-5 step 2).
- *   7. Hand off to the reactor: ctx->resume_f =
- *      resume_nats_request_slot, ctx->resume_param = slot,
- *      async_status = slot->wake_fd, ctx->timeout_s = tmo.
- *
- * On any pre-IPC failure the slot is freed and the worker
- * returns the appropriate negative rc.  On post-IPC failure
- * (queue full) the slot is also freed; the worker returns -5
- * (capacity exhausted).
- *
- * The auto-staged X-Request-Id header (request_id_header
- * modparam) is currently NOT propagated through to the
- * consumer-side PublishMsg -- phase-5 step 3 left that as a
- * TODO.  The id is still stashed for $nats_request_id, just
- * not on the wire.  Phase-5 step 5 will deserialise
- * out_headers and call natsMsgHeader_Set on the consumer side.
- */
-/*
- * w_nats_request_async -- phase-5b worker side.
- *
- * Flow:
  *   1. Pre-flight: subject + payload bounds.
- *   2. Mint/consume UUIDv7 for $nats_request_id (phase 2.5).
- *   3. Claim a SHM slot.  On full pool surface -5.
+ *   2. Mint/consume UUIDv7 for $nats_request_id.
+ *   3. Claim a SHM slot from the pool.  On full pool surface -5.
  *   4. Fill the slot's out_subject + out_data + corr_id +
  *      epoch_at_start.
- *   5. Transition slot CLAIMED -> INFLIGHT (release) and
- *      enqueue the slot_idx on the worker -> consumer IPC.
+ *   5. Transition slot CLAIMED -> INFLIGHT (release ordering --
+ *      the consumer's IPC drain acquires this) and enqueue the
+ *      slot_idx on the worker -> consumer IPC.
  *   6. Create a worker-private timerfd that ticks every
  *      NATS_RPC_ASYNC_POLL_NS ns.  Compute the per-call deadline
  *      from timeout_ms (caps the polling loop).
@@ -1218,8 +1189,13 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
  * Headers from nats_rpc_staged are NOT propagated to the
  * consumer yet -- the slot's out_headers buffer exists but
  * w_nats_request_async writes only an empty header block.
- * That's a deliberate phase-5 step-5 deferral; the X-Request-Id
- * is still observable via $nats_request_id on the script side.
+ * The X-Request-Id is still observable via $nats_request_id on
+ * the script side; on-the-wire header propagation is a TODO.
+ *
+ * On any pre-IPC failure the slot is freed and the worker
+ * returns the appropriate negative rc.  On post-IPC failure
+ * (queue full) the slot is also freed; the worker returns -5
+ * (capacity exhausted).
  */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms)
@@ -1264,7 +1240,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 
 	tmo_ms = (timeout_ms && *timeout_ms > 0) ? *timeout_ms : 1000;
 
-	/* Phase 2.5: mint/consume the UUIDv7 + stage X-Request-Id. */
+	/* Mint or consume the UUIDv7 + stage X-Request-Id. */
 	id_len = nats_rpc_async_request_id_consume_user(id_buf, sizeof(id_buf));
 	if (id_len == 0)
 		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
@@ -1337,7 +1313,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	}
 
 	/* Worker-private timerfd: created post-fork so the reactor
-	 * can register it (phase-5 root cause). */
+	 * can register it (see commit 8eae39a5b1). */
 	LM_DBG("nats_request[async]: about to create timerfd\n");
 	tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 	if (tfd < 0) {

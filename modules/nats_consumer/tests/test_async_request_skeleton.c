@@ -3,7 +3,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1 skeleton test for the async nats_request entry point.
+ * Dual-registration / state-machine skeleton test for the async
+ * nats_request entry point.
  *
  * Verifies that the dual-registration plumbing is in place without
  * requiring a running broker or a libnats link:
@@ -14,9 +15,8 @@
  *      access while adding the async surface.
  *   3. nats_rpc.h declares w_nats_request_async with the acmd
  *      signature (struct sip_msg *, async_ctx *, ...).
- *   4. nats_rpc_async.c defines w_nats_request_async, sets
- *      async_status = ASYNC_SYNC on the fall-through path, and falls
- *      through to the sync w_nats_request body.
+ *   4. nats_rpc_async.c defines w_nats_request_async with the SHM
+ *      slot + worker -> consumer IPC + timerfd-poll wiring.
  *
  * Source-pattern style, no link dependency on opensips core or
  * libnats; equivalent to test_request_route_restriction.c.
@@ -141,7 +141,7 @@ int main(void)
 			"setter widens nats_request entry to ALL_ROUTES on opt-in");
 	}
 
-	/* (3b) phase-2.5 UUIDv7 correlation: $nats_request_id pvar +
+	/* (3b) UUIDv7 correlation: $nats_request_id pvar +
 	 * request_id_header modparam + default header name + the
 	 * writable-pvar setter that routes NULL through the early-
 	 * return clear path. */
@@ -168,13 +168,11 @@ int main(void)
 			"header includes async.h");
 	}
 
-	/* (5) phase-4/5 interim impl: state machine + UUIDv7 + pvar
-	 * surface preserved, but the transport reverted to the
-	 * sync-fall-through after the per-worker subscription
-	 * crashed (PERF_NOTES "Async nats_request" section).  The
-	 * subscription / on_inbox_reply / per-call eventfd
-	 * machinery is still defined in source for phase 5 reuse,
-	 * but w_nats_request_async no longer invokes it. */
+	/* (5) consumer-process-routed transport impl: SHM slot claim +
+	 * worker -> consumer IPC enqueue + worker-private timerfd
+	 * resume poll.  The hash table / subscription / on_inbox_reply
+	 * code is still present in the source -- consumed by the
+	 * consumer-side reply path. */
 	{
 		ASSERT(strstr(impl, "int w_nats_request_async(") != NULL,
 			"impl defines w_nats_request_async");
@@ -183,30 +181,27 @@ int main(void)
 		ASSERT(strstr(impl, "nats_rpc_async_request_id_set") != NULL,
 			"impl still stashes the request id for $nats_request_id");
 		ASSERT(strstr(impl, "nats_rpc_slot_claim()") != NULL,
-			"impl claims an SHM slot from the phase-5 pool");
+			"impl claims an SHM slot from the pool");
 		ASSERT(strstr(impl, "nats_rpc_slot_publish") != NULL,
 			"impl transitions slot CLAIMED -> INFLIGHT before IPC");
 		ASSERT(strstr(impl, "nats_rpc_ipc_enqueue") != NULL,
 			"impl enqueues the slot_idx on the worker -> consumer IPC");
 		ASSERT(strstr(impl, "timerfd_create") != NULL,
 			"impl creates a worker-private timerfd for the resume "
-			"poll (phase 5b)");
+			"poll");
 		ASSERT(strstr(impl, "ctx->resume_f") != NULL &&
 		       strstr(impl, "resume_nats_request_slot") != NULL,
 			"impl wires resume_nats_request_slot on async_ctx");
-		ASSERT(strstr(impl, "async_status      = tfd") != NULL ||
-		       strstr(impl, "async_status = tfd") != NULL,
+		ASSERT(strstr(impl, "= tfd;") != NULL,
 			"impl hands the timerfd to the reactor via async_status");
 		/* The hash table / subscription / on_inbox_reply code
-		 * is still present in the file for phase 5 reuse,
-		 * even though w_nats_request_async no longer calls
-		 * into it.  We assert that the symbols still exist so
-		 * the phase-5 refactor has something to graft onto. */
+		 * is still present in the file; the consumer-side reply
+		 * path reuses it.  Assert the symbols still exist. */
 		ASSERT(strstr(impl, "on_inbox_reply") != NULL,
-			"on_inbox_reply callback still defined (phase 5 "
-			"will reuse it from the consumer-process side)");
+			"on_inbox_reply callback still defined "
+			"(consumed by the consumer-process side)");
 		ASSERT(strstr(impl, "ensure_inbox_subscription") != NULL,
-			"ensure_inbox_subscription still defined for phase 5 reuse");
+			"ensure_inbox_subscription still defined");
 	}
 
 	free(src); free(hdr); free(impl);

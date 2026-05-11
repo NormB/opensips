@@ -132,7 +132,7 @@ function discovers the lost-connection state when the async-core
 timer next wakes it, so the worst-case time to surface `-2` is
 bounded by the script's `timeout_ms`.  Sub-second proactive
 reaping requires either a periodic-poll route or a `lib/nats`
-disconnect-callback chain; both are tracked for a later phase.
+disconnect-callback chain; both remain TODO.
 
 **Script-side idiom for `nats_fetch_batch`:** because the
 function returns `-1` on empty (not 0), always assign and branch
@@ -498,9 +498,8 @@ nats_consumer_bind("id=adv;stream=ADV;ephemeral=1;
 ## Design + implementation notes
 
 See `docs/superpowers/specs/2026-04-16-nats-consumer-design.md` on the
-`feature/nats-consumer-spec` branch for the full design, plus the phased
-implementation plan that landed in commits on the
-`feature/nats-consumer-*` branches.
+`feature/nats-consumer-spec` branch for the full design and the
+implementation history on the `feature/nats-consumer-*` branches.
 
 ## License
 

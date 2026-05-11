@@ -19,27 +19,27 @@
  */
 
 /*
- * nats_rpc_slot.h -- per-call SHM slot table for the phase-5
+ * nats_rpc_slot.h -- per-call SHM slot table for the
  * consumer-process-routed async nats_request transport.
  *
  * Why SHM
- *   Phase 2's per-worker subscription transport segfaulted because
- *   libnats's async-callback subscription thread is incompatible
- *   with the SIP UDP worker context.  Phase 5 moves the
- *   subscription to the consumer process (the only context that
- *   already runs libnats safely) and hands off in-flight state
- *   between worker and consumer via SHM.
+ *   An earlier per-worker subscription transport segfaulted
+ *   because libnats's async-callback subscription thread is
+ *   incompatible with the SIP UDP worker context.  This design
+ *   moves the subscription to the consumer process (the only
+ *   context that already runs libnats safely) and hands off
+ *   in-flight state between worker and consumer via SHM.
  *
- * Wake mechanism (phase 5b)
+ * Wake mechanism (worker-private timerfd poll)
  *   OpenSIPS's reactor cannot register fork-inherited eventfds
- *   (proven by the phase-5 diagnostic in commit 8eae39a5b1).
- *   Instead, each async call creates a fresh worker-private
- *   timerfd that fires every NATS_RPC_ASYNC_POLL_MS milliseconds;
- *   the resume function reads the slot's atomic state on each
- *   tick.  When the consumer writes the reply into the slot and
- *   transitions state to DELIVERED, the worker's next poll
- *   pick-up returns the reply.  Latency floor is the poll
- *   interval; CPU floor is one timerfd tick per in-flight call.
+ *   (see commit 8eae39a5b1).  Instead, each async call creates
+ *   a fresh worker-private timerfd that fires every
+ *   NATS_RPC_ASYNC_POLL_MS milliseconds; the resume function
+ *   reads the slot's atomic state on each tick.  When the
+ *   consumer writes the reply into the slot and transitions
+ *   state to DELIVERED, the worker's next poll pick-up returns
+ *   the reply.  Latency floor is the poll interval; CPU floor
+ *   is one timerfd tick per in-flight call.
  *
  * State machine
  *

@@ -1606,7 +1606,7 @@ void nats_consumer_proc_main(int rank)
 			"falling back to 1s select timeout\n", strerror(errno));
 	}
 
-	/* Phase-5 async nats_request: stand up the persistent inbox
+	/* Async nats_request: stand up the persistent inbox
 	 * subscription so worker-issued RPCs can route their
 	 * publish + reply through this process (libnats-safe
 	 * context) instead of running directly in the SIP worker
@@ -1614,7 +1614,7 @@ void nats_consumer_proc_main(int rank)
 	 * fails the IPC drain below will surface -3 to each
 	 * pending slot. */
 	if (nats_rpc_consumer_subscribe() < 0) {
-		LM_WARN("nats_consumer_proc: phase-5 inbox subscribe "
+		LM_WARN("nats_consumer_proc: async inbox subscribe "
 			"failed; async nats_request RPCs that arrive on "
 			"the IPC will be marked abandoned\n");
 	}
@@ -1719,7 +1719,7 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
-		/* 3.5 Phase-5 async nats_request: drain the worker ->
+		/* 3.5 Async nats_request: drain the worker ->
 		 *     consumer publish IPC.  For each entry the helper
 		 *     reads the slot's out_* fields and PublishMsg's
 		 *     against our libnats connection with reply-to
@@ -1745,7 +1745,7 @@ void nats_consumer_proc_main(int rank)
 		if (!any_work) {
 			/* Blocking idle: wait until either the ack IPC eventfd
 			 * becomes readable (a worker acked something), the
-			 * phase-5 RPC IPC eventfd becomes readable (a worker
+			 * async RPC IPC eventfd becomes readable (a worker
 			 * issued an async nats_request), or the retry
 			 * timerfd fires (bounded stall recovery).  Avoids a
 			 * busy poll so the consumer process spends ~0% CPU
@@ -1787,7 +1787,7 @@ void nats_consumer_proc_main(int rank)
 				} while (r < 0 && errno == EINTR);
 			}
 
-			/* Drain the phase-5 RPC IPC eventfd so the next
+			/* Drain the async RPC IPC eventfd so the next
 			 * empty -> non-empty edge wakes us again.  The
 			 * actual queue is drained on the next loop
 			 * iteration via nats_rpc_consumer_drain_ipc(). */

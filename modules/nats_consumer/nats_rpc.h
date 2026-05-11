@@ -146,12 +146,10 @@ int w_nats_request (struct sip_msg *msg, str *subject, str *payload,
  *   bare        nats_request(...)            -> w_nats_request    (sync)
  *   wrapped in  async(nats_request(...), rt) -> w_nats_request_async
  *
- * Phase 1 fall-through skeleton: this entry point currently runs the
- * existing synchronous request path and reports completion via
- * async_status = ASYNC_SYNC.  Phase 2 will replace the body with a
- * libnats publish + reply-inbox subscription bridged onto an eventfd,
- * yielding the worker for the duration of the round trip.  The script
- * surface is stable across both phases. */
+ * The async entry point bridges the worker onto an eventfd and yields
+ * for the duration of the round trip; the publish + reply-inbox
+ * subscription runs in the consumer process (the only libnats-safe
+ * context).  Both entry points share the same script surface. */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms);
 

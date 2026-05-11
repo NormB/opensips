@@ -1,6 +1,6 @@
 #!/bin/bash
-# test_async_request_dispatch.sh -- phase-1 dispatch validation for
-# the async nats_request acmd.
+# test_async_request_dispatch.sh -- sync vs. async dispatch validation
+# for the nats_request cmd / acmd pair.
 #
 # Drives OpenSIPS's own config-checker (opensips -C) against three
 # minimal scripts.  No NATS broker required; we only verify that the
@@ -22,11 +22,11 @@
 #         -> MUST PARSE     (setter widens the route mask in place
 #                            before the route block is parsed)
 #
-# A failure of any of these three assertions means the phase-1
-# dispatch plumbing is broken even though the source-pattern unit
-# test (test_async_request_skeleton.c) still happens to pass: e.g.
-# the acmd entry was removed, the route mask widened, or the cmd
-# was given ALL_ROUTES by accident.
+# A failure of any of these assertions means the sync/async dispatch
+# plumbing is broken even though the source-pattern unit test
+# (test_async_request_skeleton.c) still happens to pass: e.g. the
+# acmd entry was removed, the route mask widened, or the cmd was
+# given ALL_ROUTES by accident.
 #
 # Skips with exit 77 if the opensips binary or _modules/ directory
 # is not present in the tree -- this lets a Makefile target like
@@ -56,7 +56,7 @@ for m in nats_consumer.so proto_bin.so signaling.so sl.so tm.so \
     fi
 done
 
-WORKDIR="$(mktemp -d -t nats-phase1-dispatch.XXXXXX)"
+WORKDIR="$(mktemp -d -t nats-dispatch.XXXXXX)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
 cat > "${WORKDIR}/common.head" <<EOF

@@ -19,9 +19,9 @@
  */
 
 /*
- * nats_rpc_consumer.c -- consumer-process side of the phase-5
- * async nats_request transport.  See nats_rpc_consumer.h for
- * the architecture rationale.
+ * nats_rpc_consumer.c -- consumer-process side of the
+ * consumer-process-routed async nats_request transport.  See
+ * nats_rpc_consumer.h for the architecture rationale.
  */
 
 #include <string.h>
@@ -42,8 +42,8 @@
 #include "nats_ring.h"     /* NATS_RING_*_MAX */
 
 /* Shared headers helper -- promoted to public in nats_rpc.c so
- * the sync, async-worker (phase 1/2), and async-consumer (phase 5)
- * reply paths produce byte-identical serialised header streams. */
+ * the sync, async-worker, and consumer-process-routed async reply
+ * paths produce byte-identical serialised header streams. */
 extern int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
                                               int *truncated, int *count_out);
 
@@ -111,8 +111,8 @@ static int parse_slot_idx(const char *subject, int subject_len,
  * reply subject suffix): copy the reply payload into the slot,
  * transition state INFLIGHT -> DELIVERED with release ordering.
  * The worker side polls slot->state on each tick of a
- * worker-private timerfd (phase 5b wake mechanism); we do not
- * signal any fd from this callback.
+ * worker-private timerfd; we do not signal any fd from this
+ * callback.
  */
 static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
                             natsMsg *msg, void *closure)
@@ -278,23 +278,17 @@ void nats_rpc_consumer_unsubscribe(void)
  * remote responder echoes a reply back into us.
  *
  * Header staging is intentionally NOT handled here -- the
- * worker already applied any script-staged headers BEFORE the
- * publish (via the existing nats_rpc_staged_apply_and_clear_on
- * path during w_nats_request_async).  Wait, actually in phase 5
- * the worker does NOT call PublishMsg; it queues a slot to the
- * consumer.  So we need to think about header propagation:
- * we'd want to embed the staged headers in the slot's
- * out_headers buffer (which the worker fills before publish)
- * and have THIS function attach them via natsMsgHeader_Set
- * before publishing.
+ * worker does NOT call PublishMsg; it queues a slot to the
+ * consumer.  Header propagation embeds the staged headers in
+ * the slot's out_headers buffer (which the worker fills before
+ * publish) and this function would attach them via
+ * natsMsgHeader_Set before publishing.
  *
- * Phase-5 step 3 (this commit) leaves headers as a TODO --
- * the slot has out_headers space and the worker is wired to
- * fill it in step 4, but the actual natsMsgHeader_Set
- * deserialise loop is not yet wired here.  The first
- * end-to-end test of phase 5 (no custom headers, just the
- * UUIDv7 inbox subject) will work; richer header propagation
- * lands in step 4.
+ * The slot has out_headers space and the worker is wired to
+ * fill it, but the actual natsMsgHeader_Set deserialise loop
+ * is not yet wired here.  Calls with no custom headers (just
+ * the UUIDv7 inbox subject) work today; richer header
+ * propagation is a TODO.
  */
 static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 {
