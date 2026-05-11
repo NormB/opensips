@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-5c regression test: nats_consumer_process must detect
+ * Regression test: nats_consumer_process must detect
  * reconnects and re-establish subscriptions, not just sleep(60)
  * indefinitely.
  *

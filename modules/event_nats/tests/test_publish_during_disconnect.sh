@@ -83,14 +83,14 @@ EOF
 
 start_opensips "${WORK}/test.cfg"
 
-# Phase 1: 2 s of normal beats.
-echo "--- phase 1: warm-up ---"
+# Warm-up: 2 s of normal beats.
+echo "--- warm-up ---"
 sleep 2
 ok_before=$(grep -c '\[e12\] beat seq=.* ok' "${OPS_LOG}" || echo 0)
 [ "${ok_before}" -ge 1 ] || fail "no successful beats in warm-up; log:\n$(tail -40 "${OPS_LOG}")"
 
-# Phase 2: kill the broker.
-echo "--- phase 2: killing broker ---"
+# Outage: kill the broker.
+echo "--- killing broker ---"
 stop_private_nats
 # Beats should now fail; we let several elapse to guarantee at least one
 # attempted publish hits the down state.
@@ -102,8 +102,8 @@ if [ "${fail_count}" -eq 0 ]; then
 fi
 echo "    failed beats during outage: ${fail_count}"
 
-# Phase 3: bring broker back, allow reconnect.
-echo "--- phase 3: restarting broker ---"
+# Recovery: bring broker back, allow reconnect.
+echo "--- restarting broker ---"
 start_private_nats "${PRIV_PORT}"
 # reconnect_wait=200ms, plus a generous margin for the next timer tick.
 sleep 4
@@ -114,9 +114,9 @@ new_ok=$((ok_after - ok_before))
 [ "${new_ok}" -ge 1 ] || fail "no successful beats after broker restart (ok_before=${ok_before} ok_after=${ok_after}); log:\n$(grep '\[e12\]' "${OPS_LOG}" | tail -20)"
 echo "    new successful beats post-recovery: ${new_ok}"
 
-# The subscriber stayed connected through phase 1 only (it disconnects
-# at phase-2 broker kill).  As long as it caught at least one beat we
-# know the publish leg worked end-to-end pre-outage.
+# The subscriber stayed connected through the warm-up only (it
+# disconnects when the broker is killed).  As long as it caught at
+# least one beat we know the publish leg worked end-to-end pre-outage.
 kill ${SUB_PID} 2>/dev/null || true
 wait ${SUB_PID} 2>/dev/null || true
 sub_count=$(grep -c '"seq":' "${SUB_LOG}" || echo 0)

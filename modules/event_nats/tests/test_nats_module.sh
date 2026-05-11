@@ -1,12 +1,14 @@
 #!/bin/bash
-# test_nats_module.sh — Incremental test suite for mod_nats and event_nats subscribe
+# test_nats_module.sh — Test suite for mod_nats and event_nats subscribe
 #
-# This script grows with each implementation phase. Tests are cumulative —
-# later phases include all earlier tests as regression checks.
+# Tests are organised into cumulative groups keyed by a level number; the
+# higher the level, the more groups run.  Each level adds the tests above
+# it as a regression check on the earlier surface.
 #
 # Usage:
-#   ./tests/test_nats_module.sh [phase]
-#   phase: 1-10 (default: run all implemented phases)
+#   ./tests/test_nats_module.sh [level]
+#   level: 1-10 (default: 1).  Pass "edge" to run only the edge-case
+#   groups (also automatically included at level >= 10).
 
 set -uo pipefail
 
@@ -93,10 +95,10 @@ assert_value() {
     fi
 }
 
-# ── Phase 1: Module skeleton + nats_account_info ─────────────────
+# ── Module skeleton + nats_account_info ──────────────────────────
 
-test_phase1() {
-    echo "=== Phase 1: Module skeleton + nats_account_info ==="
+test_group1() {
+    echo "=== Module skeleton + nats_account_info ==="
 
     # Test 1: Module loaded (check MI is responsive)
     local r
@@ -124,10 +126,10 @@ test_phase1() {
     assert_value "limits.max_streams exists" "$r" "assert 'max_streams' in d['limits']"
 }
 
-# ── Phase 2: nats_stream_list + nats_stream_info ─────────────────
+# ── nats_stream_list + nats_stream_info ──────────────────────────
 
-test_phase2() {
-    echo "=== Phase 2: nats_stream_list + nats_stream_info ==="
+test_group2() {
+    echo "=== nats_stream_list + nats_stream_info ==="
 
     # Test 1: stream_list returns valid response with streams array
     local r
@@ -181,14 +183,14 @@ test_phase2() {
 
 # ── Main ─────────────────────────────────────────────────────────
 
-MAX_PHASE="${1:-1}"
+MAX_LEVEL="${1:-1}"
 RUN_EDGE=0
-if [ "$MAX_PHASE" = "edge" ]; then
-    MAX_PHASE=0
+if [ "$MAX_LEVEL" = "edge" ]; then
+    MAX_LEVEL=0
     RUN_EDGE=1
 fi
 
-echo "Running mod_nats tests (phases 1-$MAX_PHASE${RUN_EDGE:+, edge cases})"
+echo "Running mod_nats tests (levels 1-$MAX_LEVEL${RUN_EDGE:+, edge cases})"
 echo ""
 
 # Wait for OpenSIPS to be ready
@@ -206,10 +208,10 @@ for i in $(seq 1 30); do
 done
 echo ""
 
-# ── Phase 3: nats_stream_create/delete/purge ─────────────────────
+# ── nats_stream_create/delete/purge ──────────────────────────────
 
-test_phase3() {
-    echo "=== Phase 3: nats_stream_create/delete/purge ==="
+test_group3() {
+    echo "=== nats_stream_create/delete/purge ==="
 
     local r
 
@@ -265,10 +267,10 @@ test_phase3() {
     mi_with_params "nats_stream_delete" '{"stream":"test-custom"}' >/dev/null 2>&1
 }
 
-# ── Phase 4: nats_consumer_list/info/create/delete ───────────────
+# ── nats_consumer_list/info/create/delete ────────────────────────
 
-test_phase4() {
-    echo "=== Phase 4: nats_consumer_list/info/create/delete ==="
+test_group4() {
+    echo "=== nats_consumer_list/info/create/delete ==="
 
     local r
 
@@ -330,10 +332,10 @@ test_phase4() {
     mi_with_params "nats_stream_delete" '{"stream":"test-consumers"}' >/dev/null 2>&1
 }
 
-# ── Phase 5: nats_msg_get/delete ─────────────────────────────────
+# ── nats_msg_get/delete ──────────────────────────────────────────
 
-test_phase5() {
-    echo "=== Phase 5: nats_msg_get/delete ==="
+test_group5() {
+    echo "=== nats_msg_get/delete ==="
 
     local r
 
@@ -381,10 +383,10 @@ test_phase5() {
     mi_with_params "nats_stream_delete" '{"stream":"test-msg-ops"}' >/dev/null 2>&1
 }
 
-# ── Phase 8+9: event_nats subscribe ──────────────────────────────
+# ── event_nats subscribe ─────────────────────────────────────────
 
-test_phase89() {
-    echo "=== Phase 8+9: event_nats subscribe ==="
+test_group89() {
+    echo "=== event_nats subscribe ==="
 
     local r
 
@@ -441,8 +443,8 @@ assert_any_error() {
     fi
 }
 
-test_edge_phase1() {
-    echo "=== Edge: Phase 1 — account_info edge cases ==="
+test_edge_group1() {
+    echo "=== Edge: account_info edge cases ==="
 
     local r
 
@@ -467,8 +469,8 @@ test_edge_phase1() {
         "assert d['limits']['max_streams'] == -1 or d['limits']['max_streams'] > 0"
 }
 
-test_edge_phase2() {
-    echo "=== Edge: Phase 2 — stream list/info edge cases ==="
+test_edge_group2() {
+    echo "=== Edge: stream list/info edge cases ==="
 
     local r
 
@@ -509,8 +511,8 @@ test_edge_phase2() {
         "assert all('lag' in r for r in d.get('cluster',{}).get('replicas',[]))"
 }
 
-test_edge_phase3() {
-    echo "=== Edge: Phase 3 — stream create/delete/purge edge cases ==="
+test_edge_group3() {
+    echo "=== Edge: stream create/delete/purge edge cases ==="
 
     local r
 
@@ -568,8 +570,8 @@ test_edge_phase3() {
     mi_with_params "nats_stream_delete" '{"stream":"edge-zero"}' >/dev/null 2>&1
 }
 
-test_edge_phase4() {
-    echo "=== Edge: Phase 4 — consumer edge cases ==="
+test_edge_group4() {
+    echo "=== Edge: consumer edge cases ==="
 
     local r
 
@@ -647,8 +649,8 @@ test_edge_phase4() {
     mi_with_params "nats_stream_delete" '{"stream":"edge-cons"}' >/dev/null 2>&1
 }
 
-test_edge_phase5() {
-    echo "=== Edge: Phase 5 — message get/delete edge cases ==="
+test_edge_group5() {
+    echo "=== Edge: message get/delete edge cases ==="
 
     local r
 
@@ -711,8 +713,8 @@ test_edge_phase5() {
     mi_with_params "nats_stream_delete" '{"stream":"edge-msg"}' >/dev/null 2>&1
 }
 
-test_edge_phase89() {
-    echo "=== Edge: Phase 8+9 — subscribe edge cases ==="
+test_edge_group89() {
+    echo "=== Edge: subscribe edge cases ==="
 
     local r
 
@@ -782,26 +784,26 @@ test_edge_phase89() {
     fi
 }
 
-if [ "$MAX_PHASE" -ge 1 ]; then test_phase1; fi
-if [ "$MAX_PHASE" -ge 2 ]; then test_phase2; fi
-if [ "$MAX_PHASE" -ge 3 ]; then test_phase3; fi
-if [ "$MAX_PHASE" -ge 4 ]; then test_phase4; fi
-if [ "$MAX_PHASE" -ge 5 ]; then test_phase5; fi
-if [ "$MAX_PHASE" -ge 8 ]; then test_phase89; fi
+if [ "$MAX_LEVEL" -ge 1 ]; then test_group1; fi
+if [ "$MAX_LEVEL" -ge 2 ]; then test_group2; fi
+if [ "$MAX_LEVEL" -ge 3 ]; then test_group3; fi
+if [ "$MAX_LEVEL" -ge 4 ]; then test_group4; fi
+if [ "$MAX_LEVEL" -ge 5 ]; then test_group5; fi
+if [ "$MAX_LEVEL" -ge 8 ]; then test_group89; fi
 
-# Edge case tests (run when phase >= 10 or "edge" is passed)
-if [ "$MAX_PHASE" -ge 10 ] || [ "$RUN_EDGE" -eq 1 ]; then
+# Edge case tests (run when level >= 10 or "edge" is passed)
+if [ "$MAX_LEVEL" -ge 10 ] || [ "$RUN_EDGE" -eq 1 ]; then
     echo ""
     echo "═══════════════════════════════════════════════"
     echo "  EDGE CASE TESTS"
     echo "═══════════════════════════════════════════════"
     echo ""
-    test_edge_phase1
-    test_edge_phase2
-    test_edge_phase3
-    test_edge_phase4
-    test_edge_phase5
-    test_edge_phase89
+    test_edge_group1
+    test_edge_group2
+    test_edge_group3
+    test_edge_group4
+    test_edge_group5
+    test_edge_group89
 fi
 
 echo ""

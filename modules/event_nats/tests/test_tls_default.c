@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-2a regression test: tls_skip_verify must default to 0 (verify)
+ * Regression test: tls_skip_verify must default to 0 (verify)
  * in event_nats so unconfigured deployments do not silently accept
  * MITM-vulnerable TLS connections.  Earlier code shipped with the
  * default = 1 (skip), which meant every untouched event_nats config
