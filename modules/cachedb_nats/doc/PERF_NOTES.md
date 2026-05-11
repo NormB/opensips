@@ -975,6 +975,75 @@ reactor; both `cachedb_nats` and `event_nats` either
 publish-only or operate on a dedicated NATS process, not on
 a SIP-reactor-backed worker.
 
+### Phase-5 attempt -- design flaw identified
+
+Phase-5 (commits `c02d102e7f` → `8789322df3`) built the
+consumer-process-routed infrastructure cleanly:
+
+  * SHM slot pool with a pre-allocated eventfd pool (one
+    eventfd per slot, created in mod_init pre-fork, inherited
+    by every child).
+  * Worker -> consumer publish IPC queue.
+  * Consumer-side persistent inbox subscription
+    (`_INBOX.opensips.<consumer_pid>.>`) + IPC drain loop.
+  * On-reply callback that copies the payload into the slot
+    and would have signaled the slot's wake_fd.
+
+All three layers boot and run cleanly under live opensips.
+The worker-side rewire (`54131313f3`'s parent diff) reliably
+segfaults the SIP UDP worker after a single async() call.
+Step-by-step isolation with LM_INFO checkpoints showed:
+
+  1. Every step inside `w_nats_request_async` completes
+     successfully (slot_claim, fill out_*, slot_publish,
+     ipc_enqueue, ctx setup).
+  2. The crash fires AFTER the function returns -- i.e. it's
+     in the OpenSIPS async core (`tm/async.c`) trying to
+     register the slot's wake_fd with the worker's reactor.
+  3. Substituting `ASYNC_NO_FD` (skip reactor registration)
+     avoids the crash.
+  4. Substituting a FRESH eventfd created inside the worker
+     also avoids the crash.
+
+Conclusion: **OpenSIPS's reactor cannot register
+fork-inherited eventfds.**  The pre-fork-pool approach for
+cross-process wake signaling is a non-starter; phase-5 needs
+a different mechanism.
+
+Three candidate designs for the next attempt:
+
+  A. **SCM_RIGHTS.** Worker creates a fresh eventfd in its
+     own context, sends it to the consumer process via a
+     unix-domain socket with SCM_RIGHTS ancillary data; the
+     consumer adds the dup to its fd table and writes to it
+     on reply.  Standard textbook pattern but needs a
+     UDS-mediated handshake before each call (or a long-lived
+     UDS between worker and consumer with a registration
+     protocol).
+
+  B. **`pidfd_getfd(2)`.** Linux 5.6+ system call that lets a
+     privileged process acquire a duplicate of another
+     process's file descriptor.  Requires `CAP_SYS_PTRACE`
+     (root) or specific yama configuration.  Operationally
+     awkward.
+
+  C. **Worker-private timerfd polling.**  Each worker
+     registers ONE timerfd with the reactor that fires every
+     N ms.  On each fire the resume scans the worker's
+     in-flight slots for state==DELIVERED.  Adds N/2 ms
+     average latency but uses only worker-private fds.
+     Probably the most pragmatic next iteration.
+
+(C) is the simplest correct path; (A) is the proper one for
+operators who want minimal latency.  Both leave the entire
+phase-5 infrastructure (slot pool, IPC queue, consumer-side
+subscription, reply callback) intact -- they only change the
+wake mechanism the worker registers with its reactor.
+
+The current shipped state keeps the sync fall-through that
+works end-to-end; phase-5 is in a clean "infra built, wake
+mechanism rethink pending" state.
+
 ### Architectural consequence
 
 Phase 2's implementation places the inbox subscription on the
