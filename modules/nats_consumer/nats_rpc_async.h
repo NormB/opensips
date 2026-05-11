@@ -106,6 +106,23 @@ int  nats_rpc_async_eventfd  (struct nats_rpc_async_ctx *c);
 int  nats_rpc_async_corr_len (struct nats_rpc_async_ctx *c);
 const char *nats_rpc_async_corr_id(struct nats_rpc_async_ctx *c);
 
+/* Reconnect-epoch snapshot taken at ctx alloc time.  The
+ * production start path overwrites with
+ * `nats_pool_get_reconnect_epoch()`; tests can override
+ * directly. */
+void     nats_rpc_async_ctx_set_epoch_at_start(struct nats_rpc_async_ctx *c,
+                                                uint32_t epoch);
+uint32_t nats_rpc_async_ctx_epoch_at_start    (struct nats_rpc_async_ctx *c);
+
+/* Pure decision: should the resume path return -2
+ * (connection lost) instead of 0 (timeout) for this ctx given
+ * the current pool epoch + connected flag?  Returns 1 = connection
+ * lost, 0 = stable.  Exposed for unit tests; the production
+ * resume function calls it with the live pool values. */
+int nats_rpc_async_ctx_is_disconnected(struct nats_rpc_async_ctx *c,
+                                       uint32_t current_epoch,
+                                       int current_connected);
+
 /* Process-wide in-flight count snapshot (advisory, locked). */
 int nats_rpc_async_inflight_count(void);
 

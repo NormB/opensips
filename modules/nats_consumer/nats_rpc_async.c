@@ -178,6 +178,16 @@ struct nats_rpc_async_ctx {
 	_Atomic int     refcount;
 	int             state;               /* NATS_RPC_ASYNC_* */
 
+	/* Pool reconnect-epoch snapshot taken at ctx alloc time.
+	 * The resume function compares the snapshot against the
+	 * current epoch (and `nats_pool_is_connected()`) to
+	 * distinguish a clean timeout (state INFLIGHT, connection
+	 * stable) from a connection-lost (state INFLIGHT, epoch
+	 * changed OR pool reports disconnected).  Set to 0 under
+	 * TEST_SHIM; tests override via
+	 * nats_rpc_async_ctx_set_epoch_at_start(). */
+	uint32_t        epoch_at_start;
+
 	/* reply payload (populated by callback, consumed by resume) */
 	uint32_t reply_subject_len;
 	char     reply_subject[NATS_RING_SUBJECT_MAX];
@@ -562,6 +572,7 @@ struct nats_rpc_async_ctx *nats_rpc_async_ctx_new(void)
 	}
 	atomic_store_explicit(&c->refcount, 1, memory_order_relaxed);
 	c->state = NATS_RPC_ASYNC_INFLIGHT;
+	c->epoch_at_start = 0;     /* production path overwrites */
 
 	n = atomic_fetch_add_explicit(&g_corr_counter, 1, memory_order_relaxed);
 	written = snprintf(c->corr_id, sizeof(c->corr_id),
@@ -699,6 +710,51 @@ int  nats_rpc_async_state    (struct nats_rpc_async_ctx *c) { return c ? c->stat
 int  nats_rpc_async_eventfd  (struct nats_rpc_async_ctx *c) { return c ? c->eventfd : -1; }
 int  nats_rpc_async_corr_len (struct nats_rpc_async_ctx *c) { return c ? c->corr_id_len : 0; }
 const char *nats_rpc_async_corr_id(struct nats_rpc_async_ctx *c) { return c ? c->corr_id : NULL; }
+
+/* Record the reconnect-epoch snapshot taken at ctx alloc time.
+ * Called by the production start path with the value of
+ * nats_pool_get_reconnect_epoch(); called by tests with an
+ * arbitrary value to drive the disconnection-detection logic. */
+void nats_rpc_async_ctx_set_epoch_at_start(struct nats_rpc_async_ctx *c,
+                                           uint32_t epoch)
+{
+	if (c) c->epoch_at_start = epoch;
+}
+
+uint32_t nats_rpc_async_ctx_epoch_at_start(struct nats_rpc_async_ctx *c)
+{
+	return c ? c->epoch_at_start : 0u;
+}
+
+/*
+ * Pure decision: did the pool connection state change in a way
+ * that means the script should see a connection-lost (-2)
+ * instead of a clean timeout (0) for this ctx?
+ *
+ *   current_epoch != c->epoch_at_start  -> a reconnect occurred
+ *                                          during the call;
+ *                                          replies for the
+ *                                          pre-reconnect inbox
+ *                                          may have been lost.
+ *   !current_connected                  -> pool is down right
+ *                                          now; the reply
+ *                                          cannot arrive.
+ *
+ * Either condition implies connection-lost.  Both being false
+ * means the pool is stable -- a timeout is a real timeout.
+ *
+ * Exposed for tests so the state machine can be exercised under
+ * -DTEST_SHIM without linking lib/nats.
+ */
+int nats_rpc_async_ctx_is_disconnected(struct nats_rpc_async_ctx *c,
+                                       uint32_t current_epoch,
+                                       int current_connected)
+{
+	if (!c) return 0;
+	if (!current_connected)               return 1;
+	if (current_epoch != c->epoch_at_start) return 1;
+	return 0;
+}
 
 int nats_rpc_async_take_for_resume(struct nats_rpc_async_ctx *c)
 {
@@ -997,10 +1053,24 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 		return 1;
 	}
 
-	/* Timed out (state == ABANDONED at this point). */
-	if (took) nats_rpc_async_ctx_release(c);
-	nats_rpc_async_ctx_release(c);
-	return 0;
+	/* state == ABANDONED here.  Distinguish a real timeout from
+	 * a mid-flight pool disconnect / reconnect: if the
+	 * reconnect-epoch has advanced since ctx_new OR the pool
+	 * reports disconnected right now, the libnats subscription
+	 * thread had its connection perturbed and the reply may
+	 * never arrive on the original inbox.  Surface -2 so the
+	 * script can branch on "retry the rpc" vs. "the broker is
+	 * gone".  Otherwise the timer expired with the pool still
+	 * up -- a real timeout, return 0. */
+	{
+		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
+		int      cur_conn  = nats_pool_is_connected();
+		int      disc = nats_rpc_async_ctx_is_disconnected(c,
+			cur_epoch, cur_conn);
+		if (took) nats_rpc_async_ctx_release(c);
+		nats_rpc_async_ctx_release(c);
+		return disc ? -2 : 0;
+	}
 }
 
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
@@ -1055,6 +1125,12 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		async_status = ASYNC_NO_IO;
 		return -1;
 	}
+
+	/* Snapshot the pool's reconnect-epoch so the resume path
+	 * can detect a mid-flight disconnect/reconnect and surface
+	 * -2 (connection lost) instead of 0 (timeout). */
+	nats_rpc_async_ctx_set_epoch_at_start(c,
+		(uint32_t)nats_pool_get_reconnect_epoch());
 
 	/* Pick the correlation id: prefer a user-supplied value
 	 * from a prior `$nats_request_id = "..."` assignment, else
