@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-7a regression test: nats_stats counters must use C11 _Atomic
+ * Regression test: nats_stats counters must use C11 _Atomic
  * with atomic_fetch_add for increments.  The previous declaration as
  * `volatile unsigned long` is not atomic on weakly-ordered
  * architectures (aarch64); two workers incrementing concurrently

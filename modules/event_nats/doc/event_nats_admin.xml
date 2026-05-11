@@ -259,8 +259,7 @@ modparam("event_nats", "max_reconnect", 30)
             </para>
             <para>
                 <emphasis>Default value:</emphasis> <varname>0</varname>
-                (verify -- changed from <varname>1</varname> in
-                phase-2 secure-defaults)
+                (verify)
             </para>
             <example>
                 <title>Production: full TLS certificate verification</title>
