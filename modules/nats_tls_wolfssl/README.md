@@ -49,19 +49,24 @@ libnats's TLS code calls (cert-chain walk, hostname verify, etc.).
 wolfSSL < 5.6.0 stubs out a couple of cert helpers libnats
 depends on, hence the version pin.
 
-### Step 2 — libnats linked against wolfSSL's compat layer
+### Step 2 — libnats with the vendored wolfSSL patch
+
+Upstream nats.c does **not** support wolfSSL natively
+([PR #867](https://github.com/nats-io/nats.c/pull/867) was closed
+without merge on 2025-09-10).  We ship a rebased version of that
+patch under `docs/patches/nats.c-wolfssl-v3.12.0.patch` (see
+`docs/patches/README.md` for provenance).  Apply it before cmake:
 
 ```
-git clone --depth 1 --branch v3.13.0 https://github.com/nats-io/nats.c
+git clone --depth 1 --branch v3.12.0 https://github.com/nats-io/nats.c
 cd nats.c
+git apply /path/to/opensips/docs/patches/nats.c-wolfssl-v3.12.0.patch
 mkdir build && cd build
 cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
       -DCMAKE_INSTALL_LIBDIR=lib \
-      -DNATS_BUILD_WITH_TLS=ON \
-      -DOPENSSL_ROOT_DIR=/opt/wolfssl \
-      -DOPENSSL_INCLUDE_DIR=/opt/wolfssl/include/wolfssl/openssl \
-      -DOPENSSL_SSL_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
-      -DOPENSSL_CRYPTO_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
+      -DNATS_BUILD_WITH_TLS=OFF \
+      -DNATS_BUILD_WITH_WOLFSSL=ON \
+      -DNATS_WOLFSSL_DIR=/opt/wolfssl \
       ..
 make -j
 sudo make install
@@ -73,9 +78,9 @@ After step 2 the install layout is:
 /opt/libnats-wolfssl/
 ├── include/nats/...
 └── lib/
-    ├── libnats.so          -> libnats.so.3.13.0
-    ├── libnats.so.3.13     -> libnats.so.3.13.0
-    └── libnats.so.3.13.0
+    ├── libnats.so          -> libnats.so.3.12.0
+    ├── libnats.so.3.12     -> libnats.so.3.12.0
+    └── libnats.so.3.12.0
 ```
 
 `ldd /opt/libnats-wolfssl/lib/libnats.so` should show
@@ -90,7 +95,7 @@ Load `nats_tls_wolfssl.so` **before** any of `event_nats.so`,
 ```
 loadmodule "nats_tls_wolfssl.so"
 modparam("nats_tls_wolfssl", "libnats_path",
-         "/opt/libnats-wolfssl/lib/libnats.so.3.13")
+         "/opt/libnats-wolfssl/lib/libnats.so.3.12")
 loadmodule "event_nats.so"
 loadmodule "cachedb_nats.so"
 loadmodule "nats_consumer.so"
@@ -104,14 +109,14 @@ If both `nats_tls_openssl` and `nats_tls_wolfssl` appear in
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `libnats_path` | string | `/opt/libnats-wolfssl/`<br>`lib/libnats.so.3.13` | Path to the wolfSSL-flavoured libnats install.  Must be an absolute path — wolfSSL libnats is not on any standard search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.13` for upstream nats.c 3.13.x). |
+| `libnats_path` | string | `/opt/libnats-wolfssl/`<br>`lib/libnats.so.3.12` | Path to the wolfSSL-flavoured libnats install.  Must be an absolute path — wolfSSL libnats is not on any standard search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.12` for upstream nats.c 3.13.x). |
 
 ## Diagnostics
 
 At successful `mod_init`:
 
 ```
-INFO:nats_tls_wolfssl:mod_init: nats_tls_wolfssl: loaded '/opt/libnats-wolfssl/lib/libnats.so.3.13' (TLS backend = wolfSSL)
+INFO:nats_tls_wolfssl:mod_init: nats_tls_wolfssl: loaded '/opt/libnats-wolfssl/lib/libnats.so.3.12' (TLS backend = wolfSSL)
 ```
 
 The companion user modules each emit one confirming line at their

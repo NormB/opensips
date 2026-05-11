@@ -37,6 +37,7 @@ on:
       - 'modules/nats_consumer/**'
       - 'modules/nats_tls_openssl/**'
       - 'modules/nats_tls_wolfssl/**'
+      - 'docs/patches/nats.c-wolfssl-*.patch'
       - '.github/workflows/nats-tls-backends.yml'
   pull_request:
     paths:
@@ -46,6 +47,7 @@ on:
       - 'modules/nats_consumer/**'
       - 'modules/nats_tls_openssl/**'
       - 'modules/nats_tls_wolfssl/**'
+      - 'docs/patches/nats.c-wolfssl-*.patch'
       - '.github/workflows/nats-tls-backends.yml'
 
 env:
@@ -132,14 +134,21 @@ jobs:
             cmake build-essential
           git clone --depth 1 --branch "$NATS_C_VERSION" \
             https://github.com/nats-io/nats.c /tmp/nats.c-wolf
-          cd /tmp/nats.c-wolf && mkdir build && cd build
+          cd /tmp/nats.c-wolf
+          # Apply the vendored PR #867 rebase (upstream-closed; we
+          # maintain the patch in-tree).  See docs/patches/README.md
+          # for provenance.
+          git apply "$GITHUB_WORKSPACE/docs/patches/nats.c-wolfssl-v3.12.0.patch"
+          mkdir build && cd build
+          # NATS_BUILD_WITH_WOLFSSL=ON activates the patched
+          # CMake logic; NATS_WOLFSSL_DIR points at our wolfssl
+          # install.  NATS_BUILD_WITH_TLS is the legacy OpenSSL
+          # gate and must be OFF in wolfssl mode.
           cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
                 -DCMAKE_INSTALL_LIBDIR=lib \
-                -DNATS_BUILD_WITH_TLS=ON \
-                -DOPENSSL_ROOT_DIR=/opt/wolfssl \
-                -DOPENSSL_INCLUDE_DIR=/opt/wolfssl/include/wolfssl/openssl \
-                -DOPENSSL_SSL_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
-                -DOPENSSL_CRYPTO_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
+                -DNATS_BUILD_WITH_TLS=OFF \
+                -DNATS_BUILD_WITH_WOLFSSL=ON \
+                -DNATS_WOLFSSL_DIR=/opt/wolfssl \
                 ..
           make -j"$(nproc)"
           sudo make install

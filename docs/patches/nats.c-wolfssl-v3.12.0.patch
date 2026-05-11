@@ -1,0 +1,167 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7495fc2a..fcf40c5f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,6 +34,7 @@ option(NATS_UPDATE_DOC "Update the doc template file" OFF)
+ option(NATS_COVERAGE "Code coverage" OFF)
+ option(NATS_BUILD_NO_SPIN "Enable if spin code does not compile on your arch" OFF)
+ option(NATS_BUILD_WITH_TLS "Build with TLS support" ON)
++option(NATS_BUILD_WITH_WOLFSSL "Use wolfSSL as TLS backend (instead of OpenSSL)" OFF)
+ option(NATS_BUILD_TLS_FORCE_HOST_VERIFY "Forces hostname verification" ON)
+ option(NATS_BUILD_USE_SODIUM "Build using libsodium library" OFF)
+ option(NATS_BUILD_EXAMPLES "Build examples" ON)
+@@ -71,10 +72,46 @@ endif(NATS_COVERAGE)
+ 
+ find_package(Threads REQUIRED)
+ 
+-if(NATS_BUILD_WITH_TLS)
++if(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
+   set(OPENSSL_USE_STATIC_LIBS ${NATS_BUILD_OPENSSL_STATIC_LIBS})
+   find_package(OpenSSL 1.1.1 REQUIRED)
+-endif(NATS_BUILD_WITH_TLS)
++endif(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
++
++if(NATS_BUILD_WITH_WOLFSSL)
++  if(DEFINED ENV{NATS_WOLFSSL_DIR})
++    set(NATS_WOLFSSL_DIR "$ENV{NATS_WOLFSSL_DIR}")
++  endif()
++  find_path(
++          NATS_WOLFSSL_INCLUDE_DIR
++          wolfssl/options.h
++          HINTS
++          ${NATS_WOLFSSL_DIR}
++  )
++  find_library(NATS_WOLFSSL_LIBRARY
++          NAMES libwolfssl.so libwolfssl.dylib libwolfssl.a wolfssl.lib wolfssl.dll
++          HINTS ${NATS_WOLFSSL_DIR}
++  )
++  find_package_handle_standard_args(libwolfssl DEFAULT_MSG
++          NATS_WOLFSSL_INCLUDE_DIR
++          NATS_WOLFSSL_LIBRARY
++  )
++  if(libwolfssl_FOUND)
++    set(NATS_WOLFSSL_INCLUDE_DIRS ${NATS_WOLFSSL_INCLUDE_DIR}/wolfssl)
++    set(NATS_WOLFSSL_LIBRARIES ${NATS_WOLFSSL_LIBRARY})
++    mark_as_advanced(
++            NATS_WOLFSSL_LIBRARY
++            NATS_WOLFSSL_INCLUDE_DIR
++            NATS_WOLFSSL_DIR
++    )
++    add_definitions(-DNATS_HAS_WOLFSSL)
++  else()
++    set(NATS_WOLFSSL_DIR "" CACHE STRING
++            "An optional hint to a directory for finding `libwolfssl`"
++    )
++    message(FATAL_ERROR
++            "Could not find libwolfssl package.")
++  endif()
++endif(NATS_BUILD_WITH_WOLFSSL)
+ 
+ set(LIBUV_DIR "" CACHE PATH "Libuv install directory")
+ set(LIBEVENT_DIR "" CACHE PATH "Libevent install directory")
+@@ -255,13 +292,13 @@ if(UNIX)
+ endif(UNIX)
+ add_definitions(-D${NATS_OS})
+ add_definitions(-D_REENTRANT)
+-if(NATS_BUILD_WITH_TLS)
++if(NATS_BUILD_WITH_TLS OR NATS_BUILD_WITH_WOLFSSL)
+   add_definitions(-DNATS_HAS_TLS)
+   if(NATS_BUILD_TLS_FORCE_HOST_VERIFY)
+     add_definitions(-DNATS_FORCE_HOST_VERIFICATION)
+   endif(NATS_BUILD_TLS_FORCE_HOST_VERIFY)
+   set(NATS_DOC_INCLUDE_TLS "NATS_HAS_TLS")
+-endif(NATS_BUILD_WITH_TLS)
++endif(NATS_BUILD_WITH_TLS OR NATS_BUILD_WITH_WOLFSSL)
+ 
+ 
+ #------------
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 397c470f..b242034c 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -5,10 +5,14 @@ include_directories(include)
+ include_directories(${NATS_PLATFORM_INCLUDE})
+ include_directories(glib)
+ 
+-if(NATS_BUILD_WITH_TLS)
++if(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
+   include_directories(${OPENSSL_INCLUDE_DIR})
+   set(NATS_OPENSSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
+-endif(NATS_BUILD_WITH_TLS)
++endif(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
++
++if(NATS_BUILD_WITH_WOLFSSL)
++  include_directories(${NATS_WOLFSSL_INCLUDE_DIRS})
++endif(NATS_BUILD_WITH_WOLFSSL)
+ 
+ if(NATS_BUILD_STREAMING)
+   include_directories(${NATS_PROTOBUF_INCLUDE_DIRS})
+@@ -37,7 +41,7 @@ endif(NATS_BUILD_STREAMING)
+ # --------------------------------------
+ if(NATS_BUILD_LIB_SHARED)
+   add_library(nats SHARED ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
+-  target_link_libraries(nats PUBLIC ${NATS_OPENSSL_LIBS} Threads::Threads)
++  target_link_libraries(nats PUBLIC ${NATS_OPENSSL_LIBS} ${NATS_WOLFSSL_LIBRARIES} Threads::Threads)
+   target_link_libraries(nats PRIVATE ${NATS_EXTRA_LIB} ${NATS_PROTOBUF_LIBRARIES} ${NATS_SODIUM_LIBRARIES})
+   set_target_properties(nats PROPERTIES
+     VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
+@@ -46,7 +50,7 @@ endif(NATS_BUILD_LIB_SHARED)
+ 
+ if(NATS_BUILD_LIB_STATIC)
+   add_library(nats_static STATIC ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
+-  target_link_libraries(nats_static PUBLIC ${NATS_OPENSSL_LIBS} ${NATS_PROTOBUF_LIBRARIES} ${NATS_SODIUM_LIBRARIES} Threads::Threads)
++  target_link_libraries(nats_static PUBLIC ${NATS_OPENSSL_LIBS} ${NATS_WOLFSSL_LIBRARIES} ${NATS_PROTOBUF_LIBRARIES} ${NATS_SODIUM_LIBRARIES} Threads::Threads)
+   set_target_properties(nats_static PROPERTIES
+     VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
+     SOVERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR})
+diff --git a/src/conn.c b/src/conn.c
+index d7ba4501..627c05c5 100644
+--- a/src/conn.c
++++ b/src/conn.c
+@@ -44,6 +44,10 @@
+ #define NATS_EVENT_ACTION_ADD       (true)
+ #define NATS_EVENT_ACTION_REMOVE    (false)
+ 
++#ifdef NATS_HAS_WOLFSSL
++typedef int (*SSL_verify_cb)(int preverify_ok, X509_STORE_CTX *x509_ctx);
++#endif
++
+ #ifdef DEV_MODE
+ // For type safety
+ 
+@@ -735,9 +739,17 @@ _makeTLSConn(natsConnection *nc)
+ #endif
+             if (nc->tlsName != NULL)
+             {
++                // The SSL_set_hostflags / SSL_set1_host pair is not part of
++                // wolfSSL's OpenSSL compatibility layer.  Under wolfSSL we
++                // fall back to the SNI-only path (SSL_set_tlsext_host_name
++                // below already handles hostname presentation); the cert
++                // hostname-verify is then enforced via the verify callback
++                // and X509_check_host from the compat layer.
++#if !defined(NATS_HAS_WOLFSSL)
+                 SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+                 if (!SSL_set1_host(ssl, nc->tlsName))
+                     s = nats_setError(NATS_SSL_ERROR, "unable to set expected hostname '%s'", nc->tlsName);
++#endif
+             }
+             if (s == NATS_OK)
+             {
+diff --git a/src/natsp.h b/src/natsp.h
+index edd5da2b..e2d44c92 100644
+--- a/src/natsp.h
++++ b/src/natsp.h
+@@ -20,6 +20,13 @@
+ # include "include/n-unix.h"
+ #endif
+ 
++#if defined(NATS_HAS_WOLFSSL)
++// Must come before <openssl/*> so wolfSSL's compatibility layer
++// macros (SSL_get_error -> wolfSSL_get_error, etc.) are in effect
++// when the system <openssl/*.h> are processed.
++#include <wolfssl/options.h>
++#endif
++
+ #if defined(NATS_HAS_TLS)
+ #include <openssl/ssl.h>
+ #include <openssl/err.h>

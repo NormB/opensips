@@ -62,6 +62,15 @@ If none of these apply, stay on OpenSSL.
 
 ## Building wolfSSL-backed libnats
 
+Upstream nats.c does **not** support wolfSSL natively
+([PR #867](https://github.com/nats-io/nats.c/pull/867) was closed
+without merge on 2025-09-10).  This repository carries a rebased
+version of that patch at
+[`docs/patches/nats.c-wolfssl-v3.12.0.patch`](patches/nats.c-wolfssl-v3.12.0.patch);
+see [`docs/patches/README.md`](patches/README.md) for the full
+provenance.  The recipe below applies the patch before cmake so
+the wolfSSL backend logic exists in libnats's CMake.
+
 ```
 # Step 1 — wolfSSL ≥ 5.6.0 with OpenSSL-compat layer
 git clone --depth 1 --branch v5.6.4-stable https://github.com/wolfSSL/wolfssl
@@ -74,17 +83,16 @@ cd wolfssl
 make -j && sudo make install
 cd ..
 
-# Step 2 — libnats linked against wolfSSL's OpenSSL-compat layer
-git clone --depth 1 --branch v3.13.0 https://github.com/nats-io/nats.c
+# Step 2 — libnats with the vendored wolfSSL patch
+git clone --depth 1 --branch v3.12.0 https://github.com/nats-io/nats.c
 cd nats.c
+git apply /path/to/opensips/docs/patches/nats.c-wolfssl-v3.12.0.patch
 mkdir build && cd build
 cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
       -DCMAKE_INSTALL_LIBDIR=lib \
-      -DNATS_BUILD_WITH_TLS=ON \
-      -DOPENSSL_ROOT_DIR=/opt/wolfssl \
-      -DOPENSSL_INCLUDE_DIR=/opt/wolfssl/include/wolfssl/openssl \
-      -DOPENSSL_SSL_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
-      -DOPENSSL_CRYPTO_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
+      -DNATS_BUILD_WITH_TLS=OFF \
+      -DNATS_BUILD_WITH_WOLFSSL=ON \
+      -DNATS_WOLFSSL_DIR=/opt/wolfssl \
       ..
 make -j && sudo make install
 
@@ -93,6 +101,9 @@ ldd /opt/libnats-wolfssl/lib/libnats.so | grep wolfssl
 ```
 
 You should see `libwolfssl.so.X => /opt/wolfssl/lib/libwolfssl.so.X`.
+
+When nats.c bumps versions, the patch may need rebasing — see
+`docs/patches/README.md`'s maintenance section.
 
 ## Packaging guidance
 
