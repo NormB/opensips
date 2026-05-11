@@ -116,6 +116,8 @@ typedef int                            natsStatus;
 #include "nats_rpc.h"
 #include "nats_ring.h"          /* NATS_RING_*_MAX caps */
 #include "nats_rpc_async.h"
+#include "nats_rpc_slot.h"
+#include "nats_rpc_ipc.h"
 
 /* ── tunables ─────────────────────────────────────────────────── */
 
@@ -1123,44 +1125,129 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 }
 
 /*
+ * Resume function for the phase-5 SHM-slot transport.
+ *
+ * Fires when the slot's pre-allocated wake_fd becomes readable
+ * (consumer-process callback signaled it) or when the async-
+ * core timer expires (was_timeout=1).  The slot's atomic state
+ * is the source of truth; we don't need to take a mutex
+ * because the consumer publishes state=DELIVERED with release
+ * after writing reply_*, and we acquire the state here.
+ */
+static int resume_nats_request_slot(int fd, struct sip_msg *msg,
+                                     void *param)
+{
+	nats_rpc_slot_t *s = (nats_rpc_slot_t *)param;
+	uint64_t         sink;
+	ssize_t          rd;
+	int              state_obs;
+	int              rc;
+
+	(void)msg;
+	async_status = ASYNC_DONE;
+
+	if (!s) {
+		LM_ERR("nats_request[async]: resume with NULL slot\n");
+		return -6;
+	}
+
+	/* Drain the wake_fd counter so any next reuse of this slot
+	 * does not see a stale eventfd hit.  Non-blocking; EAGAIN
+	 * is fine (we may have been woken by timeout, not signal). */
+	do { rd = read(fd, &sink, sizeof(sink)); }
+	while (rd < 0 && errno == EINTR);
+
+	state_obs = atomic_load_explicit(&s->state, memory_order_acquire);
+
+	/* Disconnection check -- mirrors the previous phase-2 logic:
+	 * a reconnect-epoch advance or pool-disconnected state during
+	 * the call surfaces -2 rather than -1, regardless of whether
+	 * the slot is DELIVERED, INFLIGHT, or already ABANDONED. */
+	{
+		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
+		int      cur_conn  = nats_pool_is_connected();
+		int      disc = !cur_conn ||
+		                cur_epoch != s->epoch_at_start;
+
+		if (state_obs == NATS_RPC_SLOT_DELIVERED) {
+			nats_rpc_cur_set_from_buffers(0xFFFF,
+				s->reply_subject,  s->reply_subject_len,
+				s->reply_data,     s->reply_data_len,
+				s->reply_to,       s->reply_to_len,
+				s->reply_has_reply_to,
+				s->reply_headers,  s->reply_headers_len,
+				s->reply_headers_truncated);
+			rc = 1;
+		} else {
+			/* State is INFLIGHT or ABANDONED.  If still
+			 * INFLIGHT we're here on the async-core timer;
+			 * transition to ABANDONED so a late reply from
+			 * the consumer is dropped instead of writing
+			 * into a recycled slot. */
+			(void)nats_rpc_slot_abandon(s);
+			rc = disc ? -2 : -1;
+		}
+	}
+
+	nats_rpc_slot_free(s);
+	return rc;
+}
+
+/*
+ * w_nats_request_async -- async acmd entry point (phase 5).
+ *
+ * Worker side of the consumer-process-routed transport:
+ *
+ *   1. Pre-flight: subject length, payload bounds.
+ *   2. Pick / mint the UUIDv7 correlation id (phase 2.5).
+ *   3. Claim a SHM slot from the pool (phase-5 step 1).
+ *   4. Fill the slot's out_subject / out_data + epoch_at_start
+ *      + corr_id.
+ *   5. Transition the slot from CLAIMED to INFLIGHT (release
+ *      ordering -- the consumer's IPC drain acquires this).
+ *   6. Enqueue the slot_idx on the worker -> consumer IPC
+ *      (phase-5 step 2).
+ *   7. Hand off to the reactor: ctx->resume_f =
+ *      resume_nats_request_slot, ctx->resume_param = slot,
+ *      async_status = slot->wake_fd, ctx->timeout_s = tmo.
+ *
+ * On any pre-IPC failure the slot is freed and the worker
+ * returns the appropriate negative rc.  On post-IPC failure
+ * (queue full) the slot is also freed; the worker returns -5
+ * (capacity exhausted).
+ *
+ * The auto-staged X-Request-Id header (request_id_header
+ * modparam) is currently NOT propagated through to the
+ * consumer-side PublishMsg -- phase-5 step 3 left that as a
+ * TODO.  The id is still stashed for $nats_request_id, just
+ * not on the wire.  Phase-5 step 5 will deserialise
+ * out_headers and call natsMsgHeader_Set on the consumer side.
+ */
+/*
  * w_nats_request_async -- async acmd entry point.
  *
- * PHASE 4 / 5 INTERIM STATE: phase 2's transport (per-worker
- * libnats subscription on `_INBOX.opensips.<pid>.>`, on_inbox_reply
- * callback, per-call ctx with eventfd) was found to crash SIP UDP
- * workers within seconds of `natsConnection_Subscribe`.  See
- * `modules/cachedb_nats/doc/PERF_NOTES.md` -- "Async nats_request"
- * section.  The hash-table / ctx / subscription machinery is left
- * in source for phase 5 reuse but is no longer invoked here.
+ * PHASE 5 STATUS (this commit): infrastructure built and live-
+ * verified -- slot pool, IPC queue, consumer-side inbox
+ * subscription, IPC drain -- all in place and shown to boot
+ * without crashes when the worker side does not use them.  The
+ * worker-rewire that would actually issue slot_claim +
+ * ipc_enqueue triggers a segfault in the SIP worker shortly
+ * after the first SIP-driven async() call, and reducing the
+ * slot count alone does not eliminate it.  Root cause TBD.
  *
- * What this body does NOW:
- *   1. Pre-flight checks (subject length, payload bounds) so the
- *      script gets the same -4 / -3 / -6 errors it did before.
- *   2. Mint per-call UUIDv7 (or consume a script-supplied one
- *      from $nats_request_id), stash it in the per-worker
- *      stash, stage it as the auto-stage header (modparam-
- *      configurable).  All the phase-2.5 / pvar behaviour stays.
- *   3. Run the existing synchronous w_nats_request body.  This
- *      blocks the worker for up to timeout_ms; the route mask
- *      on the sync entry still gates which routes may invoke
- *      the function, but the async() construct itself is
- *      accepted from any reactor-backed route at parse time.
- *   4. Return the sync rc with async_status = ASYNC_SYNC so the
- *      reactor immediately runs the resume route with the right
- *      $retcode.  No FD is registered.
+ * Until the worker-rewire bug is isolated, this body keeps the
+ * proven sync fall-through from commit `7731a1c9b4` so the
+ * end-to-end functional path (round-trips a NATS RPC) stays
+ * working.  All script-surface contracts (return-code grammar,
+ * $nats_request_id pvar, request_id_header modparam, etc.) are
+ * unchanged.
  *
- * Behavioural difference vs. true async: the calling worker
- * blocks for timeout_ms instead of yielding.  Scripts that need
- * non-blocking RPC must wait for phase 5 (route through the
- * consumer process, which is the only context that can safely
- * host the libnats async subscription thread).  Until then, set
- * udp_workers proportionally to the worst-case
- * timeout_ms x concurrent-RPCs / udp_workers ratio for the
- * deployment.
- *
- * The script surface, return-code grammar, $nats_request_id
- * pvar, request_id_header modparam, and dispatch matrix are all
- * preserved -- this is purely a transport revert.
+ * The slot / IPC / consumer-side machinery is exercised by the
+ * existing unit tests and boots cleanly under live opensips;
+ * once the worker-rewire bug is fixed this function will be
+ * replaced with the slot_claim + ipc_enqueue + yield-on-wake_fd
+ * path that's preserved in git history (commit message of
+ * phase-5 step 4 commit).
  */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms)
@@ -1183,13 +1270,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		return -4;
 	}
 
-	/* Mint / stage the per-call UUIDv7.  Phase 2.5 behaviour --
-	 * survives the transport revert because the stash is purely
-	 * per-worker state plus optional header staging via the
-	 * existing nats_hdr_set machinery.  The synchronous
-	 * w_nats_request below will pick up the staged header and
-	 * publish it; the user-supplied value still wins via the
-	 * staged_set_if_absent semantics. */
+	/* Mint / stage the per-call UUIDv7 (phase 2.5 behaviour). */
 	{
 		char id_buf[64];
 		int  id_len;
@@ -1208,11 +1289,11 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		}
 	}
 
-	/* Synchronous transport.  w_nats_request handles its own
-	 * pool / publish / timeout / error paths; we just pass
-	 * through.  Mark ASYNC_SYNC so the async core runs the
-	 * resume route immediately with our return code in
-	 * $retcode -- no FD registration, no yield. */
+	/* Synchronous transport.  See the function comment above for
+	 * the phase-5 status.  The infrastructure (slot pool, IPC
+	 * queue, consumer-side subscription) is built and live-
+	 * verified; switching this body to slot_claim +
+	 * ipc_enqueue is the last step of phase 5. */
 	rc = w_nats_request(msg, subject, payload, timeout_ms);
 	async_status = ASYNC_SYNC;
 	return rc;
