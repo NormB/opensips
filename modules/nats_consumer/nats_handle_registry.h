@@ -23,7 +23,7 @@
  *
  * The registry is the single source of truth for bound JetStream consumer
  * configurations.  Handles are added/removed at runtime via the MI bind/
- * unbind commands (phase 1) or script functions (future phases).
+ * unbind commands or script functions.
  *
  * Concurrency:
  *   - Lookups (hot path) take a per-bucket read lock.
@@ -58,7 +58,7 @@ struct nats_ring;
 typedef enum {
 	NATS_CONSUMER_DURABLE = 0,
 	NATS_CONSUMER_EPHEMERAL,
-	NATS_CONSUMER_ORDERED,    /* reserved -- unused in phase 1 */
+	NATS_CONSUMER_ORDERED,    /* reserved -- not yet implemented */
 } nats_consumer_type_e;
 
 typedef enum {
@@ -99,7 +99,7 @@ typedef struct nats_handle {
 	 * Used to pack (handle_idx, slot_idx, generation) into an ack token
 	 * so the consumer process can look up the stored natsMsg* without
 	 * a hash.  Stable for the lifetime of the handle; not reused after
-	 * unbind within a single opensips run (Phase 4 scope). */
+	 * unbind within a single opensips run. */
 	uint16_t index;
 
 	/* filters */
@@ -129,10 +129,10 @@ typedef struct nats_handle {
 	str js_domain;
 	str api_prefix;
 
-	/* Per-handle ring capacity override.  Phase 5: if non-zero at bind
-	 * time, the registry sizes the SHM ring to this value instead of
-	 * the module default (NATS_HANDLE_RING_CAPACITY).  Must be a power
-	 * of two >= 2; the parser rejects anything else so the registry can
+	/* Per-handle ring capacity override.  If non-zero at bind time,
+	 * the registry sizes the SHM ring to this value instead of the
+	 * module default (NATS_HANDLE_RING_CAPACITY).  Must be a power of
+	 * two >= 2; the parser rejects anything else so the registry can
 	 * trust the value.  0 = "use default". */
 	uint32_t ring_capacity;
 
@@ -168,18 +168,17 @@ typedef struct nats_handle {
 	 * shim does not provide eventfd-compatible allocation. */
 	struct nats_ring *ring;
 
-	/* Phase 5 stop-gap refcount guarding against unbind-while-in-use.
-	 * Incremented by consumer-process ring push-success and any worker
-	 * that holds an ack IPC pending for this handle; decremented when
-	 * that operation completes.  nats_registry_unbind() refuses while
-	 * this is non-zero in Phase 5; Phase 7 replaces that rejection with
-	 * the retire/reap lifecycle: unbind still returns 0 but the actual
-	 * free is deferred until both `retire` is set AND `sub_torn_down`
-	 * is set AND `pending_ops` has drained to zero.  Atomic SEQ_CST for
+	/* Refcount guarding against unbind-while-in-use.  Incremented by
+	 * consumer-process ring push-success and any worker that holds
+	 * an ack IPC pending for this handle; decremented when that
+	 * operation completes.  Combined with the retire/reap lifecycle
+	 * below: unbind returns 0 but the actual free is deferred until
+	 * both `retire` is set AND `sub_torn_down` is set AND
+	 * `pending_ops` has drained to zero.  Atomic SEQ_CST for
 	 * cross-process visibility. */
 	int pending_ops;
 
-	/* Phase 7 retire/reap lifecycle.
+	/* Retire/reap lifecycle.
 	 *
 	 * `retire` is set by nats_registry_unbind() the moment the handle
 	 *   is unlinked from its bucket (so new lookups fail).  The handle
@@ -235,7 +234,7 @@ int nats_registry_bind(nats_handle_t *h);
 
 /* Remove a handle by id.
  *
- * Phase 7 lifecycle:
+ * Lifecycle:
  *   1. unbind marks the handle retired and unlinks it from its bucket
  *      chain so subsequent lookups miss.
  *   2. The consumer process observes `retire` on its next iteration,
@@ -260,7 +259,7 @@ int nats_registry_unbind(const str *id);
  * happens only after `sub_torn_down==1` AND `pending_ops==0`. */
 nats_handle_t *nats_registry_lookup_weak(const str *id);
 
-/* Phase 7 reaper.
+/* Reaper for retired handles.
  *
  * Frees any handle whose retire=1, sub_torn_down=1, and pending_ops==0.
  * Intended to be called from the consumer process's main loop (cheap
@@ -270,12 +269,12 @@ nats_handle_t *nats_registry_lookup_weak(const str *id);
 void nats_registry_reap(void);
 
 /* Optional runtime ring-capacity override helper.  Convenience wrapper
- * for scripts / MI to resize a handle's ring after bind; Phase 5
- * declares it so callers have a known entry point, but the current
- * implementation only supports setting the override at bind time via
- * the `ring_capacity` field on the parsed handle and rejects runtime
- * resize (returns -1 if the handle already has a ring).  Phase 7 will
- * wire up a proper pause-teardown-recreate flow. */
+ * for scripts / MI to resize a handle's ring after bind.  Declared so
+ * callers have a known entry point, but the current implementation
+ * only supports setting the override at bind time via the
+ * `ring_capacity` field on the parsed handle and rejects runtime
+ * resize (returns -1 if the handle already has a ring).  A future
+ * change can wire up a proper pause-teardown-recreate flow. */
 int nats_registry_set_ring_capacity(const str *id, uint32_t cap);
 
 /* Borrowed lookup.  Returns NULL if not found.
@@ -299,18 +298,19 @@ void nats_handle_free(nats_handle_t *h);
 
 /* Accessor -- returns the SHM ring owned by the handle with the given
  * `id`, or NULL if no such handle is bound.  Intended for SIP worker
- * side script functions (Phase 4) that need to pop messages.
+ * side script functions that need to pop messages.
  *
  * The registry keeps the handle alive until nats_registry_unbind(), so
  * the returned pointer is valid until a concurrent unbind -- callers
  * that race with unbind must be prepared for the ring to disappear
- * underneath them.  A future phase will add refcounting. */
+ * underneath them.  A future change will add proper refcounting. */
 struct nats_ring *nats_registry_ring_get(const str *id);
 
-/* Phase 5 pending_ops helpers.  Use these from any path that holds a
- * borrowed nats_handle_t * across a blocking call (e.g. the consumer
- * process's Fetch() on a subscription owned by handle h).  While the
- * counter is non-zero, nats_registry_unbind() refuses with -4.
+/* pending_ops helpers.  Use these from any path that holds a borrowed
+ * nats_handle_t * across a blocking call (e.g. the consumer process's
+ * Fetch() on a subscription owned by handle h).  The retire/reap
+ * lifecycle uses pending_ops==0 as one of the gating conditions for
+ * the actual free.
  *
  * These operate on the handle directly (not by id) because callers
  * already have a pointer from a lookup; re-looking-up by id would

@@ -20,7 +20,7 @@
 
 /*
  * nats_persist.h -- opt-in JSON persistence of the nats_consumer handle
- * registry.  Phase 8.
+ * registry.
  *
  * When enabled via the `persist_handles` modparam, the registry is
  * serialized to a JSON file on every bind/unbind (debounced 500 ms by a

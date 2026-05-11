@@ -28,11 +28,11 @@
  * __thread keyword.  A fetch populates it; subsequent ack/nak/pvar
  * reads consume it.
  *
- * Phase 4 exposes two entry points for fetching:
+ * Single-message fetch exposes two entry points:
  *   - w_nats_fetch          (sync, cmd_export)
  *   - w_nats_fetch_async    (async, acmd_export with async_ctx)
  *
- * Batch fetch is deferred to Phase 5.
+ * Batch fetch (w_nats_fetch_batch / _async) is declared below.
  */
 
 #ifndef NATS_FETCH_H
@@ -64,8 +64,8 @@ typedef struct nats_cur_msg {
 } nats_cur_msg_t;
 
 /*
- * Phase 5 batch fetch: cap of NATS_BATCH_MAX drained slots kept in a
- * per-worker buffer.  The script iterates by calling nats_batch_select(i)
+ * Batch fetch: cap of NATS_BATCH_MAX drained slots kept in a per-worker
+ * buffer.  The script iterates by calling nats_batch_select(i)
  * which points g_cur at slot i before ack/nak/pvar reads.
  *
  * The cap is bounded to keep the per-worker SHM footprint predictable;
@@ -94,7 +94,7 @@ void              nats_fetch_clear_batch(void);
  *   timeout_ms == 0  -> non-blocking poll; returns 1 on hit, 0 on empty.
  *   timeout_ms > 0   -> blocks the worker up to timeout_ms; returns 1/0.
  *
- * Return codes (Phase 7 extended):
+ * Return codes:
  *    1   got a message (populated current-msg state).
  *    0   no message within the budget; not an error.
  *   -2   NATS connection lost.  Workers can inspect the textual reason
@@ -106,13 +106,12 @@ void              nats_fetch_clear_batch(void);
  *   -1   internal error (OOM, parser failure). */
 int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms);
 
-/* Return the most recent per-worker error string (Phase 7).
+/* Return the most recent per-worker error string.
  *
  * Points into a process-local static buffer; valid until the next
  * nats_fetch* / nats_ack* / nats_request call on the same worker.
  * Returns "" when there is no error pending.  Exposed so MI and
- * debug-log callers can read it without a pseudo-var (Phase 7 scope
- * keeps the pvar surface frozen). */
+ * debug-log callers can read it without a pseudo-var. */
 const char *nats_last_error(void);
 
 /* Script-callable: async fetch.  Short-circuits to success if the

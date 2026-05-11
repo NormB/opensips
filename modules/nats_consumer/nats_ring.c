@@ -21,8 +21,8 @@
 /*
  * nats_ring.c -- per-handle bounded MPMC SHM ring.
  *
- * Algorithm chosen: the "simpler correct variant" from the Phase 2
- * design note.  Two monotonically-increasing 64-bit indices (head and
+ * Algorithm: the "simpler correct variant" of an MPMC ring.
+ * Two monotonically-increasing 64-bit indices (head and
  * tail) live in the ring header; a power-of-two capacity means the
  * actual slot index is `head & mask`.  Per-slot sequence counters
  * (ready_gen / consumed_gen) decide when a producer may write a slot

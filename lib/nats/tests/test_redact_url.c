@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-2c regression test: lib/nats/nats_redact_url() must scrub
+ * Regression test: lib/nats/nats_redact_url() must scrub
  * userinfo (user:pass) from NATS URL strings before they are written
  * to logs.  The current code at modules/event_nats/event_nats.c:289
  * logs nats_url verbatim, leaking credentials when an operator embeds

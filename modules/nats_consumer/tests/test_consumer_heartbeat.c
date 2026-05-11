@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-5d regression test: nats_consumer must publish a heartbeat
+ * Regression test: nats_consumer must publish a heartbeat
  * that an external watchdog can read.  Without it, a wedged or
  * crashed consumer process leaves SIP workers blocked on the SHM
  * ring's eventfd forever.

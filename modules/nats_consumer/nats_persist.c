@@ -849,7 +849,7 @@ static char *build_config_from_json(cJSON *obj)
 			/* The parser accepts RFC3339 only -- skip on rehydrate.
 			 * If the handle was configured with by_start_time we
 			 * cannot round-trip without saving the raw string; a
-			 * later phase can extend serialization to persist the
+			 * later change can extend serialization to persist the
 			 * original RFC3339 form.  For now, log and skip.  The
 			 * uint64-string serialization above keeps the value
 			 * lossless on disk so a future rehydrate can use it. */

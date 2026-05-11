@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-3d regression test: nats_persist.c::slurp_file must enforce
+ * Regression test: nats_persist.c::slurp_file must enforce
  * an upper bound on the bytes it allocates.
  *
  * The bug: slurp_file calls fseek/ftell to size the persist file,

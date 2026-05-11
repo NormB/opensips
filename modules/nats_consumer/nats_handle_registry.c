@@ -45,8 +45,9 @@
 static inline void nats_persist_schedule_write(void) {}
 #endif
 
-/* Default slot count for per-handle rings.  Phase 3: fixed.  A later
- * phase will expose this as a bind-time option. */
+/* Default slot count for per-handle rings.  Fixed at the registry
+ * level; bind-time override is available via the `ring_capacity`
+ * field on nats_handle_t. */
 #define NATS_HANDLE_RING_CAPACITY 128
 
 /* ── bucket ──────────────────────────────────────────────────── */
@@ -63,7 +64,7 @@ typedef struct nats_registry {
 	int handle_count;           /* accessed with __atomic_* builtins */
 	int next_index;             /* monotonic; used to assign h->index */
 
-	/* Phase 7 retire list.  Handles removed from their bucket by
+	/* Retire list.  Handles removed from their bucket by
 	 * nats_registry_unbind() are parked here until nats_registry_reap()
 	 * can safely free them (sub_torn_down && pending_ops == 0).
 	 *
@@ -297,9 +298,9 @@ int nats_registry_bind(nats_handle_t *h)
 
 	/* Assign monotonic bind-order index BEFORE dropping into the bucket.
 	 * If we exceed the cap, refuse to bind -- the consumer process's
-	 * ref table would not have a slot for us.  Phase 5: return the
-	 * distinct -3 code so callers can surface a specific MI / script
-	 * error ("handle count limit reached") instead of the generic -2. */
+	 * ref table would not have a slot for us.  Return the distinct
+	 * -3 code so callers can surface a specific MI / script error
+	 * ("handle count limit reached") instead of the generic -2. */
 	assigned_index = __atomic_fetch_add(&g_registry->next_index, 1,
 		__ATOMIC_SEQ_CST);
 	if (assigned_index < 0 || assigned_index >= NATS_REGISTRY_MAX_HANDLES) {
@@ -330,9 +331,9 @@ int nats_registry_bind(nats_handle_t *h)
 	 * ring would require eventfd and atomic SHM allocation which the
 	 * pthread shim does not provide, so we skip it there.
 	 *
-	 * Phase 5: respect the per-handle ring_capacity override (the
-	 * parser has already validated that it is a power of two >= 2 or
-	 * zero).  A zero value means "use the module default". */
+	 * Respect the per-handle ring_capacity override (the parser has
+	 * already validated that it is a power of two >= 2 or zero).
+	 * A zero value means "use the module default". */
 #ifndef TEST_SHIM
 	if (!h->ring) {
 		uint32_t cap = h->ring_capacity ? h->ring_capacity
@@ -367,7 +368,7 @@ int nats_registry_bind(nats_handle_t *h)
 
 	__atomic_add_fetch(&g_registry->handle_count, 1, __ATOMIC_SEQ_CST);
 
-	/* Persistence (Phase 8): schedule a debounced snapshot.  No-op if
+	/* Persistence hook: schedule a debounced snapshot.  No-op if
 	 * persist_handles was not enabled in the modparam. */
 	nats_persist_schedule_write();
 	return 0;
@@ -391,7 +392,7 @@ int nats_registry_unbind(const str *id)
 	prev = NULL;
 	for (cur = b->head; cur; prev = cur, cur = cur->next) {
 		if (str_eq(&cur->id, id)) {
-			/* Phase 7: regardless of pending_ops we unlink the handle
+			/* Regardless of pending_ops we unlink the handle
 			 * from its bucket chain immediately so subsequent lookups
 			 * fail.  The physical free is deferred to
 			 * nats_registry_reap() once the consumer process has torn
@@ -430,7 +431,7 @@ int nats_registry_unbind(const str *id)
 
 	__atomic_sub_fetch(&g_registry->handle_count, 1, __ATOMIC_SEQ_CST);
 
-	/* Persistence (Phase 8): snapshot drops the retired handle. */
+	/* Persistence hook: snapshot drops the retired handle. */
 	nats_persist_schedule_write();
 	return 0;
 }
@@ -593,7 +594,7 @@ out:
 	return rc;
 }
 
-/* Phase 5 stub -- reserved for Phase 7 pause/teardown/recreate flow.
+/* Stub -- reserved for a future pause/teardown/recreate flow.
  * For now, only succeeds if the handle has no ring yet (i.e. bound
  * without initialization under TEST_SHIM).  Returns -1 otherwise. */
 int nats_registry_set_ring_capacity(const str *id, uint32_t cap)
@@ -615,8 +616,8 @@ int nats_registry_set_ring_capacity(const str *id, uint32_t cap)
 	for (cur = b->head; cur; cur = cur->next) {
 		if (str_eq(&cur->id, id)) {
 			if (cur->ring) {
-				/* Runtime resize requires drain-and-recreate; not in
-				 * Phase 5 scope -- use at bind time via the
+				/* Runtime resize requires drain-and-recreate; not
+				 * implemented yet -- use at bind time via the
 				 * ring_capacity= parameter. */
 				rc = -1;
 			} else {

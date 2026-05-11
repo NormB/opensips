@@ -213,7 +213,7 @@ static void test_foreach(void)
 	nats_registry_destroy();
 }
 
-/* Phase 5: binding past NATS_REGISTRY_MAX_HANDLES returns -3. */
+/* Binding past NATS_REGISTRY_MAX_HANDLES returns -3. */
 static void test_bind_cap_exceeded(void)
 {
 	int i, rc;
@@ -246,12 +246,11 @@ static void test_bind_cap_exceeded(void)
 	nats_registry_destroy();
 }
 
-/* Phase 7: unbind while pending_ops > 0 now SUCCEEDS (replacing the
- * Phase 5 -4 rejection).  The handle is marked retired, dropped from
- * its bucket so lookups miss, and parked on the retire list until the
- * consumer process tears the subscription down and the reaper drains
- * it.  A subsequent nats_registry_reap() without sub_torn_down keeps
- * the handle parked (no crash). */
+/* Unbind while pending_ops > 0 succeeds: the handle is marked
+ * retired, dropped from its bucket so lookups miss, and parked on
+ * the retire list until the consumer process tears the subscription
+ * down and the reaper drains it.  A subsequent nats_registry_reap()
+ * without sub_torn_down keeps the handle parked (no crash). */
 static void test_unbind_retires_while_in_use(void)
 {
 	nats_handle_t *h, *found;
@@ -267,8 +266,8 @@ static void test_unbind_retires_while_in_use(void)
 	nats_handle_pending_inc(h);
 
 	key = dup_str("busy");
-	/* Phase 7: unbind returns 0 even with pending_ops > 0 -- the
-	 * handle is retired, not freed yet. */
+	/* Unbind returns 0 even with pending_ops > 0 -- the handle is
+	 * retired, not freed yet. */
 	CHECK(nats_registry_unbind(&key) == 0);
 
 	/* Normal lookup misses a retired handle. */
@@ -303,8 +302,8 @@ static void test_unbind_retires_while_in_use(void)
 	nats_registry_destroy();
 }
 
-/* Phase 7: unbind without pending_ops retires instantly; reap frees
- * the handle once the consumer process signals sub_torn_down. */
+/* Unbind without pending_ops retires instantly; reap frees the
+ * handle once the consumer process signals sub_torn_down. */
 static void test_unbind_retire_flow(void)
 {
 	nats_handle_t *h, *weak;
@@ -336,8 +335,8 @@ static void test_unbind_retire_flow(void)
 	nats_registry_destroy();
 }
 
-/* Phase 4: every bind assigns a fresh monotonic index so the ack
- * token packing is stable for the handle's lifetime. */
+/* Every bind assigns a fresh monotonic index so the ack token
+ * packing is stable for the handle's lifetime. */
 static void test_bind_index_assignment(void)
 {
 	nats_handle_t *a, *b, *c;
