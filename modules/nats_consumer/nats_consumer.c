@@ -204,6 +204,17 @@ static const acmd_export_t acmds[] = {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
 		{0, 0, 0}} },
+	/* `nats_request` is also registered above as a sync cmd with a
+	 * restrictive route mask.  The dispatch between sync and async is
+	 * driven by call-site syntax: `nats_request(...)` resolves to the
+	 * sync entry, `async(nats_request(...), rt)` resolves here.  Phase
+	 * 1 of the async entry runs the same sync body and reports
+	 * ASYNC_SYNC; phase 2 will yield on a libnats reply inbox. */
+	{ "nats_request", (acmd_function)w_nats_request_async, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_INT, 0, 0},
+		{0, 0, 0}} },
 	{ 0, 0, {{0, 0, 0}} }
 };
 

@@ -69,6 +69,7 @@
 #include "../../str.h"
 #include "../../parser/msg_parser.h"
 #include "../../pvar.h"
+#include "../../async.h"
 
 /* Upper bound on staged-header entries per publish.  Sized generously
  * relative to real-world NATS use; each entry is a pair of `str`s
@@ -87,6 +88,21 @@ int w_nats_hdr_set (struct sip_msg *msg, str *name, str *value);
 int w_nats_reply   (struct sip_msg *msg, str *payload);
 int w_nats_request (struct sip_msg *msg, str *subject, str *payload,
                     int *timeout_ms);
+
+/* Script-callable async variant of nats_request.  Registered in the
+ * module's acmd table under the same name `nats_request`, so the
+ * sync vs. async dispatch is driven by call-site syntax:
+ *   bare        nats_request(...)            -> w_nats_request    (sync)
+ *   wrapped in  async(nats_request(...), rt) -> w_nats_request_async
+ *
+ * Phase 1 fall-through skeleton: this entry point currently runs the
+ * existing synchronous request path and reports completion via
+ * async_status = ASYNC_SYNC.  Phase 2 will replace the body with a
+ * libnats publish + reply-inbox subscription bridged onto an eventfd,
+ * yielding the worker for the duration of the round trip.  The script
+ * surface is stable across both phases. */
+int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
+                         str *subject, str *payload, int *timeout_ms);
 
 /* Clear the staged-header table and free the backing buffers.
  * Invoked internally by the publish paths; exposed so that a future

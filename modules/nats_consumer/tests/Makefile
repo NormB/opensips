@@ -21,11 +21,13 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
 # be linked under ThreadSanitizer.  The rest of the suite is race-safe.
 TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_persist test_request_route_restriction \
-                  test_consumer_heartbeat test_persist_precision
+                  test_consumer_heartbeat test_persist_precision \
+                  test_async_request_skeleton
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
-     test_consumer_heartbeat test_persist_precision
+     test_consumer_heartbeat test_persist_precision \
+     test_async_request_skeleton
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -56,6 +58,10 @@ test_slurp_file_cap: test_slurp_file_cap.c
 test_request_route_restriction: test_request_route_restriction.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# Phase 1 skeleton test for async nats_request dual registration
+test_async_request_skeleton: test_async_request_skeleton.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 check: all
 	./test_registry
 	./test_parser
@@ -66,6 +72,7 @@ check: all
 	./test_request_route_restriction
 	./test_consumer_heartbeat
 	./test_persist_precision
+	./test_async_request_skeleton
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -74,7 +81,8 @@ check-tsan: $(TESTS_TSAN_SAFE)
 clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \
 	      test_slurp_file_cap test_request_route_restriction \
-	      test_consumer_heartbeat test_persist_precision
+	      test_consumer_heartbeat test_persist_precision \
+	      test_async_request_skeleton
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
