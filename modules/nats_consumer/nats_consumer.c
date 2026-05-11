@@ -253,6 +253,20 @@ static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
 int nats_consumer_fetch_batch      = 10;
 int nats_consumer_fetch_timeout_ms = 1000;
 
+/* Outbound header name used to carry the per-call UUIDv7
+ * correlation id auto-minted by both the sync and async
+ * `nats_request` start paths.  Default `X-Request-Id`, following
+ * the most-common cross-system convention.  An empty string
+ * disables auto-staging entirely: the id is still minted and
+ * readable as $nats_request_id, just not put on the wire.
+ *
+ * A script that manually stages the same header via
+ * nats_hdr_set("X-Request-Id", $var(my_id)) BEFORE calling
+ * nats_request wins -- the auto-stager only sets the header when
+ * no entry with the same (case-insensitive) name is already on
+ * the worker's outbound buffer. */
+char *nats_request_id_header = "X-Request-Id";
+
 /*
  * USE_FUNC_PARAM setter for `allow_sync_anywhere`.
  *
@@ -387,6 +401,7 @@ static const param_export_t params[] = {
 	{ "allow_sync_anywhere",
 	      INT_PARAM | USE_FUNC_PARAM,
 	      (void *)nats_request_allow_sync_setter },
+	{ "request_id_header", STR_PARAM, &nats_request_id_header },
 	{ 0, 0, 0 }
 };
 
@@ -411,6 +426,8 @@ static const pv_export_t mod_pvars[] = {
 		0, 0, 0, 0, 0 },
 	{ str_const_init("nats_hdr"),          1000, pv_get_nats_hdr,
 		0, pv_parse_nats_hdr_name, 0, 0, 0 },
+	{ str_const_init("nats_request_id"),   1000, pv_get_nats_request_id,
+		0, 0, 0, 0, 0 },
 	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 

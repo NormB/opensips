@@ -123,4 +123,30 @@ const char *nats_rpc_async_corr_from_subject(const char *subject,
                                              int subject_len,
                                              int *out_len);
 
+/*
+ * Mint a UUIDv7 correlation id (RFC 9562 §5.7) into the provided
+ * buffer.  `cap` must be at least 37 (36 chars + NUL).  Returns
+ * the written length (36) on success or 0 on truncation /
+ * getrandom failure.
+ *
+ * Used by the sync and async nats_request start paths to populate
+ * the per-worker `$nats_request_id` stash and the auto-staged
+ * outbound header (modparam `request_id_header`, default
+ * `X-Request-Id`).  Exposed for unit tests that want to validate
+ * the version-7 nibble and variant bits without booting opensips.
+ */
+int nats_rpc_async_uuidv7_mint(char *out, size_t cap);
+
+/* Per-worker stash setter / getter for the most recent outbound
+ * request's UUIDv7.  Set by the start paths; read by the
+ * $nats_request_id pvar getter (which is why the storage lives
+ * here in the async module rather than in nats_rpc.c -- both
+ * paths converge on this stash and on the same uuidv7 minter).
+ *
+ * The pointer returned by ..._get() is owned by the module; it is
+ * valid until the next nats_request call on this worker.  Callers
+ * that need the value to outlive that must copy. */
+void        nats_rpc_async_request_id_set(const char *id, int len);
+const char *nats_rpc_async_request_id_get(int *out_len);
+
 #endif /* NATS_RPC_ASYNC_H */

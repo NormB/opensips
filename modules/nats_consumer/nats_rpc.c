@@ -83,6 +83,14 @@
 
 #include "nats_fetch.h"
 #include "nats_rpc.h"
+#include "nats_rpc_async.h"
+
+/* Operator-configurable outbound header name for the per-call
+ * UUIDv7.  Owned by nats_consumer.c via the `request_id_header`
+ * modparam; declared extern here so both the sync and async start
+ * paths can read the current value at request time.  Empty /
+ * NULL disables auto-staging. */
+extern char *nats_request_id_header;
 
 /* ── shared helpers ──────────────────────────────────────────── */
 
@@ -178,6 +186,31 @@ static int hdr_stream_find(const nats_cur_msg_t *cur, const str *name,
 		}
 	}
 	return 0;
+}
+
+/*
+ * $nats_request_id -- read the UUIDv7 of the most recent
+ * nats_request issued by this worker.  Set by both the sync and
+ * async start paths; persists across an async() yield so the
+ * resume route can read it back for log/trace correlation.
+ *
+ * Returns NULL when no request has been issued on this worker yet
+ * (cold-boot path).
+ */
+int pv_get_nats_request_id(struct sip_msg *msg, pv_param_t *param,
+                           pv_value_t *res)
+{
+	const char *id;
+	int         id_len = 0;
+	str         out;
+
+	if (!res || !param) return -1;
+	id = nats_rpc_async_request_id_get(&id_len);
+	if (!id || id_len <= 0)
+		return pv_get_null(msg, param, res);
+	out.s   = (char *)id;
+	out.len = id_len;
+	return pv_get_strval(msg, param, res, &out);
 }
 
 int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
@@ -299,6 +332,53 @@ int w_nats_hdr_set(struct sip_msg *msg, str *name, str *value)
 		LM_ERR("nats_hdr_set: pkg_malloc failed for header "
 			"'%.*s'\n", name->len, name->s);
 		return -1;
+	}
+	g_staged[free_slot].in_use = 1;
+	return 1;
+}
+
+/*
+ * Internal variant of w_nats_hdr_set used by the request_id
+ * auto-stager: skip the header entirely if the script has
+ * already staged a value for the same (case-insensitive) name.
+ * Lets a deliberate `nats_hdr_set("X-Request-Id", ...)` in the
+ * script win over the auto-mint.
+ *
+ * Returns 1 if the header was newly staged, 0 if an existing
+ * stage was preserved, -1 on OOM / full table.
+ */
+int nats_rpc_staged_set_if_absent(const str *name, const str *value)
+{
+	int i, free_slot = -1;
+
+	if (!name || name->len <= 0 || !name->s) return -1;
+
+	for (i = 0; i < NATS_MAX_STAGED_HDRS; i++) {
+		if (!g_staged[i].in_use) {
+			if (free_slot < 0) free_slot = i;
+			continue;
+		}
+		if (hdr_name_eq_ci(g_staged[i].name.s, g_staged[i].name.len,
+				name->s, name->len)) {
+			return 0;   /* already staged; leave the script's value alone */
+		}
+	}
+
+	if (free_slot < 0) {
+		LM_WARN("nats_rpc_staged_set_if_absent: staged-header "
+			"table full (cap=%d); dropping '%.*s'\n",
+			NATS_MAX_STAGED_HDRS, name->len, name->s);
+		return -1;
+	}
+
+	{
+		str empty = { NULL, 0 };
+		const str *v = value ? value : &empty;
+		if (staged_dup(&g_staged[free_slot].name,  name) < 0 ||
+		    staged_dup(&g_staged[free_slot].value, v) < 0) {
+			staged_free_entry(&g_staged[free_slot]);
+			return -1;
+		}
 	}
 	g_staged[free_slot].in_use = 1;
 	return 1;
@@ -659,6 +739,24 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 
 	data_s   = (payload && payload->s) ? payload->s : "";
 	data_len = (payload && payload->len > 0) ? payload->len : 0;
+
+	/* Mint per-call UUIDv7, stash for $nats_request_id, and stage
+	 * the operator-configured outbound header unless the script
+	 * already set it explicitly via nats_hdr_set(). */
+	{
+		char id_buf[40];
+		int  id_len;
+		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
+		if (id_len > 0) {
+			nats_rpc_async_request_id_set(id_buf, id_len);
+			if (nats_request_id_header && nats_request_id_header[0]) {
+				str hname = { nats_request_id_header,
+					(int)strlen(nats_request_id_header) };
+				str hval  = { id_buf, id_len };
+				(void)nats_rpc_staged_set_if_absent(&hname, &hval);
+			}
+		}
+	}
 
 	/* Build an outbound natsMsg so we can carry staged headers onto
 	 * the request.  natsConnection_RequestMsg uses the msg's subject,

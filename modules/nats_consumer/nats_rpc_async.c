@@ -107,9 +107,11 @@ typedef int                            natsStatus;
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/random.h>
 
 #include "nats_rpc.h"
 #include "nats_ring.h"          /* NATS_RING_*_MAX caps */
@@ -204,6 +206,20 @@ static _Atomic uint64_t g_corr_counter;
 static char g_inbox_owner[40];
 static int  g_inbox_owner_len;
 
+/*
+ * Per-worker stash of the most recent outbound request's UUIDv7.
+ * Set by both the sync (w_nats_request) and async (w_nats_request_
+ * _async) start paths after they mint the correlation id; read by
+ * the $nats_request_id pvar getter.  Lives in process memory and
+ * persists across an async() yield so the resume route can read
+ * it back to correlate the reply against logs / traces / etc.
+ * Overwritten on the next nats_request call from this worker;
+ * shielded from concurrent updates by the worker single-threading
+ * (only the worker thread runs script code).
+ */
+static char g_last_request_id[40];
+static int  g_last_request_id_len;
+
 #ifndef TEST_SHIM
 /* Persistent inbox subscription (one per worker, lazy-initialised
  * on first async request).  Guards: g_inbox_sub_mu serialises the
@@ -227,6 +243,96 @@ static uint32_t fnv1a32(const char *s, int len)
 		h *= 16777619u;
 	}
 	return h;
+}
+
+/*
+ * Mint a UUIDv7 (RFC 9562 §5.7) into `out`.  `cap` must be >= 37
+ * (36 chars + NUL).  Layout:
+ *
+ *     | unix_ts_ms (48b) | ver (4b) | rand_a (12b) |
+ *     | var (2b) | rand_b (62b) |
+ *
+ * Formatted as 8-4-4-4-12 lowercase hex with version nibble = 7
+ * and variant bits = 10b.  Returns the written length (always
+ * 36) on success; 0 on truncation or RNG failure.
+ *
+ * Hot-path cost: one CLOCK_REALTIME read + one getrandom() of 10
+ * bytes (the timestamp fills the first 6 bytes).  No allocations.
+ *
+ * If getrandom() fails (kernel < 3.17 or seccomp restriction)
+ * the function returns 0; callers should treat a zero return as
+ * "no correlation id available" and skip header staging rather
+ * than minting a low-entropy fallback.
+ */
+int nats_rpc_async_uuidv7_mint(char *out, size_t cap)
+{
+	struct timespec ts;
+	uint64_t ts_ms;
+	uint8_t  rand10[10];
+	ssize_t  got;
+	int      n;
+
+	if (!out || cap < 37) return 0;
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		return 0;
+	ts_ms = (uint64_t)ts.tv_sec * 1000u +
+	        (uint64_t)(ts.tv_nsec / 1000000);
+
+	got = getrandom(rand10, sizeof(rand10), GRND_NONBLOCK);
+	if (got != (ssize_t)sizeof(rand10))
+		return 0;
+
+	/* Set version nibble (7) in the high nibble of byte 6
+	 * (which becomes the first nibble of the third group). */
+	rand10[0] = (uint8_t)((rand10[0] & 0x0f) | 0x70);
+	/* Set variant bits (10b) in the high two bits of byte 8
+	 * (first byte of the fourth group). */
+	rand10[2] = (uint8_t)((rand10[2] & 0x3f) | 0x80);
+
+	n = snprintf(out, cap,
+		"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		(unsigned)((ts_ms >> 40) & 0xff),
+		(unsigned)((ts_ms >> 32) & 0xff),
+		(unsigned)((ts_ms >> 24) & 0xff),
+		(unsigned)((ts_ms >> 16) & 0xff),
+		(unsigned)((ts_ms >>  8) & 0xff),
+		(unsigned)( ts_ms        & 0xff),
+		rand10[0], rand10[1],     /* version 7 + 12b rand_a */
+		rand10[2], rand10[3],     /* variant 10b + 14b rand_b */
+		rand10[4], rand10[5], rand10[6],
+		rand10[7], rand10[8], rand10[9]);
+
+	if (n != 36) return 0;
+	return n;
+}
+
+/*
+ * Stash the just-minted (or already-staged) outbound id in the
+ * per-worker storage so $nats_request_id can read it back later
+ * (including inside the resume route, after the async() yield).
+ *
+ * Empty input clears the stash.  Caller is responsible for keeping
+ * the lifetime of `id` >= the call; we copy.
+ */
+void nats_rpc_async_request_id_set(const char *id, int len)
+{
+	if (!id || len <= 0) {
+		g_last_request_id[0] = '\0';
+		g_last_request_id_len = 0;
+		return;
+	}
+	if (len >= (int)sizeof(g_last_request_id))
+		len = (int)sizeof(g_last_request_id) - 1;
+	memcpy(g_last_request_id, id, len);
+	g_last_request_id[len] = '\0';
+	g_last_request_id_len = len;
+}
+
+const char *nats_rpc_async_request_id_get(int *out_len)
+{
+	if (out_len) *out_len = g_last_request_id_len;
+	return g_last_request_id_len > 0 ? g_last_request_id : NULL;
 }
 
 /* ── refcount / release ───────────────────────────────────────── */
@@ -739,6 +845,14 @@ extern int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
 extern void nats_rpc_staged_apply_and_clear_on(natsMsg *out);
 extern const char *nats_rpc_cstr_buf(char *buf, size_t cap,
                                       const char *src, int len);
+extern int nats_rpc_staged_set_if_absent(const str *name, const str *value);
+
+/* Operator-configurable outbound header name carrying the per-call
+ * UUIDv7.  Owned by nats_consumer.c via the `request_id_header`
+ * modparam.  An empty / NULL value disables auto-staging entirely;
+ * callers can still mint and read the id but no header is added
+ * to the outbound natsMsg. */
+extern char *nats_request_id_header;
 
 /* Populate g_cur from the ctx's stored reply buffers.  Mirrors
  * cur_set_from_nats_reply() in nats_rpc.c but reads from byte
@@ -863,6 +977,26 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -1;
+	}
+
+	/* Mint a UUIDv7 correlation id, stash it in the per-worker
+	 * slot (so $nats_request_id reads it back after the yield),
+	 * and stage it as an outbound header unless an empty header
+	 * name disables auto-staging or the script already set it
+	 * explicitly via nats_hdr_set(). */
+	{
+		char id_buf[40];
+		int  id_len;
+		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
+		if (id_len > 0) {
+			nats_rpc_async_request_id_set(id_buf, id_len);
+			if (nats_request_id_header && nats_request_id_header[0]) {
+				str hname = { nats_request_id_header,
+					(int)strlen(nats_request_id_header) };
+				str hval  = { id_buf, id_len };
+				(void)nats_rpc_staged_set_if_absent(&hname, &hval);
+			}
+		}
 	}
 
 	if (nats_rpc_async_install(c) < 0) {

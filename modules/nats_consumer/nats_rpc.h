@@ -83,6 +83,20 @@ int pv_parse_nats_hdr_name(pv_spec_p sp, const str *in);
 int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
                     pv_value_t *res);
 
+/* $nats_request_id -- read the UUIDv7 of the most recent
+ * nats_request issued by this worker.  Persists across an
+ * async() yield so it is readable from the resume route. */
+int pv_get_nats_request_id(struct sip_msg *msg, pv_param_t *param,
+                           pv_value_t *res);
+
+/* Stage a header onto the worker's outbound buffer iff no entry
+ * with the same (case-insensitive) name is already staged.  Used
+ * by the auto-stager for the per-call UUIDv7 so a deliberate
+ * nats_hdr_set("X-Request-Id", ...) in the script wins.  Returns
+ * 1 on stage, 0 if an existing entry was preserved, -1 on OOM or
+ * full table. */
+int nats_rpc_staged_set_if_absent(const str *name, const str *value);
+
 /* Script-callable header staging. */
 int w_nats_hdr_set (struct sip_msg *msg, str *name, str *value);
 int w_nats_reply   (struct sip_msg *msg, str *payload);

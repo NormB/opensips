@@ -288,6 +288,92 @@ static void test_subject_roundtrip(void)
 
 /* ────────────────────────────────────────────────────────────── */
 
+/* ────────────────────────────────────────────────────────────── */
+
+static int hex_nibble(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+	return -1;
+}
+
+static void test_uuidv7_mint(void)
+{
+	char buf[64];
+	char buf2[64];
+	int  n;
+	int  v_nibble;
+	int  var_byte;
+	int  i;
+	int  dashes_ok;
+
+	fprintf(stderr, "\n=== uuidv7 mint ===\n");
+	n = nats_rpc_async_uuidv7_mint(buf, sizeof(buf));
+	ASSERT(n == 36, "mint returns 36 bytes (UUID length)");
+	ASSERT(buf[8]  == '-' && buf[13] == '-' &&
+	       buf[18] == '-' && buf[23] == '-',
+		"dashes at positions 8/13/18/23");
+
+	dashes_ok = 1;
+	for (i = 0; i < 36; i++) {
+		if (i == 8 || i == 13 || i == 18 || i == 23) continue;
+		if (hex_nibble(buf[i]) < 0) { dashes_ok = 0; break; }
+	}
+	ASSERT(dashes_ok, "all non-dash positions are lowercase hex");
+
+	v_nibble = hex_nibble(buf[14]);
+	ASSERT(v_nibble == 7, "version nibble at offset 14 is 7");
+
+	var_byte = hex_nibble(buf[19]);
+	ASSERT(var_byte == 0x8 || var_byte == 0x9 ||
+	       var_byte == 0xa || var_byte == 0xb,
+		"variant byte at offset 19 is one of 8/9/a/b (10xx bits)");
+
+	/* Cap-undersize protection. */
+	{
+		char tiny[16];
+		int r = nats_rpc_async_uuidv7_mint(tiny, sizeof(tiny));
+		ASSERT(r == 0, "mint returns 0 on too-small buffer");
+	}
+
+	/* Sequential mints differ -- 62 random bits make a collision in
+	 * the same millisecond effectively impossible. */
+	n = nats_rpc_async_uuidv7_mint(buf2, sizeof(buf2));
+	ASSERT(n == 36, "second mint also 36 bytes");
+	ASSERT(memcmp(buf, buf2, 36) != 0, "two sequential mints differ");
+
+	/* Lexicographic order: the first 13 chars are the timestamp +
+	 * version nibble.  Two mints within the same millisecond may
+	 * tie on those 13 chars but rand_b breaks the tie.  We assert
+	 * the WEAKER property that the second mint's timestamp prefix
+	 * is >= the first's (monotonic, ms-resolution). */
+	ASSERT(memcmp(buf, buf2, 13) <= 0,
+		"second mint is lexicographically >= first (ms-monotonic)");
+}
+
+static void test_request_id_stash(void)
+{
+	const char *got;
+	int         got_len;
+	const char  uuid[] = "01970000-0001-7abc-89ef-0123456789ab";
+
+	fprintf(stderr, "\n=== request_id stash ===\n");
+
+	nats_rpc_async_request_id_set(uuid, (int)strlen(uuid));
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got != NULL, "stash get returns non-NULL after set");
+	ASSERT(got_len == (int)strlen(uuid), "stash length matches");
+	ASSERT(got && memcmp(got, uuid, got_len) == 0,
+		"stash bytes round-trip identically");
+
+	nats_rpc_async_request_id_set(NULL, 0);
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got == NULL && got_len == 0, "stash cleared by NULL set");
+}
+
+/* ────────────────────────────────────────────────────────────── */
+
 int main(void)
 {
 	test_happy_path();
@@ -296,6 +382,8 @@ int main(void)
 	test_callback_wins_race();
 	test_inflight_cap();
 	test_subject_roundtrip();
+	test_uuidv7_mint();
+	test_request_id_stash();
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);
