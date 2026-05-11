@@ -164,9 +164,18 @@ fi
 ####### drive with sipp #########################################
 #
 # sipp has no built-in OPTIONS scenario, so we render a minimal
-# XML one inline: send OPTIONS, wait for any response 1xx-5xx,
+# XML one inline: send OPTIONS, wait for any response 200-5xx,
 # done.  No ACK / BYE traffic so the timing is purely the
 # end-to-end async RPC latency.
+#
+# Previous revisions of this scenario marked EVERY <recv> as
+# optional="true".  That left sipp with no mandatory state to
+# block on, so every call stayed in CurrentCall forever; sipp
+# hit its internal open-call ceiling (~150) and stopped placing
+# new calls long before reaching -m N.  Fix: the 200 recv is
+# mandatory (happy path); 503/504 are handled via next-branch
+# labels so a server-side failure response still terminates the
+# call cleanly and is counted as Failed by sipp.
 
 SIPP_SCENARIO="$OUT/options_uac.xml"
 cat > "$SIPP_SCENARIO" <<'XML'
@@ -186,11 +195,22 @@ cat > "$SIPP_SCENARIO" <<'XML'
 
     ]]>
   </send>
-  <recv response="200" optional="true" rtd="true" />
-  <recv response="504" optional="true" rtd="true" />
-  <recv response="503" optional="true" rtd="true" />
-  <recv response="500" optional="true" rtd="true" />
-  <recv response="405" optional="true" rtd="true" />
+
+  <!-- Failure branches first.  Each is optional so it doesn't
+       block the happy path; if any of them matches the inbound
+       response, sipp counts the call as Failed and the scenario
+       ends.  rtd records the response time for the stats CSV. -->
+  <recv response="504" optional="true" rtd="true" next="failed" />
+  <recv response="503" optional="true" rtd="true" next="failed" />
+  <recv response="500" optional="true" rtd="true" next="failed" />
+  <recv response="405" optional="true" rtd="true" next="failed" />
+
+  <!-- Happy path: mandatory 200 OK.  This is what gives sipp a
+       state to block on so the call actually terminates instead
+       of sitting in CurrentCall forever. -->
+  <recv response="200" rtd="true" />
+
+  <label id="failed" />
 </scenario>
 XML
 
