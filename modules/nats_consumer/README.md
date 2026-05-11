@@ -478,11 +478,6 @@ nats_consumer_bind("id=adv;stream=ADV;ephemeral=1;
 
 ## Known limitations
 
-- **`nats_request` is sync-only.**  The call blocks the worker for the full
-  `timeout_ms`.  Callsites must be restricted to `timer_route` or
-  `startup_route`.  For async request/reply from a `request_route`, use
-  `event_nats` to publish the request and a plain `nats_fetch` consumer to
-  receive the reply on a known subject.
 - **`$nats_hdr($var(...))` dynamic names are not supported.**  The header
   name must be a literal pseudo-variable parameter.  If you need a computed
   name, pre-select the value with `nats_hdr_set` at bind time or walk a
