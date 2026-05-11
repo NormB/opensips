@@ -1224,30 +1224,28 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
  * out_headers and call natsMsgHeader_Set on the consumer side.
  */
 /*
- * w_nats_request_async -- async acmd entry point.
+ * w_nats_request_async -- phase-5 worker side.
  *
- * PHASE 5 STATUS (this commit): infrastructure built and live-
- * verified -- slot pool, IPC queue, consumer-side inbox
- * subscription, IPC drain -- all in place and shown to boot
- * without crashes when the worker side does not use them.  The
- * worker-rewire that would actually issue slot_claim +
- * ipc_enqueue triggers a segfault in the SIP worker shortly
- * after the first SIP-driven async() call, and reducing the
- * slot count alone does not eliminate it.  Root cause TBD.
+ * INTERIM SYNC FALL-THROUGH (commit 7731a1c9b4 onwards): the
+ * slot_claim + ipc_enqueue + yield-on-wake_fd path is blocked
+ * on a design issue isolated this session -- OpenSIPS's reactor
+ * cannot register fork-inherited eventfds (the pre-fork pool
+ * approach in nats_rpc_slot.c).  Using `async_status =
+ * slot->wake_fd` (where wake_fd was created in main pre-fork)
+ * segfaults the SIP worker; using a fresh worker-side eventfd
+ * does not.  But a fresh worker-side fd cannot be written to
+ * by the consumer process, so this approach can't be used as-is.
  *
- * Until the worker-rewire bug is isolated, this body keeps the
- * proven sync fall-through from commit `7731a1c9b4` so the
- * end-to-end functional path (round-trips a NATS RPC) stays
- * working.  All script-surface contracts (return-code grammar,
- * $nats_request_id pvar, request_id_header modparam, etc.) are
- * unchanged.
+ * Phase 5 needs a different cross-process wake mechanism:
+ * either SCM_RIGHTS to pass a worker-created eventfd to the
+ * consumer, pidfd_getfd to let the consumer acquire a dup, or
+ * a polling design where the worker periodically reads slot
+ * state via the OpenSIPS timer subsystem.  Each is its own
+ * substantial design + implementation effort.
  *
- * The slot / IPC / consumer-side machinery is exercised by the
- * existing unit tests and boots cleanly under live opensips;
- * once the worker-rewire bug is fixed this function will be
- * replaced with the slot_claim + ipc_enqueue + yield-on-wake_fd
- * path that's preserved in git history (commit message of
- * phase-5 step 4 commit).
+ * Until then this body keeps the sync fall-through so the
+ * end-to-end script path keeps working.  The phase-2.5 UUIDv7
+ * mint + $nats_request_id stash + auto-stage are preserved.
  */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms)
@@ -1289,11 +1287,6 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		}
 	}
 
-	/* Synchronous transport.  See the function comment above for
-	 * the phase-5 status.  The infrastructure (slot pool, IPC
-	 * queue, consumer-side subscription) is built and live-
-	 * verified; switching this body to slot_claim +
-	 * ipc_enqueue is the last step of phase 5. */
 	rc = w_nats_request(msg, subject, payload, timeout_ms);
 	async_status = ASYNC_SYNC;
 	return rc;
