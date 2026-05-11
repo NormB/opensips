@@ -76,7 +76,7 @@
  * concurrency.
  */
 #ifndef NATS_RPC_SLOT_COUNT
-#define NATS_RPC_SLOT_COUNT 1024
+#define NATS_RPC_SLOT_COUNT 64
 #endif
 
 /* Slot states.  Encoded as plain ints + atomic accesses so we can
