@@ -127,29 +127,51 @@ Load `nats_tls_wolfssl.so` **before** any of `event_nats.so`,
 
 ```
 loadmodule "nats_tls_wolfssl.so"
-modparam("nats_tls_wolfssl", "libnats_path",
-         "/opt/libnats-wolfssl/lib/libnats.so.3.12")
 loadmodule "event_nats.so"
 loadmodule "cachedb_nats.so"
 loadmodule "nats_consumer.so"
 ```
 
+The wolfSSL-flavoured libnats install path is hardcoded to
+`/opt/libnats-wolfssl/lib/libnats.so.3.12` by default; override
+via the `NATS_TLS_LIBNATS_PATH` environment variable (see below)
+when the install lives elsewhere.
+
 If both `nats_tls_openssl` and `nats_tls_wolfssl` appear in
-`opensips.cfg`, the second wrapper's `mod_init` refuses with an
-`LM_ERR` and OpenSIPS exits at config-parse time.
+`opensips.cfg`, both `mod_load` callbacks run (each dlopens its
+own libnats), then the first wrapper's `mod_init` detects the
+other via `module_loaded()`, emits an `LM_ERR`, and OpenSIPS
+aborts before any traffic flows.
 
 ## Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `libnats_path` | string | `/opt/libnats-wolfssl/`<br>`lib/libnats.so.3.12` | Path to the wolfSSL-flavoured libnats install.  An absolute path is recommended — the sidecar wolfSSL libnats is not on any standard system search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.12` for upstream nats.c v3.12.x). |
+This module exports **no modparams**.  Backend selection is driven
+by the `loadmodule` directive itself; libnats path is overridable
+via an environment variable.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NATS_TLS_LIBNATS_PATH` | `/opt/libnats-wolfssl/lib/libnats.so.3.12` | Path to the wolfSSL-flavoured libnats install.  An absolute path is recommended — the sidecar wolfSSL libnats is not on any standard system search path.  Use the exact SONAME the user modules will `DT_NEEDED` (typically `libnats.so.3.12` for upstream nats.c v3.12.x).  Set in the systemd unit (`Environment=NATS_TLS_LIBNATS_PATH=…`) or shell rc before starting OpenSIPS. |
+
+### Why an environment variable rather than a modparam
+
+The dlopen happens in `mod_load`, which fires immediately after
+OpenSIPS dlopens the wrapper module — **before** the next
+`loadmodule` directive in `opensips.cfg` runs.  This timing is
+load-bearing for the preload pattern: it's what lets later NATS
+user modules resolve their `DT_NEEDED libnats.so.3.x` against the
+already-loaded wolfssl libnats by SONAME match.  Modparams are
+parsed strictly after `mod_load`, so a modparam couldn't influence
+the dlopen.
 
 ## Diagnostics
 
-At successful `mod_init`:
+At successful `mod_load`:
 
 ```
-INFO:nats_tls_wolfssl:mod_init: nats_tls_wolfssl: loaded '/opt/libnats-wolfssl/lib/libnats.so.3.12' (TLS backend = wolfSSL)
+INFO:nats_tls_wolfssl:mod_load: nats_tls_wolfssl: loaded '/opt/libnats-wolfssl/lib/libnats.so.3.12' (TLS backend = wolfSSL)
 ```
 
 The companion user modules each emit one confirming line at their

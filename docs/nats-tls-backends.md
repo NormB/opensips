@@ -49,12 +49,24 @@ choice explicit, validated, and grep-able in `opensips.cfg`.
 ## Architecture (preload pattern)
 
 The wrapper modules don't link against libnats at compile time.
-Each wrapper's `mod_init` does an explicit
-`dlopen("libnats.so.3.13", RTLD_NOW | RTLD_GLOBAL)`.  When the NATS
-user modules load later in the OpenSIPS startup sequence, their
+Each wrapper's `mod_load` callback does an explicit
+`dlopen(<path>, RTLD_NOW | RTLD_GLOBAL)` on its target libnats
+variant.  `mod_load` fires immediately after OpenSIPS dlopens the
+wrapper module itself — **before** the next `loadmodule` directive
+runs — so the dlopen registers libnats's SONAME in the global
+dynamic-linker namespace before any NATS user module tries to
+resolve it.  When `event_nats`, `cachedb_nats`, or `nats_consumer`
+load later in the startup sequence, their
 `DT_NEEDED libnats.so.3.x` reference is resolved by SONAME match
 against the already-loaded copy — no re-dlopen, no rpath
 override, no `LD_LIBRARY_PATH` magic.
+
+The path each wrapper dlopens:
+
+| Wrapper | Source | Default |
+|---|---|---|
+| `nats_tls_openssl` | `$NATS_TLS_LIBNATS_PATH` env var, else first match from a 9-candidate SONAME search list | `libnats.so.3.13` → ... → `libnats.so.3.7` → `libnats.so.3` → `libnats.so` |
+| `nats_tls_wolfssl` | `$NATS_TLS_LIBNATS_PATH` env var, else compiled-in default | `/opt/libnats-wolfssl/lib/libnats.so.3.12` |
 
 This pattern is cheaper than the "vtable abstraction over libnats's
 ~90 C entry points" approach because no call sites in `lib/nats` or
@@ -164,8 +176,8 @@ explicit `dlopen` is independent of system search paths.
 At OpenSIPS startup the wrapper logs its selection:
 
 ```
-INFO:nats_tls_wolfssl:mod_init: nats_tls_wolfssl: loaded
-    '/opt/libnats-wolfssl/lib/libnats.so.3.13' (TLS backend = wolfSSL)
+INFO:nats_tls_wolfssl:mod_load: nats_tls_wolfssl: loaded
+    '/opt/libnats-wolfssl/lib/libnats.so.3.12' (TLS backend = wolfSSL)
 ```
 
 Each NATS user module echoes the resolved backend at its own init:
@@ -191,7 +203,7 @@ for unrelated SIP-TLS handling).
 **Q: Can I run different TLS backends on different NATS connections
 in the same OpenSIPS process?**
 No.  The backend choice is process-global, baked in at the
-`dlopen` step in the wrapper module's `mod_init`.  Two OpenSIPS
+`dlopen` step in the wrapper module's `mod_load`.  Two OpenSIPS
 instances on one host can run different backends (via separate
 `loadmodule` choices in each instance's `opensips.cfg`); within
 one instance every NATS connection uses the same backend.
@@ -206,9 +218,13 @@ SONAMEs are distinct.
 
 **Q: What happens if both `nats_tls_openssl` and `nats_tls_wolfssl`
 are listed in `opensips.cfg`?**
-The second one to load detects the conflict via
-`module_loaded()`, emits an `LM_ERR`, and OpenSIPS exits at
-config-parse time.  This mirrors `tls_mgm`'s
+Both wrappers' `mod_load` runs successfully in `loadmodule` order
+(each dlopens its own libnats), so the log will briefly show both
+"TLS backend = ..." lines.  Then OpenSIPS iterates module `mod_init`
+callbacks; the first wrapper's `mod_init` detects the other via
+`module_loaded()`, emits an `LM_ERR`
+("`load exactly one TLS-backend wrapper module`"), and OpenSIPS
+aborts before any traffic flows.  This mirrors `tls_mgm`'s
 "multiple TLS library modules loaded" rejection.
 
 **Q: What happens if neither wrapper is loaded?**
@@ -226,8 +242,8 @@ write to the same internal storage, so behaviour is identical.
 
 **Q: Can I switch backends without restarting OpenSIPS?**
 No.  The backend choice is fixed at the wrapper module's
-`mod_init`.  Switching requires editing `opensips.cfg` and
-restarting OpenSIPS.
+`mod_load` (which runs during `opensips.cfg` parse).  Switching
+requires editing `opensips.cfg` and restarting OpenSIPS.
 
 ## See also
 
