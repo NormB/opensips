@@ -762,6 +762,145 @@ modparam, `proc_export_t`, gate sites in `mod_init` /
 RED-proven: stripping the modparam string from `cachedb_nats.c`
 flips the test red; restoring it flips it green.
 
+## Static-review round: algorithmic clean-ups across all NATS modules
+
+A second pass over the three NATS modules + `lib/nats` looking for
+algorithmic-class wins distinct from the allocator/watcher work
+above.  Four landed in `a3a5809494`; the fifth (AND-filter
+shard-lock coalescing) was deferred because deadlock-safety would
+have required a global lock-acquisition-order rule for a documented
+~10-15% win, more invasive than the gain justified.
+
+### #1 — `_entry_add_key` / `_entry_remove_key`: pointer compare on interned keys
+
+`modules/cachedb_nats/cachedb_nats_json.c`
+
+Both functions linear-scanned `e->keys[]` and called `strcmp()` on
+every stored entry.  Every stored key is already canonical
+(acquired through `nats_intern_acquire`), so identical content
+implies identical SHM pointer.  Intern the input first, then
+pointer-compare in the loop: O(n `strcmp`) → O(1 acquire) + O(n
+pointer compare).
+
+Cost: one extra acquire+release per call (hash lookup + refcount
+bump under a shard lock).  Cheaper than even two `strcmp()` on
+40-byte usrloc AoRs.  Net win at `e->num_keys >= 2` — the common
+case in re-register storms where the same AoR cycles through
+add/remove on every refresh.
+
+### #2 — `_intersect_keys`: O(n*m) nested-`strcmp` → O(n+m) hash set
+
+`modules/cachedb_nats/cachedb_nats_json.c`
+
+Introduced `_intkeyset_t`: an open-addressed, FNV-1a-hashed string
+set sized to the smaller input.  Build the set from B's keys, then
+test each A key for membership.  O(a+b) instead of O(a*b).
+
+Mostly matters for high-cardinality AND queries (>500 matched keys
+per filter); under that the constant factors cancel.  Includes a
+fallback to the original nested-loop on allocation failure so the
+function is strictly no-worse than before in OOM conditions.
+
+### #3 — `_sink_emit_string`: exact-size escape pre-allocation
+
+`modules/cachedb_nats/cachedb_nats_json.c`
+
+The JSON sink reserved `n*6+2` bytes per emitted string (worst-case
+per-byte escape) even though typical values escape < 1%.  Added
+`_json_escape_len()` — a single-pass scan that returns the exact
+expansion — and call it before `_sink_grow`.  Cuts reservation by
+~5-6x on real workloads, which on multi-MB FTS docs eliminates a
+substantial fraction of geometric-grow / `memcpy` churn.
+
+### #4 — `nats_ring`: cross-process futex wake replaces 5 ms usleep tick
+
+`modules/nats_consumer/nats_ring.{c,h}`,
+`modules/nats_consumer/nats_fetch.c`
+
+The ring's `eventfd` is created in whichever process called
+`nats_ring_create` (typically a worker via the MI bind handler,
+post-fork) and so is not in other workers' or the consumer
+process's fd tables.  The legacy fallback was `usleep(5ms)` tick
+polling: at low message-arrival rates this put the mean
+wait-to-delivery at ~7-10 ms (kernel-tick granularity + scheduling).
+
+Replaced with a SHM-resident `wake_seq` counter and the standard
+futex pattern:
+
+```c
+/* producer, on empty -> non-empty edge */
+atomic_fetch_add_explicit(&r->wake_seq, 1, memory_order_release);
+syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
+
+/* waiter */
+seq = atomic_load_explicit(&r->wake_seq, memory_order_acquire);
+if (ring_empty)
+    syscall(SYS_futex, &r->wake_seq, FUTEX_WAIT, seq, &tmo, NULL, 0);
+```
+
+Works across any fork boundary because the SHM page is mapped by
+every process.  Wake-ups are coalesced — only the producer that
+triggers the empty → non-empty edge calls `FUTEX_WAKE` — so
+steady-state push traffic does not pay a syscall per message.  The
+eventfd path is retained for legacy single-process callers
+(`lib/nats` async reactor); cross-process worker waits now use
+`nats_ring_wait()`.
+
+### Bench: cachedb_nats index path (REGISTER through usrloc)
+
+`tests/sip_e2e/bench_ul_register.sh`, N=1000, RPS=200,
+AOR_SPACE=200, aarch64, loopback NATS, HP_MALLOC.  Steady-state
+medians across four warm runs:
+
+| Metric  | Before (`24774ab5ac`) | After (`a3a5809494`) | Δ      |
+|---------|----------------------:|---------------------:|-------:|
+| p50 µs  | 1 718                 | 760                  | −56%   |
+| p95 µs  | 2 107                 | 1 124                | −47%   |
+| p99 µs  | 2 637                 | 1 617                | −39%   |
+| max µs  | 5 208                 | 3 369                | −35%   |
+| effective RPS | 200            | 200                  | n/a (RPS-clamped) |
+| CAS retry / exhausted | 0 / 0 | 0 / 0                | unchanged |
+
+The wins are entirely from cheaper per-write work (cheaper string
+escape, pointer-compare on interned keys), not from reduced
+contention — CAS deltas stay at zero across both runs.
+
+### Bench: nats_consumer JetStream drain throughput
+
+`modules/nats_consumer/tests/bench/bench_consumer.sh`, N=100 000:
+
+| Drain pattern             | Before        | After         | Δ      |
+|---------------------------|--------------:|--------------:|-------:|
+| `nats_fetch_batch=10`     | 9 832 msgs/s  | 9 630 msgs/s  | noise  |
+| `nats_fetch_batch=64`     | 37 425 msgs/s | **56 211** msgs/s | **+50%** |
+| `nats_fetch_batch=128`    | 56 148 msgs/s | 55 897 msgs/s | noise  |
+| `nats_fetch_batch=256`    | 74 516 msgs/s | **89 286** msgs/s | **+19.8%** |
+| `nats_fetch` (single)     | 5 094 msgs/s  | 5 101 msgs/s  | noise  |
+
+The `batch=64` and `batch=256` wins come from the futex path: in
+the batch-fetch wait loop, sub-ms wake-up vs. the historical 5 ms
+tick translates into more pop-attempt rounds inside the same
+`expires_ms` budget.  At `batch=10` / single mode the ring is
+rarely empty during the run, so the change has no measurable
+effect.  At `batch=128` the per-message processing path saturates
+the worker before the wait loop becomes the bottleneck.
+
+### Portability: clang C11-atomic fix
+
+`18a27079e6` — the initial `a3a5809494` landing used GCC-style
+`__atomic_*` builtins on the new `_Atomic uint32_t wake_seq` field.
+GCC accepts that; clang rejects with "address argument to atomic
+operation must be a pointer to integer or pointer ('_Atomic(uint32_t) *'
+invalid)" and the OpenSIPS Main CI matrix (clang-9 / clang-default
+on Ubuntu 20.04 / 22.04 / 24.04) failed.  Two-line swap to C11
+`atomic_fetch_add_explicit` / `atomic_load_explicit` (same calls
+the file's `head` / `tail` already used) cleared the matrix.
+
+Pre-push validation gap: prior local builds had run only host gcc
+on aarch64.  Going forward, any C change touching atomic ops or
+new system headers should be validated with
+`CC=clang make modules=modules/<name> modules` before pushing.
+
 ## What's still on the table
 
 Not pursued in this series, listed for the next session:
