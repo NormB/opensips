@@ -430,6 +430,110 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
             </example>
         </section>
 
+        <!-- allow_sync_in_request_route -->
+        <section id="param_allow_sync_in_request_route">
+            <title>
+                <varname>allow_sync_in_request_route</varname>
+                (integer)
+            </title>
+            <para>
+                Opt-in switch that widens the route mask of the
+                synchronous <function>nats_request</function> entry
+                point so it may be called from SIP-worker contexts
+                (<emphasis>REQUEST_ROUTE</emphasis>,
+                <emphasis>FAILURE_ROUTE</emphasis>,
+                <emphasis>BRANCH_ROUTE</emphasis>,
+                <emphasis>ERROR_ROUTE</emphasis>).  When unset (the
+                default), the OpenSIPS parser rejects any call to
+                bare <function>nats_request</function> from those
+                routes with the diagnostic
+                <quote>Command &lt;nats_request&gt; cannot be used
+                in the block</quote>; only
+                <emphasis>STARTUP_ROUTE</emphasis>,
+                <emphasis>TIMER_ROUTE</emphasis>,
+                <emphasis>LOCAL_ROUTE</emphasis>,
+                <emphasis>EVENT_ROUTE</emphasis>, and
+                <emphasis>ONREPLY_ROUTE</emphasis> remain accepted.
+            </para>
+            <para>
+                The guard exists because
+                <function>natsConnection_RequestMsg</function>
+                blocks the calling worker for up to
+                <varname>timeout_ms</varname>.  A SIP UDP/TCP worker
+                that blocks on the RPC cannot read its next packet
+                for that long, which on a production proxy with a
+                steady inbound rate quickly stalls SIP throughput.
+                Operators who know their deployment can absorb the
+                worst case (low RPS, a thin SIP gateway in front,
+                generous worker pool sizing) may opt in to the
+                simpler synchronous ergonomics by setting this to
+                <varname>1</varname>; the setter callback widens the
+                <function>nats_request</function> entry's flag word
+                to <emphasis>ALL_ROUTES</emphasis> at the moment the
+                modparam directive is parsed, before any route block
+                is checked.
+            </para>
+            <para>
+                <emphasis>The recommended pattern for any
+                request_route caller is the async form</emphasis>,
+                which yields the worker on an eventfd while the
+                reply is in flight and does not block SIP
+                processing:
+                <programlisting format="linespecific">async(nats_request(subj, payload, tmo), reply_route)</programlisting>
+                The async form is accepted from every route that
+                supports <function>async()</function> regardless of
+                this modparam.  See
+                <function>nats_request</function> below.
+            </para>
+            <para>
+                Range: <varname>0</varname> (default, safer) or
+                <varname>1</varname> (opt-in, permissive).  Any
+                other value is rejected at config-parse time so a
+                typo cannot silently disarm the guard.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>0</varname>
+            </para>
+            <example>
+                <title>Opt in -- low-RPS deployment that prefers sync ergonomics</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "allow_sync_in_request_route", 1)
+
+route {
+    # Operator has accepted that this call blocks the worker
+    # for up to 200 ms; udp_workers sized accordingly.
+    nats_request("rpc.lookup", $var(payload), 200);
+    if ($retcode == 1) {
+        xlog("got reply: $nats_data()\n");
+    }
+}
+                </programlisting>
+            </example>
+            <example>
+                <title>Default -- async from request_route, sync only in startup</title>
+                <programlisting format="linespecific">
+# No modparam set; the default (0) keeps the safety guard in place.
+
+startup_route {
+    # Allowed -- no SIP worker is being stalled.
+    nats_request("rpc.health", "ping", 1000);
+}
+
+route {
+    # Async form -- worker yields to the reactor while the
+    # RPC is in flight.  Accepted regardless of the modparam.
+    async(nats_request("rpc.lookup", $var(payload), 200), got_reply);
+}
+route[got_reply] {
+    if ($retcode == 1) {
+        xlog("got reply: $nats_data()\n");
+    }
+}
+                </programlisting>
+            </example>
+        </section>
+
         <section id="param_nats_transport">
             <title>NATS transport parameters (owned by event_nats)</title>
             <para>

@@ -124,7 +124,11 @@ static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
 
 /* ── script-callable commands ────────────────────────────────── */
 
-static const cmd_export_t cmds[] = {
+/* NOT `const` -- the allow_sync_in_request_route modparam setter
+ * widens the nats_request entry's route mask in-place when an
+ * operator opts into worker-blocking sync calls from the SIP
+ * request path.  See nats_request_allow_sync_setter(). */
+static cmd_export_t cmds[] = {
 	{ "nats_fetch", (cmd_function)w_nats_fetch, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_INT|CMD_PARAM_OPT, 0, 0},
@@ -170,14 +174,23 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_STR, 0, 0},
 		{0, 0, 0}},
 		ALL_ROUTES },
-	/* nats_request is SYNC-ONLY: natsConnection_RequestMsg blocks the
-	 * calling process for up to timeout_ms.  Restrict the route mask
-	 * so the engine refuses to call it from contexts where blocking
-	 * a SIP UDP/TCP worker would stall request processing
-	 * (REQUEST_ROUTE, FAILURE_ROUTE, BRANCH_ROUTE, ERROR_ROUTE).
-	 * Allow it from STARTUP/TIMER/LOCAL/EVENT/ONREPLY routes, which
-	 * either don't own a SIP worker (startup, timer, event) or
-	 * already accept synchronous semantics (local, onreply). */
+	/* The sync `nats_request` blocks the calling worker on
+	 * natsConnection_RequestMsg for up to timeout_ms.  By default
+	 * we restrict the route mask so the engine refuses the call
+	 * from contexts where blocking a SIP UDP/TCP worker would
+	 * stall request processing (REQUEST_ROUTE, FAILURE_ROUTE,
+	 * BRANCH_ROUTE, ERROR_ROUTE).  Allowed from STARTUP / TIMER /
+	 * LOCAL / EVENT / ONREPLY routes, which either don't own a
+	 * SIP worker (startup, timer, event) or already accept
+	 * synchronous semantics (local, onreply).
+	 *
+	 * Operators who want the sync ergonomics from `request_route`
+	 * (low-RPS deployments, a thin SIP gateway in front, etc.)
+	 * opt in via `modparam("nats_consumer",
+	 * "allow_sync_in_request_route", 1)`; the setter widens this
+	 * entry's flags to ALL_ROUTES in place.  Most deployments
+	 * should leave the safer default and use `async(nats_request
+	 * (...), rt)` from worker contexts instead. */
 	{ "nats_request", (cmd_function)w_nats_request, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR, 0, 0},
@@ -236,11 +249,64 @@ static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
 int nats_consumer_fetch_batch      = 10;
 int nats_consumer_fetch_timeout_ms = 1000;
 
+/*
+ * USE_FUNC_PARAM setter for `allow_sync_in_request_route`.
+ *
+ * Runs at config-parse time, the moment OpenSIPS sees the
+ * `modparam("nats_consumer", "allow_sync_in_request_route", 1)`
+ * directive.  Because modparam directives are processed strictly
+ * before route blocks are parsed (and the route-mask validation
+ * happens at route-block parse time), this setter is in a position
+ * to widen the cmds[]'s nats_request entry's flag word before any
+ * call site is checked against it.
+ *
+ * Setting val=0 (or omitting the modparam entirely) leaves the
+ * default restrictive mask.  Setting val=1 widens to ALL_ROUTES.
+ * Setting anything else is reported as a parse error so a typo
+ * does not silently disarm the safety guard.
+ */
+static int nats_request_allow_sync_setter(modparam_t type, void *val)
+{
+	int       want;
+	unsigned  i;
+
+	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
+		LM_ERR("allow_sync_in_request_route: must be an integer\n");
+		return -1;
+	}
+	want = (int)(long)val;
+	if (want != 0 && want != 1) {
+		LM_ERR("allow_sync_in_request_route: expected 0 or 1, got %d\n",
+			want);
+		return -1;
+	}
+	if (want == 0)
+		return 0;   /* default behaviour; no mutation needed */
+
+	for (i = 0; cmds[i].name; i++) {
+		if (strcmp(cmds[i].name, "nats_request") == 0) {
+			cmds[i].flags = ALL_ROUTES;
+			LM_INFO("nats_request route mask widened to ALL_ROUTES "
+				"(operator opt-in via allow_sync_in_request_route=1); "
+				"calls from request_route will block the worker for "
+				"up to timeout_ms.  Prefer `async(nats_request(...), "
+				"rt)` if possible.\n");
+			return 0;
+		}
+	}
+	LM_ERR("allow_sync_in_request_route: nats_request entry not "
+		"found in cmds[] -- module table layout drift?\n");
+	return -1;
+}
+
 static const param_export_t params[] = {
 	{ "persist_handles",   INT_PARAM, &persist_handles },
 	{ "persist_path",      STR_PARAM, &persist_path    },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
 	{ "fetch_timeout_ms",  INT_PARAM, &nats_consumer_fetch_timeout_ms  },
+	{ "allow_sync_in_request_route",
+	      INT_PARAM | USE_FUNC_PARAM,
+	      (void *)nats_request_allow_sync_setter },
 	{ 0, 0, 0 }
 };
 
