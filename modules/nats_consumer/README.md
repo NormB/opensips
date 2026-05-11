@@ -323,21 +323,26 @@ matters more than the module knobs; both rows are at N=100 000:
 | Drain pattern                          | msgs/sec | Drain elapsed | redeliveries |
 |----------------------------------------|---------:|--------------:|-------------:|
 | `nats_fetch` + `nats_ack` (single)     |    2 058 |        48.5 s |          206 |
-| `nats_fetch_batch` (`fetch_batch=10`)  |    9 833 |        10.2 s |            0 |
-| `nats_fetch_batch` (`fetch_batch=64`)  |   37 509 |         2.7 s |            0 |
-| `nats_fetch_batch` (`fetch_batch=128`) |   56 085 |         1.8 s |            0 |
-| `nats_fetch_batch` (`fetch_batch=256`) | **89 365** | **1.1 s**   |        **0** |
+| `nats_fetch_batch` (`fetch_batch=10`)  |    9 630 |       10.4 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=64`)  |   56 211 |         1.8 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=128`) |   55 897 |         1.8 s |            0 |
+| `nats_fetch_batch` (`fetch_batch=256`) | **89 286** | **1.1 s**   |        **0** |
 
 The 43x speedup over the original single-drain baseline lands via
-four fixes that compound:
+five fixes that compound:
 
 1. `nats_fetch_batch`'s opts parser now accepts `expires_ms=` (was
    silently ignored before; only `expires=` was wired up).
 2. `nats_fetch_batch`'s wait loop no longer relies on the ring's
-   cross-process eventfd (which never wakes on the worker side),
-   replaced with the same 5 ms usleep-tick pattern `nats_fetch`
-   uses.  This was the dominant collapse: every wait blocked the
-   full `expires_ms` instead of returning when messages arrived.
+   per-process eventfd (which never wakes on the worker side).
+   It uses a SHM-resident `wake_seq` + Linux `FUTEX_WAIT` /
+   `FUTEX_WAKE` against an address inside the ring struct, so the
+   producer can wake every worker across fork boundaries in
+   sub-millisecond time.  This replaced both the original "block
+   the full `expires_ms`" collapse and the 5 ms usleep-tick
+   stop-gap that shipped in the interim.  Visible mostly at
+   mid-range `fetch_batch=64` (now 56 k msgs/sec vs. 37 k on the
+   5 ms tick).
 3. The consumer process's per-handle msg-ref table is now sized
    from `max(ring_capacity, max_ack_pending)`.  With the previous
    size = ring_capacity, any handle with `max_ack_pending` larger
@@ -354,6 +359,10 @@ four fixes that compound:
    advance the broker's ack floor --- which is what stalled
    `fetch_batch` in (16..64) at zero broker-confirmed acks despite
    tens of thousands of locally-applied acks.
+5. The consumer process's idle cycle is a blocking `select()` on
+   `(ack_fd, retry_timerfd)` rather than a `usleep(50ms)` spin, so
+   empty subscriptions drop to ~0% CPU and worker acks wake the
+   process immediately.
 
 ### Choosing a drain pattern
 
