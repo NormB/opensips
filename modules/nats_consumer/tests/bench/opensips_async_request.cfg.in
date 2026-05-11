@@ -48,9 +48,11 @@ modparam("event_nats", "nats_url", "@@NATS_URL@@")
 
 loadmodule "nats_consumer.so"
 modparam("nats_consumer", "fetch_batch", 10)
-# Keep the auto-staged header on so the responder side sees the
-# UUIDv7 correlation id and can log it.
-modparam("nats_consumer", "request_id_header", "X-Request-Id")
+# Disable auto-staging during the segfault hunt -- staged_dup
+# uses pkg_malloc, which is suspected of racing with the libnats
+# subscription thread in this worker.  Re-enable once the bug is
+# understood.
+modparam("nats_consumer", "request_id_header", "")
 
 ####### routes ###################################################
 
