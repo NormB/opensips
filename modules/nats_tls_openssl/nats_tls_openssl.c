@@ -50,20 +50,25 @@
  */
 
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../../sr_module.h"
 #include "../../dprint.h"
 
-/* Optional override of the libnats path / SONAME.  Defaults to
- * "libnats.so.3", which the dynamic linker resolves against the
- * standard search path (ld.so.cache + /lib + /usr/lib + LOCALBASE).
- * Distros that ship libnats in a non-standard directory or that
- * version-suffix the SONAME differently can point at the exact
- * file.  Must not contain a wolfSSL-flavoured libnats path -- the
- * sentinel check below does not validate the TLS backend, only
- * that libnats is loadable. */
-static char *nats_libnats_path = NULL;
+/* Path of the libnats this wrapper loaded.  Populated by mod_load;
+ * read by mod_init for the diagnostic log.  When the env var
+ * NATS_TLS_LIBNATS_PATH is set, that path wins.  Otherwise the
+ * default name list (libnats.so.3.13 → .3.12 → ... → libnats.so)
+ * is tried; the first one that dlopens wins.
+ *
+ * Why an env var rather than a modparam: modparams are parsed
+ * AFTER mod_load runs, but mod_load is exactly the point at which
+ * we need to dlopen libnats -- it fires before subsequent
+ * loadmodule directives, so the NATS user modules' DT_NEEDED
+ * resolution sees our dlopen.  A modparam wouldn't be readable
+ * at mod_load time. */
+static const char *nats_resolved_path = NULL;
 
 /* dlopen handle.  Kept so mod_destroy can dlclose() cleanly on
  * shutdown.  The libnats globals (allocator, signal mask, lib
@@ -72,13 +77,9 @@ static char *nats_libnats_path = NULL;
  * that this wrapper added at mod_init. */
 static void *_handle = NULL;
 
+static int mod_load(void);
 static int mod_init(void);
 static void mod_destroy(void);
-
-static const param_export_t params[] = {
-	{"libnats_path", STR_PARAM, &nats_libnats_path},
-	{0, 0, 0}
-};
 
 struct module_exports exports = {
 	"nats_tls_openssl",  /* module name */
@@ -86,12 +87,17 @@ struct module_exports exports = {
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,     /* dlopen flags for THIS module (libnats's
 	                      * symbols get their own RTLD_GLOBAL via
-	                      * the explicit dlopen below) */
-	0,                   /* load function */
+	                      * the explicit dlopen in mod_load) */
+	mod_load,            /* load function -- runs immediately after
+	                      * dlopen of this wrapper, BEFORE the next
+	                      * loadmodule directive is processed.  This
+	                      * is the only place where dlopen of
+	                      * libnats happens early enough that user
+	                      * modules' DT_NEEDED resolution sees it. */
 	NULL,                /* OpenSIPS module dependencies */
 	0,                   /* exported commands */
 	0,                   /* exported async commands */
-	params,              /* module parameters */
+	0,                   /* module parameters */
 	0,                   /* exported statistics */
 	0,                   /* exported MI functions */
 	0,                   /* exported pseudo-variables */
@@ -133,43 +139,36 @@ static const char *default_libnats_names[] = {
 	NULL
 };
 
-static int mod_init(void)
+/* mod_load: pre-load libnats so subsequent loadmodule directives
+ * (event_nats, cachedb_nats, nats_consumer) resolve their
+ * DT_NEEDED libnats.so against the SO we just dlopen-ed.  This
+ * fires immediately after the wrapper's own dlopen, BEFORE the
+ * next loadmodule line in opensips.cfg runs. */
+static int mod_load(void)
 {
+	const char *env = getenv("NATS_TLS_LIBNATS_PATH");
 	void *sentinel;
 
-	LM_INFO("nats_tls_openssl: initializing\n");
-
-	/* Mutual exclusion: only one libnats variant can be live in a
-	 * single process.  Loading both wrapper modules would double-
-	 * dlopen libnats and (if the two prefixes are configured to
-	 * point at different libnats builds) lead to undefined
-	 * behaviour at the first global-state access. */
-	if (module_loaded("nats_tls_wolfssl")) {
-		LM_ERR("nats_tls_openssl: nats_tls_wolfssl is also loaded; "
-		       "load exactly one TLS-backend wrapper module\n");
-		return -1;
-	}
-
-	/* RTLD_NOW: resolve all symbols up-front so we know now if
-	 *           the libnats build is incomplete (rather than
-	 *           failing on the first call site).
-	 * RTLD_GLOBAL: put libnats's symbols in the global namespace
-	 *           so the NATS user modules' DT_NEEDED resolution
-	 *           reuses this load by SONAME match. */
-	if (nats_libnats_path && *nats_libnats_path) {
-		_handle = dlopen(nats_libnats_path, RTLD_NOW | RTLD_GLOBAL);
+	/* RTLD_NOW: resolve all symbols up-front so a missing function
+	 *           surfaces at module-load time, not at first call.
+	 * RTLD_GLOBAL: put libnats's symbols in the global dynamic-
+	 *           linker namespace so subsequent module loads
+	 *           reuse this copy by SONAME match. */
+	if (env && *env) {
+		_handle = dlopen(env, RTLD_NOW | RTLD_GLOBAL);
 		if (!_handle) {
-			LM_ERR("nats_tls_openssl: dlopen('%s') failed: %s\n",
-			       nats_libnats_path, dlerror());
+			LM_ERR("nats_tls_openssl: dlopen('%s') from "
+			       "$NATS_TLS_LIBNATS_PATH failed: %s\n",
+			       env, dlerror());
 			return -1;
 		}
+		nats_resolved_path = env;
 	} else {
-		/* Walk default name list until one resolves. */
 		const char **np;
 		for (np = default_libnats_names; *np; np++) {
 			_handle = dlopen(*np, RTLD_NOW | RTLD_GLOBAL);
 			if (_handle) {
-				nats_libnats_path = (char *)*np;
+				nats_resolved_path = *np;
 				break;
 			}
 		}
@@ -178,21 +177,21 @@ static int mod_init(void)
 			       "default SONAME search (tried minor versions "
 			       "3.7 through 3.13, plus libnats.so.3 and "
 			       "libnats.so).  Install libnats from a distro "
-			       "package or set the libnats_path modparam to "
+			       "package or set $NATS_TLS_LIBNATS_PATH to "
 			       "the exact SONAME / file path.\n");
 			return -1;
 		}
 	}
 
-	/* Sentinel check: confirm the loaded SO actually exports the
-	 * libnats API surface.  Catches a packaging mistake where the
-	 * configured path points at a stub or a non-libnats SO that
-	 * happens to share the SONAME. */
+	/* Sentinel check: confirm the loaded SO exports the libnats
+	 * API surface.  Catches a packaging mistake where the path
+	 * resolves to a stub or a non-libnats SO that happens to
+	 * share the SONAME. */
 	sentinel = dlsym(_handle, "natsConnection_Connect");
 	if (!sentinel) {
 		LM_ERR("nats_tls_openssl: sanity-check failed -- loaded "
 		       "'%s' does not export natsConnection_Connect (%s)\n",
-		       nats_libnats_path,
+		       nats_resolved_path,
 		       dlerror() ? dlerror() : "no error string");
 		dlclose(_handle);
 		_handle = NULL;
@@ -200,7 +199,23 @@ static int mod_init(void)
 	}
 
 	LM_INFO("nats_tls_openssl: loaded '%s' (TLS backend = OpenSSL)\n",
-	        nats_libnats_path);
+	        nats_resolved_path);
+	return 0;
+}
+
+static int mod_init(void)
+{
+	/* Mutual exclusion: only one libnats variant can be live in a
+	 * single process.  This check fires at the second wrapper's
+	 * mod_init; if both were loaded, OpenSIPS aborts here before
+	 * any traffic flows.  (Both wrappers' mod_load already ran by
+	 * this point, so the damage of double-dlopen is already
+	 * present in memory, but no real RPC has happened yet.) */
+	if (module_loaded("nats_tls_wolfssl")) {
+		LM_ERR("nats_tls_openssl: nats_tls_wolfssl is also loaded; "
+		       "load exactly one TLS-backend wrapper module\n");
+		return -1;
+	}
 	return 0;
 }
 
