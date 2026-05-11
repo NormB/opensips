@@ -113,8 +113,14 @@ cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
       ..
 make -j && sudo make install
 
+# Register /opt/wolfssl/lib with the dynamic linker so libnats's
+# DT_NEEDED libwolfssl.so.NN resolves at runtime.
+echo "/opt/wolfssl/lib" | sudo tee /etc/ld.so.conf.d/wolfssl.conf
+sudo ldconfig
+
 # Verify
 ldd /opt/libnats-wolfssl/lib/libnats.so | grep wolfssl
+# Expected: libwolfssl.so.NN => /opt/wolfssl/lib/libwolfssl.so.NN
 ```
 
 You should see `libwolfssl.so.X => /opt/wolfssl/lib/libwolfssl.so.X`.

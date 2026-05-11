@@ -171,9 +171,18 @@ jobs:
                 ..
           make -j"$(nproc)"
           sudo make install
-      - name: Verify ldd shows wolfSSL
+      - name: Register /opt/wolfssl/lib with the dynamic linker
         run: |
-          ldd /opt/libnats-wolfssl/lib/libnats.so | grep -q libwolfssl
+          # Runs whether or not the cache hit fired -- /etc/ld.so.conf.d/
+          # is not part of the cache, so the registration has to happen
+          # every CI run.  Without it, the wolfssl-backed libnats has a
+          # DT_NEEDED libwolfssl.so.NN that the linker can't resolve at
+          # dlopen time.
+          echo "/opt/wolfssl/lib" | sudo tee /etc/ld.so.conf.d/wolfssl.conf
+          sudo ldconfig
+      - name: Verify ldd resolves wolfSSL after ldconfig
+        run: |
+          ldd /opt/libnats-wolfssl/lib/libnats.so | grep -q '=> /opt/wolfssl/lib/libwolfssl'
       - name: Install OpenSIPS build deps + bundled libnats for compile-time symbols
         run: |
           set -e
