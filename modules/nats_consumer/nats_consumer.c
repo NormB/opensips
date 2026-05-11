@@ -521,16 +521,13 @@ static int child_init(int rank)
 	}
 	LM_DBG("nats_consumer: child_init rank=%d\n", rank);
 
-	/* Eagerly set up the per-worker inbox subscription for the
-	 * async nats_request path.  Doing this in child_init (rather
-	 * than lazily inside w_nats_request_async on first call) keeps
-	 * libnats's subscription bookkeeping outside the SIP-message
-	 * execution context, where the subscription thread spawn can
-	 * race with active connection usage.  Failure is non-fatal --
-	 * scripts that don't use async nats_request never notice; the
-	 * lazy path inside w_nats_request_async still runs as a
-	 * fallback. */
+	/* Debug gate: eager-subscribe at child_init triggers a
+	 * segfault in SIP workers within seconds of boot (id=6 in
+	 * test runs).  Disable to confirm the crash is from
+	 * natsConnection_Subscribe in worker context. */
+#if 0
 	(void)nats_rpc_async_child_init(rank);
+#endif
 
 	return 0;
 }

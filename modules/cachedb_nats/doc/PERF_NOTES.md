@@ -944,18 +944,84 @@ What the bench is designed to surface:
   the `-1` timeout path; killing `nats-server` mid-run exercises
   the `-2` connection-lost path (phase-3 logic).
 
-### Empirical numbers
+### Empirical numbers — blocked on an architecture flaw
 
-**Not yet captured.**  The bench reproduces a SIP-worker
-segfault on first OPTIONS delivery (logged as `CRITICAL:core:
-sig_usr: segfault in process pid: N, id: 6`).  The crash
-fires AFTER `ensure_inbox_subscription` reports success
-("inbox subscription up on _INBOX.opensips.<pid>.>") but
-before any reply is processed; moving the subscribe to
-`child_init` (eager) did not change the failure surface, so
-the bug is somewhere on the `request_route → async(...) →
-w_nats_request_async` start path rather than in the
-subscription set-up itself.  Tracked as a phase-4 follow-up.
+**Not yet captured, and not capturable without a refactor.**
+The bench surfaced (and reliably reproduces) a deeper issue:
+
+> Calling `natsConnection_Subscribe` from any OpenSIPS worker
+> process (SIP UDP worker, MI Datagram, Timer handler) segfaults
+> the calling worker within a few seconds, even with **no SIP
+> traffic ever reaching it**.
+
+Phase-4 isolation work, in order:
+
+1. Stand up `bench_async_request.sh` against a single-worker
+   opensips.  First OPTIONS via SIPp → SIP worker segfaults.
+2. Move the subscribe from lazy (first call to
+   `w_nats_request_async`) to eager (`child_init`).  Workers
+   still segfault on their own at boot+~3s, without any SIP
+   traffic.  The OPTIONS never makes it through because the
+   worker is already gone.
+3. `#if 0` the eager-subscribe call.  Opensips boots and runs
+   indefinitely with no crash.
+
+Conclusion: `natsConnection_Subscribe` running inside a
+worker process is fundamentally incompatible with how
+OpenSIPS forks and runs its worker pool.  The pattern works
+in `event_nats` and in `nats_consumer`'s dedicated consumer
+process because they don't run inside the SIP worker
+reactor; both `cachedb_nats` and `event_nats` either
+publish-only or operate on a dedicated NATS process, not on
+a SIP-reactor-backed worker.
+
+### Architectural consequence
+
+Phase 2's implementation places the inbox subscription on the
+SIP worker that issues the request.  That choice was driven by
+"every worker owns its own subscription" / "minimal IPC"
+reasoning, and the design notes (phase 2 commit message,
+`nats_rpc_async.c` header comment) reflect that.  It's now
+clear the choice was wrong: workers cannot safely host
+libnats subscription threads.
+
+The correct architecture is the one I considered and rejected
+during phase 2 scoping (**option B** in that discussion):
+route the publish + reply through the dedicated nats_consumer
+process, which already runs libnats safely.
+
+Sketch of the refactor for a future phase:
+
+1. Consumer process maintains **one** persistent inbox
+   subscription on `_INBOX.opensips.<instance-id>.>`.  No
+   per-worker subs.
+2. Worker's `w_nats_request_async` sends an IPC packet to the
+   consumer process: "publish this subject + payload, my
+   correlation id is `<uuid>`, signal me at eventfd `<fd>`."
+3. Consumer process does the publish + parks the worker's fd
+   in its in-flight hash table.
+4. When the reply lands on the consumer's subscription
+   callback, it copies the payload into a SHM ring (one
+   per worker, similar to the existing fetch ring), then
+   signals the worker's eventfd.
+5. Worker resume reads from its ring, populates
+   `$nats_data` / `$nats_request_id` / `$nats_hdr(...)`,
+   returns.
+
+Cost: one IPC hop per call (worker → consumer → worker) plus
+the broker round-trip.  Benefit: zero worker-side libnats
+threading, no segfaults, all per-worker async state lives in
+SHM rings the consumer process already knows how to talk to.
+
+Until that refactor lands, async `nats_request` is implemented
+correctly at the **state-machine + script-surface** level
+(every unit test passes, the dispatch matrix is green, the
+return-code grammar is sound, the writable pvar works), but it
+**cannot be exercised end-to-end against a live broker**.  The
+sync `nats_request` path is unaffected -- it does its own
+short-lived inbox subscription inside
+`natsConnection_RequestMsg` and tears it down before returning,
+which apparently does not trigger the bug.
 
 The bench scaffolding is committed regardless so the
 reproducer is part of the tree and operators can re-run it as
