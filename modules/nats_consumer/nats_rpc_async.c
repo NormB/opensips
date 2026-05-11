@@ -756,6 +756,31 @@ int nats_rpc_async_ctx_is_disconnected(struct nats_rpc_async_ctx *c,
 	return 0;
 }
 
+/*
+ * Centralised script return-code policy for the async resume.
+ *
+ * OpenSIPS terminates the surrounding route when a script-
+ * callable cmd returns 0 (action.c:196 sets ACT_FL_EXIT on
+ * ret==0).  We deliberately avoid returning 0 from any
+ * script-callable nats_* function; a timeout / no-result must
+ * surface as a NEGATIVE value so the route continues and the
+ * script can branch on $retcode.
+ *
+ * Decision:
+ *   state == REPLIED    -> 1   reply delivered
+ *   state != REPLIED &&  disconnected -> -2  connection lost
+ *   state != REPLIED && !disconnected -> -1  clean timeout
+ *
+ * Exposed for unit tests so the policy can be locked down
+ * without booting opensips.
+ */
+int nats_rpc_async_resume_rc(int state, int disconnected)
+{
+	if (state == NATS_RPC_ASYNC_REPLIED) return 1;
+	if (disconnected)                    return -2;
+	return -1;
+}
+
 int nats_rpc_async_take_for_resume(struct nats_rpc_async_ctx *c)
 {
 	return ht_take(c);
@@ -1011,7 +1036,7 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 
 	if (!c) {
 		LM_ERR("nats_request: resume with NULL param\n");
-		return -1;
+		return -6;     /* internal error; never seen in practice */
 	}
 
 	/* Drain the eventfd counter so a hypothetical reuse (none
@@ -1048,28 +1073,25 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 			c->reply_has_reply_to,
 			c->reply_headers,        c->reply_headers_len,
 			c->reply_headers_truncated);
-		if (took) nats_rpc_async_ctx_release(c);
-		nats_rpc_async_ctx_release(c);   /* resume_param's ref */
-		return 1;
 	}
 
-	/* state == ABANDONED here.  Distinguish a real timeout from
-	 * a mid-flight pool disconnect / reconnect: if the
-	 * reconnect-epoch has advanced since ctx_new OR the pool
-	 * reports disconnected right now, the libnats subscription
-	 * thread had its connection perturbed and the reply may
-	 * never arrive on the original inbox.  Surface -2 so the
-	 * script can branch on "retry the rpc" vs. "the broker is
-	 * gone".  Otherwise the timer expired with the pool still
-	 * up -- a real timeout, return 0. */
+	/* Decide the script rc before dropping refs.  Centralised
+	 * policy in nats_rpc_async_resume_rc() guarantees we never
+	 * return 0 from any script-callable nats_* function (a 0
+	 * return triggers ACT_FL_EXIT in run_action_list and would
+	 * silently terminate the calling route).  Connection-lost
+	 * vs. clean-timeout is distinguished by checking the pool
+	 * reconnect epoch + is_connected at resume time. */
 	{
 		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
 		int      cur_conn  = nats_pool_is_connected();
 		int      disc = nats_rpc_async_ctx_is_disconnected(c,
 			cur_epoch, cur_conn);
-		if (took) nats_rpc_async_ctx_release(c);
-		nats_rpc_async_ctx_release(c);
-		return disc ? -2 : 0;
+		int      rc = nats_rpc_async_resume_rc(state_obs, disc);
+
+		if (took) nats_rpc_async_ctx_release(c);   /* hash ref */
+		nats_rpc_async_ctx_release(c);             /* resume_param ref */
+		return rc;
 	}
 }
 
@@ -1123,7 +1145,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		LM_ERR("nats_request[async]: oom for ctx\n");
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;
 	}
 
 	/* Snapshot the pool's reconnect-epoch so the resume path
@@ -1172,7 +1194,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		nats_rpc_async_ctx_release(c);                /* alloc ref */
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;
 	}
 
 	subj_c = nats_rpc_cstr_buf(subj_buf, sizeof(subj_buf),

@@ -238,7 +238,10 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 
 	tmo = timeout_ms ? *timeout_ms : 0;
 	if (tmo <= 0) {
-		ret = 0;   /* non-blocking poll miss */
+		/* Non-blocking poll, no message.  -1 (not 0) so the
+		 * caller's bare `nats_fetch(...)` doesn't terminate
+		 * the surrounding route via ACT_FL_EXIT. */
+		ret = -1;
 		goto out;
 	}
 
@@ -288,7 +291,7 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		goto out;
 	}
 
-	ret = 0;
+	ret = -1;   /* timeout, no message; -1 (not 0) to keep route alive */
 out:
 	nats_handle_pending_dec(h);
 	return ret;
@@ -410,14 +413,14 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		LM_ERR("nats_fetch_async: handle '%.*s' has no eventfd\n",
 			id->len, id->s);
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;     /* internal: handle bound but ring lacks fd */
 	}
 
 	p = (nats_fetch_async_param_t *)shm_malloc(sizeof(*p));
 	if (!p) {
 		LM_ERR("nats_fetch_async: oom for resume param\n");
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;     /* internal: shm oom */
 	}
 	p->handle_idx = h->index;
 	p->evfd       = fd;
@@ -613,13 +616,18 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	if (g_batch.count >= cap)
 		return g_batch.count;
 	if (bo.no_wait || bo.expires_ms <= 0) {
-		/* No-wait path with nothing queued: treat a disconnected pool
-		 * as a -2 signal so the caller distinguishes "empty but
-		 * healthy" (return 0) from "empty because we've lost the
-		 * server" (return -2). */
-		if (g_batch.count == 0 && !nats_pool_is_connected()) {
-			set_last_error("connection lost");
-			return -2;
+		/* No-wait path with nothing queued: distinguish "empty
+		 * but healthy" (return -1) from "empty because the
+		 * pool is down" (return -2).  Neither path can return
+		 * 0 -- a bare-call nats_fetch_batch(...) statement
+		 * would otherwise terminate the surrounding route via
+		 * ACT_FL_EXIT. */
+		if (g_batch.count == 0) {
+			if (!nats_pool_is_connected()) {
+				set_last_error("connection lost");
+				return -2;
+			}
+			return -1;
 		}
 		return g_batch.count;
 	}
@@ -663,6 +671,13 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 		}
 	}
 
+	/* If we drained nothing within the budget, return -1 (not 0)
+	 * so a bare `nats_fetch_batch(...)` call doesn't terminate
+	 * the surrounding route.  Callers that always use the
+	 * `$var(n) = nats_fetch_batch(...)` form should treat
+	 * $var(n) <= 0 as the empty case. */
+	if (g_batch.count == 0)
+		return -1;
 	return g_batch.count;
 }
 
@@ -686,7 +701,7 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 
 	if (!p) {
 		LM_ERR("nats_fetch_batch: resume with NULL param\n");
-		return -1;
+		return -6;     /* internal error */
 	}
 
 	evfd_drain(fd);
@@ -702,10 +717,13 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 		return g_batch.count;
 	}
 
-	/* Spurious wake -- another worker drained the ring before we could.
-	 * Re-arm.  The async-core timeout_s is coarse; a deadline-aware
-	 * timerfd would make this cleaner.  For now the reactor times the
-	 * whole fetch out and we return 0. */
+	/* Spurious wake -- another worker drained the ring before we
+	 * could.  Re-arm; with ASYNC_CONTINUE the async core ignores
+	 * the return value and keeps the FD registered.  We still
+	 * return 0 here intentionally because this is the resume-
+	 * function-level control flow, not a script-visible $retcode
+	 * (the route only sees the value when async_status is
+	 * ASYNC_DONE on a subsequent wake). */
 	async_status = ASYNC_CONTINUE;
 	return 0;
 }
@@ -741,7 +759,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 
 	if (batch_parse_opts(opts, &bo) < 0) {
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -4;     /* bad opts (parse error) */
 	}
 	if (bo.count <= 0) bo.count = 1;
 	cap = bo.count < NATS_BATCH_MAX ? bo.count : NATS_BATCH_MAX;
@@ -752,10 +770,14 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	}
 
 	if (g_batch.count > 0 || bo.no_wait || bo.expires_ms <= 0) {
-		if (g_batch.count == 0 && !nats_pool_is_connected()) {
-			set_last_error("connection lost");
-			async_status = ASYNC_NO_IO;
-			return -2;
+		if (g_batch.count == 0) {
+			if (!nats_pool_is_connected()) {
+				set_last_error("connection lost");
+				async_status = ASYNC_NO_IO;
+				return -2;
+			}
+			async_status = ASYNC_SYNC;
+			return -1;  /* no msgs available, pool healthy */
 		}
 		async_status = ASYNC_SYNC;
 		return g_batch.count;
@@ -771,13 +793,13 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	fd = nats_ring_eventfd(h->ring);
 	if (fd < 0) {
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;     /* internal: handle has no eventfd */
 	}
 
 	p = (nats_batch_async_param_t *)shm_malloc(sizeof(*p));
 	if (!p) {
 		async_status = ASYNC_NO_IO;
-		return -1;
+		return -6;     /* internal: shm oom */
 	}
 	p->handle_idx = h->index;
 	p->evfd       = fd;

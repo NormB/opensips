@@ -821,7 +821,10 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	if (s == NATS_TIMEOUT) {
 		LM_DBG("nats_request: timeout waiting for reply on '%s' "
 			"after %d ms\n", subj_c, tmo);
-		return 0;
+		/* -1, not 0: returning 0 from a script-callable cmd
+		 * sets ACT_FL_EXIT in run_action_list and silently
+		 * terminates the calling route. */
+		return -1;
 	}
 	if (s != NATS_OK || !reply) {
 		LM_ERR("nats_request: request on '%s' failed: %s\n",

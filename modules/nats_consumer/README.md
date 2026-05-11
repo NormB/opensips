@@ -110,22 +110,44 @@ persistence round-trips.
 
 ### Return codes
 
-**General (`nats_fetch`, `nats_ack` family, etc.):**
+**Unified grammar.**  No `nats_*` script function returns 0 — a 0
+return from a script-callable cmd triggers `ACT_FL_EXIT` in
+`run_action_list` (core/action.c:196) and silently terminates the
+calling route, which is never the right behaviour for an RPC /
+fetch result.  Every result is therefore either a positive count
+or a negative code:
 
-- `1` — success
-- `0` — no message (timeout / empty batch)
-- `-1` — local error (bad id, no current message, stage overflow, …)
-- `-2` — NATS transport error; detail in `nats_last_error()`
+| Code | Meaning |
+|---|---|
+| `>0` | success — for `nats_fetch_batch`, the message count.  For everything else, `1`. |
+| `-1` | expected non-result: timeout for `nats_request` / `nats_fetch`, empty batch for `nats_fetch_batch`.  Pool is healthy; script can retry. |
+| `-2` | connection/transport error.  Broker is down or the connection was lost mid-flight (for async `nats_request`).  Distinct from `-1`: treat as broker-down (alert, circuit-break) rather than retry-with-longer-tmo. |
+| `-3` | configuration error: handle id not found, pool not initialised, handle retiring. |
+| `-4` | request error: bad opts, subject empty / too long, msg create failed, publish/request failed. |
+| `-5` | capacity: per-worker in-flight cap reached (async `nats_request` only).  Default 4096. |
+| `-6` | internal error: oom, missing eventfd, format failure. |
 
-**`nats_request` (sync and async):**
+**Latency note for `-2` on `async nats_request`:** the resume
+function discovers the lost-connection state when the async-core
+timer next wakes it, so the worst-case time to surface `-2` is
+bounded by the script's `timeout_ms`.  Sub-second proactive
+reaping requires either a periodic-poll route or a `lib/nats`
+disconnect-callback chain; both are tracked for a later phase.
 
-- `1` — reply delivered (read via `$nats_data`, `$nats_subject`, `$nats_hdr(Name)`, `$nats_request_id`)
-- `0` — timeout: the broker is still reachable but the responder did not reply within `timeout_ms`.  Script may retry with a longer timeout.
-- `-1` — internal error (oom, format failure).  Async only.
-- `-2` — **connection lost mid-flight.**  The pool epoch advanced or `nats_pool_is_connected()` went false during the call.  Distinct from `0`/timeout: treat as broker-down (alert, circuit-break) rather than retry-with-longer-tmo.  Async only; the sync path returns `-3` if the pool is down at issue time.  *Latency note:* the resume function discovers the lost-connection state when the async-core timer next wakes it, so the worst-case time to surface `-2` is bounded by the script's `timeout_ms`.
-- `-3` — NATS unavailable at issue time (no pool connection).
-- `-4` — request error (subject empty / too long, msg create failed, publish/request failed).
-- `-5` — per-worker in-flight cap reached.  Async only.  Default cap is 4096 simultaneous in-flight calls per worker.
+**Script-side idiom for `nats_fetch_batch`:** because the
+function returns `-1` on empty (not 0), always assign and branch
+on `> 0`:
+
+```opensips
+$var(n) = nats_fetch_batch("jobs", "count=64;expires=500");
+if ($var(n) > 0) {
+    for ($var(i) = 0; $var(i) < $var(n); $var(i) = $var(i) + 1) {
+        nats_batch_select($var(i));
+        # ... process the slot
+        nats_ack();
+    }
+}
+```
 
 ## Pseudo-variables
 
