@@ -46,22 +46,63 @@ always OpenSSL-backed).  Loading this wrapper just makes that
 choice explicit, validated, and logged.
 
 `nats_tls_openssl` and `nats_tls_wolfssl` must NOT be loaded at
-the same time.  If both appear in `opensips.cfg`, the second
-wrapper's `mod_init` refuses with an `LM_ERR` and OpenSIPS exits
-at config-parse time.
+the same time.  If both appear in `opensips.cfg`, both `mod_load`
+callbacks run (each dlopens its own libnats), then the first
+wrapper's `mod_init` detects the other via `module_loaded()`,
+emits an `LM_ERR`, and OpenSIPS aborts before any traffic flows.
 
 ## Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `libnats_path` | string | _(empty — search defaults)_ | Optional override of the libnats SONAME / file path.  When empty, the module tries `libnats.so.3.13`, `libnats.so.3`, then `libnats.so` in order, resolved via the standard dynamic-linker search path.  Set this to an absolute path (e.g. `/opt/custom-libnats/lib/libnats.so.3.14`) only for non-default installs. |
+This module exports **no modparams**.  Backend selection is driven
+by the `loadmodule` directive itself; libnats path is overridable
+via an environment variable (see below).
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NATS_TLS_LIBNATS_PATH` | _(unset)_ | When set, the wrapper's `mod_load` dlopens this exact path/SONAME instead of walking the default search list.  Use when libnats is installed somewhere outside the standard linker search path, or to pin a specific minor version. |
+
+When `NATS_TLS_LIBNATS_PATH` is unset, the wrapper tries the
+following SONAMEs in order and uses the first one the dynamic
+linker can resolve:
+
+```
+libnats.so.3.13
+libnats.so.3.12
+libnats.so.3.11
+libnats.so.3.10
+libnats.so.3.9
+libnats.so.3.8
+libnats.so.3.7
+libnats.so.3       (hypothetical post-realign SONAME)
+libnats.so         (dev-package symlink, last resort)
+```
+
+Each candidate is tried with `dlopen(name, RTLD_NOW | RTLD_GLOBAL)`;
+misses fail fast (no disk I/O once ld.so determines the file is
+absent), so startup-time cost is sub-millisecond even when the
+last entry is the one that resolves.
+
+### Why an environment variable rather than a modparam
+
+The dlopen happens in `mod_load`, which fires immediately after
+OpenSIPS dlopens the wrapper module — **before** the next
+`loadmodule` directive in `opensips.cfg` runs.  This timing is
+load-bearing for the preload pattern: it's what lets later NATS
+user modules resolve their `DT_NEEDED libnats.so.3.x` against the
+already-loaded wrapper variant by SONAME match.  Modparams are
+parsed strictly after `mod_load`, so a modparam couldn't influence
+the dlopen.  Setting the env var in the unit file
+(`Environment=NATS_TLS_LIBNATS_PATH=…`) or shell rc works
+correctly.
 
 ## Diagnostics
 
-At successful `mod_init`:
+At successful `mod_load`:
 
 ```
-INFO:nats_tls_openssl:mod_init: nats_tls_openssl: loaded 'libnats.so.3.13' (TLS backend = OpenSSL)
+INFO:nats_tls_openssl:mod_load: nats_tls_openssl: loaded 'libnats.so.3.12' (TLS backend = OpenSSL)
 ```
 
 The companion user modules each emit one confirming line at their
