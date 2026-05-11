@@ -51,11 +51,17 @@ depends on, hence the version pin.
 
 ### Step 2 — libnats with the vendored wolfSSL patch
 
-Upstream nats.c does **not** support wolfSSL natively
+Upstream nats.c does **not** support wolfSSL natively yet
 ([PR #867](https://github.com/nats-io/nats.c/pull/867) was closed
-without merge on 2025-09-10).  We ship a rebased version of that
-patch under `docs/patches/nats.c-wolfssl-v3.12.0.patch` (see
-`docs/patches/README.md` for provenance).  Apply it before cmake:
+without merge on 2025-09-10; upstream's stance is "not at this
+time", not permanent).  We ship a rebased version of that patch
+under `docs/patches/nats.c-wolfssl-v3.12.0.patch` so this build
+recipe actually produces a working library; see
+`docs/patches/README.md` for the full provenance and the
+rationale for shipping it despite upstream's current "no".
+Production wolfSSL deployments are encouraged to leave a comment
+on upstream PR #867 so additional adoption signal accumulates on
+the path to eventual reconsideration.  Apply it before cmake:
 
 ```
 git clone --depth 1 --branch v3.12.0 https://github.com/nats-io/nats.c

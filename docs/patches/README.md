@@ -17,7 +17,7 @@ itself.
 - **Upstream PR:** [nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867) by [@kerbert101](https://github.com/kerbert101) (Albert Bakker).
 - **Upstream status:** **closed without merge** on 2025-09-10.  The
   upstream maintainer (kozlovic) explicitly decided libnats will not
-  support alternative TLS backends:
+  support alternative TLS backends at this time:
   > *"we needed to decide if we would want to support different SSL
   > backend, and at this stage I would say no."*
 - **Our rebase:** the original PR diff targeted a mid-2025 libnats
@@ -27,8 +27,56 @@ itself.
   hand-rebased version that applies cleanly against v3.12.0.
 
 Because upstream rejected the integration, **this patch is now ours
-to maintain forever.**  Operators who do not need wolfSSL should
-load `nats_tls_openssl.so` instead and ignore this patch entirely.
+to maintain forever** — until they reconsider.  Operators who do
+not need wolfSSL should load `nats_tls_openssl.so` instead and
+ignore this patch entirely.
+
+### Why we ship this anyway
+
+The maintainer's "no" is a *current* stance, not a permanent one.
+The position upstream took is reasonable: maintaining two TLS
+backends doubles the test matrix, and at the time only one
+contributor was asking.  But the calculus shifts as more downstream
+projects adopt wolfSSL for concrete reasons that aren't going away:
+
+- **FIPS 140-2 / 140-3 audit pressure.**  wolfSSL ships
+  FIPS-validated builds that some compliance regimes treat as
+  preferable to OpenSSL's FIPS provider.  Operators in regulated
+  industries (telecom, healthcare, financial messaging) increasingly
+  see "what TLS library?" appear on audit checklists.
+- **Footprint-sensitive deployments.**  wolfSSL is ~600 KB vs
+  OpenSSL's ~5 MB.  For OpenSIPS instances running on edge
+  appliances, container sidecars, or constrained VMs, that matters.
+- **License surface review.**  OpenSSL is Apache-2.0 with the
+  historical OpenSSL/SSLeay dual license.  wolfSSL is GPLv2 with a
+  commercial option.  Some organizations prefer one over the other
+  for reasons specific to their distribution model.
+
+The OpenSIPS ecosystem already supports both backends on the
+**SIP** side (`tls_mgm` + `tls_openssl` / `tls_wolfssl`).  Operators
+who chose wolfSSL there understandably want the same on the NATS
+side.  Shipping this patch gives them that option **and**
+demonstrates to upstream nats.c that the integration:
+
+1. Is small (~60 LoC across 4 files).
+2. Has been hand-rebased onto a recent tag without trouble.
+3. Has at least one downstream project (OpenSIPS) actively using
+   and maintaining it.
+
+If you are deploying this in production, **please consider
+commenting on [PR #867](https://github.com/nats-io/nats.c/pull/867)
+with your use case** — concrete adoption signals are the most
+likely thing to change upstream's calculus.  A reopened PR with
+multiple downstream voices is much more persuasive than a closed
+one with a single contributor.
+
+### Long-term goal
+
+The intent is for this patch to **disappear from our tree** when
+upstream nats.c adopts native wolfSSL support.  At that point
+operators just bump their nats.c version pin; the rebased patch
+becomes the empty file and gets deleted.  Until then we carry it,
+keep it green, and treat it as a transitional cost.
 
 ### Applies to
 
