@@ -901,6 +901,86 @@ on aarch64.  Going forward, any C change touching atomic ops or
 new system headers should be validated with
 `CC=clang make modules=modules/<name> modules` before pushing.
 
+## Async `nats_request` (phase 2 / 2.5 / 3 / rc remap / phase 4)
+
+A multi-phase build-out of the script-callable async RPC under
+`modules/nats_consumer/`.  Each phase commits its own tests and
+docs; this section is the engineering record.
+
+| Phase | What landed | Commit |
+|---|---|---|
+| **1** | Dual cmds[]/acmds[] registration so `async(nats_request(...), rt)` is parser-accepted in worker routes; phase-1 body falls through to the sync path. | `93c0b38879` |
+| **B** | `allow_sync_anywhere` modparam (USE_FUNC_PARAM setter widens the cmd's route mask to ALL_ROUTES); subsequently renamed from `allow_sync_in_request_route` after the user pointed out the misleading "request_route" scope. | `a053f9cc33`, `dac9a26c72` |
+| **2** | Real async impl: per-worker persistent inbox subscription on `_INBOX.opensips.<pid>.>`, per-call eventfd, process-local hash table keyed by correlation suffix, refcount + per-ctx mutex.  Callback-vs-timeout race resolved by state inspection under the mutex. | `a053f9cc33` |
+| **2.5** | UUIDv7 correlation id minted per call (`clock_gettime` + `getrandom(10)` ≈ 200 ns); exposed as `$nats_request_id` (read/write); auto-staged as `X-Request-Id` outbound header (modparam `request_id_header`).  Script can override the auto-mint by assigning the pvar before the call. | `b22bba5600`, `363ab0f371` |
+| **3** | Reconnect-epoch snapshot at ctx alloc; resume function returns `-2` (connection lost) when the epoch advanced or the pool went offline mid-flight, distinct from `-1` (clean timeout). | `8b1587e40d` |
+| **rc remap** | Audit + fix: no `nats_*` script function returns 0, since `core/action.c:196` interprets a 0 return from a cmd as `ACT_FL_EXIT` and terminates the calling route.  Unified rc grammar (`1` / `-1` / `-2` / `-3` / `-4` / `-5` / `-6`). | `2979fba87a` |
+| **4** | Bench scaffolding (`bench_async_request.sh` + `opensips_async_request.cfg.in`) and an eager-subscribe `child_init` hook that moves `natsConnection_Subscribe` out of script-execution context. | this commit |
+
+### Bench design (phase 4)
+
+`modules/nats_consumer/tests/bench/bench_async_request.sh` drives
+SIPp at increasing CPS against a single-worker OpenSIPS that
+fires `async(nats_request(...), on_reply)` for every inbound
+OPTIONS.  A `nats reply` CLI subscriber on the matching subject
+echoes a "pong" payload back (optionally after a tunable
+`RESPONDER_DELAY_MS` to simulate a slow upstream).  SIPp's
+per-response-time stats are written to a CSV and the harness
+parses the totals.
+
+What the bench is designed to surface:
+
+- **Concurrency**: with sync `nats_request`, one SIP worker holds
+  exactly one in-flight RPC at a time -- throughput is `1 / RTT`.
+  With the async path, the same worker yields on each call and
+  services other SIP requests while replies are in flight, so
+  the practical ceiling becomes the smaller of (broker
+  throughput, responder concurrency, `NATS_RPC_ASYNC_MAX_INFLIGHT`).
+- **Latency distribution**: pure round-trip (`SIP UA → opensips →
+  broker → responder → broker → opensips → SIP UA`) under a
+  single worker, so the per-call libnats + ctx-machinery
+  overhead is isolated.
+- **Failure modes**: `RESPONDER_DELAY_MS > RPC_TIMEOUT_MS` exercises
+  the `-1` timeout path; killing `nats-server` mid-run exercises
+  the `-2` connection-lost path (phase-3 logic).
+
+### Empirical numbers
+
+**Not yet captured.**  The bench reproduces a SIP-worker
+segfault on first OPTIONS delivery (logged as `CRITICAL:core:
+sig_usr: segfault in process pid: N, id: 6`).  The crash
+fires AFTER `ensure_inbox_subscription` reports success
+("inbox subscription up on _INBOX.opensips.<pid>.>") but
+before any reply is processed; moving the subscribe to
+`child_init` (eager) did not change the failure surface, so
+the bug is somewhere on the `request_route → async(...) →
+w_nats_request_async` start path rather than in the
+subscription set-up itself.  Tracked as a phase-4 follow-up.
+
+The bench scaffolding is committed regardless so the
+reproducer is part of the tree and operators can re-run it as
+soon as the start-path bug is fixed.  At that point this
+section will be filled in with:
+
+| Mode | CPS | responder_delay | p50 / p95 / max SIP RTT | succeeded | failed |
+|---|---|---|---|---|---|
+| _pending_ |   |   |   |   |   |
+
+### Eager subscribe in `child_init`
+
+Independent of the bench result, phase 4 moved the per-worker
+inbox subscription's `natsConnection_Subscribe` call from the
+lazy "first call to `w_nats_request_async`" path to a new
+`nats_rpc_async_child_init()` hook invoked from
+`nats_consumer.c`'s `child_init()`.  Rationale: the libnats
+subscription thread is spawned synchronously inside that call,
+and spawning a thread from inside a SIP worker that is
+already mid-script-execution races with the connection's
+locking discipline on aarch64 + libnats 3.x.  The lazy fallback
+inside `w_nats_request_async` is retained as a safety net for
+worker types that don't enter `child_init` with the pool
+ready.
+
 ## What's still on the table
 
 Not pursued in this series, listed for the next session:

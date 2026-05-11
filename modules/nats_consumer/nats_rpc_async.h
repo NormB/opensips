@@ -191,4 +191,18 @@ int nats_rpc_async_request_id_user_set(const char *id, int len);
  * re-assigns. */
 int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
+/*
+ * child_init hook: per-worker eager set-up of the inbox
+ * subscription used by w_nats_request_async.  Called from
+ * nats_consumer.c's child_init() so libnats's subscription
+ * thread is spawned at worker startup, not mid-SIP-message
+ * execution (where it can race with active connection usage
+ * and segfault on aarch64 + libnats 3.x).
+ *
+ * Always returns 0; the underlying ensure_inbox_subscription
+ * is robust to a missing pool at this point (lazy retry on
+ * first request remains a fallback).
+ */
+int nats_rpc_async_child_init(int rank);
+
 #endif /* NATS_RPC_ASYNC_H */

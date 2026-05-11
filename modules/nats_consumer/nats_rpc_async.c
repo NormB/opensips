@@ -940,8 +940,10 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	nats_rpc_async_ctx_release(c);
 }
 
-/* Lazy-init the per-worker inbox subscription.  Called from the
- * async start path on first use.  Thread-safe via g_inbox_sub_mu
+/* Eager (preferred) or lazy fallback init of the per-worker
+ * inbox subscription.  Called from nats_consumer.c's child_init
+ * at worker boot, OR (as a fallback) from the async start path on
+ * first use.  Thread-safe via g_inbox_sub_mu
  * (although the start path is single-threaded per worker, the
  * mutex hardens against pthread-spawned helpers landing here too).
  * Returns 0 on success / already-ready, -1 on failure (pool
@@ -990,6 +992,31 @@ static int ensure_inbox_subscription(void)
 	g_inbox_sub_ready = 1;
 	LM_INFO("nats_rpc_async: inbox subscription up on %s\n", wildcard);
 	pthread_mutex_unlock(&g_inbox_sub_mu);
+	return 0;
+}
+
+/*
+ * Public per-worker init hook.  nats_consumer.c::child_init() calls
+ * this so the inbox subscription is set up at worker boot, before
+ * any SIP message lands on the worker.  Doing the libnats
+ * `natsConnection_Subscribe` here rather than lazily on first
+ * `nats_request_async` call avoids spawning the subscription
+ * thread from inside script execution -- empirically that race
+ * crashes libnats 3.x on aarch64 when the SIP worker enters
+ * w_nats_request_async right after the SUB completes.
+ *
+ * Failure is non-fatal: if the pool isn't ready yet, this returns
+ * a soft error and the lazy path inside w_nats_request_async tries
+ * again on first request.  Always returns 0 so child_init does
+ * not fail boot just because the broker is briefly unreachable.
+ */
+int nats_rpc_async_child_init(int rank)
+{
+	(void)rank;
+	if (ensure_inbox_subscription() < 0) {
+		LM_DBG("nats_rpc_async: eager inbox subscribe deferred; "
+			"lazy fallback will retry on first nats_request\n");
+	}
 	return 0;
 }
 
