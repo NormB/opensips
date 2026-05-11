@@ -471,6 +471,54 @@ static void test_request_id_user_override(void)
 
 /* ────────────────────────────────────────────────────────────── */
 
+static void test_disconnect_detection(void)
+{
+	struct nats_rpc_async_ctx *c;
+
+	fprintf(stderr, "\n=== phase-3 disconnect detection ===\n");
+	c = nats_rpc_async_ctx_new();
+	ASSERT(c != NULL, "ctx_new returned non-NULL");
+	if (!c) return;
+
+	/* Default epoch snapshot is 0 (TEST_SHIM ctx_new). */
+	ASSERT(nats_rpc_async_ctx_epoch_at_start(c) == 0u,
+		"epoch_at_start defaults to 0 under TEST_SHIM");
+
+	/* Stable case: pool connected, epoch unchanged -> not disc. */
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 0u, 1) == 0,
+		"stable pool (epoch=0, connected=1) -> not disconnected");
+
+	/* Pool flapped (reconnect happened during the call):
+	 * current_epoch is now > epoch_at_start.  Connected may
+	 * even be true (we reconnected) but the prior inbox
+	 * routing was perturbed -- still surface -2. */
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 1u, 1) == 1,
+		"epoch bump with reconnect (epoch=1, connected=1) -> disconnected");
+
+	/* Pool currently down: any current_epoch -- still surface -2. */
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 0u, 0) == 1,
+		"pool down (connected=0) -> disconnected");
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 5u, 0) == 1,
+		"pool down and epoch bumped -> disconnected");
+
+	/* Caller-set epoch matches subsequent observations -> stable. */
+	nats_rpc_async_ctx_set_epoch_at_start(c, 42u);
+	ASSERT(nats_rpc_async_ctx_epoch_at_start(c) == 42u,
+		"set_epoch_at_start round-trips");
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 42u, 1) == 0,
+		"epoch snapshot 42 vs. current 42 + connected -> not disc");
+	ASSERT(nats_rpc_async_ctx_is_disconnected(c, 43u, 1) == 1,
+		"epoch snapshot 42 vs. current 43 -> disconnected");
+
+	/* NULL ctx is treated as "not disconnected" (defensive). */
+	ASSERT(nats_rpc_async_ctx_is_disconnected(NULL, 99u, 0) == 0,
+		"is_disconnected(NULL) returns 0 (defensive)");
+
+	nats_rpc_async_ctx_release(c);
+}
+
+/* ────────────────────────────────────────────────────────────── */
+
 int main(void)
 {
 	test_happy_path();
@@ -482,6 +530,7 @@ int main(void)
 	test_uuidv7_mint();
 	test_request_id_stash();
 	test_request_id_user_override();
+	test_disconnect_detection();
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

@@ -106,14 +106,26 @@ persistence round-trips.
 | `nats_term()`                               | any       | Terminate delivery (no retry). |
 | `nats_hdr_set(name, value)`                 | any       | Stage outgoing header on the worker buffer. |
 | `nats_reply(payload)`                       | any       | Publish to the current message's `reply_to`. |
-| `nats_request(subject, payload, timeout_ms)`| onreply / local / startup / timer / event | **Sync-only.**  Blocks the worker up to `timeout_ms`. Excluded from `request_route`/`failure_route` (would block SIP processing). |
+| `nats_request(subject, payload, timeout_ms)`| sync: onreply / local / startup / timer / event (widen with `allow_sync_anywhere`); async: any reactor-backed route | NATS request/reply.  Sync blocks the worker; `async(nats_request(...), rt)` yields on a per-call eventfd until the reply arrives or the timer expires. |
 
 ### Return codes
+
+**General (`nats_fetch`, `nats_ack` family, etc.):**
 
 - `1` — success
 - `0` — no message (timeout / empty batch)
 - `-1` — local error (bad id, no current message, stage overflow, …)
 - `-2` — NATS transport error; detail in `nats_last_error()`
+
+**`nats_request` (sync and async):**
+
+- `1` — reply delivered (read via `$nats_data`, `$nats_subject`, `$nats_hdr(Name)`, `$nats_request_id`)
+- `0` — timeout: the broker is still reachable but the responder did not reply within `timeout_ms`.  Script may retry with a longer timeout.
+- `-1` — internal error (oom, format failure).  Async only.
+- `-2` — **connection lost mid-flight.**  The pool epoch advanced or `nats_pool_is_connected()` went false during the call.  Distinct from `0`/timeout: treat as broker-down (alert, circuit-break) rather than retry-with-longer-tmo.  Async only; the sync path returns `-3` if the pool is down at issue time.  *Latency note:* the resume function discovers the lost-connection state when the async-core timer next wakes it, so the worst-case time to surface `-2` is bounded by the script's `timeout_ms`.
+- `-3` — NATS unavailable at issue time (no pool connection).
+- `-4` — request error (subject empty / too long, msg create failed, publish/request failed).
+- `-5` — per-worker in-flight cap reached.  Async only.  Default cap is 4096 simultaneous in-flight calls per worker.
 
 ## Pseudo-variables
 

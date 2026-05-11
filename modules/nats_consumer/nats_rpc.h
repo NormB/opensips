@@ -46,21 +46,40 @@
  *                                -4 publish failed,
  *                                 1 on success.
  *
- *   nats_request(subj, payload, timeout_ms) -- SYNC-ONLY core NATS RPC
- *                                request/reply.  Blocks the worker for
- *                                up to timeout_ms waiting for a reply.
- *                                Intended for timer_route / startup
- *                                contexts; DO NOT call from a UDP/TCP
- *                                SIP worker -- it stalls request
- *                                processing for that worker until the
- *                                reply (or timeout) comes back.  A
- *                                non-blocking async variant is on the
- *                                roadmap.  On success, the reply
- *                                populates the current-message state so
+ *   nats_request(subj, payload, timeout_ms) -- core NATS RPC
+ *                                request/reply.  Two call shapes:
+ *                                  bare nats_request(...)            -- sync
+ *                                  async(nats_request(...), rt)      -- async
+ *                                The sync shape blocks the worker for
+ *                                up to timeout_ms; the async shape
+ *                                yields to the reactor on a per-call
+ *                                eventfd while a libnats subscription
+ *                                thread waits for the reply.  On
+ *                                success the reply populates the
+ *                                per-worker current-message state so
  *                                the script can read $nats_data,
  *                                $nats_subject, $nats_hdr(...), etc.
- *                                Returns 1 on success, 0 on timeout,
- *                                -3 NATS unavailable, -4 request error.
+ *                                Return codes:
+ *                                   1  reply delivered.
+ *                                   0  timeout (the broker is still
+ *                                      reachable; the responder did
+ *                                      not reply in time).
+ *                                  -1  internal error (oom, format
+ *                                      failure) -- async only.
+ *                                  -2  connection lost mid-flight --
+ *                                      async only.  The pool epoch
+ *                                      advanced or is_connected
+ *                                      went false during the call;
+ *                                      the script should treat this
+ *                                      as broker-down rather than
+ *                                      retry-with-longer-tmo.
+ *                                  -3  NATS unavailable at issue
+ *                                      time (no pool connection).
+ *                                  -4  request error (subject empty
+ *                                      / too long, msg create failed,
+ *                                      publish/request failed).
+ *                                  -5  per-worker in-flight cap
+ *                                      reached -- async only.
  */
 
 #ifndef NATS_RPC_H

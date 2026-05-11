@@ -1097,36 +1097,143 @@ timer_route[drain, 1] {
                 <function moreinfo="none">nats_request(subject, payload, timeout_ms)</function>
             </title>
             <para>
-                Synchronous NATS request/reply.  Publishes
+                NATS request/reply.  Publishes
                 <emphasis>payload</emphasis> to
-                <emphasis>subject</emphasis>, blocks the calling worker
-                for up to <emphasis>timeout_ms</emphasis> milliseconds,
-                and populates <varname>$nats_data</varname> +
-                <varname>$nats_hdr(...)</varname> with the reply.
+                <emphasis>subject</emphasis> and waits for a reply on
+                a per-call inbox.  Two call shapes:
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis role="bold">Sync:</emphasis>
+                    <programlisting format="linespecific">nats_request("rpc.x", $var(p), 200);</programlisting>
+                    Blocks the calling worker for up to
+                    <emphasis>timeout_ms</emphasis> milliseconds.
+                    Default route mask permits
+                    <varname>STARTUP_ROUTE</varname>,
+                    <varname>TIMER_ROUTE</varname>,
+                    <varname>LOCAL_ROUTE</varname>,
+                    <varname>EVENT_ROUTE</varname>,
+                    <varname>ONREPLY_ROUTE</varname> only;
+                    <function>request_route</function> /
+                    <function>failure_route</function> /
+                    <function>branch_route</function> /
+                    <function>error_route</function> are reachable
+                    only after setting
+                    <varname>allow_sync_anywhere=1</varname>.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">Async:</emphasis>
+                    <programlisting format="linespecific">async(nats_request("rpc.x", $var(p), 200), on_reply);</programlisting>
+                    Yields the worker to the reactor on a per-call
+                    eventfd.  A libnats subscription thread receives
+                    the reply on the worker's persistent inbox
+                    subscription and signals the eventfd; the
+                    resume route runs with the per-worker
+                    current-message state populated.
+                </para></listitem>
+            </itemizedlist>
+            <para>
+                On success the reply populates the script-visible
+                state: <varname>$nats_data</varname>,
+                <varname>$nats_subject</varname>,
+                <varname>$nats_hdr(<emphasis>Name</emphasis>)</varname>,
+                <varname>$nats_reply_to</varname>.  The
+                <varname>$nats_request_id</varname> pvar holds the
+                UUIDv7 used as the correlation id and is also
+                staged as the
+                <varname>X-Request-Id</varname> outbound header
+                (modparam-configurable; can be overridden by the
+                script).
             </para>
             <para>
-                <emphasis>This function is sync-only.</emphasis>  It
-                blocks the worker process for the full timeout.  The
-                cmd_export route mask is restricted to
-                <varname>ONREPLY_ROUTE | LOCAL_ROUTE |
-                STARTUP_ROUTE | TIMER_ROUTE | EVENT_ROUTE</varname> so
-                the engine refuses to call it from
-                <varname>REQUEST_ROUTE</varname>,
-                <varname>FAILURE_ROUTE</varname>,
-                <varname>BRANCH_ROUTE</varname>, or
-                <varname>ERROR_ROUTE</varname> -- the contexts where a
-                SIP UDP/TCP worker would be blocked while holding an
-                in-flight transaction.  An attempt to call from a
-                forbidden route surfaces as an
-                &quot;function not supported in this route&quot; error
-                at config-load.
+                <emphasis>Return codes.</emphasis>
             </para>
-            <para>
-                Returns <varname>1</varname> on success,
-                <varname>0</varname> on timeout with no reply,
-                <varname>-1</varname> on local error, and
-                <varname>-2</varname> on transport error.
-            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <varname>1</varname> — reply delivered.
+                </para></listitem>
+                <listitem><para>
+                    <varname>0</varname> — timeout: the broker
+                    is still reachable but the responder did not
+                    reply within
+                    <varname>timeout_ms</varname>.  Script may
+                    retry with a longer timeout.
+                </para></listitem>
+                <listitem><para>
+                    <varname>-1</varname> — internal error (oom,
+                    snprintf failure).  Async only.
+                </para></listitem>
+                <listitem><para>
+                    <varname>-2</varname> —
+                    <emphasis role="bold">connection lost
+                    mid-flight.</emphasis>  Async only.  The pool
+                    reconnect epoch advanced or
+                    <function>nats_pool_is_connected</function>
+                    went false during the call.  This is distinct
+                    from a timeout: the script should treat
+                    <varname>-2</varname> as broker-down (alert,
+                    circuit-break, surface 503) rather than
+                    retry-with-longer-tmo.
+                </para>
+                <para>
+                    <emphasis>Latency note.</emphasis>  The resume
+                    function discovers the lost-connection state
+                    when the async-core timer next wakes it; the
+                    worst-case time to surface
+                    <varname>-2</varname> is therefore bounded by
+                    the script's
+                    <varname>timeout_ms</varname>.  Proactive
+                    sub-second reaping requires either a
+                    periodic-poll route or a
+                    <filename>lib/nats</filename> disconnect-
+                    callback chain; both are tracked for a later
+                    phase.
+                </para></listitem>
+                <listitem><para>
+                    <varname>-3</varname> — NATS unavailable at
+                    issue time (no pool connection).  Returned
+                    before any publish attempt; the script can
+                    short-circuit without paying the
+                    <varname>timeout_ms</varname> wait.
+                </para></listitem>
+                <listitem><para>
+                    <varname>-4</varname> — request error
+                    (subject empty / too long, msg create
+                    failed, publish or sync-request failed).
+                </para></listitem>
+                <listitem><para>
+                    <varname>-5</varname> — per-worker in-flight
+                    cap reached.  Async only.  Default cap is
+                    4096 simultaneous in-flight calls per worker;
+                    callers should implement back-pressure when
+                    this surfaces.
+                </para></listitem>
+            </itemizedlist>
+            <example>
+                <title>Async request with connection-aware error handling</title>
+                <programlisting format="linespecific">
+route {
+    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
+}
+
+route[on_reply] {
+    if ($retcode == 1) {
+        # success: reply in $nats_data
+    } else if ($retcode == 0) {
+        # timeout: responder slow; maybe retry with longer tmo
+        xlog("L_WARN", "rpc id=$nats_request_id timeout\n");
+    } else if ($retcode == -2) {
+        # broker is down: alert / circuit-break
+        xlog("L_ERR", "rpc id=$nats_request_id connection lost\n");
+        sl_send_reply(503, "Service Unavailable");
+    } else {
+        # -3 / -4 / -5: configuration / publish / capacity errors
+        xlog("L_ERR", "rpc id=$nats_request_id failed rc=$retcode\n");
+        sl_send_reply(500, "Internal Server Error");
+    }
+}
+                </programlisting>
+            </example>
         </section>
 
     </section><!-- /functions -->
