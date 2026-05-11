@@ -182,13 +182,21 @@ int main(void)
 			"impl still mints per-call UUIDv7");
 		ASSERT(strstr(impl, "nats_rpc_async_request_id_set") != NULL,
 			"impl still stashes the request id for $nats_request_id");
-		ASSERT(strstr(impl, "w_nats_request(msg") != NULL,
-			"impl delegates the transport to w_nats_request "
-			"(sync fall-through after the phase-2 transport "
-			"revert)");
-		ASSERT(strstr(impl, "async_status = ASYNC_SYNC") != NULL,
-			"impl reports ASYNC_SYNC so the reactor runs the "
-			"resume route immediately");
+		ASSERT(strstr(impl, "nats_rpc_slot_claim()") != NULL,
+			"impl claims an SHM slot from the phase-5 pool");
+		ASSERT(strstr(impl, "nats_rpc_slot_publish") != NULL,
+			"impl transitions slot CLAIMED -> INFLIGHT before IPC");
+		ASSERT(strstr(impl, "nats_rpc_ipc_enqueue") != NULL,
+			"impl enqueues the slot_idx on the worker -> consumer IPC");
+		ASSERT(strstr(impl, "timerfd_create") != NULL,
+			"impl creates a worker-private timerfd for the resume "
+			"poll (phase 5b)");
+		ASSERT(strstr(impl, "ctx->resume_f") != NULL &&
+		       strstr(impl, "resume_nats_request_slot") != NULL,
+			"impl wires resume_nats_request_slot on async_ctx");
+		ASSERT(strstr(impl, "async_status      = tfd") != NULL ||
+		       strstr(impl, "async_status = tfd") != NULL,
+			"impl hands the timerfd to the reactor via async_status");
 		/* The hash table / subscription / on_inbox_reply code
 		 * is still present in the file for phase 5 reuse,
 		 * even though w_nats_request_async no longer calls
