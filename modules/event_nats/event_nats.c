@@ -287,6 +287,11 @@ static int mod_init(void)
 
 	LM_NOTICE("initializing event_nats module ...\n");
 
+	/* Surface which libnats TLS backend the operator's
+	 * loadmodule choices resolved to.  Pure observability;
+	 * runtime behaviour is unaffected. */
+	nats_pool_log_tls_backend("event_nats");
+
 	if (nats_stats_init() < 0) {
 		LM_ERR("cannot init stats\n");
 		return -1;
