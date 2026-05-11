@@ -10,7 +10,7 @@
 #   A.  async(nats_request(...), rt)  inside the main script route
 #         -> MUST PARSE     (acmd path; async() gates worker safety)
 #   B.  nats_request(...)              inside the main script route,
-#       default modparam (allow_sync_in_request_route absent / 0)
+#       default modparam (allow_sync_anywhere absent / 0)
 #         -> MUST BE REJECTED with "Command <nats_request> cannot be
 #                                   used in the block"
 #   C.  nats_request(...)              inside startup_route
@@ -18,7 +18,7 @@
 #                            contexts; route mask explicitly permits
 #                            STARTUP_ROUTE)
 #   D.  nats_request(...)              inside the main script route,
-#       with modparam("nats_consumer", "allow_sync_in_request_route", 1)
+#       with modparam("nats_consumer", "allow_sync_anywhere", 1)
 #         -> MUST PARSE     (setter widens the route mask in place
 #                            before the route block is parsed)
 #
@@ -107,7 +107,7 @@ cat "${WORKDIR}/common.head" - > "${WORKDIR}/D.cfg" <<'EOF'
 # Operator opts in -- the setter widens the cmd's route mask to
 # ALL_ROUTES at the moment this modparam is parsed.  The route
 # block below must therefore parse cleanly.
-modparam("nats_consumer", "allow_sync_in_request_route", 1)
+modparam("nats_consumer", "allow_sync_anywhere", 1)
 
 route {
     if (nats_request("rpc.lookup", "ping", 200)) {

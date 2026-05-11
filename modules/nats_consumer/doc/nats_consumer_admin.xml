@@ -430,10 +430,10 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
             </example>
         </section>
 
-        <!-- allow_sync_in_request_route -->
-        <section id="param_allow_sync_in_request_route">
+        <!-- allow_sync_anywhere -->
+        <section id="param_allow_sync_anywhere">
             <title>
-                <varname>allow_sync_in_request_route</varname>
+                <varname>allow_sync_anywhere</varname>
                 (integer)
             </title>
             <para>
@@ -474,11 +474,92 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
                 is checked.
             </para>
             <para>
-                <emphasis>The recommended pattern for any
-                request_route caller is the async form</emphasis>,
-                which yields the worker on an eventfd while the
-                reply is in flight and does not block SIP
-                processing:
+                <emphasis>Per-route blocking consequences.</emphasis>
+                Each of the newly-opened routes has its own
+                distinct operational blast radius (verified
+                against the core invocation paths cited below).
+                The setter callback emits an
+                <emphasis>LM_WARN</emphasis> at config-parse time
+                spelling these out so an operator who flips the
+                switch cannot miss them:
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis role="bold">REQUEST_ROUTE.</emphasis>
+                    Runs on the SIP worker that received the
+                    request
+                    (<filename>receive.c</filename>:
+                    <function>run_top_route</function>(<varname>sroutes-&gt;request[DEFAULT_RT]</varname>)).
+                    The worker cannot read its next SIP packet for
+                    the duration; under sustained load the recv
+                    backlog grows on this worker's interface.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">FAILURE_ROUTE.</emphasis>
+                    Has two invocation paths with different blast
+                    radius:
+                    <itemizedlist>
+                        <listitem><para>
+                            <emphasis>Negative-reply trigger</emphasis>
+                            -- when an upstream branch returns a
+                            final non-2xx, the SIP worker that
+                            received the reply runs the failure
+                            route inline
+                            (<filename>modules/tm/t_reply.c</filename>:
+                            <function>run_failure_handlers</function>).
+                            Blast radius identical to
+                            REQUEST_ROUTE blocking on that worker.
+                        </para></listitem>
+                        <listitem><para>
+                            <emphasis><varname>fr_timer</varname> /
+                            <varname>fr_inv_timer</varname> expiry</emphasis>
+                            -- the failure route runs on the
+                            single-threaded
+                            <varname>timer</varname> process
+                            (forked by
+                            <function>start_timer_processes</function>
+                            in <filename>timer.c</filename>).
+                            Blocking it queues every other
+                            transaction's timer fire <emphasis>plus</emphasis>
+                            every other module's registered
+                            timer (retransmissions, watchdogs)
+                            until the block clears.  Worse blast
+                            radius than blocking a single SIP
+                            worker, and there is currently
+                            <emphasis>no async alternative</emphasis>
+                            from this trigger path -- async() is
+                            not supported on the timer process.
+                        </para></listitem>
+                    </itemizedlist>
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">BRANCH_ROUTE.</emphasis>
+                    Runs on the SIP worker that is fanning out the
+                    transaction's outbound branches
+                    (<filename>modules/tm/t_fwd.c</filename>:
+                    <function>pre_print_uac_request</function>).
+                    The per-branch INVITE/REGISTER send is delayed
+                    by up to <varname>timeout_ms</varname>;
+                    subsequent branches in the same transaction
+                    also wait.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">ERROR_ROUTE.</emphasis>
+                    Runs on the SIP worker that hit a parse error
+                    on an inbound request
+                    (<filename>receive.c</filename>) or that
+                    tripped an in-action error
+                    (<filename>action.c</filename>:
+                    <function>run_error_route</function>).
+                    Blocking delays the error response back to the
+                    peer.
+                </para></listitem>
+            </itemizedlist>
+            <para>
+                <emphasis>The recommended pattern for any worker
+                route is the async form</emphasis>, which yields
+                the worker on a per-call eventfd while the reply
+                is in flight and does not block SIP processing:
                 <programlisting format="linespecific">async(nats_request(subj, payload, tmo), reply_route)</programlisting>
                 The async form is accepted from every route that
                 supports <function>async()</function> regardless of
@@ -498,7 +579,7 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
             <example>
                 <title>Opt in -- low-RPS deployment that prefers sync ergonomics</title>
                 <programlisting format="linespecific">
-modparam("nats_consumer", "allow_sync_in_request_route", 1)
+modparam("nats_consumer", "allow_sync_anywhere", 1)
 
 route {
     # Operator has accepted that this call blocks the worker

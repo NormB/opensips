@@ -124,10 +124,11 @@ static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
 
 /* ── script-callable commands ────────────────────────────────── */
 
-/* NOT `const` -- the allow_sync_in_request_route modparam setter
+/* NOT `const` -- the allow_sync_anywhere modparam setter
  * widens the nats_request entry's route mask in-place when an
  * operator opts into worker-blocking sync calls from the SIP
- * request path.  See nats_request_allow_sync_setter(). */
+ * worker contexts (REQUEST/FAILURE/BRANCH/ERROR routes).  See
+ * nats_request_allow_sync_setter(). */
 static cmd_export_t cmds[] = {
 	{ "nats_fetch", (cmd_function)w_nats_fetch, {
 		{CMD_PARAM_STR, 0, 0},
@@ -184,13 +185,16 @@ static cmd_export_t cmds[] = {
 	 * SIP worker (startup, timer, event) or already accept
 	 * synchronous semantics (local, onreply).
 	 *
-	 * Operators who want the sync ergonomics from `request_route`
+	 * Operators who want the sync ergonomics from a worker route
 	 * (low-RPS deployments, a thin SIP gateway in front, etc.)
 	 * opt in via `modparam("nats_consumer",
-	 * "allow_sync_in_request_route", 1)`; the setter widens this
-	 * entry's flags to ALL_ROUTES in place.  Most deployments
-	 * should leave the safer default and use `async(nats_request
-	 * (...), rt)` from worker contexts instead. */
+	 * "allow_sync_anywhere", 1)`; the setter widens this entry's
+	 * flags to ALL_ROUTES in place and emits an LM_WARN listing
+	 * the per-route blocking consequences so the operator cannot
+	 * miss them.  Most deployments should leave the safer default
+	 * and use `async(nats_request(...), rt)` from worker contexts
+	 * instead -- it yields to the reactor on a per-call eventfd
+	 * rather than blocking. */
 	{ "nats_request", (cmd_function)w_nats_request, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR, 0, 0},
@@ -250,10 +254,10 @@ int nats_consumer_fetch_batch      = 10;
 int nats_consumer_fetch_timeout_ms = 1000;
 
 /*
- * USE_FUNC_PARAM setter for `allow_sync_in_request_route`.
+ * USE_FUNC_PARAM setter for `allow_sync_anywhere`.
  *
  * Runs at config-parse time, the moment OpenSIPS sees the
- * `modparam("nats_consumer", "allow_sync_in_request_route", 1)`
+ * `modparam("nats_consumer", "allow_sync_anywhere", 1)`
  * directive.  Because modparam directives are processed strictly
  * before route blocks are parsed (and the route-mask validation
  * happens at route-block parse time), this setter is in a position
@@ -261,9 +265,15 @@ int nats_consumer_fetch_timeout_ms = 1000;
  * call site is checked against it.
  *
  * Setting val=0 (or omitting the modparam entirely) leaves the
- * default restrictive mask.  Setting val=1 widens to ALL_ROUTES.
- * Setting anything else is reported as a parse error so a typo
- * does not silently disarm the safety guard.
+ * default restrictive mask.  Setting val=1 widens to ALL_ROUTES so
+ * sync nats_request is callable from every worker context --
+ * REQUEST_ROUTE, FAILURE_ROUTE, BRANCH_ROUTE, ERROR_ROUTE -- in
+ * addition to the always-permitted STARTUP/TIMER/LOCAL/EVENT/
+ * ONREPLY contexts.  Setting anything else is reported as a parse
+ * error so a typo cannot silently disarm the safety guard.
+ *
+ * A multi-line LM_WARN spells out the per-route blocking
+ * consequences so the operator who opts in cannot miss them.
  */
 static int nats_request_allow_sync_setter(modparam_t type, void *val)
 {
@@ -271,12 +281,12 @@ static int nats_request_allow_sync_setter(modparam_t type, void *val)
 	unsigned  i;
 
 	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
-		LM_ERR("allow_sync_in_request_route: must be an integer\n");
+		LM_ERR("allow_sync_anywhere: must be an integer\n");
 		return -1;
 	}
 	want = (int)(long)val;
 	if (want != 0 && want != 1) {
-		LM_ERR("allow_sync_in_request_route: expected 0 or 1, got %d\n",
+		LM_ERR("allow_sync_anywhere: expected 0 or 1, got %d\n",
 			want);
 		return -1;
 	}
@@ -286,15 +296,62 @@ static int nats_request_allow_sync_setter(modparam_t type, void *val)
 	for (i = 0; cmds[i].name; i++) {
 		if (strcmp(cmds[i].name, "nats_request") == 0) {
 			cmds[i].flags = ALL_ROUTES;
-			LM_INFO("nats_request route mask widened to ALL_ROUTES "
-				"(operator opt-in via allow_sync_in_request_route=1); "
-				"calls from request_route will block the worker for "
-				"up to timeout_ms.  Prefer `async(nats_request(...), "
-				"rt)` if possible.\n");
+			LM_WARN(
+"================================================================\n"
+"  allow_sync_anywhere=1\n"
+"  nats_request route mask widened to ALL_ROUTES.\n"
+"\n"
+"  Sync calls to nats_request(...) from these routes will BLOCK\n"
+"  the executing process for up to timeout_ms while the libnats\n"
+"  request/reply round-trip is in flight.  Per-route blast\n"
+"  radius (verified against the OpenSIPS source paths):\n"
+"\n"
+"    REQUEST_ROUTE  Runs on the SIP worker that received the\n"
+"                   request (receive.c run_top_route).  The\n"
+"                   worker cannot read its next SIP packet for\n"
+"                   the duration; under load the recv backlog\n"
+"                   grows on this worker's interface.\n"
+"\n"
+"    FAILURE_ROUTE  Two invocation paths:\n"
+"                   * Negative-reply trigger -- runs on the SIP\n"
+"                     worker that received the reply.  Same\n"
+"                     blast radius as REQUEST_ROUTE blocking on\n"
+"                     that worker.\n"
+"                   * fr_timer / fr_inv_timer expiry -- runs on\n"
+"                     the single-threaded `timer` process.\n"
+"                     Blocking it queues every other\n"
+"                     transaction's timer fires plus every\n"
+"                     other module's registered timer\n"
+"                     (retransmissions, watchdogs) until the\n"
+"                     block clears.  Worse blast radius than\n"
+"                     blocking a single SIP worker.\n"
+"\n"
+"    BRANCH_ROUTE   Runs on the SIP worker that is fanning out\n"
+"                   the transaction's outbound branches\n"
+"                   (tm/t_fwd.c pre_print_uac_request).  The\n"
+"                   per-branch INVITE/REGISTER send is delayed\n"
+"                   by up to timeout_ms; subsequent branches in\n"
+"                   the same transaction also wait.\n"
+"\n"
+"    ERROR_ROUTE    Runs on the SIP worker that hit a parse\n"
+"                   error on an inbound request (receive.c) or\n"
+"                   that tripped an in-action error\n"
+"                   (action.c).  Blocking delays the error\n"
+"                   response back to the peer.\n"
+"\n"
+"  Strongly recommended for any worker route:\n"
+"      async(nats_request(subj, payload, tmo), reply_route)\n"
+"  -- yields to the reactor instead of blocking, and is\n"
+"  accepted regardless of this modparam.  The async form is\n"
+"  NOT available from the timer process today; failure_route\n"
+"  invoked via fr_timer therefore has no non-blocking option\n"
+"  in this module.\n"
+"================================================================\n"
+			);
 			return 0;
 		}
 	}
-	LM_ERR("allow_sync_in_request_route: nats_request entry not "
+	LM_ERR("allow_sync_anywhere: nats_request entry not "
 		"found in cmds[] -- module table layout drift?\n");
 	return -1;
 }
@@ -304,7 +361,7 @@ static const param_export_t params[] = {
 	{ "persist_path",      STR_PARAM, &persist_path    },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
 	{ "fetch_timeout_ms",  INT_PARAM, &nats_consumer_fetch_timeout_ms  },
-	{ "allow_sync_in_request_route",
+	{ "allow_sync_anywhere",
 	      INT_PARAM | USE_FUNC_PARAM,
 	      (void *)nats_request_allow_sync_setter },
 	{ 0, 0, 0 }
