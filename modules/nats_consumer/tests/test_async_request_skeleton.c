@@ -142,12 +142,16 @@ int main(void)
 	}
 
 	/* (3b) phase-2.5 UUIDv7 correlation: $nats_request_id pvar +
-	 * request_id_header modparam + default header name. */
+	 * request_id_header modparam + default header name + the
+	 * writable-pvar setter that routes NULL through the early-
+	 * return clear path. */
 	{
 		ASSERT(strstr(src, "nats_request_id") != NULL,
 			"$nats_request_id pvar registered in mod_pvars[]");
 		ASSERT(strstr(src, "pv_get_nats_request_id") != NULL,
 			"pvar getter pv_get_nats_request_id wired");
+		ASSERT(strstr(src, "pv_set_nats_request_id") != NULL,
+			"pvar setter pv_set_nats_request_id wired (writable)");
 		ASSERT(strstr(src, "\"request_id_header\"") != NULL,
 			"request_id_header modparam declared");
 		ASSERT(strstr(src, "\"X-Request-Id\"") != NULL,

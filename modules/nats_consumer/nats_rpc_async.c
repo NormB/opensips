@@ -216,9 +216,19 @@ static int  g_inbox_owner_len;
  * Overwritten on the next nats_request call from this worker;
  * shielded from concurrent updates by the worker single-threading
  * (only the worker thread runs script code).
- */
-static char g_last_request_id[40];
+ *
+ * `g_request_id_user_supplied` is the consume-once flag: when set,
+ * the next nats_request start path uses `g_last_request_id` as
+ * the outbound id instead of minting a fresh UUIDv7.  Cleared by
+ * the start path on consumption.  Set by the pvar setter when the
+ * script assigns to $nats_request_id.
+ *
+ * Storage is sized at 64 bytes to comfortably hold any UUID
+ * variant plus common trace-id formats (ULIDs, base32 hashes,
+ * vendor-prefixed strings) without spilling. */
+static char g_last_request_id[64];
 static int  g_last_request_id_len;
+static int  g_request_id_user_supplied;
 
 #ifndef TEST_SHIM
 /* Persistent inbox subscription (one per worker, lazy-initialised
@@ -320,6 +330,7 @@ void nats_rpc_async_request_id_set(const char *id, int len)
 	if (!id || len <= 0) {
 		g_last_request_id[0] = '\0';
 		g_last_request_id_len = 0;
+		g_request_id_user_supplied = 0;
 		return;
 	}
 	if (len >= (int)sizeof(g_last_request_id))
@@ -327,12 +338,78 @@ void nats_rpc_async_request_id_set(const char *id, int len)
 	memcpy(g_last_request_id, id, len);
 	g_last_request_id[len] = '\0';
 	g_last_request_id_len = len;
+	/* deliberate: callers from start-path use this to record the
+	 * just-used id, which is NOT a user-supplied override. */
+	g_request_id_user_supplied = 0;
 }
 
 const char *nats_rpc_async_request_id_get(int *out_len)
 {
 	if (out_len) *out_len = g_last_request_id_len;
 	return g_last_request_id_len > 0 ? g_last_request_id : NULL;
+}
+
+/*
+ * Pvar-write entry: the script has assigned to $nats_request_id.
+ * Stash the value so the NEXT nats_request call uses it instead
+ * of minting a fresh UUIDv7.  Returns 0 on success, -1 if the
+ * value is rejected (too long, contains CR/LF, etc.); the
+ * setter surfaces -1 to the script.
+ *
+ * Empty input clears the pending override and the last-used
+ * stash (so $nats_request_id then reads NULL until the next
+ * mint).
+ */
+int nats_rpc_async_request_id_user_set(const char *id, int len)
+{
+	int i;
+
+	if (!id || len <= 0) {
+		g_last_request_id[0] = '\0';
+		g_last_request_id_len = 0;
+		g_request_id_user_supplied = 0;
+		return 0;
+	}
+	if (len >= (int)sizeof(g_last_request_id))
+		return -1;
+	/* Reject control characters that would break NATS header
+	 * serialisation.  Header values per the NATS wire protocol
+	 * are CRLF-delimited; embedded CR/LF would inject pseudo-
+	 * headers downstream.  No log here; the pvar setter in
+	 * nats_rpc.c surfaces a single LM_WARN on the -1 return so
+	 * we keep this function dprint-free for the unit-test
+	 * shim. */
+	for (i = 0; i < len; i++) {
+		if (id[i] == '\r' || id[i] == '\n')
+			return -1;
+	}
+	memcpy(g_last_request_id, id, len);
+	g_last_request_id[len] = '\0';
+	g_last_request_id_len = len;
+	g_request_id_user_supplied = 1;
+	return 0;
+}
+
+/*
+ * Start-path consumer: if a user-supplied id is pending, copy it
+ * to `out` (cap-sized), clear the pending flag, and return the
+ * length copied.  Returns 0 if no user-supplied id is pending --
+ * the caller then mints a fresh UUIDv7.
+ *
+ * Consume-once semantics: the user's assignment is honoured by
+ * one nats_request call.  Subsequent calls revert to minting
+ * unless the script writes the pvar again.
+ */
+int nats_rpc_async_request_id_consume_user(char *out, int cap)
+{
+	if (!g_request_id_user_supplied)
+		return 0;
+	if (!out || cap <= g_last_request_id_len)
+		return 0;
+	memcpy(out, g_last_request_id, g_last_request_id_len);
+	out[g_last_request_id_len] = '\0';
+	g_request_id_user_supplied = 0;
+	return g_last_request_id_len;
 }
 
 /* ── refcount / release ───────────────────────────────────────── */
@@ -979,15 +1056,21 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		return -1;
 	}
 
-	/* Mint a UUIDv7 correlation id, stash it in the per-worker
-	 * slot (so $nats_request_id reads it back after the yield),
-	 * and stage it as an outbound header unless an empty header
-	 * name disables auto-staging or the script already set it
-	 * explicitly via nats_hdr_set(). */
+	/* Pick the correlation id: prefer a user-supplied value
+	 * from a prior `$nats_request_id = "..."` assignment, else
+	 * mint a fresh UUIDv7.  Either way, stash the final value
+	 * (so $nats_request_id reads it back across the yield) and
+	 * stage it on the outbound header unless an empty
+	 * request_id_header modparam disables auto-staging or the
+	 * script already staged the same header explicitly via
+	 * nats_hdr_set(). */
 	{
-		char id_buf[40];
+		char id_buf[64];
 		int  id_len;
-		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
+		id_len = nats_rpc_async_request_id_consume_user(id_buf,
+			sizeof(id_buf));
+		if (id_len == 0)
+			id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
 		if (id_len > 0) {
 			nats_rpc_async_request_id_set(id_buf, id_len);
 			if (nats_request_id_header && nats_request_id_header[0]) {

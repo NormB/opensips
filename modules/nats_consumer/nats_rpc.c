@@ -189,14 +189,51 @@ static int hdr_stream_find(const nats_cur_msg_t *cur, const str *name,
 }
 
 /*
- * $nats_request_id -- read the UUIDv7 of the most recent
- * nats_request issued by this worker.  Set by both the sync and
- * async start paths; persists across an async() yield so the
- * resume route can read it back for log/trace correlation.
+ * $nats_request_id -- writable.
  *
- * Returns NULL when no request has been issued on this worker yet
- * (cold-boot path).
+ * GET returns the UUIDv7 (or user-supplied value, if a write is
+ * pending) of the most recent nats_request issued by this worker.
+ * Persists across an async() yield so the resume route can read
+ * it back for log / trace correlation.  Returns NULL when no
+ * request has been issued on this worker yet AND no script
+ * assignment has been made.
+ *
+ * SET stashes the value for the next nats_request call to consume
+ * instead of minting a fresh UUIDv7.  Consume-once: the script's
+ * assignment is honoured by exactly one subsequent nats_request,
+ * after which the path reverts to minting unless another
+ * assignment is made.  Empty / NULL value clears the pending
+ * override and the last-used stash.
+ *
+ * Validation: value must be 1..63 bytes, no CR/LF (would break
+ * NATS header serialisation).  Out-of-range values are rejected
+ * with -1; the script can branch on `$retcode` after the
+ * assignment if it cares (most scripts will not).
  */
+int pv_set_nats_request_id(struct sip_msg *msg, pv_param_t *param,
+                           int op, pv_value_t *val)
+{
+	int rc;
+	(void)msg; (void)param; (void)op;
+
+	if (!val || (val->flags & PV_VAL_NULL))
+		return nats_rpc_async_request_id_user_set(NULL, 0);
+
+	if (!(val->flags & PV_VAL_STR)) {
+		LM_WARN("$nats_request_id: value must be a string\n");
+		return -1;
+	}
+	rc = nats_rpc_async_request_id_user_set(val->rs.s, val->rs.len);
+	if (rc < 0) {
+		LM_WARN("$nats_request_id: rejecting value "
+			"(over 63 bytes, embedded CR/LF, or both); the "
+			"next nats_request will fall back to minting a "
+			"fresh UUIDv7\n");
+		return -1;
+	}
+	return 0;
+}
+
 int pv_get_nats_request_id(struct sip_msg *msg, pv_param_t *param,
                            pv_value_t *res)
 {
@@ -740,13 +777,18 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	data_s   = (payload && payload->s) ? payload->s : "";
 	data_len = (payload && payload->len > 0) ? payload->len : 0;
 
-	/* Mint per-call UUIDv7, stash for $nats_request_id, and stage
+	/* Pick the correlation id: prefer a user-supplied value
+	 * from a prior `$nats_request_id = "..."` assignment, else
+	 * mint a fresh UUIDv7.  Stash for $nats_request_id and stage
 	 * the operator-configured outbound header unless the script
 	 * already set it explicitly via nats_hdr_set(). */
 	{
-		char id_buf[40];
+		char id_buf[64];
 		int  id_len;
-		id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
+		id_len = nats_rpc_async_request_id_consume_user(id_buf,
+			sizeof(id_buf));
+		if (id_len == 0)
+			id_len = nats_rpc_async_uuidv7_mint(id_buf, sizeof(id_buf));
 		if (id_len > 0) {
 			nats_rpc_async_request_id_set(id_buf, id_len);
 			if (nats_request_id_header && nats_request_id_header[0]) {

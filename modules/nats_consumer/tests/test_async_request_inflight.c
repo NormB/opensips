@@ -372,6 +372,103 @@ static void test_request_id_stash(void)
 	ASSERT(got == NULL && got_len == 0, "stash cleared by NULL set");
 }
 
+static void test_request_id_user_override(void)
+{
+	const char  trace[] = "trace-abc-123";
+	char        buf[64];
+	int         n;
+	int         rc;
+	const char *got;
+	int         got_len;
+	char        oversized[80];
+	const char  bad[] = "trace\r\nInjected: header";
+
+	fprintf(stderr, "\n=== request_id user override (writable pvar) ===\n");
+
+	/* Baseline: no pending value -> consumer returns 0. */
+	n = nats_rpc_async_request_id_consume_user(buf, sizeof(buf));
+	ASSERT(n == 0, "consume_user returns 0 when nothing pending");
+
+	/* Script assigns a value. */
+	rc = nats_rpc_async_request_id_user_set(trace, (int)strlen(trace));
+	ASSERT(rc == 0, "user_set accepts plain trace id");
+
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got != NULL && got_len == (int)strlen(trace) &&
+	       memcmp(got, trace, got_len) == 0,
+		"pvar GET immediately reflects the user-supplied value");
+
+	/* Consume once -> value returned, flag cleared. */
+	n = nats_rpc_async_request_id_consume_user(buf, sizeof(buf));
+	ASSERT(n == (int)strlen(trace),
+		"consume_user returns the pending length");
+	ASSERT(memcmp(buf, trace, n) == 0,
+		"consume_user copies the pending bytes");
+
+	/* Second consume on the same assignment -> 0 (consume-once). */
+	n = nats_rpc_async_request_id_consume_user(buf, sizeof(buf));
+	ASSERT(n == 0,
+		"consume_user returns 0 on second call (consume-once)");
+
+	/* g_last_request_id is unchanged by the consume; it still
+	 * holds the value the caller assigned -- the start-path will
+	 * call request_id_set after consuming, but at this point we
+	 * simulate "stash still set, flag cleared".  pvar GET still
+	 * reads the value. */
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got != NULL && got_len == (int)strlen(trace),
+		"stash still holds the consumed value (start-path overwrites)");
+
+	/* Validation: over-long value -> rejected. */
+	memset(oversized, 'x', sizeof(oversized));
+	oversized[sizeof(oversized) - 1] = '\0';
+	rc = nats_rpc_async_request_id_user_set(oversized,
+		(int)sizeof(oversized) - 1);
+	ASSERT(rc == -1,
+		"user_set rejects values larger than the 63-byte cap");
+
+	/* Validation: CR/LF rejected. */
+	rc = nats_rpc_async_request_id_user_set(bad, (int)strlen(bad));
+	ASSERT(rc == -1,
+		"user_set rejects values containing CR/LF");
+
+	/* Both `$nats_request_id = NULL;` and `$nats_request_id = "";`
+	 * must clear the stash + pending flag.  The pvar setter
+	 * (pv_set_nats_request_id) routes the NULL case through an
+	 * explicit early return; the empty-string case falls through
+	 * to user_set with len=0.  We exercise both at the
+	 * underlying user_set entry point. */
+	rc = nats_rpc_async_request_id_user_set(NULL, 0);
+	ASSERT(rc == 0, "user_set(NULL, 0) clears (NULL assignment)");
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got == NULL && got_len == 0,
+		"stash empty after NULL clear");
+
+	/* Re-assign so we have something to clear. */
+	(void)nats_rpc_async_request_id_user_set(trace, (int)strlen(trace));
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got != NULL, "stash repopulated");
+
+	rc = nats_rpc_async_request_id_user_set("", 0);
+	ASSERT(rc == 0, "user_set(\"\", 0) clears (empty-string assignment)");
+	got = nats_rpc_async_request_id_get(&got_len);
+	ASSERT(got == NULL && got_len == 0,
+		"stash empty after empty-string clear");
+
+	/* Verify the consume-once flag is also cleared by both
+	 * paths -- a stale pending flag after a clear would have
+	 * the next nats_request call try to copy an empty string
+	 * as the id, breaking the fall-through-to-mint path. */
+	(void)nats_rpc_async_request_id_user_set(trace, (int)strlen(trace));
+	(void)nats_rpc_async_request_id_user_set(NULL, 0);   /* clear */
+	{
+		char tmp[64];
+		int  n = nats_rpc_async_request_id_consume_user(tmp, sizeof(tmp));
+		ASSERT(n == 0,
+			"consume_user returns 0 after NULL clear (flag cleared)");
+	}
+}
+
 /* ────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -384,6 +481,7 @@ int main(void)
 	test_subject_roundtrip();
 	test_uuidv7_mint();
 	test_request_id_stash();
+	test_request_id_user_override();
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

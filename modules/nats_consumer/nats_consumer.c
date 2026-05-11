@@ -427,7 +427,7 @@ static const pv_export_t mod_pvars[] = {
 	{ str_const_init("nats_hdr"),          1000, pv_get_nats_hdr,
 		0, pv_parse_nats_hdr_name, 0, 0, 0 },
 	{ str_const_init("nats_request_id"),   1000, pv_get_nats_request_id,
-		0, 0, 0, 0, 0 },
+		pv_set_nats_request_id, 0, 0, 0, 0 },
 	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 

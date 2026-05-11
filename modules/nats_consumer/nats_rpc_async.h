@@ -138,15 +138,28 @@ const char *nats_rpc_async_corr_from_subject(const char *subject,
 int nats_rpc_async_uuidv7_mint(char *out, size_t cap);
 
 /* Per-worker stash setter / getter for the most recent outbound
- * request's UUIDv7.  Set by the start paths; read by the
- * $nats_request_id pvar getter (which is why the storage lives
- * here in the async module rather than in nats_rpc.c -- both
- * paths converge on this stash and on the same uuidv7 minter).
+ * request's UUIDv7.  `_set` is used by the start paths to record
+ * the just-used id (and clears the user-supplied override flag);
+ * `_get` is read by the $nats_request_id pvar getter.
  *
  * The pointer returned by ..._get() is owned by the module; it is
  * valid until the next nats_request call on this worker.  Callers
  * that need the value to outlive that must copy. */
 void        nats_rpc_async_request_id_set(const char *id, int len);
 const char *nats_rpc_async_request_id_get(int *out_len);
+
+/* Pvar-write entry point: the script has assigned to
+ * $nats_request_id.  Stash the value with a consume-once flag so
+ * the NEXT nats_request call uses it instead of minting a fresh
+ * UUIDv7.  Returns 0 on success, -1 on validation failure
+ * (length > 63 bytes, embedded CR/LF). */
+int nats_rpc_async_request_id_user_set(const char *id, int len);
+
+/* Start-path consumer: if a user-supplied id is pending, copy
+ * it to `out` (cap-sized) and clear the pending flag.  Returns
+ * the length copied, or 0 if no override is pending.  Consume-
+ * once -- subsequent calls revert to minting unless the script
+ * re-assigns. */
+int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
 #endif /* NATS_RPC_ASYNC_H */
