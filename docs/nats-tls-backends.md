@@ -1,5 +1,23 @@
 # NATS TLS backend selection
 
+> **Status (2026-05-11):** validated end-to-end on aarch64 Linux
+> and amd64 Ubuntu CI.  The
+> [`NATS TLS Backends`](../.github/workflows/nats-tls-backends.yml)
+> workflow runs four jobs every push that touches NATS modules,
+> wrapper modules, the vendored patch, or the workflow itself:
+>
+> | Job | What it tests |
+> |---|---|
+> | `openssl` | wrapper loads system libnats, diagnostic confirms OpenSSL backend |
+> | `wolfssl` | wrapper loads wolfSSL-built libnats (vendored patch applied), diagnostic confirms wolfSSL backend |
+> | `mismatch` | both wrappers loaded → mutual-exclusion `LM_ERR` fires, OpenSIPS exits non-zero |
+> | `none` | no wrapper loaded → user modules fall back, "system default" diagnostic fires |
+>
+> Plus a local end-to-end rebuild on the development host
+> (wolfSSL 5.9.1-stable + nats.c v3.12.0 + patch + OpenSIPS
+> feature/nats) with `/proc/<pid>/maps` confirming each backend
+> loads **only** its target libnats variant (no parallel loading).
+
 This document covers operator-facing TLS backend selection for the
 libnats C client used by OpenSIPS's NATS modules (`event_nats`,
 `cachedb_nats`, `nats_consumer`).
@@ -218,3 +236,127 @@ restarting OpenSIPS.
 - `modules/event_nats/README.md` — `skip_tls_init` modparam
 - `modules/cachedb_nats/README.md` — same
 - `modules/cachedb_nats/doc/PERF_NOTES.md` — async / RPC architecture
+
+## Implementation notes (for future maintainers)
+
+A handful of non-obvious constraints surfaced during the
+end-to-end validation.  They're called out here so the next
+person to touch this code doesn't have to rediscover them.
+
+### Timing: `mod_load`, not `mod_init`
+
+The wrapper modules' libnats `dlopen()` happens in `mod_load`,
+not `mod_init`.  `mod_load` runs immediately after OpenSIPS
+dlopens the wrapper module itself, **before the next
+loadmodule directive** in `opensips.cfg`.  This timing is
+load-bearing for the preload pattern:
+
+```
+loadmodule "nats_tls_wolfssl.so"   # ← mod_load runs here,
+                                   #   dlopens wolfssl libnats,
+                                   #   RTLD_GLOBAL.
+loadmodule "event_nats.so"         # ← DT_NEEDED libnats.so.3.x
+                                   #   resolves against the
+                                   #   already-loaded wolfssl libnats
+                                   #   by SONAME match.
+```
+
+If the dlopen were in `mod_init` (which runs after all loadmodule
+directives), `event_nats` would have already resolved its
+`DT_NEEDED libnats.so.3.x` via the standard search path —
+typically finding `/usr/local/lib/libnats.so.3.x` (OpenSSL flavor)
+before the wrapper's wolfssl variant could win the SONAME race.
+The wrapper's diagnostic log line would still say
+"TLS backend = wolfSSL" because the dlopen succeeds, but the user
+modules would actually be using the OpenSSL libnats.
+Operationally undetectable, dangerously wrong.
+
+This is why the `libnats_path` setting is an **environment
+variable** (`NATS_TLS_LIBNATS_PATH`) rather than a modparam:
+modparams aren't parsed until after `mod_load`.
+
+The mutual-exclusion check stays in `mod_init` (after both
+wrappers' `mod_load` runs), which is correct — by that point
+OpenSIPS knows what modules are loaded and can reject the
+conflict before any RPC fires.
+
+### wolfSSL OpenSSL-compat header path
+
+wolfSSL's OpenSSL compatibility layer ships its `openssl/`
+headers under `${WOLFSSL_INCLUDE_DIR}/wolfssl/openssl/`, not
+`${WOLFSSL_INCLUDE_DIR}/openssl/`.  For libnats's existing
+`#include <openssl/ssl.h>` lines to resolve to wolfSSL's
+compat shim (which renames `SSL_get_error` → `wolfSSL_get_error`
+at preprocess time), the include path must contain
+`${WOLFSSL_INCLUDE_DIR}/wolfssl` AS WELL AS
+`${WOLFSSL_INCLUDE_DIR}` (the latter so `<wolfssl/options.h>`
+in `natsp.h` resolves).
+
+Order matters: the `wolfssl` subdir must come first via
+`include_directories(BEFORE ...)` so `<openssl/ssl.h>` finds
+the wolfSSL compat header before the system OpenSSL header.
+
+Also: this `include_directories` belongs at the **top-level**
+`CMakeLists.txt`, not in `src/CMakeLists.txt`.  CMake scopes
+`include_directories` to the current directory and below; if
+it's in `src/`, then `test/`, `examples/`, and any other
+subdir won't see it, and any file that includes `natsp.h`
+fails to compile.
+
+### Required wolfSSL configure flags
+
+`--enable-opensslextra` / `--enable-opensslall` are necessary
+but not sufficient for the symbol set libnats's TLS code
+references.  In addition, you need at minimum:
+
+- `--enable-crl`   — provides `wolfSSL_X509_STORE_add_crl`
+- `--enable-ocsp`  — provides OCSP-related compat symbols
+- `--enable-sni`   — provides SNI-related compat symbols
+
+There may be more depending on which libnats functions you
+exercise.  `--enable-session-certs` is referenced by some
+libnats test/example targets but not by the shipped library;
+the CI workflow simply skips test/example builds rather than
+chasing every additional flag.
+
+### ldconfig registration
+
+The wolfSSL-built libnats has `DT_NEEDED libwolfssl.so.NN`
+where `NN` is the wolfSSL ABI version (currently 44 for
+wolfSSL 5.9.x, 41 for 5.6.x).  For that to resolve at dlopen
+time, `/opt/wolfssl/lib` must be on the dynamic linker's
+search path.  Once per host:
+
+```
+echo "/opt/wolfssl/lib" | sudo tee /etc/ld.so.conf.d/wolfssl.conf
+sudo ldconfig
+```
+
+The CI workflow does this on every run (`ldconfig`-style
+registration is host state, not part of the cached build
+artifacts) — see the "Register /opt/wolfssl/lib with the
+dynamic linker" step.
+
+### Cache invalidation
+
+The CI workflow caches the wolfSSL + libnats-wolfssl build
+under a key derived from `WOLFSSL_VERSION` + `NATS_C_VERSION`
+plus a suffix (currently `-v2-crl`).  Bump the suffix whenever
+the wolfSSL configure flags or the libnats patch change so old
+cached artifacts don't mask the new behaviour.  The cache
+mostly exists to keep wolfSSL's from-source build (3-5 min on
+the runner) out of the critical path; once a key combination
+has been cached, subsequent runs save that time.
+
+### Skipping libnats tests/examples
+
+The CI workflow builds wolfSSL-libnats with
+`-DNATS_BUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF`.  Without
+these, libnats's `test/` and `examples/` source uses wolfSSL
+APIs gated by `SESSION_CERTS` (`wolfSSL_get_peer_cert_chain`,
+etc.) that aren't enabled in our `--enable-opensslextra`
+build, and the build aborts at the link step.
+
+Skipping these is safe — they're not part of what we ship.
+The library itself builds and links correctly; operators
+follow `sudo make install` to deploy `libnats.so.3.x` only.

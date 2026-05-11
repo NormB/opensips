@@ -4,6 +4,18 @@ This directory ships small, hand-maintained patches that we apply to
 external NATS-related source trees during build.  Each patch is
 independent; this README is the directory's index.
 
+> **Status (2026-05-11):** `nats.c-wolfssl-v3.12.0.patch` is
+> CI-validated.  The
+> [`NATS TLS Backends`](../../.github/workflows/nats-tls-backends.yml)
+> workflow applies it on every push that touches NATS source,
+> builds a wolfSSL-linked `libnats.so.3.12`, and smoke-tests the
+> wrapper module against it.  See
+> [`docs/nats-tls-backends.md`](../nats-tls-backends.md) for the
+> full status matrix and the implementation-notes section that
+> captures the non-obvious gotchas (mod_load timing, wolfSSL
+> compat-header path requirements, required configure flags,
+> ldconfig registration, cache invalidation).
+
 ## nats.c-wolfssl-v3.12.0.patch
 
 Adds wolfSSL TLS backend support to libnats (`nats-io/nats.c`) by
