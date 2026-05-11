@@ -27,13 +27,9 @@
  * nats_pool, then loops forever reconciling subscriptions with the
  * registry and pulling batches.
  *
- * Phase 3 limitations (documented in the .c):
- *   - auto-acks every successfully pushed message (no ack-token
- *     plumbing yet; Phase 4 replaces this with explicit worker-driven
- *     ack via the IPC queue).
- *   - no reconnect-aware subscription refresh (Phase 7).
- *   - no persistence / durable-name reconciliation beyond what the
- *     server already does for us (Phase 8).
+ * See nats_consumer_proc.c for the per-section design notes
+ * (reconnect-aware subscription refresh, ack-IPC plumbing,
+ * persistence integration, retire/reap teardown, etc.).
  */
 
 #ifndef NATS_CONSUMER_PROC_H

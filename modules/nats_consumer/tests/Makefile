@@ -76,7 +76,7 @@ clean:
 	      test_slurp_file_cap test_request_route_restriction \
 	      test_consumer_heartbeat test_persist_precision
 
-# Phase-5d heartbeat + Phase-6a persist precision tests (self-contained)
+# Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
 	$(CC) -g -O0 -Wall -pthread -o $@ $<
 

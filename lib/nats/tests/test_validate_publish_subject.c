@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-3a regression test: lib/nats/nats_validate_publish_subject.
+ * Regression test: lib/nats/nats_validate_publish_subject.
  *
  * Background: event_nats's publish paths (nats_evi_raise and
  * w_nats_publish) currently copy the script-supplied subject directly

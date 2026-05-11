@@ -51,13 +51,13 @@
  * populates the current-message state (success) or reports empty (the
  * broker fed us nothing in this window).
  *
- * LIMITATION carried to Phase 5:
+ * LIMITATION:
  *   The async timeout_ms argument is accepted but not fully enforced
  *   by an independent timer -- the OpenSIPS async framework's
  *   timeout_s field is in seconds and we feed it (timeout_ms+999)/1000
  *   for the worst-case upper bound.  Sub-second precision for the
- *   "no message arrived" timeout path lands with Phase 5 when we can
- *   justify allocating a per-fetch timerfd.
+ *   "no message arrived" timeout path is on the roadmap; it requires
+ *   allocating a per-fetch timerfd.
  */
 
 #include <string.h>
@@ -190,7 +190,7 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	}
 	nats_handle_pending_inc(h);
 
-	/* Phase 7: a retired handle still lives on the retire list; the
+	/* A retired handle still lives on the retire list; the
 	 * bucket-chain lookup we just did misses it so a concurrent unbind
 	 * is already visible here.  Defence in depth: if a lookup slipped
 	 * in between unlink and retire=1, treat it as -3 (not found). */
@@ -220,7 +220,7 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 		goto out;
 	}
 
-	/* Phase 7 connection-loss check.  The worker never speaks to NATS
+	/* Connection-loss check.  The worker never speaks to NATS
 	 * directly, so the best signal available here is the shared pool's
 	 * connection state: if the pool reports disconnected there will be
 	 * no consumer-process pushes landing on the ring, and blocking on
@@ -299,10 +299,10 @@ out:
 typedef struct nats_fetch_async_param {
 	uint16_t  handle_idx;
 	int       evfd;
-	/* Borrowed refs into the registry-owned handle.  Phase 5 pending_ops
+	/* Borrowed refs into the registry-owned handle.  pending_ops
 	 * guards against unbind-while-in-flight: the param holds a pending
 	 * ref across the reactor round-trip and the resume path releases it.
-	 * A Phase 7 refcount will replace this stop-gap with a proper
+	 * A future refcount can replace this stop-gap with a proper
 	 * get/put pair keyed on handle identity. */
 	nats_handle_t *h_ref;
 	nats_ring_t   *ring;
@@ -341,10 +341,10 @@ static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
 
 	/* Spurious wake -- another consumer raced us to the pop.
 	 * Re-arm by asking the reactor to keep us registered and try
-	 * again on the next edge.  This is Phase 4's substitute for a
-	 * dedicated timerfd; if this loops forever (unlikely, because
-	 * another worker already consumed the message), the only cost is
-	 * a wasted wakeup.  Phase 5 adds the timerfd. */
+	 * again on the next edge.  Substitute for a dedicated timerfd;
+	 * if this loops forever (unlikely, because another worker already
+	 * consumed the message), the only cost is a wasted wakeup.
+	 * A future change can add the timerfd. */
 	async_status = ASYNC_CONTINUE;
 	return 0;
 }
@@ -395,7 +395,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		return 1;
 	}
 
-	/* Phase 7: ring empty + pool disconnected -> surface -2 now so the
+	/* Ring empty + pool disconnected -> surface -2 now so the
 	 * script can short-circuit.  Yielding to the reactor on a dead
 	 * connection would just eat the worker's timeout budget with no
 	 * messages to wake on. */
@@ -605,7 +605,7 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	if (bo.count <= 0) bo.count = 1;
 	cap = bo.count < NATS_BATCH_MAX ? bo.count : NATS_BATCH_MAX;
 
-	/* Phase 1: drain whatever is already visible. */
+	/* Drain whatever is already visible. */
 	while (g_batch.count < cap) {
 		if (nats_ring_pop(h->ring, &slot) != 0) break;
 		batch_push_slot(h->index, &slot);
@@ -631,7 +631,7 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 		return g_batch.count > 0 ? g_batch.count : -2;
 	}
 
-	/* Phase 2: wait up to expires_ms total.
+	/* Wait up to expires_ms total.
 	 *
 	 * The single-fetch path (see w_nats_fetch above) documents the
 	 * problem with the ring's eventfd: it is created in the process
@@ -703,9 +703,9 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 	}
 
 	/* Spurious wake -- another worker drained the ring before we could.
-	 * Re-arm.  Phase 5 share: the async-core timeout_s is coarse; the
-	 * deadline-aware timerfd would make this cleaner.  For now the
-	 * reactor times the whole fetch out and we return 0. */
+	 * Re-arm.  The async-core timeout_s is coarse; a deadline-aware
+	 * timerfd would make this cleaner.  For now the reactor times the
+	 * whole fetch out and we return 0. */
 	async_status = ASYNC_CONTINUE;
 	return 0;
 }

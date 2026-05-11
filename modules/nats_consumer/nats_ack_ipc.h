@@ -21,7 +21,7 @@
 /*
  * nats_ack_ipc.h -- worker -> consumer-process ack queue.
  *
- * Phase 4 implementation: a bounded SHM ring acting as a
+ * Implementation: a bounded SHM ring acting as a
  * multi-producer / single-consumer queue.  Producers are any SIP
  * worker that called nats_ack() / nats_nak() / nats_term() from a
  * script; the single consumer is the dedicated nats_consumer process
@@ -38,8 +38,8 @@
  * Concurrency: a single SHM spinlock guards the head/tail advance
  * plus the slot write.  This is fine: acks are rare compared to the
  * data-plane and the critical section is a handful of stores.
- * Phase 5 can replace this with a lock-free variant if profiling shows
- * it matters.
+ * A future change can replace this with a lock-free variant if
+ * profiling shows it matters.
  */
 
 #ifndef NATS_ACK_IPC_H
@@ -49,8 +49,8 @@
 
 /* Tuning -- bounded ring sized for bursts.  Oversubscription is
  * handled by returning -1 from enqueue; the caller decides whether
- * to log+drop or retry.  Phase 4 choice: log+drop so a mis-scripted
- * worker cannot wedge the module. */
+ * to log+drop or retry.  We log+drop so a mis-scripted worker
+ * cannot wedge the module. */
 #define NATS_ACK_IPC_QUEUE_DEPTH 4096
 
 /* Ack action vocabulary.  Keep this aligned with the nats.c JetStream
@@ -80,7 +80,7 @@ typedef struct nats_ack_ipc_msg {
 	uint32_t delay_ms;         /* NAK_DELAY only; ignored otherwise */
 } nats_ack_ipc_msg_t;
 
-/* Back-compat alias kept for any callers that referenced the Phase 3
+/* Back-compat alias kept for any callers that referenced the old
  * slot-level struct.  Prefer nats_ack_ipc_msg_t. */
 typedef struct nats_ack_ipc_slot {
 	uint64_t ack_token;

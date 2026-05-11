@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-6a regression test: persist serialization must preserve
+ * Regression test: persist serialization must preserve
  * uint64 precision for fields above 2^53.
  *
  * The bug: cJSON_AddNumberToObject takes a double argument, so

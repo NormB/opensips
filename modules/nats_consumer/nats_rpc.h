@@ -21,7 +21,7 @@
 /*
  * nats_rpc.h -- script-callable NATS headers + reply-to + RPC.
  *
- * Phase 6 entry points:
+ * Entry points:
  *
  *   $nats_hdr(Name)           -- pseudo-var; reads a header from the
  *                                current message (populated by
@@ -54,8 +54,8 @@
  *                                SIP worker -- it stalls request
  *                                processing for that worker until the
  *                                reply (or timeout) comes back.  A
- *                                non-blocking async variant lands in a
- *                                later phase.  On success, the reply
+ *                                non-blocking async variant is on the
+ *                                roadmap.  On success, the reply
  *                                populates the current-message state so
  *                                the script can read $nats_data,
  *                                $nats_subject, $nats_hdr(...), etc.

@@ -19,12 +19,11 @@
  */
 
 /*
- * nats_rpc.c -- Phase 6 script surface: NATS headers, reply-to, and
- * sync caller RPC.  This file grows incrementally across the Phase 6
- * commit chain:
+ * nats_rpc.c -- script surface for NATS headers, reply-to, and sync
+ * caller RPC:
  *     1. $nats_hdr pvar + nats_hdr_set script function.
  *     2. nats_reply (plain core publish onto the reply-to).
- *     3. nats_request (SYNC-ONLY core RPC) -- this commit.
+ *     3. nats_request (SYNC-ONLY core RPC).
  *
  * Headers (read)
  *   The ring slot carries a compact serialized header stream (see
@@ -51,16 +50,16 @@
  *   publish regardless of outcome so the next message starts clean.
  *
  * Request (SYNC-ONLY)
- *   Phase 6 ships sync-only nats_request: natsConnection_RequestMsg
- *   blocks the calling worker for up to timeout_ms.  This is the
- *   correct choice for timer_route / startup_route callers where a
- *   worker stall is acceptable, but WRONG for SIP request_route on
- *   UDP/TCP workers -- calling it there stalls SIP processing for
- *   that worker until the RPC returns.  The docstring in nats_rpc.h
- *   and the script registration comment in nats_consumer.c both
- *   state this; script authors are responsible for honouring it.
- *   A future phase will add a non-blocking variant that routes the
- *   request through the dedicated consumer process.
+ *   nats_request is sync-only: natsConnection_RequestMsg blocks the
+ *   calling worker for up to timeout_ms.  This is the correct choice
+ *   for timer_route / startup_route callers where a worker stall is
+ *   acceptable, but WRONG for SIP request_route on UDP/TCP workers
+ *   -- calling it there stalls SIP processing for that worker until
+ *   the RPC returns.  The docstring in nats_rpc.h and the script
+ *   registration comment in nats_consumer.c both state this; script
+ *   authors are responsible for honouring it.  A future change will
+ *   add a non-blocking variant that routes the request through the
+ *   dedicated consumer process.
  *
  *   On success, the reply natsMsg is unpacked into the per-worker
  *   current-message state so the script can read $nats_data /
@@ -85,7 +84,7 @@
 #include "nats_fetch.h"
 #include "nats_rpc.h"
 
-/* ── helpers shared across Phase 6 ───────────────────────────── */
+/* ── shared helpers ──────────────────────────────────────────── */
 
 /* Case-insensitive byte compare of two str-like inputs.  Inlined on
  * the hot path (every $nats_hdr(Name) read calls this per header in
@@ -114,7 +113,7 @@ int pv_parse_nats_hdr_name(pv_spec_p sp, const str *in)
 	if (!sp || !in || in->len <= 0 || !in->s)
 		return -1;
 
-	/* Static name -- we do NOT support dynamic expansion for Phase 6.
+	/* Static name -- we do NOT support dynamic expansion yet.
 	 * If a caller passes $pvar(Name) they'll see the literal characters
 	 * "$pvar(Name)" here because we don't parse them. */
 	sp->pvp.pvn.type         = PV_NAME_INTSTR;
@@ -191,8 +190,7 @@ int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
 	if (!res || !param) return -1;
 	if (!cur || !cur->has_message) return pv_get_null(msg, param, res);
 
-	/* Only static names are parsed in Phase 6 (see
-	 * pv_parse_nats_hdr_name). */
+	/* Only static names are parsed (see pv_parse_nats_hdr_name). */
 	if (param->pvn.type == PV_NAME_INTSTR)
 		name = param->pvn.u.isname.name.s;
 	else
@@ -562,7 +560,7 @@ static void cur_set_from_nats_reply(natsMsg *reply)
  * context that tolerates blocking a worker for the full timeout).
  * Calling from a UDP/TCP SIP request_route stalls that worker's entire
  * SIP pipeline until the RPC returns -- avoid.  A non-blocking async
- * variant is a Phase 7+ concern (it requires bridging nats.c callbacks
+ * variant is on the roadmap (it requires bridging nats.c callbacks
  * onto an eventfd because nats.c runs them on a library-internal
  * thread that cannot touch OpenSIPS APIs).
  *

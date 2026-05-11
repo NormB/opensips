@@ -18,7 +18,7 @@
  *   6. Payload / subject size limits.
  *   7. Destroy while non-empty (must not deadlock or crash).
  *
- * Uses the shared-memory shim from Phase 1 (plain malloc/free).
+ * Uses the test shared-memory shim (plain malloc/free).
  * Threads inside a single process simulate cross-process producers and
  * consumers because the ring only relies on atomics -- no per-process
  * state.

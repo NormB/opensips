@@ -48,7 +48,7 @@ int w_nats_nak_delay(struct sip_msg *msg, int *delay_ms);
 int w_nats_term (struct sip_msg *msg);
 int w_nats_in_progress(struct sip_msg *msg);
 
-/* Phase 5 additions.
+/* Batch-oriented ack helpers.
  *
  * nats_ack_next(): acknowledge the current message and hint the
  *   consumer process to refill the ring as soon as possible.  nats.c
@@ -59,8 +59,8 @@ int w_nats_in_progress(struct sip_msg *msg);
  *   nats_ack() followed by a zero-budget nats_fetch() on the same id.
  *
  * nats_ack_progress(): same as nats_in_progress() but exported under
- *   the canonical Phase 5 name.  nats_in_progress remains as an alias
- *   to preserve Phase 4 scripts. */
+ *   the canonical name.  nats_in_progress remains as an alias for
+ *   backwards compatibility with earlier scripts. */
 int w_nats_ack_next    (struct sip_msg *msg);
 int w_nats_ack_progress(struct sip_msg *msg);
 

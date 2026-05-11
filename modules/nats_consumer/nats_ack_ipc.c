@@ -28,10 +28,9 @@
  * all workers and the consumer process through fork(2)) so the
  * consumer's reactor-level select() wakes up.
  *
- * This is deliberately the simpler locked variant -- Phase 4 scope
- * prioritises correctness over throughput.  Profiling in later
- * phases can justify replacing the lock with head/tail CAS sequences
- * similar to nats_ring.
+ * This is deliberately the simpler locked variant -- correctness
+ * over throughput.  Profiling can later justify replacing the lock
+ * with head/tail CAS sequences similar to nats_ring.
  */
 
 #include <string.h>

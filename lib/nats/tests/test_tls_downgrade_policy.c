@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-2b regression test: silent TLS downgrade must require explicit
+ * Regression test: silent TLS downgrade must require explicit
  * operator opt-in via tls_allow_downgrade=1.  By default, any tls://
  * URL configured against a TLS-less nats.c build must hard-fail at
  * pool registration rather than silently rewriting URLs to nats://.

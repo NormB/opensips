@@ -87,7 +87,7 @@ static void test_round_trip(void)
 	CHECK(path != NULL);
 	if (!path) return;
 
-	/* --- phase 1: bind, write, destroy --- */
+	/* --- step 1: bind, write, destroy --- */
 
 	CHECK(nats_registry_init(16) == 0);
 	CHECK(nats_persist_init(path) == 0);
@@ -114,7 +114,7 @@ static void test_round_trip(void)
 	nats_persist_destroy();
 	nats_registry_destroy();
 
-	/* --- phase 2: re-init + rehydrate --- */
+	/* --- step 2: re-init + rehydrate --- */
 
 	CHECK(nats_registry_init(16) == 0);
 	CHECK(nats_persist_init(path) == 0);

@@ -50,15 +50,15 @@
  *   is still defended against (release_msg_ref + ss->total_dropped_*),
  *   but is unreachable in steady state with the clamp in place.
  *
- *   Throughput: with this design plus the Phase 6 msg-ref sizing
- *   (max(ring_capacity, max_ack_pending)) and the Phase 6 batch-fetch
- *   wait-loop fix in nats_fetch.c, sustained drain on aarch64
+ *   Throughput: with this design plus msg-ref sizing of
+ *   max(ring_capacity, max_ack_pending) and the batch-fetch
+ *   wait-loop in nats_fetch.c, sustained drain on aarch64
  *   loopback at fetch_batch=256 measures ~89 000 msgs/sec vs. ~2 000
  *   msgs/sec on the original per-message single-drain path.
  *
- *   Phase 4 change: the Phase 3 auto-ack after push is gone.  The
- *   consumer process now stashes natsMsg* in a process-local ref
- *   table indexed by (handle_idx, slot_idx) and only calls
+ *   Ack model: rather than auto-acking each pushed message, the
+ *   consumer process stashes natsMsg* in a process-local ref table
+ *   indexed by (handle_idx, slot_idx) and only calls
  *   natsMsg_Ack / Nak / Term / InProgress in drain_ack_ipc() on a
  *   worker's explicit request.  A 16-bit generation counter in each
  *   ref slot is bumped on (re)use and checked on ack to guard against
@@ -158,12 +158,12 @@ static inline int eff_fetch_timeout_ms(const nats_handle_t *h)
 	return v;
 }
 
-/* Phase 5: idle cycle replaces the Phase 4 usleep(50ms) spin with a
- * blocking select() on (ack_fd, retry_timerfd).  The retry timerfd
- * gives us a bounded upper wait so a stalled subscription
- * (e.g. broker TCP stall) does not keep us asleep forever; acks still
- * wake us immediately on any worker ack-IPC enqueue. */
-#define PHASE5_IDLE_RETRY_MS      1000   /* 1 s max idle before retry */
+/* Idle cycle: blocking select() on (ack_fd, retry_timerfd) instead of
+ * a usleep spin.  The retry timerfd gives us a bounded upper wait so
+ * a stalled subscription (e.g. broker TCP stall) does not keep us
+ * asleep forever; acks still wake us immediately on any worker
+ * ack-IPC enqueue. */
+#define IDLE_RETRY_MS      1000   /* 1 s max idle before retry */
 
 /* ── process-local state ─────────────────────────────────────── */
 
@@ -179,13 +179,13 @@ typedef struct proc_sub_state {
 	                                        *  accounting). */
 	time_t                last_fetch;
 
-	/* counters -- local to this process, included in mi_info in Phase 4 */
+	/* counters -- local to this process, included in mi_info */
 	uint64_t              total_pulled;
 	uint64_t              total_pushed;
 	uint64_t              total_dropped_backpressure;
 	uint64_t              total_fetch_errors;
 
-	/* Phase 7 subscription-refresh bookkeeping. */
+	/* Subscription-refresh bookkeeping. */
 	int                   dirty;   /* 1 iff the subscription needs
 	                                 * rebuild (epoch bump or broker
 	                                 * GC'd ephemeral); cleared when
@@ -193,14 +193,12 @@ typedef struct proc_sub_state {
 	                                 * successfully creates a fresh
 	                                 * natsSubscription. */
 
-	/* Phase 7 string cleanup slots.  These point at the malloc'd
-	 * C-strings and arrays we hand to nats.c in
-	 * ensure_subscription_for_handle(); they are leaked by Phase 5 on
-	 * purpose because nats.c holds borrowed pointers for the life of
-	 * the subscription.  With the retire/reap lifecycle in place, we
-	 * stash them here so the teardown path can free them along with
-	 * the proc_sub_state_t.  NULL entries mean "no allocation for
-	 * that slot". */
+	/* String cleanup slots.  These point at the malloc'd C-strings
+	 * and arrays we hand to nats.c in ensure_subscription_for_handle();
+	 * nats.c holds borrowed pointers for the life of the subscription,
+	 * so we stash them here and the retire/reap teardown path frees
+	 * them along with the proc_sub_state_t.  NULL entries mean
+	 * "no allocation for that slot". */
 	char                 *c_durable;
 	char                 *c_filter;
 	char                 *c_stream;
@@ -250,9 +248,10 @@ static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
  * the slot reused) is detected and ignored.
  *
  * The ring-capacity dimension is sized at first use of a handle in
- * store_msg_ref().  All rings in Phase 4 share the same capacity
- * (NATS_HANDLE_RING_CAPACITY), but we key off the handle's ring
- * object to future-proof Phase 5's per-handle capacity.
+ * store_msg_ref().  Rings may share the same capacity
+ * (NATS_HANDLE_RING_CAPACITY) or override it per-handle via
+ * `ring_capacity` at bind time; we key off the handle's ring
+ * object so any per-handle capacity is honoured.
  */
 typedef struct msg_ref_slot {
 	natsMsg  *msg;
@@ -417,8 +416,8 @@ static jsReplayPolicy map_replay_policy(nats_replay_policy_e p)
  * structs; registry str buffers are not guaranteed to be NUL-terminated,
  * so we allocate a process-local copy for each subscription we set up.
  * Since subscriptions are long-lived (one per handle for the life of
- * the process), leaking these copies on unbind is acceptable in Phase
- * 3.  A proper cleanup path lands with unbind wiring in Phase 7. */
+ * the process), pointers are kept alive on the proc_sub_state_t and
+ * freed by the retire/reap teardown path. */
 static char *str_to_cstr(const str *s)
 {
 	char *out;
@@ -454,9 +453,9 @@ static proc_sub_state_t *find_sub_by_id(const str *id)
 }
 
 /* Free all the malloc'd C-strings / arrays we stashed on ss during
- * ensure_subscription_for_handle().  Phase 5 leaked these for the life
- * of the sub because nats.c's jsConsumerConfig holds borrowed pointers;
- * Phase 7's retire path lets us free them along with the sub.
+ * ensure_subscription_for_handle().  nats.c's jsConsumerConfig holds
+ * borrowed pointers for the life of the subscription; the retire/reap
+ * teardown path calls us once the subscription is destroyed.
  *
  * Leaves ss itself alive -- caller decides whether to free the struct
  * (on full teardown) or to clear the slots for recreation (on an
@@ -492,16 +491,16 @@ static void free_proc_sub_strings(proc_sub_state_t *ss)
  * done so.  Succeeds idempotently: if we already have a proc_sub_state
  * for this id, returns 0 without touching the server.
  *
- * The c-string fields passed into nats.c config structs are leaked
- * intentionally (see str_to_cstr comment) -- Phase 3 has no unbind-
- * aware cleanup.
+ * The c-string fields passed into nats.c config structs are stashed
+ * on the proc_sub_state_t (see str_to_cstr comment) and freed by the
+ * retire/reap teardown path when the subscription is destroyed.
  */
 /* Parse a comma-separated list of durations into an allocated
  * `int64_t` array of nanoseconds.  Returns 0 on success and fills
  * `*out_arr` and `*out_len`; returns -1 on parse error.  Called only
  * when `csv` is non-empty.  The returned array is malloc'd (NOT SHM);
  * the caller owns it and should treat it as consumer-process-local
- * (leaked until Phase 7 adds the unbind teardown path).
+ * (freed by the retire/reap teardown path when the sub is destroyed).
  *
  * Grammar matches nats_handle_parse's duration syntax:
  *   <int>(ms|s|m|h|d), no suffix = ms.
@@ -573,9 +572,9 @@ static int parse_backoff_csv(const str *csv, int64_t **out_arr, int *out_len)
 
 /* Parse a comma-separated list of filter subjects into an allocated
  * `const char **` array.  Returns 0 and fills `*out_arr` + `*out_len`;
- * returns -1 on OOM.  Each element and the array are malloc'd; caller
- * must free on teardown (Phase 7 wires the cleanup path; Phase 5 leaks
- * the allocation for the lifetime of the subscription). */
+ * returns -1 on OOM.  Each element and the array are malloc'd; the
+ * retire/reap teardown path frees them when the subscription is
+ * destroyed. */
 static int parse_filters_csv(const str *csv,
                              const char ***out_arr, int *out_len)
 {
@@ -658,7 +657,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	if (!h || !h->ring)
 		return 0;   /* handle still being constructed or TEST_SHIM */
 
-	/* Phase 7: dirty handles refresh in place -- the sub was destroyed
+	/* Dirty handles refresh in place -- the sub was destroyed
 	 * on the epoch bump or on a fetch-time "consumer vanished" error,
 	 * and we now rebuild the natsSubscription while keeping the
 	 * proc_sub_state_t (and its counters) intact. */
@@ -703,7 +702,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * The ref-row capacity must be at least max_ack_pending: the broker
 	 * may deliver that many messages before any acks come back, and
 	 * each delivery occupies one ref slot until acked.  Sizing from
-	 * ring_capacity alone (the original Phase 4 design) caused
+	 * ring_capacity alone (an earlier design) caused
 	 * msg-ref-table-full drops at any handle where max_ack_pending >
 	 * ring_capacity, which then triggered ack_wait redeliveries and
 	 * stalled the ack floor at the broker.
@@ -728,7 +727,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 			return -1;
 		}
 	}
-	/* Build jsConsumerConfig.  Phase 5 fills in the full matrix. */
+	/* Build jsConsumerConfig with the full handle-config matrix. */
 	jsConsumerConfig_Init(&cc);
 
 	durable_c    = str_to_cstr(&h->durable);
@@ -830,8 +829,8 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	jsSubOptions_Init(&so);
 	so.Stream    = stream_c;
 	so.Config    = cc;
-	/* We drive acks ourselves -- Phase 4 replaces Phase 3's auto-ack
-	 * with the real worker-driven path. */
+	/* We drive acks ourselves via the worker-driven ack-IPC path,
+	 * not via nats.c's auto-ack. */
 	so.ManualAck = true;
 
 	/* Multi-env: when js_domain / api_prefix are set, build a per-call
@@ -867,10 +866,10 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 			g_subs_by_idx[ss->handle_idx] = ss;
 	}
 
-	/* Phase 7: stash the allocations on ss so the retire / rebuild
-	 * paths can free them without leaking.  nats.c has borrowed
-	 * pointers into these for the life of the subscription, so they
-	 * must outlive the natsSubscription_Destroy() call but NOT the
+	/* Stash the allocations on ss so the retire / rebuild paths can
+	 * free them without leaking.  nats.c has borrowed pointers into
+	 * these for the life of the subscription, so they must outlive
+	 * the natsSubscription_Destroy() call but NOT the
 	 * proc_sub_state_t itself. */
 	ss->c_durable       = durable_c;
 	ss->c_filter        = filter_c;
@@ -940,14 +939,14 @@ fail_free_sub:
 static int reconcile_subs_cb(nats_handle_t *h, void *user)
 {
 	(void)user;
-	/* Phase 7: skip retired handles -- the teardown path owns them now.
+	/* Skip retired handles -- the teardown path owns them now.
 	 * A retired handle is already off its bucket chain so registry
 	 * foreach should not surface it, but defense-in-depth against a
 	 * race where unbind fires between the foreach-global-lock
 	 * acquisition and the bucket-lock acquisition. */
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST))
 		return 0;
-	/* ignore individual-handle failures; Phase 3 retries next tick
+	/* ignore individual-handle failures; the next tick retries them
 	 * because find_sub_by_id() keeps returning NULL for that id */
 	(void)ensure_subscription_for_handle(h);
 	return 0;
@@ -1090,9 +1089,9 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	if (!ss || !ss->sub || !ss->ring)
 		return 0;
 
-	/* Phase 5 in-use guard: hold a pending_ops reference across the
-	 * blocking Fetch() + push loop so unbind can defer while we're
-	 * mid-pull.  Paired with the dec below. */
+	/* In-use guard: hold a pending_ops reference across the blocking
+	 * Fetch() + push loop so unbind can defer while we're mid-pull.
+	 * Paired with the dec below. */
 	nats_handle_pending_inc(ss->h_ref);
 
 	/* Dynamic batch sizing: never request more than will fit in the
@@ -1149,7 +1148,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		goto out;
 	}
 
-	/* Phase 7 ephemeral-GC / subscription-invalidated detection.
+	/* Ephemeral-GC / subscription-invalidated detection.
 	 *
 	 * NATS_NOT_FOUND comes back when JetStream has GC'd the consumer
 	 * past its inactive_threshold (the common ephemeral-GC case).
@@ -1539,8 +1538,8 @@ static void tear_down_retired_subs(void)
 			ss->sub = NULL;
 		}
 
-		/* Free the Phase-5-leaked C-strings and arrays.  This is the
-		 * cleanup Phase 5 deferred to Phase 7. */
+		/* Free the C-strings and arrays we stashed when we built
+		 * the natsSubscription. */
 		free_proc_sub_strings(ss);
 
 		if (h) {
@@ -1621,7 +1620,7 @@ void nats_consumer_proc_main(int rank)
 		int any_work = 0;
 		int cur_epoch;
 
-		/* 0. Phase 7 reconnect-epoch check.  The nats.c library bumps
+		/* 0. Reconnect-epoch check.  The nats.c library bumps
 		 *    the epoch from its reconnect callback (on a library
 		 *    thread); here we observe the bump and mark every live
 		 *    subscription dirty so the next reconcile pass rebuilds
@@ -1705,8 +1704,8 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
-		/* 4. Phase 7 lifecycle: tear down subscriptions whose handles
-		 *    are retiring, then reap any fully-drained handles.
+		/* 4. Retire/reap lifecycle: tear down subscriptions whose
+		 *    handles are retiring, then reap any fully-drained handles.
 		 *    Running these every iteration keeps the unbind latency
 		 *    bounded (worst case: one iteration delay between unbind
 		 *    and reap).  Both are cheap when the retire list is
@@ -1715,11 +1714,11 @@ void nats_consumer_proc_main(int rank)
 		nats_registry_reap();
 
 		if (!any_work) {
-			/* Phase 5 blocking idle: wait until either the ack IPC
-			 * eventfd becomes readable (a worker acked something) or
-			 * the retry timerfd fires (bounded stall recovery).  This
-			 * replaces the Phase 3/4 50 ms busy-poll so the consumer
-			 * process spends ~0% CPU on empty subscriptions. */
+			/* Blocking idle: wait until either the ack IPC eventfd
+			 * becomes readable (a worker acked something) or the retry
+			 * timerfd fires (bounded stall recovery).  Avoids a busy
+			 * poll so the consumer process spends ~0% CPU on empty
+			 * subscriptions. */
 			fd_set rfds;
 			int    maxfd = ack_fd;
 			struct timeval tv;
@@ -1730,9 +1729,9 @@ void nats_consumer_proc_main(int rank)
 			if (retry_fd >= 0) {
 				struct itimerspec its;
 				memset(&its, 0, sizeof(its));
-				its.it_value.tv_sec  = PHASE5_IDLE_RETRY_MS / 1000;
+				its.it_value.tv_sec  = IDLE_RETRY_MS / 1000;
 				its.it_value.tv_nsec =
-					(PHASE5_IDLE_RETRY_MS % 1000) * 1000000L;
+					(IDLE_RETRY_MS % 1000) * 1000000L;
 				if (timerfd_settime(retry_fd, 0, &its, NULL) == 0) {
 					FD_SET(retry_fd, &rfds);
 					if (retry_fd > maxfd) maxfd = retry_fd;

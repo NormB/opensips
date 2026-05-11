@@ -229,9 +229,9 @@ mi_response_t *mi_consumer_list(const mi_params_t *params,
 
 /* Re-read the persist file and merge any new bindings into the live
  * registry.  Does NOT clear the existing registry -- new handles are
- * added; ids that already exist keep their current state.  Phase 8
- * does not implement "full replacement" semantics (no way to represent
- * "unbind id X" from a snapshot).
+ * added; ids that already exist keep their current state.  We do not
+ * implement "full replacement" semantics (no way to represent "unbind
+ * id X" from a snapshot).
  *
  * Refuses with 400 if persistence was not enabled via modparam. */
 mi_response_t *mi_handle_reload(const mi_params_t *params,

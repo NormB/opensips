@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-4c regression test: nats_consumer.c registers nats_request
+ * Regression test: nats_consumer.c registers nats_request
  * with ALL_ROUTES, allowing the script to call this synchronous,
  * worker-blocking function from request_route.  A single 30-second
  * timeout there stalls the SIP UDP worker entirely.

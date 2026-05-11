@@ -21,7 +21,7 @@
 /*
  * nats_consumer.c -- module lifecycle + registrations.
  *
- * Phase 6 exports (populated in commit order as the phase lands):
+ * Script-surface exports:
  *   - sync  cmd:   nats_fetch(id, timeout_ms),
  *                  nats_fetch_batch(id, opts), nats_batch_select(i),
  *                  nats_ack(), nats_ack_next(), nats_ack_progress(),
@@ -36,10 +36,10 @@
  *                  $nats_seq, $nats_consumer_seq, $nats_delivered,
  *                  $nats_pending, $nats_token, $nats_hdr(Name)
  *
- * IMPORTANT: nats_request() is SYNC-ONLY in Phase 6 -- it blocks the
- * calling worker for up to timeout_ms.  Restrict callsites to
- * timer_route / startup_route until the async variant lands in a
- * later phase.  See nats_rpc.c / nats_rpc.h for the full rationale.
+ * IMPORTANT: nats_request() is SYNC-ONLY -- it blocks the calling
+ * worker for up to timeout_ms.  Restrict callsites to timer_route /
+ * startup_route until an async variant is added.  See nats_rpc.c /
+ * nats_rpc.h for the full rationale.
  */
 
 #include "../../sr_module.h"
@@ -209,8 +209,8 @@ static const acmd_export_t acmds[] = {
 
 /* ── modparams ───────────────────────────────────────────────── */
 
-/* Phase 8 opt-in persistence.  Defaults: off.  If enabled, the registry
- * is JSON-serialized to `persist_path` on every bind/unbind (debounced
+/* Opt-in persistence.  Defaults: off.  If enabled, the registry is
+ * JSON-serialized to `persist_path` on every bind/unbind (debounced
  * 500 ms) and rehydrated on mod_init.  If the parent directory of
  * `persist_path` does not exist at init time, we log a warning and run
  * with persistence disabled for this instance. */
@@ -257,7 +257,7 @@ static const pv_export_t mod_pvars[] = {
 	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 
-/* Phase 3: dedicated JetStream pull consumer process.
+/* Dedicated JetStream pull consumer process.
  * One instance -- there is a single process for the module. */
 static const proc_export_t procs[] = {
 	{ "NATS consumer", 0, 0, nats_consumer_proc_main, 1, 0 },
@@ -313,9 +313,9 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* Phase 8 opt-in persistence.  If enabled, start the writer thread
-	 * and rehydrate any snapshot left by a previous run.  Failures
-	 * here are non-fatal -- we log, disable persistence, and continue
+	/* Opt-in persistence.  If enabled, start the writer thread and
+	 * rehydrate any snapshot left by a previous run.  Failures here
+	 * are non-fatal -- we log, disable persistence, and continue
 	 * with an empty registry so the module still loads. */
 	if (persist_handles) {
 		if (!persist_path || !*persist_path) {
@@ -353,7 +353,7 @@ static void mod_destroy(void)
 	LM_INFO("nats_consumer: shutting down\n");
 	/* Order matters: persistence flush first (so the outgoing snapshot
 	 * reflects the final live state), then ack IPC (so any future
-	 * Phase 4 drain path can flush before the registry disappears
+	 * drain path can flush before the registry disappears
 	 * underneath it), then registry.  nats_persist_destroy() joins the
 	 * writer thread after flushing any outstanding dirty state -- no
 	 * pending writer can race with the registry teardown below. */

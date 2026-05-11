@@ -159,7 +159,7 @@ int w_nats_in_progress(struct sip_msg *msg)
 	return send_ack_ipc(cur->ack_token, NATS_ACK_ACTION_IN_PROGRESS, 0);
 }
 
-/* Alias for the Phase 5 canonical name. */
+/* Alias for the canonical name. */
 int w_nats_ack_progress(struct sip_msg *msg)
 {
 	return w_nats_in_progress(msg);

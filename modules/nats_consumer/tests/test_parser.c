@@ -251,7 +251,7 @@ static void test_by_start_seq_ok(void)
 	}
 }
 
-/* ── Phase 5: extended bind-matrix coverage ───────────────────── */
+/* ── Extended bind-matrix coverage ─────────────────────────────── */
 
 static void test_replay_policy_instant_default(void)
 {
@@ -521,7 +521,7 @@ int main(void)
 	test_by_start_seq_requires_seq();
 	test_by_start_seq_ok();
 
-	/* Phase 5 additions */
+	/* Extended bind-matrix coverage */
 	test_replay_policy_instant_default();
 	test_replay_policy_original();
 	test_replay_policy_bogus();
