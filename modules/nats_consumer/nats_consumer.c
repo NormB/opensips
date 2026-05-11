@@ -227,9 +227,7 @@ static const acmd_export_t acmds[] = {
 	/* `nats_request` is also registered above as a sync cmd with a
 	 * restrictive route mask.  The dispatch between sync and async is
 	 * driven by call-site syntax: `nats_request(...)` resolves to the
-	 * sync entry, `async(nats_request(...), rt)` resolves here.  Phase
-	 * 1 of the async entry runs the same sync body and reports
-	 * ASYNC_SYNC; phase 2 will yield on a libnats reply inbox. */
+	 * sync entry, `async(nats_request(...), rt)` resolves here. */
 	{ "nats_request", (acmd_function)w_nats_request_async, {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR, 0, 0},
@@ -484,7 +482,7 @@ static int mod_init(void)
 		nats_ack_ipc_fd());
 
 	/* Allocate the SHM slot pool + eventfd pool for the
-	 * phase-5 consumer-routed async nats_request transport.
+	 * consumer-process-routed async nats_request transport.
 	 * Must happen pre-fork so every child inherits the
 	 * eventfds at the same numeric fd values.  Tolerant to
 	 * failure (slot allocation requires NATS_RPC_SLOT_COUNT
@@ -497,10 +495,10 @@ static int mod_init(void)
 		/* deliberately non-fatal */
 	}
 
-	/* Worker -> consumer-process publish queue for the phase-5
-	 * async transport.  Mirrors the ack IPC, eventfd inherited
-	 * via fork().  Non-fatal: if SHM is short, async will fall
-	 * back to the sync path. */
+	/* Worker -> consumer-process publish queue for the
+	 * consumer-process-routed async transport.  Mirrors the
+	 * ack IPC, eventfd inherited via fork().  Non-fatal: if SHM
+	 * is short, async will fall back to the sync path. */
 	if (nats_rpc_ipc_init() < 0) {
 		LM_WARN("nats_consumer: rpc IPC init failed; async "
 			"nats_request will fall back to the sync path\n");

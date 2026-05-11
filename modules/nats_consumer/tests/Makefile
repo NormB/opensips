@@ -58,13 +58,14 @@ test_slurp_file_cap: test_slurp_file_cap.c
 test_request_route_restriction: test_request_route_restriction.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# Phase 1 skeleton test for async nats_request dual registration
+# Source-pattern skeleton test for async nats_request dual
+# registration (sync entry + acmd entry in nats_consumer.c).
 test_async_request_skeleton: test_async_request_skeleton.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# Phase 2 in-flight state-machine test.  Links nats_rpc_async.c
-# under -DTEST_SHIM so the libnats glue is excluded and only the
-# pure C state machine is exercised.
+# In-flight state-machine test.  Links nats_rpc_async.c under
+# -DTEST_SHIM so the libnats glue is excluded and only the pure C
+# state machine is exercised.
 ASYNC_SRCS := test_async_request_inflight.c $(SHIM) ../nats_rpc_async.c
 test_async_request_inflight: $(ASYNC_SRCS) test_shim.h ../nats_rpc_async.h
 	$(CC) $(CFLAGS) -o $@ $(ASYNC_SRCS) $(LDFLAGS)

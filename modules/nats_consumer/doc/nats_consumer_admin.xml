@@ -1191,8 +1191,7 @@ timer_route[drain, 1] {
                     sub-second reaping requires either a
                     periodic-poll route or a
                     <filename>lib/nats</filename> disconnect-
-                    callback chain; both are tracked for a later
-                    phase.
+                    callback chain; both remain TODO.
                 </para></listitem>
                 <listitem><para>
                     <varname>-3</varname> — NATS unavailable at

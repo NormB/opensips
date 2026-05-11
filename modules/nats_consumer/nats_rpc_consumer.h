@@ -19,8 +19,8 @@
  */
 
 /*
- * nats_rpc_consumer.h -- consumer-process side of the phase-5
- * async nats_request transport.
+ * nats_rpc_consumer.h -- consumer-process side of the
+ * consumer-process-routed async nats_request transport.
  *
  * All three functions below are called from the dedicated
  * nats_consumer process (not from SIP workers).  They set up a
@@ -33,8 +33,8 @@
  * The libnats subscription callback runs on a libnats internal
  * thread inside the consumer process.  That context is known
  * safe for libnats threading (it's the same place where
- * JetStream pull subscriptions live today); the worker-side
- * subscription pattern of phase 2 -- which crashed -- is gone.
+ * JetStream pull subscriptions live today); the earlier
+ * worker-side subscription pattern -- which crashed -- is gone.
  */
 
 #ifndef NATS_RPC_CONSUMER_H

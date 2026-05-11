@@ -24,9 +24,9 @@
  * The async entry point itself (w_nats_request_async) is declared
  * in nats_rpc.h alongside the rest of the script-callable RPC
  * surface; that's the only symbol nats_consumer.c needs.  This
- * header exposes the state-machine primitives so the phase-2 unit
- * test (test_async_request_inflight.c) can drive them in isolation
- * without linking libnats.
+ * header exposes the state-machine primitives so the in-flight
+ * unit test (test_async_request_inflight.c) can drive them in
+ * isolation without linking libnats.
  *
  * All functions are process-local (per-worker); the in-flight
  * table is statically sized in nats_rpc_async.c and is not shared

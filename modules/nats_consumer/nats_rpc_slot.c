@@ -19,9 +19,9 @@
  */
 
 /*
- * nats_rpc_slot.c -- SHM slot allocator for phase-5 async
- * nats_request transport.  See nats_rpc_slot.h for the
- * architecture / wake-mechanism rationale.
+ * nats_rpc_slot.c -- SHM slot allocator for the
+ * consumer-process-routed async nats_request transport.  See
+ * nats_rpc_slot.h for the architecture / wake-mechanism rationale.
  */
 
 #ifdef TEST_SHIM
@@ -99,7 +99,7 @@ int nats_rpc_slot_init(void)
 
 	LM_INFO("nats_rpc_slot: %u slots allocated (%zu KB SHM); "
 		"wake mechanism is per-call worker-private timerfd "
-		"polling (phase 5b)\n",
+		"polling\n",
 		(unsigned)NATS_RPC_SLOT_COUNT,
 		bytes / 1024);
 	return 0;

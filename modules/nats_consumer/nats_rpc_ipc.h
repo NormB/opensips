@@ -20,7 +20,7 @@
 
 /*
  * nats_rpc_ipc.h -- worker -> consumer-process publish queue for
- * the phase-5 async nats_request transport.
+ * the consumer-process-routed async nats_request transport.
  *
  * Producers are any SIP worker that called
  * async(nats_request(...)).  The single consumer is the dedicated

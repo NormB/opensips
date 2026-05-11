@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-2 unit test for nats_rpc_async.c's in-flight state machine.
+ * Unit test for nats_rpc_async.c's in-flight state machine.
  *
  * Drives the ctx alloc / install / deliver / take / release
  * primitives directly without linking libnats; the file under test
@@ -508,7 +508,7 @@ static void test_disconnect_detection(void)
 {
 	struct nats_rpc_async_ctx *c;
 
-	fprintf(stderr, "\n=== phase-3 disconnect detection ===\n");
+	fprintf(stderr, "\n=== disconnect detection ===\n");
 	c = nats_rpc_async_ctx_new();
 	ASSERT(c != NULL, "ctx_new returned non-NULL");
 	if (!c) return;
