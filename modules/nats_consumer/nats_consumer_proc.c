@@ -86,6 +86,8 @@
 #include "nats_ack_ipc.h"
 #include "nats_ack.h"
 #include "nats_consumer_proc.h"
+#include "nats_rpc_consumer.h"
+#include "nats_rpc_ipc.h"
 
 /* SHM heartbeat block -- bumped per loop iteration so a watchdog or
  * MI handler can detect a wedged or crashed consumer process.
@@ -1604,6 +1606,19 @@ void nats_consumer_proc_main(int rank)
 			"falling back to 1s select timeout\n", strerror(errno));
 	}
 
+	/* Phase-5 async nats_request: stand up the persistent inbox
+	 * subscription so worker-issued RPCs can route their
+	 * publish + reply through this process (libnats-safe
+	 * context) instead of running directly in the SIP worker
+	 * (libnats-unsafe context).  Non-fatal: if the subscribe
+	 * fails the IPC drain below will surface -3 to each
+	 * pending slot. */
+	if (nats_rpc_consumer_subscribe() < 0) {
+		LM_WARN("nats_consumer_proc: phase-5 inbox subscribe "
+			"failed; async nats_request RPCs that arrive on "
+			"the IPC will be marked abandoned\n");
+	}
+
 	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d retry_fd=%d, "
 		"baseline_epoch=%d, entering main loop\n",
 		ack_fd, retry_fd, baseline_epoch);
@@ -1704,6 +1719,20 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
+		/* 3.5 Phase-5 async nats_request: drain the worker ->
+		 *     consumer publish IPC.  For each entry the helper
+		 *     reads the slot's out_* fields and PublishMsg's
+		 *     against our libnats connection with reply-to
+		 *     pointing back at our persistent inbox.  Replies
+		 *     land in on_inbox_reply (running on the libnats
+		 *     thread, also in this process) which writes
+		 *     reply_* + signals the slot's wake_fd. */
+		{
+			int rpcs = nats_rpc_consumer_drain_ipc();
+			if (rpcs > 0)
+				any_work = 1;
+		}
+
 		/* 4. Retire/reap lifecycle: tear down subscriptions whose
 		 *    handles are retiring, then reap any fully-drained handles.
 		 *    Running these every iteration keeps the unbind latency
@@ -1715,16 +1744,23 @@ void nats_consumer_proc_main(int rank)
 
 		if (!any_work) {
 			/* Blocking idle: wait until either the ack IPC eventfd
-			 * becomes readable (a worker acked something) or the retry
-			 * timerfd fires (bounded stall recovery).  Avoids a busy
-			 * poll so the consumer process spends ~0% CPU on empty
-			 * subscriptions. */
+			 * becomes readable (a worker acked something), the
+			 * phase-5 RPC IPC eventfd becomes readable (a worker
+			 * issued an async nats_request), or the retry
+			 * timerfd fires (bounded stall recovery).  Avoids a
+			 * busy poll so the consumer process spends ~0% CPU
+			 * on empty subscriptions. */
 			fd_set rfds;
 			int    maxfd = ack_fd;
+			int    rpc_fd = nats_rpc_ipc_fd();
 			struct timeval tv;
 
 			FD_ZERO(&rfds);
 			if (ack_fd >= 0) FD_SET(ack_fd, &rfds);
+			if (rpc_fd >= 0) {
+				FD_SET(rpc_fd, &rfds);
+				if (rpc_fd > maxfd) maxfd = rpc_fd;
+			}
 
 			if (retry_fd >= 0) {
 				struct itimerspec its;
@@ -1748,6 +1784,18 @@ void nats_consumer_proc_main(int rank)
 				ssize_t r;
 				do {
 					r = read(retry_fd, &sink, sizeof(sink));
+				} while (r < 0 && errno == EINTR);
+			}
+
+			/* Drain the phase-5 RPC IPC eventfd so the next
+			 * empty -> non-empty edge wakes us again.  The
+			 * actual queue is drained on the next loop
+			 * iteration via nats_rpc_consumer_drain_ipc(). */
+			if (rpc_fd >= 0 && FD_ISSET(rpc_fd, &rfds)) {
+				uint64_t sink;
+				ssize_t r;
+				do {
+					r = read(rpc_fd, &sink, sizeof(sink));
 				} while (r < 0 && errno == EINTR);
 			}
 		}
