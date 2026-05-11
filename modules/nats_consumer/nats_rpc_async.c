@@ -1122,21 +1122,52 @@ static int resume_nats_request(int fd, struct sip_msg *msg, void *param)
 	}
 }
 
+/*
+ * w_nats_request_async -- async acmd entry point.
+ *
+ * PHASE 4 / 5 INTERIM STATE: phase 2's transport (per-worker
+ * libnats subscription on `_INBOX.opensips.<pid>.>`, on_inbox_reply
+ * callback, per-call ctx with eventfd) was found to crash SIP UDP
+ * workers within seconds of `natsConnection_Subscribe`.  See
+ * `modules/cachedb_nats/doc/PERF_NOTES.md` -- "Async nats_request"
+ * section.  The hash-table / ctx / subscription machinery is left
+ * in source for phase 5 reuse but is no longer invoked here.
+ *
+ * What this body does NOW:
+ *   1. Pre-flight checks (subject length, payload bounds) so the
+ *      script gets the same -4 / -3 / -6 errors it did before.
+ *   2. Mint per-call UUIDv7 (or consume a script-supplied one
+ *      from $nats_request_id), stash it in the per-worker
+ *      stash, stage it as the auto-stage header (modparam-
+ *      configurable).  All the phase-2.5 / pvar behaviour stays.
+ *   3. Run the existing synchronous w_nats_request body.  This
+ *      blocks the worker for up to timeout_ms; the route mask
+ *      on the sync entry still gates which routes may invoke
+ *      the function, but the async() construct itself is
+ *      accepted from any reactor-backed route at parse time.
+ *   4. Return the sync rc with async_status = ASYNC_SYNC so the
+ *      reactor immediately runs the resume route with the right
+ *      $retcode.  No FD is registered.
+ *
+ * Behavioural difference vs. true async: the calling worker
+ * blocks for timeout_ms instead of yielding.  Scripts that need
+ * non-blocking RPC must wait for phase 5 (route through the
+ * consumer process, which is the only context that can safely
+ * host the libnats async subscription thread).  Until then, set
+ * udp_workers proportionally to the worst-case
+ * timeout_ms x concurrent-RPCs / udp_workers ratio for the
+ * deployment.
+ *
+ * The script surface, return-code grammar, $nats_request_id
+ * pvar, request_id_header modparam, and dispatch matrix are all
+ * preserved -- this is purely a transport revert.
+ */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms)
 {
-	natsConnection            *nc;
-	natsMsg                   *out = NULL;
-	natsStatus                 s;
-	struct nats_rpc_async_ctx *c   = NULL;
-	char                       subj_buf[NATS_RING_SUBJECT_MAX + 1];
-	char                       reply_buf[64 + 32];   /* prefix.pid.corr */
-	const char                *subj_c;
-	const char                *data_s;
-	int                        data_len;
-	int                        tmo;
+	int rc;
 
-	(void)msg;
+	(void)ctx;
 
 	if (!subject || subject->len <= 0 || !subject->s) {
 		LM_DBG("nats_request[async]: empty/null subject\n");
@@ -1152,43 +1183,13 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		return -4;
 	}
 
-	tmo = timeout_ms ? *timeout_ms : 0;
-	if (tmo <= 0) tmo = 1000;
-
-	if (ensure_inbox_subscription() < 0) {
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -3;
-	}
-	nc = nats_pool_get();
-	if (!nc) {
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -3;
-	}
-
-	c = nats_rpc_async_ctx_new();
-	if (!c) {
-		LM_ERR("nats_request[async]: oom for ctx\n");
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -6;
-	}
-
-	/* Snapshot the pool's reconnect-epoch so the resume path
-	 * can detect a mid-flight disconnect/reconnect and surface
-	 * -2 (connection lost) instead of 0 (timeout). */
-	nats_rpc_async_ctx_set_epoch_at_start(c,
-		(uint32_t)nats_pool_get_reconnect_epoch());
-
-	/* Pick the correlation id: prefer a user-supplied value
-	 * from a prior `$nats_request_id = "..."` assignment, else
-	 * mint a fresh UUIDv7.  Either way, stash the final value
-	 * (so $nats_request_id reads it back across the yield) and
-	 * stage it on the outbound header unless an empty
-	 * request_id_header modparam disables auto-staging or the
-	 * script already staged the same header explicitly via
-	 * nats_hdr_set(). */
+	/* Mint / stage the per-call UUIDv7.  Phase 2.5 behaviour --
+	 * survives the transport revert because the stash is purely
+	 * per-worker state plus optional header staging via the
+	 * existing nats_hdr_set machinery.  The synchronous
+	 * w_nats_request below will pick up the staged header and
+	 * publish it; the user-supplied value still wins via the
+	 * staged_set_if_absent semantics. */
 	{
 		char id_buf[64];
 		int  id_len;
@@ -1207,69 +1208,14 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		}
 	}
 
-	if (nats_rpc_async_install(c) < 0) {
-		LM_ERR("nats_request[async]: in-flight cap reached (%d)\n",
-			NATS_RPC_ASYNC_MAX_INFLIGHT);
-		nats_rpc_staged_clear();
-		nats_rpc_async_ctx_release(c);
-		async_status = ASYNC_NO_IO;
-		return -5;
-	}
-
-	if (!nats_rpc_async_format_reply_subject(c, reply_buf, sizeof(reply_buf))) {
-		ht_take(c); nats_rpc_async_ctx_release(c);    /* hash ref */
-		nats_rpc_async_ctx_release(c);                /* alloc ref */
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -6;
-	}
-
-	subj_c = nats_rpc_cstr_buf(subj_buf, sizeof(subj_buf),
-		subject->s, subject->len);
-	if (!subj_c) {
-		ht_take(c); nats_rpc_async_ctx_release(c);
-		nats_rpc_async_ctx_release(c);
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -4;
-	}
-
-	data_s   = (payload && payload->s) ? payload->s : "";
-	data_len = (payload && payload->len > 0) ? payload->len : 0;
-
-	s = natsMsg_Create(&out, subj_c, reply_buf, data_s, data_len);
-	if (s != NATS_OK || !out) {
-		LM_ERR("nats_request[async]: natsMsg_Create failed: %s\n",
-			natsStatus_GetText(s));
-		ht_take(c); nats_rpc_async_ctx_release(c);
-		nats_rpc_async_ctx_release(c);
-		nats_rpc_staged_clear();
-		async_status = ASYNC_NO_IO;
-		return -4;
-	}
-
-	nats_rpc_staged_apply_and_clear_on(out);
-
-	s = natsConnection_PublishMsg(nc, out);
-	natsMsg_Destroy(out);
-	if (s != NATS_OK) {
-		LM_ERR("nats_request[async]: publish failed: %s\n",
-			natsStatus_GetText(s));
-		ht_take(c); nats_rpc_async_ctx_release(c);
-		nats_rpc_async_ctx_release(c);
-		async_status = ASYNC_NO_IO;
-		return -4;
-	}
-
-	/* Hand off to the reactor.  The alloc-caller's ref becomes
-	 * resume_param's ref; the hash holds its own ref.  Total
-	 * outstanding: 2 refs.  Resume releases both. */
-	ctx->resume_f     = resume_nats_request;
-	ctx->resume_param = c;
-	ctx->timeout_s    = (unsigned int)((tmo + 999) / 1000);
-
-	async_status = c->eventfd;
-	return 1;
+	/* Synchronous transport.  w_nats_request handles its own
+	 * pool / publish / timeout / error paths; we just pass
+	 * through.  Mark ASYNC_SYNC so the async core runs the
+	 * resume route immediately with our return code in
+	 * $retcode -- no FD registration, no yield. */
+	rc = w_nats_request(msg, subject, payload, timeout_ms);
+	async_status = ASYNC_SYNC;
+	return rc;
 }
 
 #endif /* !TEST_SHIM */
