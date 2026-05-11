@@ -31,7 +31,13 @@ loadmodule "$ROOT/modules/sipmsgops/sipmsgops.so"
 
 loadmodule "$ROOT/modules/nats_tls_openssl/nats_tls_openssl.so"
 loadmodule "$ROOT/modules/nats_tls_wolfssl/nats_tls_wolfssl.so"
-loadmodule "$ROOT/modules/event_nats/event_nats.so"
+# event_nats deliberately NOT loaded -- this test exercises the
+# wrapper-side mutual-exclusion check, which lives in each
+# wrapper's mod_init.  mod_init fires after all module dlopens
+# complete and modparams are parsed.  Loading event_nats would
+# add a build dependency to every CI job that runs this smoke
+# without testing anything the wrapper-only path doesn't already
+# cover.
 
 route { sl_send_reply(200, "OK"); exit; }
 EOF
