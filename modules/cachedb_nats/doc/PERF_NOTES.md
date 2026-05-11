@@ -1021,30 +1021,45 @@ drop the poll interval to 100 us at proportional CPU cost; an
 SCM_RIGHTS-based wake mechanism remains a possible future
 alternative.
 
-### Eager subscribe in `child_init`
+### Subscription placement
 
-The per-worker inbox subscription's `natsConnection_Subscribe`
-call is invoked from a `nats_rpc_async_child_init()` hook
-called by `nats_consumer.c`'s `child_init()` rather than lazily
-from the first call to `w_nats_request_async`.  Rationale: the
-libnats subscription thread is spawned synchronously inside
-that call, and spawning a thread from inside a SIP worker that
-is already mid-script-execution races with the connection's
-locking discipline on aarch64 + libnats 3.x.  The lazy fallback
-inside `w_nats_request_async` is retained as a safety net for
-worker types that don't enter `child_init` with the pool
-ready.
+The persistent inbox subscription lives in the dedicated
+`nats_consumer` process, not in the SIP workers.  It is set up
+in `nats_consumer_proc_main()` once the pool is ready, before
+the consumer enters its main loop.  The historical per-worker
+subscription (with an eager `child_init` setup hook to dodge a
+libnats-thread-spawn race) was abandoned with the move to the
+consumer-process-routed transport — workers no longer touch
+libnats async-callback paths at all.
+
+### Bench harness — sipp scenario discipline
+
+`bench_async_request.sh` renders a sipp UAC scenario inline.
+Every `<recv>` block was originally marked `optional="true"`,
+which left sipp with no mandatory state to block on; placed
+calls stayed in `CurrentCall` forever and sipp's open-call
+ceiling (~150) capped throughput long before `-m N` was
+reached.  The scenario now has:
+
+  * `<send start_rtd="1">` — starts the response-time
+    counter so `ResponseTime1(C)` is non-zero;
+  * an optional `<recv>` per error response (504 / 503 / 500 /
+    405) branching to `<label id="failed"/>` so a failure path
+    still terminates the call cleanly and counts as Failed;
+  * one mandatory `<recv response="200" rtd="1"/>` on the
+    happy path — this is the state sipp blocks on.
+
+Any future scenario edit must preserve at least one mandatory
+recv or sipp will silently hang at its open-call ceiling.
+
+The stats parser pulls cumulative counters by their actual
+sipp column names (`SuccessfulCall(C)`, `FailedCall(C)`,
+`FailedUnexpectedMessage(C)`); the earlier `*_count` names were
+fictional and produced "n/a" everywhere.
 
 ## What's still on the table
 
 Not pursued in this series, listed for the next session:
-
-- **Async `nats_request` variant** — `nats_consumer/
-  nats_rpc.c` currently blocks the SIP worker on the RPC call.
-  Synchronous design is fine for non-request-route callers and
-  modest RPS; a deployment running `nats_request` in
-  `request_route` at 1MM-endpoint scale needs async.  Flagged in
-  the original perf review (item #8); not pursued.
 
 - **SHM allocator pressure at non-trivial bucket counts** — at
   20k AoRs / 256 buckets the residual p99 growth from 10k → 20k
