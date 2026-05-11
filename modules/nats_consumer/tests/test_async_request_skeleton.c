@@ -141,6 +141,19 @@ int main(void)
 			"setter widens nats_request entry to ALL_ROUTES on opt-in");
 	}
 
+	/* (3b) phase-2.5 UUIDv7 correlation: $nats_request_id pvar +
+	 * request_id_header modparam + default header name. */
+	{
+		ASSERT(strstr(src, "nats_request_id") != NULL,
+			"$nats_request_id pvar registered in mod_pvars[]");
+		ASSERT(strstr(src, "pv_get_nats_request_id") != NULL,
+			"pvar getter pv_get_nats_request_id wired");
+		ASSERT(strstr(src, "\"request_id_header\"") != NULL,
+			"request_id_header modparam declared");
+		ASSERT(strstr(src, "\"X-Request-Id\"") != NULL,
+			"default header name is X-Request-Id");
+	}
+
 	/* (4) nats_rpc.h declares w_nats_request_async with the acmd shape */
 	{
 		ASSERT(strstr(hdr, "int w_nats_request_async(") != NULL,
