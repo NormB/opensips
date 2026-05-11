@@ -50,7 +50,7 @@ on:
 
 env:
   WOLFSSL_VERSION: v5.6.4-stable
-  NATS_C_VERSION: v3.13.0
+  NATS_C_VERSION: v3.12.0
 
 jobs:
   openssl:
