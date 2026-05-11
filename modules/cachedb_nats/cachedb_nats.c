@@ -114,19 +114,18 @@ char *kv_bucket = "opensips";
 int kv_replicas = 3;
 int kv_history = 5;
 int kv_ttl = 0;
-/* Phase 2 — multi-instance index coordination knobs.
+/* Multi-instance index coordination knobs.
  *
  * index_resync_on_reconnect (default 0):
  *   On a NATS reconnect (epoch change), should the watcher rebuild
  *   the in-memory JSON index in full?  The rebuild costs O(N)
  *   round-trips against the bucket and on a 50k-AoR deployment
- *   stalls the watcher for ~5-10 s.  Phase 1.4's stale-entry
- *   self-heal in nats_cache_query covers correctness without the
- *   bulk rebuild, so the default is OFF: stale entries are evicted
- *   lazily on the first query that hits them.  Operators with
- *   high cross-instance churn or deep historical drift after
- *   prolonged outages may set this to 1 to force the bulk
- *   reconciliation.
+ *   stalls the watcher for ~5-10 s.  The stale-entry self-heal in
+ *   nats_cache_query covers correctness without the bulk rebuild,
+ *   so the default is OFF: stale entries are evicted lazily on the
+ *   first query that hits them.  Operators with high cross-instance
+ *   churn or deep historical drift after prolonged outages may set
+ *   this to 1 to force the bulk reconciliation.
  *
  * index_resync_interval_secs (default 0 = off):
  *   Optional periodic full rebuild on a timer.  Belt-and-braces

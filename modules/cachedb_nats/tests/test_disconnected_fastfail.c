@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-4b regression test: hot-path NATS calls (w_nats_request,
+ * Regression test: hot-path NATS calls (w_nats_request,
  * nats_evi_raise, w_nats_publish) must check nats_pool_is_connected()
  * before invoking the cnats blocking call.  The pool's nats_pool_get()
  * returns a live natsConnection pointer even when the underlying

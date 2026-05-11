@@ -1,11 +1,11 @@
 ####### usrloc <-> NATS cachedb e2e test cfg #####################
 #
-# Drives Phase 1.5 / Phase 2 integration tests for cachedb_nats acting
-# as the storage backend for usrloc in cluster_mode=full-sharing-cachedb.
+# Drives the integration test suite for cachedb_nats acting as the
+# storage backend for usrloc in cluster_mode=full-sharing-cachedb.
 #
 # Boots once per `run.sh` invocation; tested by many cases under cases/.
-# Two-instance Phase 2 cases re-render this template with @@INSTANCE@@-
-# specific ports and re-boot the binary as instance B.
+# Two-instance cases re-render this template with @@INSTANCE@@-specific
+# ports and re-boot the binary as instance B.
 #
 # usrloc full-sharing-cachedb mode requires clusterer to be loaded for
 # shtag / pinging coordination even when actual contact data lives in

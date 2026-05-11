@@ -29,7 +29,7 @@ For production cachedb_nats deployments backing usrloc in
    average chain length ≤ ~5: 4096 (default) at ≤ 20k AoRs,
    16384 at 100k, 65536 at 1MM.  Power-of-two-rounded at init.
 4. **Set `index_resync_on_reconnect=0`** (the new default since
-   commit 05a695f8c).  The Phase-1.4 self-heal makes the bulk
+   commit 05a695f8c).  The stale-entry self-heal makes the bulk
    rebuild redundant for correctness, and saves a 5-10 s stall on
    every brief broker hiccup.
 5. **Monitor `nats_cdb_stats`** counters via MI; alert on
@@ -37,8 +37,8 @@ For production cachedb_nats deployments backing usrloc in
    for a churn-rate signal across multi-instance deployments.
 6. **Optionally bump `nats_cas_retries`** above the default 10
    if you see a steady non-zero `cas_exhausted` rate under burst
-   contention; the Phase-1.3 jittered backoff bounds total per-
-   call latency at ~50 ms.
+   contention; the jittered CAS backoff bounds total per-call
+   latency at ~50 ms.
 
 ## Bench summary
 
@@ -61,18 +61,18 @@ CAS exhaustion was zero across every configuration.  Effective
 RPS was bench-harness-bound (sipsak round-trip + `udp_workers=2`),
 not opensips-bound, except at 20k where index pressure showed.
 
-## Correctness fixes (Phase 1.1–1.4 + 1.5)
+## Correctness fixes (initial wave)
 
-These commits (the first wave) were not perf work per se but
-unblocked usrloc-on-NATS at all:
+These commits were not perf work per se but unblocked usrloc-on-NATS
+at all:
 
-| SHA | Phase | What it fixed |
-|-----|-------|---------------|
-| `eaff7d0ec` | 1.1 | nested-dict + typed pairs + subkey + unset in `nats_cache_update` (was silently dropping every `CDB_DICT` pair) |
-| `a98198fe4` | 1.2 | upsert-on-first-update via `kvStore_CreateString` seed (every initial REGISTER had been failing) |
-| `536ee0b3f` | 1.3 | jittered CAS backoff + 4 SHM-atomic counters + `nats_cdb_stats` MI |
-| `bf45eeb1a` | 1.4 | self-healing stale-index eviction in `nats_cache_query` |
-| `f976ae18f` | 1.5 | KV-key encoding (`@` → `=40`) + sip_e2e harness + 4 integration cases |
+| SHA | What it fixed |
+|-----|---------------|
+| `eaff7d0ec` | nested-dict + typed pairs + subkey + unset in `nats_cache_update` (was silently dropping every `CDB_DICT` pair) |
+| `a98198fe4` | upsert-on-first-update via `kvStore_CreateString` seed (every initial REGISTER had been failing) |
+| `536ee0b3f` | jittered CAS backoff + 4 SHM-atomic counters + `nats_cdb_stats` MI |
+| `bf45eeb1a` | self-healing stale-index eviction in `nats_cache_query` |
+| `f976ae18f` | KV-key encoding (`@` → `=40`) + sip_e2e harness + 4 integration cases |
 
 Together these turned a spec-only "you can use NATS as your usrloc
 store" into a configuration that actually persists REGISTERs.
@@ -161,9 +161,9 @@ mapping.
 ## Tier-3 perf
 
 **`05a695f8c` — flip `index_resync_on_reconnect` default 1 →
-0.**  Phase 1.4's stale-entry self-heal makes the bulk rebuild
-redundant for correctness; the lazy convergence avoids a 5-10 s
-watcher stall on every brief broker hiccup.
+0.**  The stale-entry self-heal in `nats_cache_query` makes the
+bulk rebuild redundant for correctness; the lazy convergence
+avoids a 5-10 s watcher stall on every brief broker hiccup.
 
 **`5c6095a8f` — tunable shutdown drain timeout.**  `lib/nats/
 nats_pool_finalize` had a hardcoded 5 s `kvStore_DrainTimeout`.

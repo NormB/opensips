@@ -3,8 +3,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1.5 fix discovered during integration testing: NATS-KV
- * subject tokens reject characters outside [-./_=a-zA-Z0-9]. usrloc
+ * Regression test: NATS-KV subject tokens reject characters outside
+ * [-./_=a-zA-Z0-9]. usrloc
  * AoRs in cluster_mode=full-sharing-cachedb routinely contain '@'
  * (user@host SIP convention), causing kvStore_Get to return
  * "Invalid Argument" and every REGISTER to fail.

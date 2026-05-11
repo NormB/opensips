@@ -1,4 +1,4 @@
-# 140 — Phase 1.4 self-healing: when one instance deletes a key (via
+# 140 — Stale-entry self-healing: when one instance deletes a key (via
 # a soft-delete REGISTER expiry, or operator action) while another
 # instance still holds it in g_idx, the next query/update from the
 # stale instance must not silently drop the row. nats_cache_query
@@ -37,8 +37,8 @@ n kv del "$KV_BUCKET" "json_extern=40host" -f >/dev/null 2>&1
 # the route's save() implicitly performs an update via cdbf.update which
 # runs the kvStore_Get path for the existing-doc branch. If the index
 # entry persisted, cachedb_nats would silently emit a key for which
-# kvStore_Get returns NATS_NOT_FOUND. The Phase 1.4 fix evicts and
-# bumps index_miss_kv.
+# kvStore_Get returns NATS_NOT_FOUND. The stale-entry self-heal
+# evicts and bumps index_miss_kv.
 #
 # Equivalent surface: re-register the warmup user, which exercises the
 # index for routine traffic and indirectly forces a sweep over

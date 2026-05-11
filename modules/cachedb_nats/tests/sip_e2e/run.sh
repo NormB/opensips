@@ -3,8 +3,8 @@
 #
 # Boots ONE opensips instance against the user-supplied NATS broker,
 # sources lib/helpers.sh, and iterates cases/*.sh in lexical order.
-# Phase 2 cases that need a second instance start it on demand via
-# helpers and tear it down before returning.
+# Cases that need a second instance start it on demand via helpers and
+# tear it down before returning.
 #
 # Required tools: opensips (built), nats CLI, sipsak, nc.
 # Skips with autotools-style exit 77 on missing prerequisites.

@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1.1 fix: cachedb_nats_json.c::nats_cache_update silently dropped
+ * Regression test: cachedb_nats_json.c::nats_cache_update silently dropped
  * every non-string pair. usrloc's cdb_flush_urecord passes contacts as
  * CDB_DICT pairs, so contacts vanished. Top-level integers (e.g. aorhash)
  * vanished. CDB_NULL pairs vanished. Pair->subkey was ignored entirely,
