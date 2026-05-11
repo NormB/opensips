@@ -56,6 +56,7 @@
 #include "nats_rpc.h"
 #include "nats_rpc_async.h"
 #include "nats_rpc_slot.h"
+#include "nats_rpc_ipc.h"
 #include "nats_persist.h"
 
 static int  mod_init(void);
@@ -496,6 +497,15 @@ static int mod_init(void)
 		/* deliberately non-fatal */
 	}
 
+	/* Worker -> consumer-process publish queue for the phase-5
+	 * async transport.  Mirrors the ack IPC, eventfd inherited
+	 * via fork().  Non-fatal: if SHM is short, async will fall
+	 * back to the sync path. */
+	if (nats_rpc_ipc_init() < 0) {
+		LM_WARN("nats_consumer: rpc IPC init failed; async "
+			"nats_request will fall back to the sync path\n");
+	}
+
 	if (nats_consumer_hb_init() < 0) {
 		LM_ERR("nats_consumer: heartbeat SHM alloc failed\n");
 		nats_ack_ipc_destroy();
@@ -558,6 +568,7 @@ static void mod_destroy(void)
 	 * pending writer can race with the registry teardown below. */
 	nats_persist_destroy();
 	nats_ack_ipc_destroy();
+	nats_rpc_ipc_destroy();
 	nats_rpc_slot_destroy();
 	nats_consumer_hb_destroy();
 	nats_registry_destroy();
