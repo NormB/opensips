@@ -111,7 +111,10 @@ jobs:
           path: |
             /opt/wolfssl
             /opt/libnats-wolfssl
-          key: wolfssl-${{ env.WOLFSSL_VERSION }}-libnats-${{ env.NATS_C_VERSION }}
+          # Bump the cache-key suffix whenever the wolfSSL configure
+          # flags or the libnats patch change so old caches don't
+          # mask the new behaviour.
+          key: wolfssl-${{ env.WOLFSSL_VERSION }}-libnats-${{ env.NATS_C_VERSION }}-v2-crl
       - name: Build wolfSSL
         if: steps.cache-wolf.outputs.cache-hit != 'true'
         run: |
@@ -123,10 +126,15 @@ jobs:
             https://github.com/wolfSSL/wolfssl /tmp/wolfssl
           cd /tmp/wolfssl
           ./autogen.sh
+          # CRL/OCSP/SNI are not in --enable-opensslextra/openssall
+          # by default but libnats's TLS code references symbols
+          # from those (e.g. wolfSSL_X509_STORE_add_crl).  --enable-
+          # aesni is x86-only; CI is amd64 so keep it.
           ./configure --prefix=/opt/wolfssl \
                       --enable-opensslextra --enable-opensslall \
                       --enable-tls13 --enable-aesni \
-                      --enable-curve25519 --enable-ed25519
+                      --enable-curve25519 --enable-ed25519 \
+                      --enable-crl --enable-ocsp --enable-sni
           make -j"$(nproc)"
           sudo make install
       - name: Build wolfSSL-backed libnats
@@ -222,13 +230,24 @@ jobs:
         run: |
           set -e
           bash modules/nats_tls_openssl/tests/smoke_mismatch.sh 2>&1 | tee mismatch.log
-          # The wrapper-conflict run must NOT report a successful TLS
-          # backend load; it must surface the LM_ERR.
-          if grep -q "TLS backend = " mismatch.log; then
-            echo "FAIL: mod_init succeeded with both wrappers loaded"
+          # Each wrapper's mod_load runs in loadmodule order and
+          # successfully dlopens its own libnats variant -- so the
+          # log WILL contain "TLS backend = OpenSSL" from the first
+          # wrapper.  The conflict is caught at the second wrapper's
+          # mod_init via module_loaded() check, after both mod_loads
+          # have run.  The pass condition is:
+          #   1. the mutual-exclusion LM_ERR fires;
+          #   2. OpenSIPS exits non-zero at config-parse time
+          #      (which the smoke script captures by virtue of NOT
+          #      reaching the user-module diagnostic line).
+          grep -q "load exactly one TLS-backend wrapper module" mismatch.log
+          # The user-module's "NATS TLS backend = ..." diagnostic
+          # should NOT appear -- that runs in event_nats's mod_init,
+          # which is downstream of the rejection.
+          if grep -q "NATS TLS backend = " mismatch.log; then
+            echo "FAIL: event_nats mod_init ran despite the conflict"
             exit 1
           fi
-          grep -q "load exactly one TLS-backend wrapper module" mismatch.log
 
   none:
     name: System-default fallback

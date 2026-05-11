@@ -89,10 +89,14 @@ CMake.
 git clone --depth 1 --branch v5.6.4-stable https://github.com/wolfSSL/wolfssl
 cd wolfssl
 ./autogen.sh
+# --enable-crl/ocsp/sni are required for the symbol set libnats's
+# TLS code uses (e.g. wolfSSL_X509_STORE_add_crl).  --enable-aesni
+# is x86-only; drop it on aarch64.
 ./configure --prefix=/opt/wolfssl \
             --enable-opensslextra --enable-opensslall \
             --enable-tls13 --enable-aesni \
-            --enable-curve25519 --enable-ed25519
+            --enable-curve25519 --enable-ed25519 \
+            --enable-crl --enable-ocsp --enable-sni
 make -j && sudo make install
 cd ..
 
