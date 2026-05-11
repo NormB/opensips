@@ -1197,11 +1197,12 @@ timer_route[drain, 1] {
             </listitem>
             <listitem>
                 <para>
-                    <varname>$nats_request_id</varname> — UUIDv7
-                    correlation id of the most recent
+                    <varname>$nats_request_id</varname>
+                    (<emphasis role="bold">read/write</emphasis>)
+                    — UUIDv7 correlation id of the most recent
                     <function>nats_request</function> issued by
                     this worker.  Minted automatically by both the
-                    sync and async start paths at call time, then
+                    sync and async start paths at call time and
                     stashed in per-worker process memory so it is
                     readable
                     <emphasis role="bold">before</emphasis> the
@@ -1211,7 +1212,7 @@ timer_route[drain, 1] {
                     and inside the resume route.  Returns
                     <varname>NULL</varname> on workers that have
                     not yet issued any <function>nats_request</function>
-                    call.
+                    call and have no pending script assignment.
                 </para>
                 <para>
                     Same value is auto-staged as the
@@ -1222,6 +1223,44 @@ timer_route[drain, 1] {
                     the reply get end-to-end correlation across
                     logs and traces.  Set the modparam to an empty
                     string to mint but not stage.
+                </para>
+                <para>
+                    <emphasis role="bold">Caller-set override.</emphasis>
+                    Assigning to the pvar before a
+                    <function>nats_request</function> call swaps
+                    the auto-minted UUIDv7 for the script-supplied
+                    value on that one call (consume-once
+                    semantics): subsequent calls with no further
+                    assignment revert to minting fresh.  Useful
+                    for propagating an inbound trace id (e.g. from
+                    a SIP header, an upstream tracing context, or
+                    a callee-specific correlation token) into the
+                    NATS request so the entire trace shares one
+                    id end-to-end.
+                </para>
+                <para>
+                    Validation: 1..63 bytes, no CR/LF (would
+                    inject pseudo-headers into the NATS wire
+                    format).  Out-of-range assignments are
+                    rejected, an
+                    <emphasis>LM_WARN</emphasis> is logged
+                    explaining why, and the next call falls
+                    back to minting a fresh UUIDv7.
+                </para>
+                <para>
+                    <emphasis>Clearing the override.</emphasis>
+                    Both <varname>$nats_request_id = NULL</varname>
+                    and <varname>$nats_request_id = ""</varname>
+                    clear the pending override and the stash.
+                    The NULL form is handled by the pvar setter's
+                    early-return fast path; the empty-string
+                    form falls through to the same clear routine
+                    via the
+                    <emphasis>len &lt;= 0</emphasis> branch.
+                    After a clear, <varname>$nats_request_id</varname>
+                    reads NULL until the next
+                    <function>nats_request</function> mints
+                    fresh.
                 </para>
                 <example>
                     <title>Correlate an async RPC across log lines</title>
@@ -1236,6 +1275,25 @@ route[on_reply] {
     } else if ($retcode == 0) {
         xlog("L_WARN", "rpc id=$nats_request_id timed out\n");
     }
+}
+                    </programlisting>
+                </example>
+                <example>
+                    <title>Propagate an inbound SIP X-Trace-Id into the NATS RPC</title>
+                    <programlisting format="linespecific">
+route {
+    # Reuse the upstream caller's trace id (if present) so the
+    # NATS responder logs the same id the SIP gateway logged.
+    if ($hdr(X-Trace-Id) != null) {
+        $nats_request_id = $hdr(X-Trace-Id);
+    }
+    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
+}
+route[on_reply] {
+    # $nats_request_id still holds the id used on this call --
+    # the consume-once flag was cleared when nats_request fired,
+    # but the stash still reflects the value that went out.
+    xlog("L_INFO", "rpc trace=$nats_request_id reply=$nats_data()\n");
 }
                     </programlisting>
                 </example>

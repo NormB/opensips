@@ -83,11 +83,20 @@ int pv_parse_nats_hdr_name(pv_spec_p sp, const str *in);
 int pv_get_nats_hdr(struct sip_msg *msg, pv_param_t *param,
                     pv_value_t *res);
 
-/* $nats_request_id -- read the UUIDv7 of the most recent
- * nats_request issued by this worker.  Persists across an
- * async() yield so it is readable from the resume route. */
+/* $nats_request_id pvar getter + setter.
+ *
+ * GET returns the value used (or to-be-used) for the most recent
+ * nats_request issued by this worker; persists across an async()
+ * yield so it is readable from the resume route.
+ *
+ * SET stashes a script-supplied value for the next nats_request
+ * call to consume instead of minting a fresh UUIDv7 (consume-once
+ * semantics).  Rejects values that are over 63 bytes or contain
+ * CR/LF. */
 int pv_get_nats_request_id(struct sip_msg *msg, pv_param_t *param,
                            pv_value_t *res);
+int pv_set_nats_request_id(struct sip_msg *msg, pv_param_t *param,
+                           int op, pv_value_t *val);
 
 /* Stage a header onto the worker's outbound buffer iff no entry
  * with the same (case-insensitive) name is already staged.  Used

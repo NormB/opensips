@@ -128,7 +128,7 @@ persistence round-trips.
 | `$nats_pending`       | Broker-side pending estimate. |
 | `$nats_token`         | Opaque ack token. |
 | `$nats_hdr(Name)`     | Header read; case-insensitive name match. |
-| `$nats_request_id`    | UUIDv7 of the most recent `nats_request` issued by this worker.  Persists across `async()` yields so the resume route can read it back for log/trace correlation.  Auto-staged as the `X-Request-Id` outbound header by default (configurable via the `request_id_header` modparam). |
+| `$nats_request_id`    | **Read/write.** UUIDv7 of the most recent `nats_request` issued by this worker.  Auto-minted at call time; persists across `async()` yields so the resume route can read it for log/trace correlation.  Auto-staged as the `X-Request-Id` outbound header by default (configurable via `request_id_header`).  **Assigning** before a `nats_request` call substitutes a script-supplied value (consume-once) — useful to propagate an inbound `$hdr(X-Trace-Id)` end-to-end.  Both `$nats_request_id = NULL;` and `$nats_request_id = "";` clear the pending override and the stash.  Validation: 1..63 bytes, no CR/LF; rejected assignments log `LM_WARN` and the call falls back to minting fresh. |
 
 ## MI commands
 
