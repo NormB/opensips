@@ -73,9 +73,15 @@ jobs:
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
-      - name: Build OpenSIPS + NATS modules
+      - name: Build OpenSIPS core + NATS modules
         run: |
           set -e
+          # Full default build: produces the opensips binary AND the
+          # core modules (signaling, sl, tm, rr, maxfwd, sipmsgops)
+          # that the smoke loadmodule lines reference.
+          make -j"$(nproc)"
+          # Then the NATS-specific modules that aren't in the default
+          # `make` target.
           make modules=modules/nats_tls_openssl modules
           make modules=modules/nats_tls_wolfssl modules
           make modules=modules/event_nats modules
@@ -156,9 +162,13 @@ jobs:
           cmake -DNATS_BUILD_WITH_TLS=ON \
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
-      - name: Build OpenSIPS + NATS modules
+      - name: Build OpenSIPS core + NATS modules
         run: |
           set -e
+          # Full default build for opensips binary + core modules,
+          # then explicit NATS module builds.  See openssl job for
+          # the rationale.
+          make -j"$(nproc)"
           make modules=modules/nats_tls_openssl modules
           make modules=modules/nats_tls_wolfssl modules
           make modules=modules/event_nats modules
@@ -191,6 +201,10 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
           cd "$GITHUB_WORKSPACE"
+          # Full OpenSIPS build (opensips binary + core modules
+          # needed by the smoke loadmodule lines), then the two
+          # wrapper modules.
+          make -j"$(nproc)"
           make modules=modules/nats_tls_openssl modules
           make modules=modules/nats_tls_wolfssl modules
       - name: Verify OpenSIPS refuses both wrappers
@@ -225,6 +239,10 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
           cd "$GITHUB_WORKSPACE"
+          # Full OpenSIPS build (opensips binary + core modules)
+          # plus event_nats.  No nats_tls_* wrapper needed -- this
+          # job tests the no-wrapper fallback diagnostic.
+          make -j"$(nproc)"
           make modules=modules/event_nats modules
       - name: Verify fallback diagnostic fires
         run: |
