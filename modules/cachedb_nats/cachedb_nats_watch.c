@@ -34,14 +34,14 @@
  *   2. EVI events (E_NATS_KV_CHANGE) -- raised for every put/delete/purge
  *      so that OpenSIPS routing scripts can react to KV changes in real time.
  *
- * The thread follows a four-phase loop:
+ * The thread follows a four-step loop:
  *
- *   Phase 1 -- Wait for NATS connectivity (poll nats_pool_is_connected).
- *   Phase 2 -- Acquire a fresh KV handle and rebuild the search index
- *              from the full bucket contents (crash-recovery path).
- *   Phase 3 -- Create a kvWatcher on the bucket (with optional key pattern).
- *   Phase 4 -- Process live kvWatcher_Next() updates until disconnect or
- *              reconnect-epoch change, then loop back to Phase 1.
+ *   1. Wait for NATS connectivity (poll nats_pool_is_connected).
+ *   2. Acquire a fresh KV handle and rebuild the search index
+ *      from the full bucket contents (crash-recovery path).
+ *   3. Create a kvWatcher on the bucket (with optional key pattern).
+ *   4. Process live kvWatcher_Next() updates until disconnect or
+ *      reconnect-epoch change, then loop back to step 1.
  *
  * On disconnect, the watcher is stopped BEFORE nats.c tears down internal
  * subscription state, avoiding a use-after-free race.  On reconnect, the
@@ -305,16 +305,16 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
  * _watcher_thread_fn() -- Main watcher thread entry point.
  *
  * Runs for the lifetime of the OpenSIPS worker process.  Implements a
- * four-phase self-healing loop:
+ * four-step self-healing loop:
  *
- *   Phase 1: Block until NATS connectivity is established (500ms poll).
- *   Phase 2: Obtain a fresh KV handle from the pool and rebuild the
- *            JSON full-text search index from the complete bucket state.
- *   Phase 3: Create a kvWatcher with the configured key pattern (or
- *            watch all keys if no pattern is set).
- *   Phase 4: Process live updates from kvWatcher_Next() in a tight loop.
- *            On reconnect-epoch change or disconnect, break out and
- *            restart from Phase 1 to get a fresh KV handle and index.
+ *   1. Block until NATS connectivity is established (500ms poll).
+ *   2. Obtain a fresh KV handle from the pool and rebuild the
+ *      JSON full-text search index from the complete bucket state.
+ *   3. Create a kvWatcher with the configured key pattern (or
+ *      watch all keys if no pattern is set).
+ *   4. Process live updates from kvWatcher_Next() in a tight loop.
+ *      On reconnect-epoch change or disconnect, break out and
+ *      restart from step 1 to get a fresh KV handle and index.
  *
  * Cleanup between iterations destroys the stale kvWatcher.  During
  * disconnect, kvWatcher_Destroy is skipped to avoid double-free races
@@ -337,7 +337,7 @@ static void *_watcher_thread_fn(void *arg)
 /* ------------------------------------------------------------------ */
 
 /*
- * The four-phase loop body factored out so both the legacy rank-1
+ * The self-healing loop body factored out so both the legacy rank-1
  * pthread (_watcher_thread_fn) and the dedicated-process main
  * (nats_watcher_proc_main) call the same code.  Loops while
  * _watcher_running is non-zero; in the dedicated-process variant
@@ -358,7 +358,7 @@ static void _watcher_loop(void)
 
 	while (atomic_load(&_watcher_running)) {
 
-		/* ---- Phase 1: wait for NATS connection ----
+		/* ---- Wait for NATS connection ----
 		 * Poll every 500ms until the pool reports connectivity.
 		 * This covers both initial startup and post-disconnect recovery. */
 		while (atomic_load(&_watcher_running) && !nats_pool_is_connected()) {
@@ -369,7 +369,7 @@ static void _watcher_loop(void)
 
 		last_epoch = nats_pool_get_reconnect_epoch();
 
-		/* ---- Phase 2: get fresh KV handle + rebuild search index ----
+		/* ---- Get fresh KV handle + rebuild search index ----
 		 * After every reconnect the old KV handle is stale.  We obtain
 		 * a new one from the pool and do a full index rebuild so the
 		 * search index is consistent with the actual bucket state. */
@@ -382,11 +382,11 @@ static void _watcher_loop(void)
 		}
 
 		/* index_resync_on_reconnect (default 1): rebuild the JSON
-		 * index in full from KV. Phase 1.4 added stale-entry self-
-		 * heal in the query path, so operators may opt out of the
-		 * O(N) rebuild for hot-reconnect topologies and accept a
-		 * brief window where queries may evict a few stale entries
-		 * before the index converges. */
+		 * index in full from KV. The query path has stale-entry
+		 * self-heal, so operators may opt out of the O(N) rebuild
+		 * for hot-reconnect topologies and accept a brief window
+		 * where queries may evict a few stale entries before the
+		 * index converges. */
 		{
 			if (index_resync_on_reconnect)
 				nats_json_index_rebuild(kv, fts_json_prefix);
@@ -396,10 +396,10 @@ static void _watcher_loop(void)
 					"deferring to lazy self-heal\n");
 		}
 
-		/* ---- Phase 3: create kvWatcher ----
+		/* ---- Create kvWatcher ----
 		 * Set UpdatesOnly so we only receive mutations after the
-		 * current revision (the full state was already loaded in
-		 * Phase 2 via index_rebuild). */
+		 * current revision (the full state was already loaded via
+		 * the index_rebuild above). */
 		kvWatchOptions_Init(&opts);
 		opts.UpdatesOnly = true;
 
@@ -416,17 +416,17 @@ static void _watcher_loop(void)
 		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d)\n",
 			_num_patterns, last_epoch);
 
-		/* ---- Phase 4: event loop ----
+		/* ---- Event loop ----
 		 * Process live KV updates until a reconnect or disconnect
 		 * invalidates the current watcher and KV handle. */
 		while (atomic_load(&_watcher_running)) {
 			/* Check for reconnect -- epoch changed means connection
 			 * was lost and restored; our KV handle and watcher are
-			 * stale. Break out to Phase 1 for a full rebuild. */
+			 * stale. Break out for a full rebuild. */
 			if (nats_pool_get_reconnect_epoch() != last_epoch) {
 				/* Memory barrier: ensure subsequent KV operations
-				 * (Phase 2 rebuild) see the new connection state
-				 * established by the reconnect callback thread. */
+				 * (the rebuild path above) see the new connection
+				 * state established by the reconnect callback thread. */
 				atomic_thread_fence(memory_order_acquire);
 				LM_INFO("watcher: reconnect detected (epoch %d->%d), "
 					"restarting\n", last_epoch,
@@ -650,7 +650,7 @@ void nats_watch_stop(void)
  * runs in its own process: it calls nats_pool_get() to bring up the
  * per-process NATS connection (nats_pool_register having seeded the
  * shared config in mod_init pre-fork), validates the KV bucket, and
- * enters the same self-healing four-phase loop.  Index updates are
+ * enters the same self-healing loop.  Index updates are
  * written to the SHM-backed g_idx that every SIP worker also maps;
  * the per-shard locks added in commit 43ceca02b serialise the
  * cross-process writes safely without any new synchronisation.
@@ -718,8 +718,8 @@ void nats_watcher_proc_main(int rank)
 	}
 
 	/* Validate the KV bucket exists.  The watcher loop fetches its
-	 * own KV handle from the pool inside Phase 2 anyway, but we keep
-	 * this gate here for symmetry with the rank-1 child_init flow:
+	 * own KV handle from the pool on each iteration anyway, but we
+	 * keep this gate here for symmetry with the rank-1 child_init flow:
 	 * if the bucket is missing or the broker is unreachable at
 	 * startup, fail loudly rather than silently entering the
 	 * reconnect loop. */
@@ -728,8 +728,8 @@ void nats_watcher_proc_main(int rank)
 	if (!kv) {
 		LM_ERR("watcher proc: failed to open KV bucket '%s'\n",
 			kv_bucket);
-		/* fall through -- the loop's Phase 1 reconnect handling will
-		 * keep trying so a transient broker outage doesn't kill the
+		/* fall through -- the loop's reconnect-wait step will keep
+		 * trying so a transient broker outage doesn't kill the
 		 * process. */
 	}
 
@@ -758,7 +758,7 @@ void nats_watcher_proc_main(int rank)
 		LM_INFO("watcher proc: watching %d pattern(s)\n", _num_patterns);
 	} else {
 		LM_INFO("watcher proc: no kv_watch patterns configured; "
-			"loop will block on phase 3 until at least one is set\n");
+			"loop will block on watcher creation until at least one is set\n");
 	}
 
 	/* Run forever.  SIGTERM from main on shutdown will terminate the

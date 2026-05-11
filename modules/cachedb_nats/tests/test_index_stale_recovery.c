@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1.4 regression test: nats_cache_query at the result-fetch
+ * Regression test: nats_cache_query at the result-fetch
  * loop (cachedb_nats_json.c around the kvStore_Get call inside the
  * "Fetch full JSON documents" stage) used to silently `continue` on
  * any non-NATS_OK status from kvStore_Get. In a multi-instance

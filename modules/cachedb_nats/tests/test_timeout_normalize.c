@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-4a regression test: w_nats_request must normalize the
+ * Regression test: w_nats_request must normalize the
  * caller-supplied timeout against a configurable default and clamp
  * it into a sane range.
  *

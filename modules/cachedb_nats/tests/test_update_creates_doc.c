@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1.2 fix: nats_cache_update treated NATS_NOT_FOUND from kvStore_Get
+ * Regression test: nats_cache_update treated NATS_NOT_FOUND from kvStore_Get
  * as a fatal error, so the very first cdbf.update() against a fresh AoR
  * key returned -1 and the contact never landed in NATS. usrloc relies on
  * cdbf.update having upsert semantics in cluster_mode=full-sharing-cachedb,

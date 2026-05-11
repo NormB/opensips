@@ -3,14 +3,13 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 2 wiring test: cachedb_nats exposes two operator knobs for
- * index resync coordination across multi-instance / multi-DC
- * deployments.
+ * Wiring test: cachedb_nats exposes two operator knobs for index
+ * resync coordination across multi-instance / multi-DC deployments.
  *
  *   index_resync_on_reconnect (int, default 1)
  *     Controls whether the KV-watcher thread issues a full
- *     nats_json_index_rebuild() after each reconnect. With Phase
- *     1.4 self-healing on stale-index hits, operators may prefer
+ *     nats_json_index_rebuild() after each reconnect. With
+ *     stale-entry self-healing on index hits, operators may prefer
  *     to skip the O(N) rebuild and accept slight staleness.
  *
  *   index_resync_interval_secs (int, default 0 = off)

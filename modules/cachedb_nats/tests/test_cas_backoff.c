@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase 1.3 fix: nats_cache_update and nats_cache_add/sub used a
+ * Regression test: nats_cache_update and nats_cache_add/sub used a
  * hot-spin CAS retry loop with no backoff. On heavy contention this
  * pegged the worker on the broker and let exhaustion silently drop
  * the write. Replace with bounded jittered exponential backoff.

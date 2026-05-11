@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-3c regression test: w_nats_request() must enforce a maximum
+ * Regression test: w_nats_request() must enforce a maximum
  * reply size before pkg_malloc'ing the response buffer.
  *
  * The bug: reply_len = natsMsg_GetDataLength(reply) is peer-controlled

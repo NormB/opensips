@@ -3,7 +3,7 @@
 # write path.  Drives N concurrent REGISTERs at a configurable RPS,
 # captures end-to-end latency percentiles, the CAS-retry / CAS-
 # exhausted deltas reported via the nats_cdb_stats MI, and the NATS
-# stream growth.  Intended for Phase 3 topology decisions:
+# stream growth.  Intended for topology decisions:
 #   - single-instance baseline
 #   - two-instance (run with INSTANCES=2)
 #   - cross-DC RTT (set NATS_URL to a remote broker; tc qdisc on the

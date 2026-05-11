@@ -828,7 +828,7 @@ modparam("cachedb_nats", "kv_watch", "json_>")
 	<para>
 		Whether the KV watcher rebuilds the in-memory search
 		index in full after each reconnect to NATS.  The
-		Phase 1.4 stale-entry self-heal in
+		stale-entry self-heal in
 		<function>nats_cache_query</function> evicts stale
 		entries lazily on the first query that hits them, so
 		the default is off: a brief broker hiccup no longer
@@ -1532,17 +1532,17 @@ if ($retcode == 1) {
 		during failover.
 	</para>
 	<para>
-		The watcher follows a four-phase loop:
+		The watcher runs a four-step loop:
 	</para>
 	<itemizedlist>
 		<listitem><para>
-			<emphasis role="bold">Phase 1 — Wait for connectivity:</emphasis>
+			<emphasis role="bold">Wait for connectivity:</emphasis>
 			polls <function>nats_pool_is_connected</function> until the NATS
 			connection is established.  Sleeps briefly between polls to avoid
 			busy-waiting.
 		</para></listitem>
 		<listitem><para>
-			<emphasis role="bold">Phase 2 — Rebuild index:</emphasis>
+			<emphasis role="bold">Rebuild index:</emphasis>
 			acquires a fresh KV handle from the pool and calls
 			<function>nats_json_index_rebuild</function> to repopulate the
 			search index from the current bucket contents.  This is the
@@ -1550,12 +1550,12 @@ if ($retcode == 1) {
 			any disconnect.
 		</para></listitem>
 		<listitem><para>
-			<emphasis role="bold">Phase 3 — Create watcher:</emphasis>
+			<emphasis role="bold">Create watcher:</emphasis>
 			calls <function>kvStore_WatchMulti</function> with the configured
 			key patterns to create a <emphasis>kvWatcher</emphasis> handle.
 		</para></listitem>
 		<listitem><para>
-			<emphasis role="bold">Phase 4 — Process updates:</emphasis>
+			<emphasis role="bold">Process updates:</emphasis>
 			calls <function>kvWatcher_Next</function> in a loop.  For each
 			received <emphasis>kvEntry</emphasis> the watcher:
 			<itemizedlist>
@@ -1572,7 +1572,7 @@ if ($retcode == 1) {
 				</para></listitem>
 			</itemizedlist>
 			If a reconnect epoch change is detected the loop exits back to
-			Phase 1.
+			the connectivity-wait step.
 		</para></listitem>
 	</itemizedlist>
 	<para>

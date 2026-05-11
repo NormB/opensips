@@ -76,7 +76,7 @@
 					Recommended only when the inter-DC RTT is
 					&lt; 50 ms and concurrent same-AoR writes are
 					rare.  Every <function>kvStore_UpdateString</function>
-					CAS pays full inter-DC RTT.  The Phase 1.3
+					CAS pays full inter-DC RTT.  The jittered
 					backoff bounds the worst-case at ~50 ms across
 					the default <varname>nats_cas_retries = 10</varname>
 					budget; raise the budget if cross-DC
@@ -393,7 +393,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 			The legacy mode <varname>full-sharing-cachedb-cluster</varname>
 			additionally relies on clusterer to broadcast cachedb
 			invalidation events.  With cachedb_nats, the KV watcher
-			thread + Phase 1.4 self-heal subsume that role.  To
+			thread + stale-entry self-heal subsume that role.  To
 			migrate:
 			<orderedlist>
 				<listitem><para>
@@ -437,11 +437,11 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 				(int, default 0)</term>
 				<listitem><para>
 					Whether the KV watcher rebuilds the in-memory
-					index in full after each reconnect.  Phase 1.4
-					self-heal evicts stale entries lazily on the
-					first query that hits them, so the default is
-					off: a single brief broker hiccup no longer
-					stalls the watcher for an O(N) bulk rebuild.
+					index in full after each reconnect.  Stale-entry
+					self-heal in the query path evicts stale entries
+					lazily on the first query that hits them, so the
+					default is off: a single brief broker hiccup no
+					longer stalls the watcher for an O(N) bulk rebuild.
 					Set to 1 in deployments with high cross-
 					instance churn or after long outages where the
 					bulk reconciliation is preferable to lazy
@@ -465,7 +465,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 					CAS budget per
 					<function>nats_cache_update</function> /
 					<function>nats_cache_counter_op</function>
-					call.  Combined with the Phase 1.3 jittered
+					call.  Combined with the jittered
 					backoff (50&nbsp;us base, 5&nbsp;ms cap),
 					the worst-case per-call latency is
 					~50&nbsp;ms.  Raise only if

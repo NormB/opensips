@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Phase-3b regression test: cachedb_nats_json.c::_json_set_field had
+ * Regression test: cachedb_nats_json.c::_json_set_field had
  * a JSON-injection bug -- field/value bytes were spliced into the
  * output document with hand-coded `"` quoting and no escaping.  An
  * input value containing `"` would close the value early and let the
