@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 7495fc2a..59b967e5 100644
+index 7495fc2..6b4b056 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -34,6 +34,7 @@ option(NATS_UPDATE_DOC "Update the doc template file" OFF)
@@ -10,7 +10,7 @@ index 7495fc2a..59b967e5 100644
  option(NATS_BUILD_TLS_FORCE_HOST_VERIFY "Forces hostname verification" ON)
  option(NATS_BUILD_USE_SODIUM "Build using libsodium library" OFF)
  option(NATS_BUILD_EXAMPLES "Build examples" ON)
-@@ -71,10 +72,59 @@ endif(NATS_COVERAGE)
+@@ -71,10 +72,64 @@ endif(NATS_COVERAGE)
  
  find_package(Threads REQUIRED)
  
@@ -61,6 +61,11 @@ index 7495fc2a..59b967e5 100644
 +            NATS_WOLFSSL_DIR
 +    )
 +    add_definitions(-DNATS_HAS_WOLFSSL)
++    # BEFORE on this top-level call propagates to every subdir
++    # (src/, test/, examples/, etc.) so any file that includes
++    # natsp.h finds wolfssl/options.h regardless of which
++    # subdir's targets it's part of.
++    include_directories(BEFORE ${NATS_WOLFSSL_INCLUDE_DIRS})
 +  else()
 +    set(NATS_WOLFSSL_DIR "" CACHE STRING
 +            "An optional hint to a directory for finding `libwolfssl`"
@@ -72,7 +77,7 @@ index 7495fc2a..59b967e5 100644
  
  set(LIBUV_DIR "" CACHE PATH "Libuv install directory")
  set(LIBEVENT_DIR "" CACHE PATH "Libevent install directory")
-@@ -255,13 +305,13 @@ if(UNIX)
+@@ -255,13 +310,13 @@ if(UNIX)
  endif(UNIX)
  add_definitions(-D${NATS_OS})
  add_definitions(-D_REENTRANT)
@@ -89,10 +94,10 @@ index 7495fc2a..59b967e5 100644
  
  #------------
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 397c470f..9823a159 100644
+index 397c470..3989586 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -5,10 +5,16 @@ include_directories(include)
+@@ -5,10 +5,10 @@ include_directories(include)
  include_directories(${NATS_PLATFORM_INCLUDE})
  include_directories(glib)
  
@@ -102,16 +107,10 @@ index 397c470f..9823a159 100644
    set(NATS_OPENSSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
 -endif(NATS_BUILD_WITH_TLS)
 +endif(NATS_BUILD_WITH_TLS AND NOT NATS_BUILD_WITH_WOLFSSL)
-+
-+if(NATS_BUILD_WITH_WOLFSSL)
-+  # BEFORE: ensure wolfSSL's openssl-compat shim wins over the
-+  # system <openssl/ssl.h>.
-+  include_directories(BEFORE ${NATS_WOLFSSL_INCLUDE_DIRS})
-+endif(NATS_BUILD_WITH_WOLFSSL)
  
  if(NATS_BUILD_STREAMING)
    include_directories(${NATS_PROTOBUF_INCLUDE_DIRS})
-@@ -37,7 +43,7 @@ endif(NATS_BUILD_STREAMING)
+@@ -37,7 +37,7 @@ endif(NATS_BUILD_STREAMING)
  # --------------------------------------
  if(NATS_BUILD_LIB_SHARED)
    add_library(nats SHARED ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
@@ -120,7 +119,7 @@ index 397c470f..9823a159 100644
    target_link_libraries(nats PRIVATE ${NATS_EXTRA_LIB} ${NATS_PROTOBUF_LIBRARIES} ${NATS_SODIUM_LIBRARIES})
    set_target_properties(nats PROPERTIES
      VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
-@@ -46,7 +52,7 @@ endif(NATS_BUILD_LIB_SHARED)
+@@ -46,7 +46,7 @@ endif(NATS_BUILD_LIB_SHARED)
  
  if(NATS_BUILD_LIB_STATIC)
    add_library(nats_static STATIC ${SOURCES} ${GLIB_SOURCES} ${PS_SOURCES} ${S_SOURCES})
@@ -130,7 +129,7 @@ index 397c470f..9823a159 100644
      VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
      SOVERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR})
 diff --git a/src/conn.c b/src/conn.c
-index d7ba4501..81b16d71 100644
+index d7ba450..81b16d7 100644
 --- a/src/conn.c
 +++ b/src/conn.c
 @@ -44,6 +44,10 @@
@@ -162,7 +161,7 @@ index d7ba4501..81b16d71 100644
              if (s == NATS_OK)
              {
 diff --git a/src/natsp.h b/src/natsp.h
-index edd5da2b..6ab69eb1 100644
+index edd5da2..6ab69eb 100644
 --- a/src/natsp.h
 +++ b/src/natsp.h
 @@ -20,6 +20,16 @@

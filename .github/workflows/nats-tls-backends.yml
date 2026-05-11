@@ -155,10 +155,18 @@ jobs:
           # CMake logic; NATS_WOLFSSL_DIR points at our wolfssl
           # install.  NATS_BUILD_WITH_TLS is the legacy OpenSSL
           # gate and must be OFF in wolfssl mode.
+          # NATS_BUILD_EXAMPLES=OFF and BUILD_TESTING=OFF: libnats's
+          # test/ and examples/ source uses wolfSSL APIs gated by
+          # SESSION_CERTS (e.g. wolfSSL_get_peer_cert_chain) that
+          # aren't part of --enable-opensslextra.  Building just
+          # the library is sufficient for the wrapper module to
+          # dlopen at runtime.
           cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
                 -DCMAKE_INSTALL_LIBDIR=lib \
                 -DNATS_BUILD_WITH_TLS=OFF \
                 -DNATS_BUILD_WITH_WOLFSSL=ON \
+                -DNATS_BUILD_EXAMPLES=OFF \
+                -DBUILD_TESTING=OFF \
                 -DNATS_WOLFSSL_DIR=/opt/wolfssl \
                 ..
           make -j"$(nproc)"
@@ -219,6 +227,15 @@ jobs:
           cmake -DNATS_BUILD_WITH_TLS=ON \
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
+          # The mismatch job tests mutual-exclusion logic only --
+          # not wolfSSL correctness.  Stub the wolfssl-libnats path
+          # with a symlink to the openssl-built libnats so the
+          # wrapper's mod_load dlopen succeeds, letting mod_init
+          # reach the module_loaded() check.  A real wolfssl libnats
+          # build is unnecessary CI overhead here.
+          sudo mkdir -p /opt/libnats-wolfssl/lib
+          sudo ln -sf /usr/local/lib/libnats.so.3.12 \
+              /opt/libnats-wolfssl/lib/libnats.so.3.12
           cd "$GITHUB_WORKSPACE"
           make -j"$(nproc)" opensips
           for m in signaling sl tm rr maxfwd sipmsgops; do
