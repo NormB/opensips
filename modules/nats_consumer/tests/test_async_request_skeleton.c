@@ -97,7 +97,7 @@ int main(void)
 
 	/* (2) cmds[] sync entry still carries the restrictive mask by
 	 * default.  The table itself is NO LONGER const after option-B
-	 * (the allow_sync_in_request_route setter mutates flags in
+	 * (the allow_sync_anywhere setter mutates flags in
 	 * place); however the literal route mask in source must still
 	 * exclude REQUEST_ROUTE / FAILURE_ROUTE / BRANCH_ROUTE so that
 	 * the default behaviour is safe. */
@@ -128,11 +128,11 @@ int main(void)
 		}
 	}
 
-	/* (3) option-B opt-in: allow_sync_in_request_route modparam +
+	/* (3) option-B opt-in: allow_sync_anywhere modparam +
 	 * setter that widens cmds[].flags to ALL_ROUTES. */
 	{
-		ASSERT(strstr(src, "allow_sync_in_request_route") != NULL,
-			"params[] exposes allow_sync_in_request_route");
+		ASSERT(strstr(src, "allow_sync_anywhere") != NULL,
+			"params[] exposes allow_sync_anywhere");
 		ASSERT(strstr(src, "nats_request_allow_sync_setter") != NULL,
 			"setter callback nats_request_allow_sync_setter present");
 		ASSERT(strstr(src, "USE_FUNC_PARAM") != NULL,
