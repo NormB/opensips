@@ -32,7 +32,8 @@ of which NATS modules are loaded.
 
 - `event_nats` (optional, but typically loaded for publishing and for the
   shared transport modparams)
-- `tls_openssl` (only when connecting to NATS over TLS)
+- `tls_openssl` **or** `tls_wolfssl` (only when SIP-side TLS is also in use; independent of NATS-side TLS choice)
+- **For NATS-side TLS backend selection (optional, recommended):** load exactly one of `nats_tls_openssl.so` or `nats_tls_wolfssl.so` before this module.  See `modules/nats_tls_openssl/README.md` / `modules/nats_tls_wolfssl/README.md`.
 - `nats.c` 3.13+ at `libnats.so`
 
 ## Parameters
@@ -51,7 +52,7 @@ Long paths split across `<br>` breaks to avoid stretching the column.
 | `allow_sync_anywhere` | int  | `0`                | Opt-in switch that widens the route mask of the sync `nats_request` so it may be called from `REQUEST_ROUTE` / `FAILURE_ROUTE` / `BRANCH_ROUTE` / `ERROR_ROUTE`.  Default 0 keeps the parser rejecting bare `nats_request(...)` from those contexts.  Each route has its own blocking blast radius (REQUEST/BRANCH/ERROR block one SIP worker; FAILURE via negative-reply trigger blocks one SIP worker; FAILURE via `fr_timer`/`fr_inv_timer` expiry blocks the single-threaded **timer ticker** process, which queues every other module's tick callback — significantly worse).  The setter emits a multi-line `LM_WARN` at config-parse time detailing each route's consequences, and the DocBook admin guide carries the verified source-path references; read both before opting in.  The recommended pattern from any reactor-backed route is `async(nats_request(...), rt)`, which yields on an eventfd and is accepted regardless of this modparam — async works from `request_route` / `branch_route` / `error_route` / `timer_route` / `event_route` / `onreply_route` and reply-triggered `failure_route`.  The one remaining gap is `fr_timer`-triggered `failure_route`, which runs on the reactor-less timer ticker; lifting that requires an upstream TM change to dispatch fr_timer expiry through a Timer-handler process. |
 
 NATS transport parameters (`nats_url`, `tls_*`, `reconnect_wait`,
-`max_reconnect`, `skip_openssl_init`) are set on the `event_nats` module;
+`max_reconnect`, `skip_tls_init`) are set on the `event_nats` module;
 `nats_consumer` reads the same connection pool via `lib/nats`.
 
 ## Bind configuration
