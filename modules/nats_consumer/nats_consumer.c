@@ -466,6 +466,10 @@ static int mod_init(void)
 {
 	LM_INFO("nats_consumer %s initializing\n", NATS_CONSUMER_VERSION);
 
+	/* Surface which libnats TLS backend the operator's loadmodule
+	 * choices resolved to.  Pure observability. */
+	nats_pool_log_tls_backend("nats_consumer");
+
 	if (nats_registry_init(NATS_CONSUMER_REGISTRY_BUCKETS) < 0) {
 		LM_ERR("nats_consumer: registry init failed\n");
 		return -1;

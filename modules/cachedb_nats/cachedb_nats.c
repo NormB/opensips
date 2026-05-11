@@ -444,6 +444,10 @@ static int mod_init(void)
 
 	LM_NOTICE("initializing module cachedb_nats ...\n");
 
+	/* Surface which libnats TLS backend the operator's loadmodule
+	 * choices resolved to.  Pure observability. */
+	nats_pool_log_tls_backend("cachedb_nats");
+
 	/*
 	 * Register with the NATS connection pool.
 	 *
