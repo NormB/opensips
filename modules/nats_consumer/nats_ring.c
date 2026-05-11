@@ -331,7 +331,7 @@ int nats_ring_push(nats_ring_t *r,
 		 * (typical N <= num workers, so the thundering-herd cost is
 		 * bounded).  Like the eventfd, we only signal on the empty
 		 * -> non-empty edge to avoid waking on every push. */
-		__atomic_fetch_add(&r->wake_seq, 1, __ATOMIC_RELEASE);
+		atomic_fetch_add_explicit(&r->wake_seq, 1, memory_order_release);
 		syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, INT_MAX,
 			NULL, NULL, 0);
 	}
@@ -425,7 +425,7 @@ int nats_ring_wait(nats_ring_t *r, int timeout_ms)
 	/* Sample the wake counter BEFORE checking emptiness; if a producer
 	 * fires between our depth-check and the FUTEX_WAIT, the counter
 	 * will have advanced and the syscall returns EAGAIN immediately. */
-	seq = __atomic_load_n(&r->wake_seq, __ATOMIC_ACQUIRE);
+	seq = atomic_load_explicit(&r->wake_seq, memory_order_acquire);
 	h = atomic_load_explicit(&r->head, memory_order_acquire);
 	t = atomic_load_explicit(&r->tail, memory_order_relaxed);
 	if (h > t) return 0;   /* not empty, no wait needed */
