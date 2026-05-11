@@ -1,0 +1,233 @@
+# Dual-TLS-backend matrix CI for the NATS modules.
+#
+# Verifies that the preload-pattern wrapper modules
+# (nats_tls_openssl / nats_tls_wolfssl) build, load, and dispatch
+# correctly against:
+#
+#   - a system OpenSSL-backed libnats install   (openssl job)
+#   - a sidecar wolfSSL-backed libnats build    (wolfssl job)
+#
+# Plus two negative-path jobs that exist to guard the operator UX:
+#
+#   - mismatch : both wrappers loaded => mod_init expected to refuse
+#   - none     : no wrapper loaded   => user modules fall back to
+#                system libnats and log the "system default" line
+#
+# Kept separate from Main CI so a wolfSSL-build hiccup (e.g.
+# transient GitHub timeout pulling the wolfSSL repo) doesn't gate
+# unrelated PRs.
+#
+# Security note: every `run:` block here uses only literal strings
+# and `env:`-set version pins.  No `${{ github.event.* }}` values
+# from PRs/issues/commits are interpolated into shell commands,
+# which is the standard workflow-injection vector.
+
+name: NATS TLS Backends
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    paths:
+      - 'lib/nats/**'
+      - 'modules/event_nats/**'
+      - 'modules/cachedb_nats/**'
+      - 'modules/nats_consumer/**'
+      - 'modules/nats_tls_openssl/**'
+      - 'modules/nats_tls_wolfssl/**'
+      - '.github/workflows/nats-tls-backends.yml'
+  pull_request:
+    paths:
+      - 'lib/nats/**'
+      - 'modules/event_nats/**'
+      - 'modules/cachedb_nats/**'
+      - 'modules/nats_consumer/**'
+      - 'modules/nats_tls_openssl/**'
+      - 'modules/nats_tls_wolfssl/**'
+      - '.github/workflows/nats-tls-backends.yml'
+
+env:
+  WOLFSSL_VERSION: v5.6.4-stable
+  NATS_C_VERSION: v3.13.0
+
+jobs:
+  openssl:
+    name: OpenSSL backend smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps + build libnats
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libpcre3-dev libxml2-dev sipsak cmake
+          git clone --depth 1 --branch "$NATS_C_VERSION" \
+            https://github.com/nats-io/nats.c /tmp/nats.c
+          cd /tmp/nats.c && mkdir build && cd build
+          cmake -DNATS_BUILD_WITH_TLS=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local ..
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+      - name: Build OpenSIPS + NATS modules
+        run: |
+          set -e
+          make modules=modules/nats_tls_openssl modules
+          make modules=modules/nats_tls_wolfssl modules
+          make modules=modules/event_nats modules
+          make modules=modules/cachedb_nats modules
+          make modules=modules/nats_consumer modules
+      - name: Verify openssl wrapper loads + emits backend line
+        run: |
+          set -e
+          bash modules/nats_tls_openssl/tests/smoke.sh 2>&1 | tee smoke.log
+          grep -q "TLS backend = OpenSSL" smoke.log
+          grep -q "NATS TLS backend = openssl" smoke.log
+
+  wolfssl:
+    name: wolfSSL backend smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache wolfSSL + wolfSSL-backed libnats
+        id: cache-wolf
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/wolfssl
+            /opt/libnats-wolfssl
+          key: wolfssl-${{ env.WOLFSSL_VERSION }}-libnats-${{ env.NATS_C_VERSION }}
+      - name: Build wolfSSL
+        if: steps.cache-wolf.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf libtool pkg-config
+          git clone --depth 1 --branch "$WOLFSSL_VERSION" \
+            https://github.com/wolfSSL/wolfssl /tmp/wolfssl
+          cd /tmp/wolfssl
+          ./autogen.sh
+          ./configure --prefix=/opt/wolfssl \
+                      --enable-opensslextra --enable-opensslall \
+                      --enable-tls13 --enable-aesni \
+                      --enable-curve25519 --enable-ed25519
+          make -j"$(nproc)"
+          sudo make install
+      - name: Build wolfSSL-backed libnats
+        if: steps.cache-wolf.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential
+          git clone --depth 1 --branch "$NATS_C_VERSION" \
+            https://github.com/nats-io/nats.c /tmp/nats.c-wolf
+          cd /tmp/nats.c-wolf && mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX=/opt/libnats-wolfssl \
+                -DCMAKE_INSTALL_LIBDIR=lib \
+                -DNATS_BUILD_WITH_TLS=ON \
+                -DOPENSSL_ROOT_DIR=/opt/wolfssl \
+                -DOPENSSL_INCLUDE_DIR=/opt/wolfssl/include/wolfssl/openssl \
+                -DOPENSSL_SSL_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
+                -DOPENSSL_CRYPTO_LIBRARY=/opt/wolfssl/lib/libwolfssl.so \
+                ..
+          make -j"$(nproc)"
+          sudo make install
+      - name: Verify ldd shows wolfSSL
+        run: |
+          ldd /opt/libnats-wolfssl/lib/libnats.so | grep -q libwolfssl
+      - name: Install OpenSIPS build deps + bundled libnats for compile-time symbols
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libpcre3-dev libxml2-dev sipsak cmake
+          # OpenSIPS module Makefiles probe pkg-config libnats at
+          # build time for headers + link.  We still install a stock
+          # libnats for that probe; the runtime swap happens via the
+          # wrapper module's dlopen at mod_init.
+          git clone --depth 1 --branch "$NATS_C_VERSION" \
+            https://github.com/nats-io/nats.c /tmp/nats.c
+          cd /tmp/nats.c && mkdir build && cd build
+          cmake -DNATS_BUILD_WITH_TLS=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local ..
+          make -j"$(nproc)" && sudo make install && sudo ldconfig
+      - name: Build OpenSIPS + NATS modules
+        run: |
+          set -e
+          make modules=modules/nats_tls_openssl modules
+          make modules=modules/nats_tls_wolfssl modules
+          make modules=modules/event_nats modules
+          make modules=modules/cachedb_nats modules
+          make modules=modules/nats_consumer modules
+      - name: Verify wolfssl wrapper loads + emits backend line
+        run: |
+          set -e
+          bash modules/nats_tls_wolfssl/tests/smoke.sh 2>&1 | tee smoke.log
+          grep -q "TLS backend = wolfSSL" smoke.log
+          grep -q "NATS TLS backend = wolfssl" smoke.log
+
+  mismatch:
+    name: Reject dual-wrapper config
+    runs-on: ubuntu-24.04
+    needs: openssl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install + build
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libpcre3-dev libxml2-dev cmake
+          git clone --depth 1 --branch "$NATS_C_VERSION" \
+            https://github.com/nats-io/nats.c /tmp/nats.c
+          cd /tmp/nats.c && mkdir build && cd build
+          cmake -DNATS_BUILD_WITH_TLS=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local ..
+          make -j"$(nproc)" && sudo make install && sudo ldconfig
+          cd "$GITHUB_WORKSPACE"
+          make modules=modules/nats_tls_openssl modules
+          make modules=modules/nats_tls_wolfssl modules
+      - name: Verify OpenSIPS refuses both wrappers
+        run: |
+          set -e
+          bash modules/nats_tls_openssl/tests/smoke_mismatch.sh 2>&1 | tee mismatch.log
+          # The wrapper-conflict run must NOT report a successful TLS
+          # backend load; it must surface the LM_ERR.
+          if grep -q "TLS backend = " mismatch.log; then
+            echo "FAIL: mod_init succeeded with both wrappers loaded"
+            exit 1
+          fi
+          grep -q "load exactly one TLS-backend wrapper module" mismatch.log
+
+  none:
+    name: System-default fallback
+    runs-on: ubuntu-24.04
+    needs: openssl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install + build
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libpcre3-dev libxml2-dev cmake
+          git clone --depth 1 --branch "$NATS_C_VERSION" \
+            https://github.com/nats-io/nats.c /tmp/nats.c
+          cd /tmp/nats.c && mkdir build && cd build
+          cmake -DNATS_BUILD_WITH_TLS=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local ..
+          make -j"$(nproc)" && sudo make install && sudo ldconfig
+          cd "$GITHUB_WORKSPACE"
+          make modules=modules/event_nats modules
+      - name: Verify fallback diagnostic fires
+        run: |
+          set -e
+          bash modules/nats_tls_openssl/tests/smoke_none.sh 2>&1 | tee none.log
+          grep -q "NATS TLS backend = system default" none.log

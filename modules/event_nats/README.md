@@ -31,7 +31,8 @@ full string.  Long defaults split across `<br>` breaks.
 | `tls_cert` | string | NULL | Client certificate file path (mutual TLS) |
 | `tls_key` | string | NULL | Client private key file path |
 | `tls_hostname` | string | NULL | Expected server certificate hostname |
-| `skip_openssl_init` | int | 1 | Skip nats.c OpenSSL initialization (1=skip, required when tls_openssl is loaded) |
+| `skip_tls_init` | int | 1 | Skip nats.c global TLS-library init/cleanup (1=skip, required when any of OpenSIPS's `tls_openssl`, `tls_wolfssl`, or one of the `nats_tls_*` wrappers is loaded -- which is almost always the case).  Backend-neutral name covering both OpenSSL and wolfSSL libnats builds. |
+| `skip_openssl_init` | int | 1 | **Deprecated** alias for `skip_tls_init` (kept for one release cycle).  Using this name emits a one-time `LM_WARN` and writes the same storage. |
 | `nats_drain_timeout_ms` | int | 5000 | Shutdown drain timeout for the shared `lib/nats` connection pool. Cross-DC deployments with high RTT may need a longer budget; this setting is shared with `cachedb_nats`'s `cdb_drain_timeout_ms` (last writer wins). |
 | `subscribe` | string (multi) | -- | Configure NATS→`event_route` subscriptions; format `subject=<pat>;event=<name>[;queue=<grp>]`. Each set adds one fire-and-forget core-NATS subscription that dispatches matching messages to the named `event_route[]` handler via IPC. No script ack, no durable consumer state — for explicit-ack JetStream pull semantics use the separate `nats_consumer` module. |
 

@@ -105,10 +105,37 @@ char *nats_tls_hostname = NULL;   /* expected server cert hostname (overrides UR
 int nats_tls_allow_downgrade = 0; /* allow silent rewrite of tls:// -> nats:// when
                                    * nats.c was built without TLS (default: no - fail) */
 
-/* OpenSSL lifecycle -- when 1, nats.c skips OpenSSL init/cleanup
- * (the host application manages it). Set to 0 only if no other
- * OpenSIPS module loads OpenSSL (unusual). */
+/* TLS-library lifecycle -- when 1, nats.c skips global TLS-library
+ * init/cleanup (the host application manages it).  Set to 0 only if
+ * no other OpenSIPS module pulls in OpenSSL / wolfSSL globals
+ * (unusual).  Variable name retains the historical "openssl" suffix
+ * for ABI consistency with the storage layout; the operator-facing
+ * modparam is the backend-neutral `skip_tls_init`. */
 int nats_skip_openssl_init = 1;
+
+/* Deprecated-alias setter for the old `skip_openssl_init` modparam.
+ * Logs a one-time LM_WARN nudging operators toward the new
+ * `skip_tls_init` name (which describes the behaviour correctly for
+ * both OpenSSL and wolfSSL-backed libnats builds), then assigns the
+ * value to the same storage variable as the new modparam. */
+static int nats_skip_openssl_init_setter(modparam_t type, void *val)
+{
+	static int warned;
+	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
+		LM_ERR("skip_openssl_init: must be an integer\n");
+		return -1;
+	}
+	if (!warned) {
+		LM_WARN("event_nats: modparam 'skip_openssl_init' is "
+		        "deprecated; use 'skip_tls_init' instead (same "
+		        "semantics, backend-neutral name).  The old name "
+		        "still works and will continue to do so for one "
+		        "release cycle.\n");
+		warned = 1;
+	}
+	nats_skip_openssl_init = (int)(long)val;
+	return 0;
+}
 
 static const param_export_t mod_params[] = {
 	{"nats_url",            STR_PARAM, &nats_url},
@@ -121,7 +148,12 @@ static const param_export_t mod_params[] = {
 	{"tls_key",             STR_PARAM, &nats_tls_key},
 	{"tls_hostname",        STR_PARAM, &nats_tls_hostname},
 	{"tls_allow_downgrade", INT_PARAM, &nats_tls_allow_downgrade},
-	{"skip_openssl_init",   INT_PARAM, &nats_skip_openssl_init},
+	/* Primary, backend-neutral name. */
+	{"skip_tls_init",       INT_PARAM, &nats_skip_openssl_init},
+	/* Deprecated alias -- retained for one release cycle.  The
+	 * setter emits a one-time LM_WARN and writes the same storage. */
+	{"skip_openssl_init",   INT_PARAM | USE_FUNC_PARAM,
+	                        (void *)nats_skip_openssl_init_setter},
 	/* Tunable shutdown drain timeout, ms.  Sets the shared
 	 * lib/nats nats_pool_drain_timeout_ms global; later modules
 	 * loading the same lib see the same value (last writer wins). */
