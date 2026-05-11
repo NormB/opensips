@@ -309,7 +309,7 @@ int w_nats_hdr_set(struct sip_msg *msg, str *name, str *value)
 /* Apply every staged header onto `out` and clear the staging table
  * regardless of publish outcome.  The caller keeps ownership of `out`.
  */
-static void staged_apply_and_clear(natsMsg *out)
+void nats_rpc_staged_apply_and_clear_on(natsMsg *out)
 {
 	int i;
 	if (!out) {
@@ -335,7 +335,7 @@ static void staged_apply_and_clear(natsMsg *out)
  * stack buffer with NUL termination, and return the pointer.  Returns
  * NULL on overflow (must not happen since slot.reply_to_len is bounded
  * by NATS_RING_SUBJECT_MAX). */
-static const char *cstr_buf(char *buf, size_t cap, const char *src, int len)
+const char *nats_rpc_cstr_buf(char *buf, size_t cap, const char *src, int len)
 {
 	if (!src || len <= 0) return "";
 	if ((size_t)len + 1 > cap) return NULL;
@@ -376,7 +376,7 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
 		return -3;
 	}
 
-	subj_c = cstr_buf(subj_buf, sizeof(subj_buf),
+	subj_c = nats_rpc_cstr_buf(subj_buf, sizeof(subj_buf),
 		cur->slot.reply_to, (int)cur->slot.reply_to_len);
 	if (!subj_c) {
 		/* Should never happen: reply_to_len is bounded. */
@@ -398,7 +398,7 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
 		return -4;
 	}
 
-	staged_apply_and_clear(out);
+	nats_rpc_staged_apply_and_clear_on(out);
 
 	s = natsConnection_PublishMsg(nc, out);
 	natsMsg_Destroy(out);
@@ -421,8 +421,8 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
  * rather than shared to avoid a public dependency on the consumer
  * process's internals.
  */
-static int hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
-                                    int *truncated, int *count_out)
+int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
+                                       int *truncated, int *count_out)
 {
 	const char * *keys = NULL;
 	int nkeys = 0;
@@ -507,7 +507,7 @@ done:
  *     message.
  *   - handle_idx is set to 0xFFFF as a synthetic marker.
  */
-static void cur_set_from_nats_reply(natsMsg *reply)
+void nats_rpc_cur_set_from_nats_reply(natsMsg *reply)
 {
 	nats_cur_msg_t  *cur = nats_fetch_current();
 	const char      *subject;
@@ -543,11 +543,54 @@ static void cur_set_from_nats_reply(natsMsg *reply)
 	cur->slot.has_reply    = 0;
 	cur->slot.reply_to_len = 0;
 
-	hdr_len = hdr_serialize_from_reply(reply,
+	hdr_len = nats_rpc_hdr_serialize_from_reply(reply,
 		cur->slot.headers, NATS_RING_HEADERS_MAX,
 		&hdr_trunc, &hdr_count);
 	cur->slot.headers_len       = (uint16_t)(hdr_len > 0 ? hdr_len : 0);
 	cur->slot.headers_truncated = (uint8_t)(hdr_trunc ? 1 : 0);
+}
+
+/*
+ * Plain-buffer variant of cur_set_from_nats_reply().  Mirrors the
+ * natsMsg-driven version above but reads the reply fields out of
+ * caller-supplied byte buffers; used by the async path, where the
+ * natsMsg has already been destroyed back in the libnats callback
+ * and the buffers were stashed in the in-flight ctx instead.
+ */
+void nats_rpc_cur_set_from_buffers(uint32_t handle_idx,
+                                    const char *subject,  uint32_t slen,
+                                    const char *data,     uint32_t dlen,
+                                    const char *reply_to, uint32_t rlen,
+                                    uint8_t   has_reply,
+                                    const char *headers,  uint16_t hlen,
+                                    uint8_t   hdr_truncated)
+{
+	nats_cur_msg_t *cur = nats_fetch_current();
+
+	memset(cur, 0, sizeof(*cur));
+	cur->has_message = 1;
+	cur->handle_idx  = handle_idx;
+	cur->ack_token   = 0;
+
+	if (slen > NATS_RING_SUBJECT_MAX) slen = NATS_RING_SUBJECT_MAX;
+	if (slen > 0 && subject) memcpy(cur->slot.subject, subject, slen);
+	cur->slot.subject_len = slen;
+
+	if (dlen > NATS_RING_PAYLOAD_MAX) dlen = NATS_RING_PAYLOAD_MAX;
+	if (dlen > 0 && data) memcpy(cur->slot.data, data, dlen);
+	cur->slot.data_len = dlen;
+
+	if (has_reply && reply_to && rlen > 0) {
+		if (rlen > NATS_RING_SUBJECT_MAX) rlen = NATS_RING_SUBJECT_MAX;
+		memcpy(cur->slot.reply_to, reply_to, rlen);
+		cur->slot.reply_to_len = rlen;
+		cur->slot.has_reply    = 1;
+	}
+
+	if (hlen > NATS_RING_HEADERS_MAX) hlen = NATS_RING_HEADERS_MAX;
+	if (hlen > 0 && headers) memcpy(cur->slot.headers, headers, hlen);
+	cur->slot.headers_len       = hlen;
+	cur->slot.headers_truncated = hdr_truncated;
 }
 
 /*
@@ -608,7 +651,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		return -3;
 	}
 
-	subj_c = cstr_buf(subj_buf, sizeof(subj_buf), subject->s, subject->len);
+	subj_c = nats_rpc_cstr_buf(subj_buf, sizeof(subj_buf), subject->s, subject->len);
 	if (!subj_c) {
 		nats_rpc_staged_clear();
 		return -4;
@@ -629,7 +672,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		return -4;
 	}
 
-	staged_apply_and_clear(out);
+	nats_rpc_staged_apply_and_clear_on(out);
 
 	/* SYNC RPC: blocks this worker until reply arrives or timeout. */
 	s = natsConnection_RequestMsg(&reply, nc, out, (int64_t)tmo);
@@ -649,7 +692,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 
 	/* Install the reply into the per-worker current-message state
 	 * so the script can read $nats_data etc. after this returns. */
-	cur_set_from_nats_reply(reply);
+	nats_rpc_cur_set_from_nats_reply(reply);
 	natsMsg_Destroy(reply);
 	return 1;
 }

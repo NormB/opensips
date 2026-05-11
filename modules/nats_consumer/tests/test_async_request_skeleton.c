@@ -95,32 +95,53 @@ int main(void)
 		}
 	}
 
-	/* (2) cmds[] sync entry still carries the restrictive mask */
+	/* (2) cmds[] sync entry still carries the restrictive mask by
+	 * default.  The table itself is NO LONGER const after option-B
+	 * (the allow_sync_in_request_route setter mutates flags in
+	 * place); however the literal route mask in source must still
+	 * exclude REQUEST_ROUTE / FAILURE_ROUTE / BRANCH_ROUTE so that
+	 * the default behaviour is safe. */
 	{
-		const char *cmds = strstr(src, "static const cmd_export_t cmds[]");
+		const char *cmds = strstr(src, "cmd_export_t cmds[]");
 		ASSERT(cmds != NULL, "located cmds[] block");
+		ASSERT(strstr(src, "static const cmd_export_t cmds[]") == NULL,
+			"cmds[] no longer declared const (option-B mutation site)");
 		if (cmds) {
 			const char *q = strstr(cmds, "\"nats_request\"");
 			ASSERT(q != NULL, "cmds[] entry \"nats_request\" present");
 			if (q) {
 				size_t look = strlen(q);
-				if (look > 600) look = 600;
-				char snip[700];
+				if (look > 700) look = 700;
+				char snip[720];
 				memcpy(snip, q, look);
 				snip[look] = '\0';
 				ASSERT(strstr(snip, "ALL_ROUTES") == NULL,
-					"sync entry does not use ALL_ROUTES");
+					"sync entry literal mask is not ALL_ROUTES "
+					"(opt-in widens at runtime)");
 				ASSERT(strstr(snip, "STARTUP_ROUTE") != NULL,
 					"sync entry still includes STARTUP_ROUTE");
 				ASSERT(strstr(snip, "TIMER_ROUTE") != NULL,
 					"sync entry still includes TIMER_ROUTE");
 				ASSERT(strstr(snip, "REQUEST_ROUTE") == NULL,
-					"sync entry still excludes REQUEST_ROUTE");
+					"sync entry still excludes REQUEST_ROUTE by default");
 			}
 		}
 	}
 
-	/* (3) nats_rpc.h declares w_nats_request_async with the acmd shape */
+	/* (3) option-B opt-in: allow_sync_in_request_route modparam +
+	 * setter that widens cmds[].flags to ALL_ROUTES. */
+	{
+		ASSERT(strstr(src, "allow_sync_in_request_route") != NULL,
+			"params[] exposes allow_sync_in_request_route");
+		ASSERT(strstr(src, "nats_request_allow_sync_setter") != NULL,
+			"setter callback nats_request_allow_sync_setter present");
+		ASSERT(strstr(src, "USE_FUNC_PARAM") != NULL,
+			"modparam registered with USE_FUNC_PARAM (setter callback)");
+		ASSERT(strstr(src, "cmds[i].flags = ALL_ROUTES") != NULL,
+			"setter widens nats_request entry to ALL_ROUTES on opt-in");
+	}
+
+	/* (4) nats_rpc.h declares w_nats_request_async with the acmd shape */
 	{
 		ASSERT(strstr(hdr, "int w_nats_request_async(") != NULL,
 			"header declares w_nats_request_async");
@@ -130,14 +151,23 @@ int main(void)
 			"header includes async.h");
 	}
 
-	/* (4) phase-1 body: calls w_nats_request and sets ASYNC_SYNC */
+	/* (5) phase-2 impl: state-machine entry points present, the
+	 * sync fall-through is GONE, and the resume path returns the
+	 * eventfd (async_status = c->eventfd) rather than ASYNC_SYNC. */
 	{
 		ASSERT(strstr(impl, "int w_nats_request_async(") != NULL,
 			"impl defines w_nats_request_async");
-		ASSERT(strstr(impl, "w_nats_request(msg") != NULL,
-			"impl delegates to w_nats_request (phase-1 fall-through)");
-		ASSERT(strstr(impl, "ASYNC_SYNC") != NULL,
-			"impl reports ASYNC_SYNC after sync completion");
+		ASSERT(strstr(impl, "nats_rpc_async_ctx_new") != NULL,
+			"impl allocates ctx via nats_rpc_async_ctx_new");
+		ASSERT(strstr(impl, "natsConnection_PublishMsg") != NULL,
+			"impl publishes with PublishMsg (carries reply-to)");
+		ASSERT(strstr(impl, "on_inbox_reply") != NULL,
+			"impl wires the inbox-subscription callback");
+		ASSERT(strstr(impl, "async_status = c->eventfd") != NULL,
+			"impl yields to the reactor on the per-call eventfd");
+		ASSERT(strstr(impl, "ASYNC_SYNC") == NULL,
+			"impl no longer falls through to a synchronous "
+			"completion (phase-1 stub removed)");
 	}
 
 	free(src); free(hdr); free(impl);

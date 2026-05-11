@@ -9,13 +9,18 @@
 #
 #   A.  async(nats_request(...), rt)  inside the main script route
 #         -> MUST PARSE     (acmd path; async() gates worker safety)
-#   B.  nats_request(...)              inside the main script route
+#   B.  nats_request(...)              inside the main script route,
+#       default modparam (allow_sync_in_request_route absent / 0)
 #         -> MUST BE REJECTED with "Command <nats_request> cannot be
 #                                   used in the block"
 #   C.  nats_request(...)              inside startup_route
 #         -> MUST PARSE     (sync path is allowed from non-worker
 #                            contexts; route mask explicitly permits
 #                            STARTUP_ROUTE)
+#   D.  nats_request(...)              inside the main script route,
+#       with modparam("nats_consumer", "allow_sync_in_request_route", 1)
+#         -> MUST PARSE     (setter widens the route mask in place
+#                            before the route block is parsed)
 #
 # A failure of any of these three assertions means the phase-1
 # dispatch plumbing is broken even though the source-pattern unit
@@ -97,6 +102,20 @@ startup_route { nats_request("rpc.health", "ping", 1000); }
 route { sl_send_reply(404, "no route"); }
 EOF
 
+cat "${WORKDIR}/common.head" - > "${WORKDIR}/D.cfg" <<'EOF'
+
+# Operator opts in -- the setter widens the cmd's route mask to
+# ALL_ROUTES at the moment this modparam is parsed.  The route
+# block below must therefore parse cleanly.
+modparam("nats_consumer", "allow_sync_in_request_route", 1)
+
+route {
+    if (nats_request("rpc.lookup", "ping", 200)) {
+        xlog("L_INFO", "got reply\n");
+    }
+}
+EOF
+
 export LD_LIBRARY_PATH="${LIB_NATS}:${LD_LIBRARY_PATH:-}"
 
 g_fails=0
@@ -126,10 +145,11 @@ check() {
     fi
 }
 
-echo "=== phase-1 dispatch ==="
+echo "=== dispatch matrix ==="
 check A "${WORKDIR}/A.cfg" 0   ""
 check B "${WORKDIR}/B.cfg" 255 "Command <nats_request> cannot be used in the block"
 check C "${WORKDIR}/C.cfg" 0   ""
+check D "${WORKDIR}/D.cfg" 0   ""
 
 if [ "${g_fails}" = 0 ]; then
     echo

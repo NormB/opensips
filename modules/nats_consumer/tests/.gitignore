@@ -9,3 +9,4 @@ test_request_route_restriction
 test_consumer_heartbeat
 test_persist_precision
 test_async_request_skeleton
+test_async_request_inflight
