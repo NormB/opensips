@@ -78,17 +78,20 @@ jobs:
       - name: Build OpenSIPS core + NATS modules
         run: |
           set -e
-          # Full default build: produces the opensips binary AND the
-          # core modules (signaling, sl, tm, rr, maxfwd, sipmsgops)
-          # that the smoke loadmodule lines reference.
-          make -j"$(nproc)"
-          # Then the NATS-specific modules that aren't in the default
-          # `make` target.
-          make modules=modules/nats_tls_openssl modules
-          make modules=modules/nats_tls_wolfssl modules
-          make modules=modules/event_nats modules
-          make modules=modules/cachedb_nats modules
-          make modules=modules/nats_consumer modules
+          # 1. opensips core binary
+          make -j"$(nproc)" opensips
+          # 2. The specific core modules the smoke loadmodule lines
+          #    reference.  Default `make modules` skips some on
+          #    Ubuntu CI when their build deps aren't installed; be
+          #    explicit so we know exactly what gets produced.
+          for m in signaling sl tm rr maxfwd sipmsgops; do
+            make modules=modules/$m modules
+          done
+          # 3. NATS modules (the actual things under test).
+          for m in nats_tls_openssl nats_tls_wolfssl event_nats \
+                   cachedb_nats nats_consumer; do
+            make modules=modules/$m modules
+          done
       - name: Verify openssl wrapper loads + emits backend line
         run: |
           set -e
@@ -174,15 +177,14 @@ jobs:
       - name: Build OpenSIPS core + NATS modules
         run: |
           set -e
-          # Full default build for opensips binary + core modules,
-          # then explicit NATS module builds.  See openssl job for
-          # the rationale.
-          make -j"$(nproc)"
-          make modules=modules/nats_tls_openssl modules
-          make modules=modules/nats_tls_wolfssl modules
-          make modules=modules/event_nats modules
-          make modules=modules/cachedb_nats modules
-          make modules=modules/nats_consumer modules
+          make -j"$(nproc)" opensips
+          for m in signaling sl tm rr maxfwd sipmsgops; do
+            make modules=modules/$m modules
+          done
+          for m in nats_tls_openssl nats_tls_wolfssl event_nats \
+                   cachedb_nats nats_consumer; do
+            make modules=modules/$m modules
+          done
       - name: Verify wolfssl wrapper loads + emits backend line
         run: |
           set -e
@@ -210,10 +212,10 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
           cd "$GITHUB_WORKSPACE"
-          # Full OpenSIPS build (opensips binary + core modules
-          # needed by the smoke loadmodule lines), then the two
-          # wrapper modules.
-          make -j"$(nproc)"
+          make -j"$(nproc)" opensips
+          for m in signaling sl tm rr maxfwd sipmsgops; do
+            make modules=modules/$m modules
+          done
           make modules=modules/nats_tls_openssl modules
           make modules=modules/nats_tls_wolfssl modules
       - name: Verify OpenSIPS refuses both wrappers
@@ -248,10 +250,12 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/usr/local ..
           make -j"$(nproc)" && sudo make install && sudo ldconfig
           cd "$GITHUB_WORKSPACE"
-          # Full OpenSIPS build (opensips binary + core modules)
-          # plus event_nats.  No nats_tls_* wrapper needed -- this
-          # job tests the no-wrapper fallback diagnostic.
-          make -j"$(nproc)"
+          make -j"$(nproc)" opensips
+          for m in signaling sl tm rr maxfwd sipmsgops; do
+            make modules=modules/$m modules
+          done
+          # No nats_tls_* wrapper -- this job tests the no-wrapper
+          # fallback diagnostic.
           make modules=modules/event_nats modules
       - name: Verify fallback diagnostic fires
         run: |
