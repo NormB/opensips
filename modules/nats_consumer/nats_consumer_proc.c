@@ -847,12 +847,64 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		js_opts_p = &js_opts;
 	}
 
-	s = js_PullSubscribe(&ss->sub, g_js,
-		filter_c /* subject -- may be NULL when Config has FilterSubject(s) */,
-		durable_c /* durable -- may be NULL for ephemeral */,
-		js_opts_p /* jsOptions for domain / prefix */,
-		&so,
-		NULL /* jsErrCode */);
+	/* nats.c 3.10's js_PullSubscribe has no public multi-filter form:
+	 * the public signature only takes a single `subject` string, and the
+	 * library's internal _subscribeMulti validator rejects
+	 *   ((numSubjects <= 0) || empty(subjects[0])) && !consBound
+	 * with NATS_INVALID_ARG, even when Config.FilterSubjects is populated.
+	 *
+	 * Workaround: when FilterSubjects is in play we
+	 *   1. js_AddConsumer up-front with the full config so the broker
+	 *      materializes the multi-filter consumer (falling back to
+	 *      js_UpdateConsumer if the consumer already exists with a
+	 *      compatible config from a prior run);
+	 *   2. flip jsSubOptions into the consBound branch (so.Stream +
+	 *      so.Consumer) so js_PullSubscribe takes the "attach to existing
+	 *      consumer" path instead of trying to create one from an empty
+	 *      subject and a `Config.FilterSubject` it cannot use.
+	 *
+	 * Single-filter pull subscribe stays on the original direct path.
+	 */
+	if (!filter_c && cc.FilterSubjectsLen > 0 && durable_c) {
+		jsConsumerInfo *ci_tmp = NULL;
+		natsStatus      cs;
+
+		cs = js_AddConsumer(&ci_tmp, g_js, stream_c, &cc,
+			js_opts_p, NULL);
+		if (cs != NATS_OK) {
+			natsStatus us;
+			us = js_UpdateConsumer(&ci_tmp, g_js, stream_c, &cc,
+				js_opts_p, NULL);
+			if (us != NATS_OK) {
+				LM_ERR("nats_consumer_proc: js_AddConsumer('%.*s')"
+					" failed: %s (update also %s)\n",
+					h->id.len, h->id.s,
+					natsStatus_GetText(cs),
+					natsStatus_GetText(us));
+				goto fail_free_sub;
+			}
+		}
+		if (ci_tmp)
+			jsConsumerInfo_Destroy(ci_tmp);
+
+		/* In the bound path nats.c does not consult so.Config; it
+		 * looks up the existing consumer via Stream + Consumer. */
+		so.Consumer = durable_c;
+
+		s = js_PullSubscribe(&ss->sub, g_js,
+			"" /* subject empty: bound path uses opts->Consumer */,
+			NULL /* durable NULL: same reason */,
+			js_opts_p,
+			&so,
+			NULL);
+	} else {
+		s = js_PullSubscribe(&ss->sub, g_js,
+			filter_c /* may be NULL when Config has FilterSubject */,
+			durable_c /* may be NULL for ephemeral */,
+			js_opts_p,
+			&so,
+			NULL);
+	}
 	if (s != NATS_OK) {
 		LM_ERR("nats_consumer_proc: js_PullSubscribe('%.*s') failed: %s\n",
 			h->id.len, h->id.s, natsStatus_GetText(s));
