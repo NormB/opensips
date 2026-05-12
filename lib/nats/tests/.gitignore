@@ -1,5 +1,6 @@
-test_tls_downgrade_policy
+*.o
+test_pool_atomics_explicit
 test_redact_url
+test_tls_downgrade_policy
 test_validate_publish_subject
 test_validate_subject_cache
-*.o
