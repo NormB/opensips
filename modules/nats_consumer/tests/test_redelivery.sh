@@ -14,36 +14,23 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream RED 'red.>'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:rd:\nid=r1;stream=RED;durable=r1;filter=red.msg;ack_wait=2s;max_deliver=3\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind r1 RED durable=r1 filter=red.msg ack_wait=2s max_deliver=3 >/dev/null
 
 publish red.msg 'hello'
 
 # The broker redelivers every ack_wait until max_deliver (3) is
-# reached.  At max_deliver the JS.API advisory fires.  We only check
-# that msgs_delivered reports >= 2 (first + one redelivery) within
-# 10 seconds, which is 2x ack_wait plus tolerance.
+# reached.  Wait for redeliveries >= 1 (first + one redelivery)
+# within 12s = 2x ack_wait plus tolerance.
 deadline=$(( $(date +%s) + 12 ))
-while [ $(date +%s) -lt ${deadline} ]; do
-    ${COMPOSE} exec -T opensips sh -c \
-        'echo ":nats_consumer_list:rls:\n\n" > /var/run/opensips/mi.fifo && \
-         sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_rls 2>/dev/null' \
-        > /tmp/rls_out 2>/dev/null || true
-    redeliveries=$(python3 -c "
-import json,re
-with open('/tmp/rls_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-for h in obj.get('handles', []):
-    if h.get('id')=='r1':
-        print(h.get('redeliveries',0)); break
-" 2>/dev/null || echo 0)
-    [ "${redeliveries}" -ge 1 ] 2>/dev/null && {
+redeliveries=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    redeliveries=$(nats_list_field "$(nats_list)" r1 redeliveries 2>/dev/null)
+    redeliveries=${redeliveries:-0}
+    if [ "${redeliveries}" -ge 1 ]; then
         pass "redelivery observed (count=${redeliveries})"
         exit 0
-    }
+    fi
     sleep 1
 done
 
-fail "redelivery did not register for handle r1 within 12s"
+fail "redelivery did not register for handle r1 within 12s (last=${redeliveries})"

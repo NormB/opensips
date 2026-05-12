@@ -19,4 +19,9 @@ while [ $i -lt 20 ]; do
     i=$((i + 1))
 done
 
-exec /usr/local/sbin/opensips -F -f /etc/opensips/opensips.cfg
+# Bump shared memory to 512 MiB.  Stress tests (stress_multi_worker,
+# stress_ack_wait_expiry) override ring_capacity to drain bursts without
+# back-pressure; each ring slot is ~18 KiB so a 16k-slot ring is
+# ~280 MiB.  The 64 MiB default is sized for steady-state drains, not
+# burst-fill rings.
+exec /usr/local/sbin/opensips -F -m 512 -M 64 -f /etc/opensips/opensips.cfg

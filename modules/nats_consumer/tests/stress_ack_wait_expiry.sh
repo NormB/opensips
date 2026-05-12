@@ -23,39 +23,40 @@ N_MESSAGES="${N_MESSAGES:-500}"
 
 ensure_stream AE 'ae.>'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:ae:\nid=ae;stream=AE;durable=ae;filter=ae.msg;ack_wait=1s;max_deliver=2\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+# ring_capacity=2048 ensures N_MESSAGES * max_deliver (=2) fits before
+# the consumer worker would back-pressure on a full ring.  The default
+# 128 is sized for steady-state drain scripts, not 500-message bursts
+# with nothing acking.
+nats_bind ae AE durable=ae filter=ae.msg ack_wait=1s max_deliver=2 \
+    ring_capacity=2048 >/dev/null
 
 echo "publishing ${N_MESSAGES} messages..."
-for i in $(seq 1 "${N_MESSAGES}"); do
-    publish ae.msg "ae-${i}" >/dev/null 2>&1
+# Batch publishes inside a single natscli shell.  Per-iteration
+# docker compose exec is ~200 ms; 500 sequential calls = ~100 s of pure
+# launch overhead.  In-container loop finishes in a second or two.
+${COMPOSE} exec -T -e N="${N_MESSAGES}" natscli sh -c '
+i=1
+while [ $i -le "$N" ]; do
+    nats --server nats://nats:4222 publish ae.msg "ae-$i" >/dev/null 2>&1
+    i=$((i + 1))
 done
+' >/dev/null 2>&1
 
 # We expect every message to be redelivered exactly once (first
 # delivery goes to the ring but nothing acks, ack_wait expires,
-# redelivery #2 happens, still no ack, max_deliver exhausted).  So the
-# total delivered count is ~2 * N_MESSAGES.
-sleep 10
+# redelivery #2 happens, still no ack, max_deliver exhausted).  Total
+# delivered should reach >= N_MESSAGES (>=1x, redelivery path active).
+# Poll until target or deadline; broker may pace redeliveries when
+# max_ack_pending backpressures the consumer.
+deadline=$(( $(date +%s) + 60 ))
+delivered=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    delivered=$(nats_list_field "$(nats_list)" ae msgs_delivered 2>/dev/null)
+    delivered=${delivered:-0}
+    [ "${delivered}" -ge "${N_MESSAGES}" ] && break
+    sleep 1
+done
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_list:aex:\n\n" > /var/run/opensips/mi.fifo && \
-     sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_aex 2>/dev/null' \
-    > /tmp/ae_out 2>/dev/null || true
-
-delivered=$(python3 -c "
-import json,re
-with open('/tmp/ae_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-for h in obj.get('handles', []):
-    if h.get('id')=='ae':
-        print(h.get('msgs_delivered',0)); break
-" 2>/dev/null || echo 0)
-
-# Accept a 10% tolerance -- the broker may not have finished all
-# redeliveries in the 10s window, and max_ack_pending backpressure can
-# throttle redelivery.  The shape check (>= N) is the important bit.
 if [ "${delivered}" -ge "${N_MESSAGES}" ] 2>/dev/null; then
     pass "ack_wait_expiry: ${delivered} deliveries for ${N_MESSAGES} publishes (>=1x, redelivery path active)"
 else

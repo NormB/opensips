@@ -16,39 +16,36 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream RC 'rc.*'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:rc1:\nid=rc;stream=RC;durable=rc;filter=rc.msg;ack_wait=30s\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind rc RC durable=rc filter=rc.msg ack_wait=30s >/dev/null
 
 publish rc.msg 'pre'
 
 sleep 2
 
 read_delivered() {
-    ${COMPOSE} exec -T opensips sh -c \
-        'echo ":nats_consumer_list:rcx:\n\n" > /var/run/opensips/mi.fifo && \
-         sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_rcx 2>/dev/null' \
-        > /tmp/rc_out 2>/dev/null || true
-    python3 -c "
-import json,re
-with open('/tmp/rc_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-for h in obj.get('handles', []):
-    if h.get('id')=='rc':
-        print(h.get('msgs_delivered',0)); break
-" 2>/dev/null || echo 0
+    local v
+    v=$(nats_list_field "$(nats_list)" rc msgs_delivered 2>/dev/null)
+    echo "${v:-0}"
 }
 
 before=$(read_delivered)
 ${COMPOSE} restart nats >/dev/null 2>&1 || true
-# wait for nats to come back (healthcheck)
+# wait for nats to come back (healthcheck) + consumer process to resubscribe
 sleep 8
 
-publish rc.msg 'post'
-sleep 3
+# The test broker uses memory storage, so a restart wipes streams.
+# Recreate RC (idempotent) so the durable can re-attach.
+ensure_stream RC 'rc.*'
 
-after=$(read_delivered)
+publish rc.msg 'post'
+
+deadline=$(( $(date +%s) + 15 ))
+after="${before}"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    after=$(read_delivered)
+    [ "${after}" -gt "${before}" ] && break
+    sleep 1
+done
 
 if [ "${after}" -gt "${before}" ] 2>/dev/null; then
     pass "reconnect: delivered grew ${before} -> ${after}"
