@@ -13,37 +13,25 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream EPH 'eph.*'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:ep:\nid=eph;stream=EPH;ephemeral=1;filter=eph.msg;inactive_threshold=3s\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind eph EPH ephemeral=1 filter=eph.msg inactive_threshold=3s >/dev/null
 
 publish eph.msg 'pre'
 sleep 2
 
 read_delivered() {
-    ${COMPOSE} exec -T opensips sh -c \
-        'echo ":nats_consumer_list:epx:\n\n" > /var/run/opensips/mi.fifo && \
-         sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_epx 2>/dev/null' \
-        > /tmp/ep_out 2>/dev/null || true
-    python3 -c "
-import json,re
-with open('/tmp/ep_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-for h in obj.get('handles', []):
-    if h.get('id')=='eph':
-        print(h.get('msgs_delivered',0)); break
-" 2>/dev/null || echo 0
+    nats_list_field "$(nats_list)" eph msgs_delivered 2>/dev/null
 }
 
 pre=$(read_delivered)
+pre=${pre:-0}
 sleep 6   # past inactive_threshold
 publish eph.msg 'post'
 sleep 3
 post=$(read_delivered)
+post=${post:-0}
 
 if [ "${post}" -gt "${pre}" ] 2>/dev/null; then
     pass "ephemeral recreate: delivered ${pre} -> ${post}"
 else
-    fail "ephemeral recreate: delivered stuck at ${pre}"
+    fail "ephemeral recreate: delivered stuck at ${pre} (post=${post})"
 fi

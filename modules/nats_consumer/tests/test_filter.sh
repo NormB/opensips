@@ -13,48 +13,31 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream CALLS 'calls.>'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:1:\nid=billing;stream=CALLS;durable=b1;filter=calls.ended;ack_wait=30s\n\n" \
-        > /var/run/opensips/mi.fifo' || true
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:2:\nid=multi;stream=CALLS;durable=m1;filters=calls.ended,calls.failed;ack_wait=30s\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind billing CALLS durable=b1 filter=calls.ended ack_wait=30s >/dev/null
+nats_bind multi   CALLS durable=m1 filters=calls.ended,calls.failed ack_wait=30s >/dev/null
 
 publish calls.started '{"id":"x"}'
 publish calls.ended   '{"id":"y"}'
 publish calls.failed  '{"id":"z"}'
 
-sleep 3
-
-# billing should have seen exactly 1 message (calls.ended).
-# multi    should have seen exactly 2 (calls.ended + calls.failed).
-#
-# We observe via the opensips log drain: the default cfg only drains
-# 'test'.  For this test we read counters via MI list output.
-
-count_acks() {
-    local id="$1"
-    ${COMPOSE} exec -T opensips sh -c \
-        'echo ":nats_consumer_list:lst:\n\n" > /var/run/opensips/mi.fifo && \
-         sleep 0.5 && cat /var/run/opensips/mi.fifo.reply_lst 2>/dev/null' \
-        | python3 -c "import sys,json,re
-raw=sys.stdin.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-if not m: sys.exit(0)
-obj=json.loads(m.group(0))
-for h in obj.get('handles', []):
-    if h.get('id') == '${id}':
-        print(h.get('msgs_delivered', 0))
-        break" 2>/dev/null || echo 0
-}
-
-b_delivered=$(count_acks billing || echo 0)
-m_delivered=$(count_acks multi   || echo 0)
+# billing should see exactly 1 (calls.ended), multi exactly 2 (ended+failed).
+# Poll counters until both reach their targets or we time out.
+deadline=$(( $(date +%s) + 15 ))
+b_delivered=0; m_delivered=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    list_out=$(nats_list 2>/dev/null || true)
+    b_delivered=$(nats_list_field "${list_out}" billing msgs_delivered 2>/dev/null)
+    m_delivered=$(nats_list_field "${list_out}" multi   msgs_delivered 2>/dev/null)
+    b_delivered=${b_delivered:-0}
+    m_delivered=${m_delivered:-0}
+    if [ "${b_delivered}" -ge 1 ] && [ "${m_delivered}" -ge 2 ]; then
+        break
+    fi
+    sleep 1
+done
 
 if [ "${b_delivered}" = "1" ] && [ "${m_delivered}" = "2" ]; then
     pass "filter: billing=1 multi=2"
 else
-    echo "WARN: expected billing=1/multi=2 but got billing=${b_delivered} multi=${m_delivered}"
-    echo "      (MI scraping uses a best-effort FIFO readback; if 0 either test is failing or FIFO read raced)"
-    fail "filter counts did not match"
+    fail "filter counts did not match: billing=${b_delivered} (want 1) multi=${m_delivered} (want 2)"
 fi

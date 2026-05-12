@@ -24,9 +24,7 @@ ensure_stream MW 'mw.>'
 # Long-lived steady-fetch handle (exercised by the default drain timer
 # only if we rename -- just leave unacked; the intent is "traffic on
 # the rings while churn happens").
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:mw:\nid=mw;stream=MW;durable=mw;filter=mw.job;ack_wait=60s;max_ack_pending=1024\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind mw MW durable=mw filter=mw.job ack_wait=60s max_ack_pending=1024 >/dev/null
 
 snap_rss() {
     ${COMPOSE} exec -T opensips sh -c 'ps -o rss= -p 1 | tr -d " "'
@@ -40,18 +38,15 @@ end=$(( $(date +%s) + DURATION ))
 while [ $(date +%s) -lt ${end} ]; do
     ts=$(date +%s%N)
     id="c_${ts}"
-    ${COMPOSE} exec -T opensips sh -c \
-        "echo \":nats_consumer_bind:ck:\nid=${id};stream=MW;ephemeral=1;filter=mw.job;inactive_threshold=5m\n\n\" \
-            > /var/run/opensips/mi.fifo" || true
+    nats_bind "${id}" MW ephemeral=1 filter=mw.job inactive_threshold=5m >/dev/null
+
     history+=("${id}")
 
     # retention: when history >= 10, unbind the oldest
     if [ "${#history[@]}" -ge 10 ]; then
         oldest="${history[0]}"
         history=("${history[@]:1}")
-        ${COMPOSE} exec -T opensips sh -c \
-            "echo \":nats_consumer_unbind:ck:\nid=${oldest}\n\n\" \
-                > /var/run/opensips/mi.fifo" || true
+        nats_unbind "${oldest}" >/dev/null
     fi
 
     publish mw.job "churn-${ts}" >/dev/null 2>&1 || true
@@ -62,17 +57,14 @@ end_rss=$(snap_rss || echo 0)
 echo "end_rss=${end_rss} kB"
 
 # MI responsiveness check.
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_list:ckx:\n\n" > /var/run/opensips/mi.fifo && \
-     sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_ckx 2>/dev/null' \
-    > /tmp/ck_out 2>/dev/null || fail "churn: MI did not respond after churn"
+list_out=$(nats_list 2>/dev/null) || fail "churn: MI did not respond after churn"
 
 handle_count=$(python3 -c "
-import json,re
-with open('/tmp/ck_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-print(len(obj.get('handles', [])))
+import json,sys
+env=json.loads('''${list_out}''')
+res=env.get('result', [])
+handles = res if isinstance(res, list) else res.get('handles', [])
+print(len(handles))
 " 2>/dev/null || echo -1)
 
 if [ "${handle_count}" = "-1" ]; then

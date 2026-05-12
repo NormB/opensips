@@ -20,9 +20,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream RPC 'rpc.*'
 
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_bind:rpc:\nid=rpc_srv;stream=RPC;durable=s1;filter=rpc.call;ack_wait=30s\n\n" \
-        > /var/run/opensips/mi.fifo' || true
+nats_bind rpc_srv RPC durable=s1 filter=rpc.call ack_wait=30s >/dev/null
 
 # Send a plain publish (not a real request -- we are only validating
 # the deliver path, not the reply).  Full RPC round-trip verification
@@ -30,22 +28,14 @@ ${COMPOSE} exec -T opensips sh -c \
 # build for scope reasons; see README "Known limitations".
 publish rpc.call 'ping'
 
-sleep 2
-
-${COMPOSE} exec -T opensips sh -c \
-    'echo ":nats_consumer_list:rls:\n\n" > /var/run/opensips/mi.fifo && \
-     sleep 0.3 && cat /var/run/opensips/mi.fifo.reply_rls 2>/dev/null' \
-    > /tmp/rpc_out 2>/dev/null || true
-
-delivered=$(python3 -c "
-import json,re
-with open('/tmp/rpc_out') as f: raw=f.read()
-m=re.search(r'\{.*\}', raw, re.DOTALL)
-obj=json.loads(m.group(0)) if m else {}
-for h in obj.get('handles', []):
-    if h.get('id')=='rpc_srv':
-        print(h.get('msgs_delivered',0)); break
-" 2>/dev/null || echo 0)
+deadline=$(( $(date +%s) + 8 ))
+delivered=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    delivered=$(nats_list_field "$(nats_list)" rpc_srv msgs_delivered 2>/dev/null)
+    delivered=${delivered:-0}
+    [ "${delivered}" -ge 1 ] && break
+    sleep 0.5
+done
 
 if [ "${delivered}" -ge 1 ] 2>/dev/null; then
     pass "rpc: request reached opensips handle rpc_srv"

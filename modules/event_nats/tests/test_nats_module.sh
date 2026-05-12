@@ -39,6 +39,25 @@ mi_with_params() {
         "$MI_URL" 2>/dev/null
 }
 
+# Poll opensips container logs for a pattern. Returns 0 on first match, 1 on
+# timeout. `docker compose logs` is eventually-consistent against the container
+# json-log file, so a short sleep is not enough on a busy stack.
+#
+# Uses grep -c (not grep -q): grep -q exits as soon as it sees the first match
+# and SIGPIPEs the upstream `docker compose logs`, which under `set -o pipefail`
+# leaks the SIGPIPE exit (141) and makes the whole pipeline look like a miss.
+wait_log() {
+    local pattern="$1"; local timeout="${2:-8}"
+    local deadline=$((SECONDS + timeout))
+    local n
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        n=$(docker compose logs opensips 2>&1 | grep -c "$pattern" || true)
+        [ "${n:-0}" -gt 0 ] && return 0
+        sleep 0.2
+    done
+    return 1
+}
+
 assert_ok() {
     local test_name="$1"
     local result="$2"
@@ -398,10 +417,9 @@ test_group89() {
     # Test 2: Publish and verify event_route fires
     # Publish a message to the test subject
     nats pub -s nats://172.20.0.50:4222 test.subscribe.test-run '{"test":"subscribe_test"}' >/dev/null 2>&1
-    sleep 1
 
     # Check OpenSIPS logs for the event_route output
-    if docker compose logs opensips 2>&1 | grep -q "NATS_TEST:.*test.subscribe.test-run"; then
+    if wait_log "NATS_TEST:.*test.subscribe.test-run"; then
         echo "  PASS: event_route[E_NATS_TEST] fired on published message"
         PASS=$((PASS + 1))
     else
@@ -410,7 +428,7 @@ test_group89() {
     fi
 
     # Test 3: Verify $param(data) contains the payload
-    if docker compose logs opensips 2>&1 | grep -q 'NATS_TEST:.*data={"test":"subscribe_test"}'; then
+    if wait_log 'NATS_TEST:.*data={"test":"subscribe_test"}'; then
         echo "  PASS: \$param(data) contains correct payload"
         PASS=$((PASS + 1))
     else
@@ -419,7 +437,7 @@ test_group89() {
     fi
 
     # Test 4: Verify $param(subject) contains the subject
-    if docker compose logs opensips 2>&1 | grep -q "NATS_TEST:.*subject=test.subscribe.test-run"; then
+    if wait_log "NATS_TEST:.*subject=test.subscribe.test-run"; then
         echo "  PASS: \$param(subject) contains correct subject"
         PASS=$((PASS + 1))
     else
@@ -720,8 +738,7 @@ test_edge_group89() {
 
     # Publish empty payload
     nats pub -s nats://172.20.0.50:4222 test.subscribe.empty '' >/dev/null 2>&1
-    sleep 1
-    if docker compose logs opensips 2>&1 | grep -q "NATS_TEST:.*subject=test.subscribe.empty"; then
+    if wait_log "NATS_TEST:.*subject=test.subscribe.empty"; then
         echo "  PASS: empty payload message delivered"
         PASS=$((PASS + 1))
     else
@@ -733,8 +750,7 @@ test_edge_group89() {
     local large_payload
     large_payload=$(python3 -c "import json; print(json.dumps({'data': 'x'*4000}))")
     nats pub -s nats://172.20.0.50:4222 test.subscribe.large "$large_payload" >/dev/null 2>&1
-    sleep 1
-    if docker compose logs opensips 2>&1 | grep -q "NATS_TEST:.*subject=test.subscribe.large"; then
+    if wait_log "NATS_TEST:.*subject=test.subscribe.large"; then
         echo "  PASS: large payload message delivered"
         PASS=$((PASS + 1))
     else
@@ -742,13 +758,17 @@ test_edge_group89() {
         FAIL=$((FAIL + 1))
     fi
 
-    # Rapid-fire 10 messages
+    # Rapid-fire 10 messages; require at least 10 matches in the log.
     for i in $(seq 1 10); do
         nats pub -s nats://172.20.0.50:4222 "test.subscribe.rapid.$i" "{\"seq\":$i}" >/dev/null 2>&1
     done
-    sleep 2
-    local rapid_count
-    rapid_count=$(docker compose logs opensips 2>&1 | grep -c "NATS_TEST:.*test.subscribe.rapid")
+    local rapid_deadline=$((SECONDS + 8))
+    local rapid_count=0
+    while [ "$SECONDS" -lt "$rapid_deadline" ]; do
+        rapid_count=$(docker compose logs opensips 2>&1 | grep -c "NATS_TEST:.*test.subscribe.rapid")
+        [ "$rapid_count" -ge 10 ] && break
+        sleep 0.2
+    done
     if [ "$rapid_count" -ge 10 ]; then
         echo "  PASS: all 10 rapid-fire messages delivered ($rapid_count found)"
         PASS=$((PASS + 1))
@@ -774,8 +794,7 @@ test_edge_group89() {
 
     # Publish with special characters in payload
     nats pub -s nats://172.20.0.50:4222 test.subscribe.special '{"key":"val with \"quotes\" and \\backslash"}' >/dev/null 2>&1
-    sleep 1
-    if docker compose logs opensips 2>&1 | grep -q "NATS_TEST:.*subject=test.subscribe.special"; then
+    if wait_log "NATS_TEST:.*subject=test.subscribe.special"; then
         echo "  PASS: special chars in payload delivered"
         PASS=$((PASS + 1))
     else
