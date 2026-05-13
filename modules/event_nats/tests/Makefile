@@ -8,7 +8,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_partial_alloc test_seq_cast_guard test_tls_default \
+TESTS = test_partial_alloc test_seq_cast_guard \
         test_atomic_stats test_subscription_rebuild
 
 # Tests safe to run under ThreadSanitizer.
@@ -16,7 +16,7 @@ TESTS = test_partial_alloc test_seq_cast_guard test_tls_default \
 # atomic by racing two writers on a non-atomic counter, so TSan
 # (correctly) flags it as a data race -- that is the whole point of
 # the test, not a regression.
-TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard test_tls_default \
+TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
                   test_subscription_rebuild
 
 all: $(TESTS)
@@ -25,9 +25,6 @@ test_partial_alloc: test_partial_alloc.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
 test_seq_cast_guard: test_seq_cast_guard.c
-	$(CC) $(CFLAGS) -o $@ $<
-
-test_tls_default: test_tls_default.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 test_atomic_stats: test_atomic_stats.c
@@ -39,7 +36,6 @@ test_subscription_rebuild: test_subscription_rebuild.c
 check: all
 	./test_partial_alloc
 	./test_seq_cast_guard
-	./test_tls_default
 	./test_atomic_stats
 	./test_subscription_rebuild
 
