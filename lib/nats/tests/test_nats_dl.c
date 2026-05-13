@@ -157,6 +157,62 @@ int main(void)
 	ASSERT_TRUE(!nats_dl_is_loaded(), "is_loaded stays false after bad load");
 	ASSERT_TRUE(nats_dl_path() == NULL, "path stays NULL after bad load");
 
+	/* Phase 2.1: backend hint default is AUTO */
+	ASSERT_EQ_INT(nats_dl_get_backend(), NATS_DL_BACKEND_AUTO,
+	              "default backend hint is AUTO");
+
+	/* Phase 2.2: setting backend hint while not loaded works */
+	nats_dl_set_backend_hint(NATS_DL_BACKEND_OPENSSL);
+	ASSERT_EQ_INT(nats_dl_get_backend(), NATS_DL_BACKEND_OPENSSL,
+	              "set backend hint OPENSSL takes effect when unloaded");
+
+	/* Phase 2.3: load with OPENSSL hint succeeds (since most distros
+	 * ship openssl-built libnats; the openssl_libnats_search list is a
+	 * superset of the AUTO list on the system path) */
+	ASSERT_EQ_INT(nats_dl_load(NULL), 0,
+	              "load with OPENSSL backend hint succeeds");
+	ASSERT_TRUE(nats_dl_is_loaded(), "is_loaded after OPENSSL load");
+	nats_dl_unload();
+
+	/* Phase 2.4: env var override (NATS_DL_LIBNATS_PATH) takes
+	 * precedence over backend search */
+	{
+		char saved_path[256] = {0};
+		nats_dl_set_backend_hint(NATS_DL_BACKEND_AUTO);
+		nats_dl_load(NULL);
+		if (nats_dl_path())
+			snprintf(saved_path, sizeof(saved_path), "%s", nats_dl_path());
+		nats_dl_unload();
+
+		setenv("NATS_DL_LIBNATS_PATH", saved_path, 1);
+		ASSERT_EQ_INT(nats_dl_load(NULL), 0,
+		              "$NATS_DL_LIBNATS_PATH override load succeeds");
+		ASSERT_TRUE(nats_dl_path() != NULL, "path set after env-var load");
+		if (nats_dl_path())
+			ASSERT_TRUE(strcmp(nats_dl_path(), saved_path) == 0,
+			            "loaded path matches $NATS_DL_LIBNATS_PATH");
+		unsetenv("NATS_DL_LIBNATS_PATH");
+		nats_dl_unload();
+	}
+
+	/* Phase 2.5: bad env var falls back to backend search */
+	setenv("NATS_DL_LIBNATS_PATH", "/nonexistent/libnats.so.bad", 1);
+	ASSERT_EQ_INT(nats_dl_load(NULL), 0,
+	              "bad env var falls back to backend search and succeeds");
+	ASSERT_TRUE(nats_dl_is_loaded(),
+	            "is_loaded true after env-var-fallback load");
+	unsetenv("NATS_DL_LIBNATS_PATH");
+	nats_dl_unload();
+
+	/* Phase 2.6: setting backend hint after load is rejected (warns
+	 * but doesn't change state) */
+	nats_dl_set_backend_hint(NATS_DL_BACKEND_AUTO);
+	nats_dl_load(NULL);
+	nats_dl_set_backend_hint(NATS_DL_BACKEND_WOLFSSL);
+	ASSERT_EQ_INT(nats_dl_get_backend(), NATS_DL_BACKEND_AUTO,
+	              "backend hint change after load is rejected");
+	nats_dl_unload();
+
 	fprintf(stderr, "==== %s (failures: %d) ====\n",
 	        g_fails == 0 ? "ALL PASS" : "SOME FAIL", g_fails);
 	return g_fails == 0 ? 0 : 1;

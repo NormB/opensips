@@ -88,13 +88,68 @@ typedef struct nats_dl_funcs {
 extern nats_dl_funcs_t nats_dl;
 
 /*
+ * Backend hint for the dlopen search.
+ *
+ * The OpenSIPS tls_mgm module exports an analogous enum
+ * (modules/tls_mgm/api.h: enum os_tls_library) with the same
+ * values; the convention for NATS modules is:
+ *
+ *   1. In mod_init, bind tls_mgm via load_tls_mgm_api()
+ *   2. Read which TLS lib it's compiled against via
+ *      tls_api.get_tls_library_used()
+ *   3. Pass that value to nats_dl_set_backend_hint() BEFORE the
+ *      first nats_pool_register / nats_dl_load call
+ *
+ * The backend hint shapes the libnats SONAME / install-path search
+ * order in nats_dl_load(NULL) so an operator who has both an
+ * openssl-built and a wolfssl-built libnats installed gets the
+ * matching variant for whichever TLS backend OpenSIPS is using.
+ *
+ * Mirror the enum values to tls_mgm's enum os_tls_library so they
+ * can be cast back-and-forth without translation:
+ *   AUTO    -> 0  (TLS_LIB_NONE)
+ *   OPENSSL -> 1  (TLS_LIB_OPENSSL)
+ *   WOLFSSL -> 2  (TLS_LIB_WOLFSSL)
+ */
+enum nats_dl_backend {
+	NATS_DL_BACKEND_AUTO    = 0,
+	NATS_DL_BACKEND_OPENSSL = 1,
+	NATS_DL_BACKEND_WOLFSSL = 2,
+};
+
+/*
+ * Set the backend hint that nats_dl_load(NULL) uses to shape the
+ * search order.  Must be called BEFORE the first nats_dl_load.
+ * Calls after the table is loaded log a warning and have no effect.
+ *
+ * If never called, nats_dl_load uses the AUTO default which walks
+ * a generic libnats SONAME list (the same as if no TLS backend
+ * detection were available).
+ */
+void nats_dl_set_backend_hint(enum nats_dl_backend backend);
+
+/*
+ * Retrieve the backend hint currently in effect.  Returns
+ * NATS_DL_BACKEND_AUTO if no hint was set.  Useful for diagnostic
+ * LM_INFO logs after init.
+ */
+enum nats_dl_backend nats_dl_get_backend(void);
+
+/*
  * nats_dl_load -- dlopen libnats and populate the table.
  *
  * @libnats_path  full path or SONAME passed to dlopen(); pass NULL
- *                to use the default search list (libnats.so.3.13 ->
- *                .3.12 -> ... -> libnats.so).  When non-NULL, no
- *                fallback is attempted -- if the explicit path
- *                fails, the function returns -1.
+ *                to use the backend-aware default search list:
+ *                  - $NATS_DL_LIBNATS_PATH (env var override) wins
+ *                    if set; no fallback.
+ *                  - Otherwise the search order is shaped by the
+ *                    most recent nats_dl_set_backend_hint() call:
+ *                    OPENSSL biases toward libnats.so.3.* SONAMEs
+ *                    on the default ld.so search path; WOLFSSL
+ *                    additionally tries /opt/libnats-wolfssl/lib/
+ *                    paths.  AUTO (default) walks a generic list.
+ *                When non-NULL, no fallback is attempted -- if the
+ *                explicit path fails, the function returns -1.
  *
  * Returns 0 on success (table populated, every entry non-NULL),
  * -1 on dlopen failure or missing required symbol.  Idempotent:
