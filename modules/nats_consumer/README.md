@@ -180,8 +180,40 @@ if ($var(n) > 0) {
 |--------------------------|---------------------|-------------|
 | `nats_consumer_bind`     | `config` (kv string)| Add / replace a handle. |
 | `nats_consumer_unbind`   | `id`                | Retire a handle (deferred free). |
-| `nats_consumer_list`     | —                   | JSON array of all handles with counters. |
+| `nats_consumer_list`     | —                   | JSON array of all handles with counters + backoff state. |
+| `nats_consumer_health`   | —                   | Liveness snapshot of the dedicated consumer process. |
 | `nats_handle_reload`     | —                   | Additive reload from `persist_path`. |
+
+## Observability
+
+Two complementary signals tell an operator that the receive path is alive:
+
+- **`nats_consumer_health`** — heartbeat from the dedicated consumer process
+  itself (`tick`, `consumer_pid`, `last_tick_ms_ago`, `stale`).  Intended for
+  external watchdogs: a wedged or crashed consumer leaves SIP workers blocked
+  on the per-handle SHM ring's eventfd with no other observable signal.
+  `stale=true` when `last_tick_ms_ago` exceeds five times the loop's 1 s
+  upper-wait bound.
+
+- **Per-handle backoff fields in `nats_consumer_list`** — every handle entry
+  also carries `ensure_failures` and `ensure_next_retry_at`.  When the
+  worker can't (re)subscribe because the broker rejected
+  `js_AddConsumer` / `js_PullSubscribe` — typically the broker-side durable
+  was deleted out from under OpenSIPS, or the underlying stream is missing —
+  `ensure_failures` climbs and the retry interval doubles each tick (1, 2,
+  4, 8, 16, 32 s, then capped at 60 s).  Non-zero `ensure_failures` on any
+  handle means "this handle is currently failing"; a one-shot WARN names
+  the handle once the cap is reached.  Both fields return to zero on the
+  first successful resubscribe.
+
+```sh
+opensips-cli -x mi nats_consumer_health
+# {"tick":12943,"consumer_pid":4711,"last_tick_ms_ago":821,"stale":"false"}
+
+opensips-cli -x mi nats_consumer_list | jq '.[] | {id, ensure_failures, ensure_next_retry_at}'
+# {"id":"jobs","ensure_failures":0,"ensure_next_retry_at":0}
+# {"id":"orphan","ensure_failures":4,"ensure_next_retry_at":1778686784}
+```
 
 ## Usage
 
