@@ -288,5 +288,190 @@ else
     pass "connection URL not visibly tls:// in log (libnats may strip scheme; non-fatal)"
 fi
 
+# Tear down the happy-path opensips before the negative scenarios.
+kill -TERM "$OPENSIPS_PID" 2>/dev/null
+wait "$OPENSIPS_PID" 2>/dev/null
+OPENSIPS_PID=""
+
+# ----------------------------------------------------------------
+# Helper: boot opensips with a per-scenario cfg, capture log, return
+# whether the named log marker appeared.  Tears the process down on
+# return; sets OPENSIPS_PID so cleanup() can reap on error exit.
+#
+# Args:
+#   $1  scenario name (used as cfg + log filename prefix)
+#   $2  cfg body (heredoc-passed content)
+#   $3  log marker grep to wait for (returns 0 if seen)
+#   $4  wait seconds (default 5)
+# ----------------------------------------------------------------
+boot_scenario() {
+    local name="$1" cfg_body="$2" want="$3" waitsecs="${4:-5}"
+    local cfg="${WORKDIR}/${name}.cfg"
+    local log="${WORKDIR}/${name}.log"
+
+    printf '%s' "$cfg_body" > "$cfg"
+
+    LD_LIBRARY_PATH="/usr/local/lib:${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+        "$OPENSIPS_BIN" -F -i -f "$cfg" > "$log" 2>&1 &
+    OPENSIPS_PID=$!
+
+    local deadline=$((SECONDS + waitsecs))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -s "$log" ] && grep -q "$want" "$log"; then
+            kill -TERM "$OPENSIPS_PID" 2>/dev/null
+            wait "$OPENSIPS_PID" 2>/dev/null
+            OPENSIPS_PID=""
+            return 0
+        fi
+        # Also exit early if opensips died (negative tests expect this)
+        if ! kill -0 "$OPENSIPS_PID" 2>/dev/null; then
+            wait "$OPENSIPS_PID" 2>/dev/null
+            OPENSIPS_PID=""
+            if grep -q "$want" "$log"; then
+                return 0
+            fi
+            return 1
+        fi
+        sleep 0.25
+    done
+
+    kill -TERM "$OPENSIPS_PID" 2>/dev/null
+    wait "$OPENSIPS_PID" 2>/dev/null
+    OPENSIPS_PID=""
+    return 1
+}
+
+# Boilerplate header reused across negative-case cfgs
+HEADER="log_level=3
+xlog_level=3
+stderror_enabled=yes
+syslog_enabled=no
+udp_workers=1
+tcp_workers=0
+socket=udp:127.0.0.1:65520
+loadmodule \"proto_udp.so\"
+loadmodule \"${TREE_ROOT}/modules/sipmsgops/sipmsgops.so\"
+loadmodule \"${TREE_ROOT}/modules/signaling/signaling.so\"
+loadmodule \"${TREE_ROOT}/modules/sl/sl.so\"
+loadmodule \"${TREE_ROOT}/modules/maxfwd/maxfwd.so\"
+"
+FOOTER="
+route {
+    sl_send_reply(200, \"ok\");
+    exit;
+}
+"
+
+# ----------------------------------------------------------------
+# Scenario: tls:// URL but tls_mgm NOT loaded.
+# Expectation: nats_pool_get errors with the operator-friendly
+# 'tls:// URL configured but tls_mgm is not loaded' message; opensips
+# either dies in child_init (cachedb_nats's child_init calls
+# nats_pool_get to create the per-process connection) or stays
+# running but logs the error.
+# ----------------------------------------------------------------
+NO_MGM_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_NO_MGM\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+modparam(\"cachedb_nats\", \"enable_search_index\", 0)
+${FOOTER}"
+
+if boot_scenario "no_mgm" "$NO_MGM_CFG" "tls_mgm is not loaded" 8; then
+    pass "negative: tls:// without tls_mgm logs operator-friendly error"
+else
+    fail "negative: expected 'tls_mgm is not loaded' error in log, never seen"
+    tail -15 "${WORKDIR}/no_mgm.log" 2>&1 | sed 's/^/  | /'
+fi
+
+# ----------------------------------------------------------------
+# Scenario: tls_mgm loaded but NO "nats" client_domain defined.
+# Expectation: nats_pool_get errors with 'tls_mgm has no client_domain
+# named "nats"' guidance.
+# ----------------------------------------------------------------
+NO_DOMAIN_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"other\")
+modparam(\"tls_mgm\", \"certificate\", \"[other]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[other]${WORKDIR}/client.key\")
+modparam(\"tls_mgm\", \"ca_list\",     \"[other]${WORKDIR}/ca.crt\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_NO_DOMAIN\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+modparam(\"cachedb_nats\", \"enable_search_index\", 0)
+${FOOTER}"
+
+if boot_scenario "no_domain" "$NO_DOMAIN_CFG" \
+        "tls_mgm has no client_domain named \"nats\"" 8; then
+    pass "negative: tls_mgm without 'nats' domain logs operator-friendly error"
+else
+    fail "negative: expected 'no client_domain named nats' error, never seen"
+    tail -15 "${WORKDIR}/no_domain.log" 2>&1 | sed 's/^/  | /'
+fi
+
+# ----------------------------------------------------------------
+# Scenario: tls_mgm with ca_directory (instead of ca_list).
+# Expectation: nats_load_ca_directory walks ${WORKDIR}/cadir (which
+# we populate with ca.crt), concatenates, hands to libnats; handshake
+# succeeds.
+# ----------------------------------------------------------------
+mkdir -p "${WORKDIR}/cadir"
+cp "${WORKDIR}/ca.crt" "${WORKDIR}/cadir/ca.pem"
+
+CADIR_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"nats\")
+modparam(\"tls_mgm\", \"certificate\", \"[nats]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[nats]${WORKDIR}/client.key\")
+modparam(\"tls_mgm\", \"ca_dir\", \"[nats]${WORKDIR}/cadir\")
+modparam(\"tls_mgm\", \"verify_cert\", \"[nats]1\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_CA_DIR\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+modparam(\"cachedb_nats\", \"enable_search_index\", 0)
+${FOOTER}"
+
+if boot_scenario "cadir" "$CADIR_CFG" "NATS pool: connected to" 10; then
+    pass "positive: ca_directory path succeeds end-to-end"
+else
+    fail "positive: ca_directory path did not connect"
+    tail -15 "${WORKDIR}/cadir.log" 2>&1 | sed 's/^/  | /'
+fi
+
+# ----------------------------------------------------------------
+# Scenario: verify_cert=0 skip path (server cert verification off).
+# Expectation: handshake succeeds even though we leave CA out so the
+# default chain validation would have rejected the self-signed cert.
+# ----------------------------------------------------------------
+SKIP_VERIFY_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"nats\")
+modparam(\"tls_mgm\", \"certificate\", \"[nats]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[nats]${WORKDIR}/client.key\")
+modparam(\"tls_mgm\", \"verify_cert\", \"[nats]0\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_SKIP_VERIFY\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+modparam(\"cachedb_nats\", \"enable_search_index\", 0)
+${FOOTER}"
+
+if boot_scenario "skip_verify" "$SKIP_VERIFY_CFG" "NATS pool: connected to" 10; then
+    pass "positive: verify_cert=0 connects with no CA configured"
+else
+    fail "positive: verify_cert=0 path did not connect"
+    tail -15 "${WORKDIR}/skip_verify.log" 2>&1 | sed 's/^/  | /'
+fi
+
 echo "==== summary: $PASSED pass, $FAILED fail ===="
 exit "$SUITE_FAIL"
