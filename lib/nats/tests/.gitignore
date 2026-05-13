@@ -1,4 +1,5 @@
 *.o
+test_nats_dl
 test_pool_atomics_explicit
 test_redact_url
 test_tls_downgrade_policy

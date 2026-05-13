@@ -441,7 +441,7 @@ void nats_rpc_staged_apply_and_clear_on(natsMsg *out)
 		 * staged_dup appends a NUL past .len.  natsMsg stores a
 		 * copy of the bytes internally so our pkg buffers can be
 		 * freed right after. */
-		(void)natsMsgHeader_Set(out,
+		(void)nats_dl.natsMsgHeader_Set(out,
 			g_staged[i].name.s,
 			g_staged[i].value.s ? g_staged[i].value.s : "");
 	}
@@ -506,23 +506,23 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
 	data_s   = (payload && payload->s)   ? payload->s   : "";
 	data_len = (payload && payload->len > 0) ? payload->len : 0;
 
-	s = natsMsg_Create(&out, subj_c, NULL /* no reply-of-reply */,
+	s = nats_dl.natsMsg_Create(&out, subj_c, NULL /* no reply-of-reply */,
 		data_s, data_len);
 	if (s != NATS_OK || !out) {
 		LM_ERR("nats_reply: natsMsg_Create failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		nats_rpc_staged_clear();
 		return -4;
 	}
 
 	nats_rpc_staged_apply_and_clear_on(out);
 
-	s = natsConnection_PublishMsg(nc, out);
-	natsMsg_Destroy(out);
+	s = nats_dl.natsConnection_PublishMsg(nc, out);
+	nats_dl.natsMsg_Destroy(out);
 
 	if (s != NATS_OK) {
 		LM_ERR("nats_reply: publish to '%s' failed: %s\n",
-			subj_c, natsStatus_GetText(s));
+			subj_c, nats_dl.natsStatus_GetText(s));
 		return -4;
 	}
 	return 1;
@@ -555,7 +555,7 @@ int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
 
 	pos = 2;   /* reserve count prefix */
 
-	s = natsMsgHeader_Keys(m, &keys, &nkeys);
+	s = nats_dl.natsMsgHeader_Keys(m, &keys, &nkeys);
 	if (s != NATS_OK || !keys || nkeys <= 0) {
 		out[0] = 0; out[1] = 0;
 		if (keys) free((void *)keys);
@@ -573,7 +573,7 @@ int nats_rpc_hdr_serialize_from_reply(natsMsg *m, char *out, int cap,
 		klen = (int)strlen(keys[i]);
 		if (klen <= 0 || klen > 0xFFFF) continue;
 
-		vs = natsMsgHeader_Values(m, keys[i], &vals, &nvals);
+		vs = nats_dl.natsMsgHeader_Values(m, keys[i], &vals, &nvals);
 		if (vs != NATS_OK || !vals || nvals <= 0) {
 			if (vals) free((void *)vals);
 			continue;
@@ -642,9 +642,9 @@ void nats_rpc_cur_set_from_nats_reply(natsMsg *reply)
 	cur->handle_idx  = 0xFFFF;   /* synthetic -- not tied to a handle */
 	cur->ack_token   = 0;
 
-	subject  = natsMsg_GetSubject(reply);
-	data     = natsMsg_GetData(reply);
-	data_len = natsMsg_GetDataLength(reply);
+	subject  = nats_dl.natsMsg_GetSubject(reply);
+	data     = nats_dl.natsMsg_GetData(reply);
+	data_len = nats_dl.natsMsg_GetDataLength(reply);
 	slen     = subject ? strlen(subject) : 0;
 
 	if (slen > NATS_RING_SUBJECT_MAX) slen = NATS_RING_SUBJECT_MAX;
@@ -804,10 +804,10 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	 * the request.  natsConnection_RequestMsg uses the msg's subject,
 	 * headers and payload.  We construct with reply=NULL; nats.c
 	 * assigns a private inbox internally. */
-	s = natsMsg_Create(&out, subj_c, NULL, data_s, data_len);
+	s = nats_dl.natsMsg_Create(&out, subj_c, NULL, data_s, data_len);
 	if (s != NATS_OK || !out) {
 		LM_ERR("nats_request: natsMsg_Create failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		nats_rpc_staged_clear();
 		return -4;
 	}
@@ -815,8 +815,8 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	nats_rpc_staged_apply_and_clear_on(out);
 
 	/* SYNC RPC: blocks this worker until reply arrives or timeout. */
-	s = natsConnection_RequestMsg(&reply, nc, out, (int64_t)tmo);
-	natsMsg_Destroy(out);
+	s = nats_dl.natsConnection_RequestMsg(&reply, nc, out, (int64_t)tmo);
+	nats_dl.natsMsg_Destroy(out);
 
 	if (s == NATS_TIMEOUT) {
 		LM_DBG("nats_request: timeout waiting for reply on '%s' "
@@ -828,14 +828,14 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	}
 	if (s != NATS_OK || !reply) {
 		LM_ERR("nats_request: request on '%s' failed: %s\n",
-			subj_c, natsStatus_GetText(s));
-		if (reply) natsMsg_Destroy(reply);
+			subj_c, nats_dl.natsStatus_GetText(s));
+		if (reply) nats_dl.natsMsg_Destroy(reply);
 		return -4;
 	}
 
 	/* Install the reply into the per-worker current-message state
 	 * so the script can read $nats_data etc. after this returns. */
 	nats_rpc_cur_set_from_nats_reply(reply);
-	natsMsg_Destroy(reply);
+	nats_dl.natsMsg_Destroy(reply);
 	return 1;
 }

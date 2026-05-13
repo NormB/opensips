@@ -8,7 +8,7 @@ ASAN    := -fsanitize=address
 .PHONY: all check check-tsan clean
 
 TESTS = test_redact_url test_tls_downgrade_policy test_validate_publish_subject \
-        test_validate_subject_cache
+        test_validate_subject_cache test_nats_dl
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -30,11 +30,24 @@ test_validate_publish_subject: test_validate_publish_subject.c ../nats_validate.
 test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_subject_cache.c ../nats_validate.o
 
+# nats_dl: dlopen + dlsym function-pointer table for libnats.
+# Built with -DNO_LOG -DNO_DEBUG so the in-source LM_INFO/LM_ERR macros
+# expand to no-ops; otherwise the test would need to link OpenSIPS's
+# dprint.o (which is a binary-only dependency, not available here).
+# The compile flags do NOT propagate to the production build of
+# nats_dl.c — lib/nats/Makefile compiles it normally.
+# Cannot run under ASan: ASan and dlopen of libnats together produce
+# false-positive "leak" reports for libnats's internal allocator state.
+test_nats_dl: test_nats_dl.c ../nats_dl.c
+	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
+		-o $@ test_nats_dl.c ../nats_dl.c -ldl
+
 check: all
 	./test_redact_url
 	./test_tls_downgrade_policy
 	./test_validate_publish_subject
 	./test_validate_subject_cache
+	./test_nats_dl
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

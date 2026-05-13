@@ -57,6 +57,7 @@
 #include "../../mem/mem.h"
 #include "../../mem/shm_mem.h"
 #include "../../cachedb/cachedb.h"
+#include "../../lib/nats/nats_dl.h"   /* libnats function-pointer table */
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats.h"
@@ -811,14 +812,14 @@ static int _drain_kv_snapshot(kvStore *kv,
 	natsStatus s;
 	int count = 0;
 
-	kvWatchOptions_Init(&opts);
+	nats_dl.kvWatchOptions_Init(&opts);
 	opts.IgnoreDeletes = true;
 	opts.UpdatesOnly   = false;   /* include the initial snapshot */
 
-	s = kvStore_WatchAll(&w, kv, &opts);
+	s = nats_dl.kvStore_WatchAll(&w, kv, &opts);
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_WatchAll failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -826,7 +827,7 @@ static int _drain_kv_snapshot(kvStore *kv,
 		const char *key, *data;
 		int data_len;
 
-		s = kvWatcher_Next(&entry, w, 30000);
+		s = nats_dl.kvWatcher_Next(&entry, w, 30000);
 		if (s == NATS_TIMEOUT) {
 			LM_WARN("snapshot stalled at %d entries; aborting\n",
 				count);
@@ -834,28 +835,28 @@ static int _drain_kv_snapshot(kvStore *kv,
 		}
 		if (s != NATS_OK) {
 			LM_ERR("kvWatcher_Next failed: %s\n",
-				natsStatus_GetText(s));
-			kvWatcher_Destroy(w);
+				nats_dl.natsStatus_GetText(s));
+			nats_dl.kvWatcher_Destroy(w);
 			return -1;
 		}
 		if (!entry)
 			break;   /* end-of-snapshot sentinel */
 
-		key      = kvEntry_Key(entry);
-		data     = kvEntry_ValueString(entry);
-		data_len = kvEntry_ValueLen(entry);
+		key      = nats_dl.kvEntry_Key(entry);
+		data     = nats_dl.kvEntry_ValueString(entry);
+		data_len = nats_dl.kvEntry_ValueLen(entry);
 
 		if (key && data && data_len > 0) {
 			if (cb(key, data, data_len, ctx) == 0)
 				count++;
 		}
 
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		entry = NULL;
 	}
 
-	if (entry) kvEntry_Destroy(entry);
-	kvWatcher_Destroy(w);
+	if (entry) nats_dl.kvEntry_Destroy(entry);
+	nats_dl.kvWatcher_Destroy(w);
 	return count;
 }
 
@@ -1644,24 +1645,24 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		}
 		free(enc);
 
-		s = kvStore_Get(&entry, ncon->kv, target_key);
+		s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 		if (s == NATS_NOT_FOUND) {
 			pkg_free(target_key);
 			return 0;   /* empty result, not an error */
 		}
 		if (s != NATS_OK) {
 			LM_WARN("PK kvStore_Get failed for '%s': %s\n",
-				target_key, natsStatus_GetText(s));
+				target_key, nats_dl.natsStatus_GetText(s));
 			pkg_free(target_key);
 			return -1;
 		}
-		data = kvEntry_ValueString(entry);
-		data_len = kvEntry_ValueLen(entry);
+		data = nats_dl.kvEntry_ValueString(entry);
+		data_len = nats_dl.kvEntry_ValueLen(entry);
 		if (data && data_len > 0 && data[0] == '{') {
 			row = pkg_malloc(sizeof *row);
 			if (!row) {
 				LM_ERR("no pkg memory for cdb_row_t\n");
-				kvEntry_Destroy(entry);
+				nats_dl.kvEntry_Destroy(entry);
 				pkg_free(target_key);
 				return -1;
 			}
@@ -1669,14 +1670,14 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 				LM_ERR("PK fast path: failed to parse JSON for "
 					"'%s'\n", target_key);
 				pkg_free(row);
-				kvEntry_Destroy(entry);
+				nats_dl.kvEntry_Destroy(entry);
 				pkg_free(target_key);
 				return -1;
 			}
 			res->count++;
 			list_add_tail(&row->list, &res->rows);
 		}
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		pkg_free(target_key);
 		return 0;
 	}
@@ -1886,7 +1887,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		const char *data;
 		int data_len;
 
-		s = kvStore_Get(&entry, ncon->kv, match_keys[i]);
+		s = nats_dl.kvStore_Get(&entry, ncon->kv, match_keys[i]);
 		if (s == NATS_NOT_FOUND) {
 			/* In-memory index said hit, KV said miss. Most common
 			 * cause: a sibling OpenSIPS instance deleted the key
@@ -1903,15 +1904,15 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (s != NATS_OK) {
 			LM_WARN("kvStore_Get failed for key '%s': %s; row "
 				"omitted from query result\n",
-				match_keys[i], natsStatus_GetText(s));
+				match_keys[i], nats_dl.natsStatus_GetText(s));
 			continue;
 		}
 
-		data = kvEntry_ValueString(entry);
-		data_len = kvEntry_ValueLen(entry);
+		data = nats_dl.kvEntry_ValueString(entry);
+		data_len = nats_dl.kvEntry_ValueLen(entry);
 
 		if (!data || data_len <= 0 || data[0] != '{') {
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			continue;
 		}
@@ -1921,7 +1922,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		row = pkg_malloc(sizeof *row);
 		if (!row) {
 			LM_ERR("no more pkg memory for cdb_row_t\n");
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			goto error;
 		}
@@ -1929,7 +1930,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (cdb_json_to_dict(data, &row->dict, NULL) != 0) {
 			LM_ERR("failed to parse JSON for key '%s'\n", match_keys[i]);
 			pkg_free(row);
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			continue;
 		}
@@ -1937,7 +1938,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
 
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		entry = NULL;
 	}
 
@@ -2902,7 +2903,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	while (retries-- > 0) {
 		nats_cas_backoff_sleep(attempt);
 		attempt++;
-		s = kvStore_Get(&entry, ncon->kv, target_key);
+		s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 		if (s == NATS_NOT_FOUND) {
 			/* First-insert path: build a {"<filter-field>":"<filter-val>"}
 			 * seed and CreateString it atomically. Only run when the filter
@@ -2928,7 +2929,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				return -1;
 			}
 
-			s = kvStore_CreateString(&create_rev, ncon->kv, target_key, seed);
+			s = nats_dl.kvStore_CreateString(&create_rev, ncon->kv, target_key, seed);
 			if (s == NATS_OK) {
 				json_buf = seed;        /* hand off ownership */
 				rev = create_rev;
@@ -2941,24 +2942,24 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				 * failures (network, etc.) will recur on the next Get and
 				 * be surfaced there. */
 				LM_DBG("seed CreateString lost race or failed for '%s': %s\n",
-					target_key, natsStatus_GetText(s));
+					target_key, nats_dl.natsStatus_GetText(s));
 				free(seed);
 				NATS_CDB_STATS_INC(cas_retry);
 				continue;
 			}
 		} else if (s != NATS_OK) {
 			LM_ERR("kvStore_Get failed for key '%s': %s\n",
-				target_key, natsStatus_GetText(s));
+				target_key, nats_dl.natsStatus_GetText(s));
 			pkg_free(target_key);
 			return -1;
 		} else {
-			data = kvEntry_ValueString(entry);
-			data_len = kvEntry_ValueLen(entry);
-			rev = kvEntry_Revision(entry);
+			data = nats_dl.kvEntry_ValueString(entry);
+			data_len = nats_dl.kvEntry_ValueLen(entry);
+			rev = nats_dl.kvEntry_Revision(entry);
 
 			if (!data || data_len <= 0) {
 				LM_ERR("empty document for key '%s'\n", target_key);
-				kvEntry_Destroy(entry);
+				nats_dl.kvEntry_Destroy(entry);
 				entry = NULL;
 				pkg_free(target_key);
 				return -1;
@@ -2977,7 +2978,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 					"failed (key '%s', %d bytes; needed for "
 					"targeted index_remove after CAS)\n",
 					target_key, data_len + 1);
-				kvEntry_Destroy(entry);
+				nats_dl.kvEntry_Destroy(entry);
 				entry = NULL;
 				pkg_free(target_key);
 				return -1;
@@ -2985,7 +2986,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			memcpy(json_buf, data, data_len);
 			json_buf[data_len] = '\0';
 
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 		}
 
@@ -3008,7 +3009,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			(void)pair; (void)pos; /* silence -Wunused under this branch */
 
 			/* write back with CAS */
-			s = kvStore_UpdateString(&new_rev, ncon->kv, target_key,
+			s = nats_dl.kvStore_UpdateString(&new_rev, ncon->kv, target_key,
 				new_json, rev);
 			if (s == NATS_OK) {
 				/* Targeted index update: remove the key from only

@@ -23,7 +23,7 @@
  *
  * Implements a non-blocking JetStream/core NATS request/reply RPC
  * that yields the worker on an eventfd while the reply is in
- * flight, instead of blocking on natsConnection_RequestMsg().
+ * flight, instead of blocking on nats_dl.natsConnection_RequestMsg().
  *
  * Architecture:
  *
@@ -874,15 +874,15 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 
 	if (!msg) return;
 
-	subject  = natsMsg_GetSubject(msg);
-	data     = natsMsg_GetData(msg);
-	data_len = natsMsg_GetDataLength(msg);
-	reply_to = natsMsg_GetReply(msg);
+	subject  = nats_dl.natsMsg_GetSubject(msg);
+	data     = nats_dl.natsMsg_GetData(msg);
+	data_len = nats_dl.natsMsg_GetDataLength(msg);
+	reply_to = nats_dl.natsMsg_GetReply(msg);
 
 	corr = nats_rpc_async_corr_from_subject(subject,
 		subject ? (int)strlen(subject) : 0, &corr_len);
 	if (!corr) {
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
 
@@ -898,7 +898,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		 * subscription to whichever worker has the active
 		 * connection, so this is benign and expected to be
 		 * rare. */
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
 
@@ -938,7 +938,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	}
 	pthread_mutex_unlock(&c->mu);
 
-	natsMsg_Destroy(msg);
+	nats_dl.natsMsg_Destroy(msg);
 	nats_rpc_async_ctx_release(c);
 }
 
@@ -983,11 +983,11 @@ static int ensure_inbox_subscription(void)
 		pthread_mutex_unlock(&g_inbox_sub_mu);
 		return -1;
 	}
-	s = natsConnection_Subscribe(&g_inbox_sub, nc, wildcard,
+	s = nats_dl.natsConnection_Subscribe(&g_inbox_sub, nc, wildcard,
 		on_inbox_reply, NULL);
 	if (s != NATS_OK || !g_inbox_sub) {
 		LM_ERR("nats_rpc_async: subscribe(%s) failed: %s\n",
-			wildcard, natsStatus_GetText(s));
+			wildcard, nats_dl.natsStatus_GetText(s));
 		pthread_mutex_unlock(&g_inbox_sub_mu);
 		return -1;
 	}

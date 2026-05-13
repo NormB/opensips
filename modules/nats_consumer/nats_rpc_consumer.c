@@ -130,18 +130,18 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 
 	if (!msg) return;
 
-	subject  = natsMsg_GetSubject(msg);
+	subject  = nats_dl.natsMsg_GetSubject(msg);
 	subj_len = subject ? (int)strlen(subject) : 0;
-	data     = natsMsg_GetData(msg);
-	data_len = natsMsg_GetDataLength(msg);
-	reply_to = natsMsg_GetReply(msg);
+	data     = nats_dl.natsMsg_GetData(msg);
+	data_len = nats_dl.natsMsg_GetDataLength(msg);
+	reply_to = nats_dl.natsMsg_GetReply(msg);
 	if (reply_to) reply_len = (int)strlen(reply_to);
 
 	if (parse_slot_idx(subject, subj_len, &slot_idx) < 0) {
 		/* malformed reply subject -- drop quietly.  Could be
 		 * an unrelated message that matched our wildcard or a
 		 * malicious peer; either way, no slot to deliver to. */
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
 
@@ -151,7 +151,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		 * timed out and freed the slot before the reply
 		 * arrived, or a stale reply from a previous use of
 		 * the same slot.  Drop silently. */
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
 
@@ -161,7 +161,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	{
 		int cur = atomic_load_explicit(&s->state, memory_order_acquire);
 		if (cur != NATS_RPC_SLOT_INFLIGHT) {
-			natsMsg_Destroy(msg);
+			nats_dl.natsMsg_Destroy(msg);
 			return;
 		}
 	}
@@ -209,7 +209,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
 		memory_order_release);
 
-	natsMsg_Destroy(msg);
+	nats_dl.natsMsg_Destroy(msg);
 }
 
 /* ── public API ──────────────────────────────────────────────── */
@@ -248,11 +248,11 @@ int nats_rpc_consumer_subscribe(void)
 		return -1;
 	}
 
-	s = natsConnection_Subscribe(&g_inbox_sub, nc, wildcard,
+	s = nats_dl.natsConnection_Subscribe(&g_inbox_sub, nc, wildcard,
 		on_inbox_reply, NULL);
 	if (s != NATS_OK || !g_inbox_sub) {
 		LM_ERR("nats_rpc_consumer_subscribe: Subscribe(%s) failed: %s\n",
-			wildcard, natsStatus_GetText(s));
+			wildcard, nats_dl.natsStatus_GetText(s));
 		g_inbox_sub = NULL;
 		return -1;
 	}
@@ -264,8 +264,8 @@ int nats_rpc_consumer_subscribe(void)
 void nats_rpc_consumer_unsubscribe(void)
 {
 	if (g_inbox_sub) {
-		natsSubscription_Unsubscribe(g_inbox_sub);
-		natsSubscription_Destroy(g_inbox_sub);
+		nats_dl.natsSubscription_Unsubscribe(g_inbox_sub);
+		nats_dl.natsSubscription_Destroy(g_inbox_sub);
 		g_inbox_sub = NULL;
 	}
 }
@@ -342,21 +342,21 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	memcpy(subj_c, s->out_subject, s->out_subject_len);
 	subj_c[s->out_subject_len] = '\0';
 
-	st = natsMsg_Create(&out, subj_c, reply_subject,
+	st = nats_dl.natsMsg_Create(&out, subj_c, reply_subject,
 		(const char *)s->out_data, (int)s->out_data_len);
 	if (st != NATS_OK || !out) {
 		LM_ERR("nats_rpc_consumer: natsMsg_Create failed for slot %u: %s\n",
-			(unsigned)s->slot_idx, natsStatus_GetText(st));
+			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
 		return;
 	}
 
-	st = natsConnection_PublishMsg(nc, out);
-	natsMsg_Destroy(out);
+	st = nats_dl.natsConnection_PublishMsg(nc, out);
+	nats_dl.natsMsg_Destroy(out);
 	if (st != NATS_OK) {
 		LM_ERR("nats_rpc_consumer: PublishMsg failed for slot %u: %s\n",
-			(unsigned)s->slot_idx, natsStatus_GetText(st));
+			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
 		return;
