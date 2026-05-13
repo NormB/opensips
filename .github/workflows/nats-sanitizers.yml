@@ -86,10 +86,27 @@ jobs:
     steps:
       - name: Install build deps + libnats
         run: |
+          # apt's libnats-dev on ubuntu 22.04/24.04 ships libnats 3.7,
+          # which predates kvStore_WatchMulti / kvStore_WatchAll-with-opts
+          # and several other symbols referenced by lib/nats/nats_dl_table.def.
+          # Build from source pinned to a known-good upstream tag so the
+          # X-macro that materialises the function-pointer struct
+          # (NATS_DL_FN(sym) -> __typeof__(sym) *sym;) finds every
+          # referenced symbol declared in nats/nats.h.
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libnats-dev libuv1-dev \
+            build-essential pkg-config libssl-dev libuv1-dev cmake \
             git ca-certificates
+          git clone --depth 1 --branch v3.12.0 \
+              https://github.com/nats-io/nats.c /tmp/nats.c
+          cd /tmp/nats.c && mkdir build && cd build
+          cmake -DNATS_BUILD_WITH_TLS=ON \
+                -DNATS_BUILD_EXAMPLES=OFF \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_INSTALL_PREFIX=/usr/local ..
+          make -j"$(nproc)"
+          make install
+          ldconfig
 
       - uses: actions/checkout@v4
         with:
