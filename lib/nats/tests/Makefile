@@ -61,6 +61,15 @@ check: all
 	$(NATS_TEST_ENV) ./test_nats_dl
 	./test_nats_ca_dir
 
+# tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
+# generates self-signed certs, boots opensips with tls_mgm + the
+# "nats" client domain + cachedb_nats configured for tls://, and
+# verifies the TLS handshake completes.  Requires opensips built,
+# nats-server, openssl, nc.  Skips with exit 77 if anything missing.
+.PHONY: smoke
+smoke: ./test_tls_mgm_smoke.sh
+	./test_tls_mgm_smoke.sh
+
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
 	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
