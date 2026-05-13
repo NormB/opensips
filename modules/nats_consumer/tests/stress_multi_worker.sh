@@ -37,7 +37,20 @@ ensure_stream MW 'mw.>'
 nats_bind mw MW durable=mw filter=mw.job ack_wait=600s \
     max_ack_pending=16384 ring_capacity=16384 >/dev/null
 
-echo "publishing ${N_MESSAGES} messages..."
+# Snapshot the mw handle's delivered + redeliveries counters BEFORE we
+# publish, so the assertion can bound per-run delta instead of absolute
+# counts.  The compose stack survives across test runs and the
+# durable 'mw' handle keeps cumulative counters; prior runs' values
+# would otherwise either satisfy "delivered >= N_MESSAGES" before any
+# new publish (false PASS) or carry redeliveries that the test
+# attributes to this run (false FAIL).
+list_start=$(nats_list 2>/dev/null || true)
+start_delivered=$(nats_list_field "${list_start}" mw msgs_delivered 2>/dev/null || echo 0)
+start_redeliveries=$(nats_list_field "${list_start}" mw redeliveries 2>/dev/null || echo 0)
+start_delivered=${start_delivered:-0}
+start_redeliveries=${start_redeliveries:-0}
+
+echo "publishing ${N_MESSAGES} messages (start_delivered=${start_delivered}, start_redeliveries=${start_redeliveries})..."
 # One docker exec amortises the publish overhead -- 10000 individual
 # `docker compose exec natscli` calls take ~30 minutes; batched in-line
 # inside a single natscli shell it takes ~20 seconds.
@@ -49,24 +62,28 @@ while [ $i -le "$N" ]; do
 done
 ' >/dev/null 2>&1
 
-# Wait for delivery counter to reach target.
+# Wait for the per-run delivery delta to reach N_MESSAGES, then check
+# per-run redelivery delta is zero.
 deadline=$(( $(date +%s) + 120 ))
 delivered=0; redeliveries=0
+delta_delivered=0; delta_redeliveries=0
 while [ $(date +%s) -lt ${deadline} ]; do
     list_out=$(nats_list 2>/dev/null)
     delivered=$(nats_list_field "${list_out}" mw msgs_delivered 2>/dev/null)
     redeliveries=$(nats_list_field "${list_out}" mw redeliveries 2>/dev/null)
     delivered=${delivered:-0}
     redeliveries=${redeliveries:-0}
-    if [ "${delivered}" -ge "${N_MESSAGES}" ] 2>/dev/null; then
-        if [ "${redeliveries}" -eq 0 ] 2>/dev/null; then
-            pass "multi_worker: ${delivered} delivered, 0 redeliveries"
+    delta_delivered=$(( delivered - start_delivered ))
+    delta_redeliveries=$(( redeliveries - start_redeliveries ))
+    if [ "${delta_delivered}" -ge "${N_MESSAGES}" ] 2>/dev/null; then
+        if [ "${delta_redeliveries}" -eq 0 ] 2>/dev/null; then
+            pass "multi_worker: ${delta_delivered} delivered (cumulative ${delivered}), 0 redeliveries this run"
             exit 0
         else
-            fail "multi_worker: ${redeliveries} redeliveries (expected 0)"
+            fail "multi_worker: ${delta_redeliveries} redeliveries this run (expected 0; cumulative ${redeliveries})"
         fi
     fi
     sleep 2
 done
 
-fail "multi_worker: did not reach ${N_MESSAGES} deliveries in 120s (last delivered=${delivered})"
+fail "multi_worker: did not reach ${N_MESSAGES} new deliveries in 120s (last delta=${delta_delivered}, cumulative=${delivered})"
