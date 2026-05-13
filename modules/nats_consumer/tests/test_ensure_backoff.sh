@@ -89,6 +89,21 @@ if [ "${attempts}" -lt 2 ]; then
 fi
 pass "attempts respect backoff schedule (${attempts} in ${OBSERVE_S}s, cap=${ENSURE_MAX_ATTEMPTS})"
 
+# MI surface: nats_consumer_list must expose ensure_failures and
+# ensure_next_retry_at per-handle so operators can spot a wedged
+# handle without grepping the log.  Non-zero ensure_failures on a
+# handle whose stream doesn't exist is the load-bearing signal.
+list_env=$(nats_list)
+ensure_failures=$(nats_list_field "${list_env}" "${ID}" ensure_failures)
+ensure_next=$(nats_list_field "${list_env}" "${ID}" ensure_next_retry_at)
+if [ -z "${ensure_failures}" ] || [ "${ensure_failures}" = "0" ]; then
+    fail "MI: nats_consumer_list returned ensure_failures='${ensure_failures}' for wedged handle (expected non-zero)"
+fi
+if [ -z "${ensure_next}" ] || [ "${ensure_next}" = "0" ]; then
+    fail "MI: nats_consumer_list returned ensure_next_retry_at='${ensure_next}' for wedged handle (expected non-zero unix-time)"
+fi
+pass "MI list exposes ensure_failures=${ensure_failures} ensure_next_retry_at=${ensure_next}"
+
 # Recovery: create the stream that's been missing.  The next reconcile
 # tick succeeds (js_AddConsumer creates the durable inline now that the
 # stream exists), the recovery INFO fires, and the counter resets.

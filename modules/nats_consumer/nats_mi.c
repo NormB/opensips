@@ -192,6 +192,22 @@ static int list_cb(nats_handle_t *h, void *user)
 	ADD_N("redeliveries",    h->redeliveries);
 	lock_stop_read(h->rlock);
 
+	/* Backoff state for ensure_subscription_for_handle() retries.
+	 * Written only by the consumer process from reconcile_subs_cb()
+	 * without taking the rlock -- consistent with the existing
+	 * pulls_requested / msgs_delivered counters above, which are
+	 * also writer-side lockless.  Worst case MI sees a tear/stale
+	 * read; ensure_failures is a small counter and ensure_next_retry_at
+	 * is monotonically nondecreasing within a single failure run, so
+	 * either field is operator-actionable even when slightly stale.
+	 *
+	 * Non-zero ensure_failures means the handle is currently failing;
+	 * ensure_failures >= 7 means the backoff has saturated at the 60 s
+	 * cap (mirrors the WARN threshold in reconcile_subs_cb).  The same
+	 * value reported as 0 means the handle is healthy. */
+	ADD_N("ensure_failures",      h->ensure_failures);
+	ADD_N("ensure_next_retry_at", (double)h->ensure_next_retry_at);
+
 	#undef ADD_S
 	#undef ADD_S_ALWAYS
 	#undef ADD_N
