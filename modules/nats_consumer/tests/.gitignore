@@ -6,6 +6,8 @@ test_adaptive_batch
 test_async_request_inflight
 test_async_request_skeleton
 test_consumer_heartbeat
+test_header_propagation
+test_start_time_roundtrip
 test_parser
 test_persist
 test_persist_precision
