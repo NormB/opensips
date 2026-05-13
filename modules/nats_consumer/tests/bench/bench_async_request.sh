@@ -152,7 +152,7 @@ sleep 1
 ####### boot opensips ###########################################
 
 OPENSIPS_LOG="$OUT/opensips.log"
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$CFG" -s HP_MALLOC -m 256 -M 8 > "$OPENSIPS_LOG" 2>&1 &
 OPENSIPS_PID=$!
 sleep 2

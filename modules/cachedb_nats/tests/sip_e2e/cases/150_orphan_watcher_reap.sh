@@ -47,7 +47,7 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
 
 # Start opensips directly (no wrapper traps).  Keep stdout / stderr
 # in a per-case log so we can post-mortem on failure.
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$ORPHAN_CFG" -s HP_MALLOC -m 256 -M 8 \
     > "$ORPHAN_LOG" 2>&1 &
 

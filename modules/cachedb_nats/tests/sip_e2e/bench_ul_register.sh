@@ -104,7 +104,7 @@ start_instance() {
     local cfg="$WORKDIR/o_${inst}.cfg"
     local log="$OUT/opensips_${inst}.log"
     render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
-    LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+    LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
         "$OPENSIPS_BIN" -F -f "$cfg" -s HP_MALLOC -m 256 -M 8 > "$log" 2>&1 &
     local pid=$!
     sleep 2

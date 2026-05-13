@@ -224,7 +224,7 @@ awk -v body="$DRAIN_BODY" '
 ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 
 echo "[bench] starting opensips ..."
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$CFG" -s HP_MALLOC -m 128 -M 8 \
     > "$OUT/opensips.log" 2>&1 &
 OPENSIPS_PID=$!

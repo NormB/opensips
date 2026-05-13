@@ -94,7 +94,15 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NATS_URL@@|${NATS_URL}|g" \
     "${HERE}/opensips.cfg.in" > "$WORKDIR/opensips.cfg"
 
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+# /usr/local/lib is where the upstream `cmake --install` for libnats
+# lands by default; on hosts that also ship a stale libnats from a
+# system package (libnats3.7 in /lib/<arch>-linux-gnu on Debian-family)
+# the upstream-installed version wins via this path order.  Without
+# this, nats_dl_load picks the system libnats whose older minor
+# version is missing kvStore_WatchMulti, kvStore_WatchAll, and other
+# symbols added in 3.10+ and event_nats mod_init aborts before the
+# MI socket comes up.
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$WORKDIR/opensips.cfg" -m 64 -M 4 \
     > "$WORKDIR/opensips.log" 2>&1 &
 OPENSIPS_PID=$!
