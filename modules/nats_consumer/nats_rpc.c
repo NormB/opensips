@@ -448,6 +448,143 @@ void nats_rpc_staged_apply_and_clear_on(natsMsg *out)
 	nats_rpc_staged_clear();
 }
 
+/*
+ * Serialize the staged-header table into the compact wire format
+ * documented in nats_rpc.h / nats_ring.h.  Used by the async
+ * nats_request worker side to embed staged headers into the SHM
+ * slot's out_headers buffer; the consumer process deserializes via
+ * nats_rpc_hdr_deserialize_to_msg() before publishing.
+ *
+ * Does NOT clear the staging table -- callers that own the publish
+ * lifecycle (w_nats_request_async) call nats_rpc_staged_clear()
+ * after the slot is fully published so a mid-flight failure does
+ * not leak staged state into the next call.
+ */
+int nats_rpc_staged_serialize(char *out, int cap,
+                              int *truncated, int *count_out)
+{
+	int i;
+	int pos = 2;             /* reserve count prefix */
+	int count = 0;
+	int trunc = 0;
+
+	if (truncated) *truncated = 0;
+	if (count_out) *count_out = 0;
+	if (!out || cap < 2) return 0;
+
+	for (i = 0; i < NATS_MAX_STAGED_HDRS; i++) {
+		int klen, vlen, need;
+		const char *kbytes, *vbytes;
+
+		if (!g_staged[i].in_use) continue;
+		if (!g_staged[i].name.s) continue;
+
+		klen = g_staged[i].name.len;
+		vlen = g_staged[i].value.len;
+		if (klen <= 0 || klen > 0xFFFF) continue;
+		if (vlen < 0  || vlen > 0xFFFF) continue;
+
+		need = 2 + klen + 2 + vlen;
+		if (pos + need > cap) { trunc = 1; break; }
+
+		kbytes = g_staged[i].name.s;
+		vbytes = g_staged[i].value.s;
+
+		out[pos++] = (char)(klen & 0xFF);
+		out[pos++] = (char)((klen >> 8) & 0xFF);
+		memcpy(out + pos, kbytes, (size_t)klen);
+		pos += klen;
+		out[pos++] = (char)(vlen & 0xFF);
+		out[pos++] = (char)((vlen >> 8) & 0xFF);
+		if (vlen > 0 && vbytes) memcpy(out + pos, vbytes, (size_t)vlen);
+		pos += vlen;
+
+		count++;
+		if (count >= 0xFFFF) { trunc = 1; break; }
+	}
+
+	out[0] = (char)(count & 0xFF);
+	out[1] = (char)((count >> 8) & 0xFF);
+	if (truncated) *truncated = trunc;
+	if (count_out) *count_out = count;
+	return pos;
+}
+
+/*
+ * Parse the compact wire-format header stream and apply each
+ * (name, value) pair onto a libnats natsMsg via natsMsgHeader_Set.
+ *
+ * Format (little-endian length prefixes -- see nats_rpc.h):
+ *   [count:2][ (klen:2)(key)(vlen:2)(value) ] * count
+ *
+ * `msg_void` is the natsMsg pointer cast through void* in the
+ * public signature so callers don't need <nats/nats.h>.
+ *
+ * Returns the number of headers successfully applied.  Returns -1
+ * if the byte stream is malformed (length prefix runs past the end
+ * of the buffer); whatever was applied before the truncation point
+ * remains on the msg.  An empty stream (count == 0) returns 0
+ * without touching the msg.
+ */
+int nats_rpc_hdr_deserialize_to_msg(const char *buf, int len, void *msg_void)
+{
+	natsMsg *out = (natsMsg *)msg_void;
+	int      pos = 0;
+	int      count;
+	int      i;
+	int      applied = 0;
+	/* Per-pair name + value land on the stack: bounded by the
+	 * 16-bit klen / vlen wire limits, but in practice headers
+	 * are tiny.  Use a small bounded buffer; oversize names or
+	 * values are skipped rather than truncated. */
+	char     kbuf[512];
+	char     vbuf[2048];
+	int      klen, vlen;
+
+	if (!buf || len < 2 || !out) return 0;
+
+	count = (unsigned char)buf[0] | ((unsigned char)buf[1] << 8);
+	pos = 2;
+
+	for (i = 0; i < count; i++) {
+		if (pos + 2 > len) return -1;
+		klen = (unsigned char)buf[pos] |
+		       ((unsigned char)buf[pos + 1] << 8);
+		pos += 2;
+		if (klen < 0 || pos + klen > len) return -1;
+
+		if (klen > 0 && klen < (int)sizeof(kbuf)) {
+			memcpy(kbuf, buf + pos, (size_t)klen);
+			kbuf[klen] = '\0';
+		} else {
+			/* Skip: empty or oversize name. */
+			kbuf[0] = '\0';
+		}
+		pos += klen;
+
+		if (pos + 2 > len) return -1;
+		vlen = (unsigned char)buf[pos] |
+		       ((unsigned char)buf[pos + 1] << 8);
+		pos += 2;
+		if (vlen < 0 || pos + vlen > len) return -1;
+
+		if (vlen >= 0 && vlen < (int)sizeof(vbuf)) {
+			if (vlen > 0) memcpy(vbuf, buf + pos, (size_t)vlen);
+			vbuf[vlen] = '\0';
+		} else {
+			/* Skip: oversize value. */
+			vbuf[0] = '\0';
+		}
+		pos += vlen;
+
+		if (kbuf[0] == '\0') continue;
+		if (nats_dl.natsMsgHeader_Set(out, kbuf, vbuf) == NATS_OK)
+			applied++;
+	}
+
+	return applied;
+}
+
 /* Render a nats_cur subject (raw, possibly not NUL-terminated) into a
  * stack buffer with NUL termination, and return the pointer.  Returns
  * NULL on overflow (must not happen since slot.reply_to_len is bounded
