@@ -789,22 +789,26 @@ route {
         <section id="param_nats_transport">
             <title>NATS transport parameters (owned by event_nats)</title>
             <para>
-                All NATS transport parameters
+                Connection-level NATS parameters
                 (<varname>nats_url</varname>,
                 <varname>reconnect_wait</varname>,
                 <varname>max_reconnect</varname>,
-                <varname>tls_skip_verify</varname>,
-                <varname>tls_allow_downgrade</varname>,
-                <varname>tls_ca</varname>,
-                <varname>tls_cert</varname>,
-                <varname>tls_key</varname>,
-                <varname>tls_hostname</varname>,
-                <varname>skip_openssl_init</varname>,
                 <varname>nats_drain_timeout_ms</varname>) are owned by
                 <emphasis>event_nats</emphasis> and read through the
                 shared <filename>lib/nats</filename> connection pool.
                 Set them on the <emphasis>event_nats</emphasis> module;
                 the consumer reuses the pool directly.
+            </para>
+            <para>
+                TLS configuration is sourced from the
+                <emphasis>tls_mgm</emphasis> client domain named
+                <varname>"nats"</varname> at connect time — see the
+                <emphasis>event_nats</emphasis> admin guide
+                "TLS configuration" section for the canonical pattern.
+                <emphasis>nats_consumer</emphasis> declares
+                <emphasis>tls_mgm</emphasis> as
+                <varname>DEP_SILENT</varname>, so plaintext-only
+                deployments don't need it.
             </para>
         </section>
     </section><!-- /parameters -->
