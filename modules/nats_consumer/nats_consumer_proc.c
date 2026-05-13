@@ -990,8 +990,32 @@ fail_free_sub:
 	return -1;
 }
 
+/* Exponential backoff for ensure_subscription_for_handle() failures.
+ *
+ * Capped at 60 s -- long enough that a wedged handle (e.g. broker-side
+ * durable deleted by an operator) stops dominating tick CPU and log
+ * noise, short enough that a transient broker outage clears within a
+ * minute of recovery.  The shift on `failures` saturates harmlessly
+ * once it exceeds the unsigned width, but the cap fires long before
+ * that ever matters. */
+#define ENSURE_BACKOFF_CAP_S 60u
+
+static unsigned ensure_backoff_seconds(unsigned failures)
+{
+	unsigned shift;
+	if (failures == 0)
+		return 0;
+	shift = failures - 1;
+	if (shift >= 6)            /* 1<<6 = 64 > cap; saturate */
+		return ENSURE_BACKOFF_CAP_S;
+	return 1u << shift;
+}
+
 static int reconcile_subs_cb(nats_handle_t *h, void *user)
 {
+	time_t now;
+	int    rc;
+
 	(void)user;
 	/* Skip retired handles -- the teardown path owns them now.
 	 * A retired handle is already off its bucket chain so registry
@@ -1000,9 +1024,49 @@ static int reconcile_subs_cb(nats_handle_t *h, void *user)
 	 * acquisition and the bucket-lock acquisition. */
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST))
 		return 0;
-	/* ignore individual-handle failures; the next tick retries them
-	 * because find_sub_by_id() keeps returning NULL for that id */
-	(void)ensure_subscription_for_handle(h);
+
+	/* Backoff gate: a handle whose ensure_subscription_for_handle()
+	 * has been failing keeps getting visited every reconcile tick,
+	 * but we only actually retry once `ensure_next_retry_at` has
+	 * elapsed.  Keeps a wedged handle from sucking IDLE_RETRY_MS of
+	 * CPU per tick and flooding the log with the same "Error (update
+	 * also Error)" line. */
+	now = time(NULL);
+	if (h->ensure_next_retry_at != 0 && now < h->ensure_next_retry_at)
+		return 0;
+
+	rc = ensure_subscription_for_handle(h);
+	if (rc == 0) {
+		/* Success or no-op (clean + already subscribed).  Either way,
+		 * the broker is happy -- reset the backoff so the next failure
+		 * starts at the 1 s base.  Only logs the recovery transition
+		 * to avoid spamming every tick of a stable handle. */
+		if (h->ensure_failures > 0) {
+			LM_INFO("nats_consumer_proc: handle '%.*s' recovered after "
+			        "%u failed ensure attempt(s)\n",
+			        (int)h->id.len, h->id.s, h->ensure_failures);
+		}
+		h->ensure_failures = 0;
+		h->ensure_next_retry_at = 0;
+	} else {
+		unsigned wait_s;
+		h->ensure_failures++;
+		wait_s = ensure_backoff_seconds(h->ensure_failures);
+		h->ensure_next_retry_at = now + (time_t)wait_s;
+		/* Log the saturation transition once so operators see when a
+		 * handle has truly wedged versus when the backoff is still
+		 * climbing -- the WARN at the cap is the signal to inspect or
+		 * unbind. */
+		if (h->ensure_failures == 7) {
+			LM_WARN("nats_consumer_proc: handle '%.*s' has failed "
+			        "ensure_subscription %u times; backoff now capped "
+			        "at %u s.  Likely broker-side consumer was deleted; "
+			        "run `nats_consumer_unbind` to clear or recreate the "
+			        "durable.\n",
+			        (int)h->id.len, h->id.s, h->ensure_failures,
+			        ENSURE_BACKOFF_CAP_S);
+		}
+	}
 	return 0;
 }
 

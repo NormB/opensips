@@ -160,6 +160,34 @@ typedef struct nats_handle {
 	int last_error_code;
 	str last_error_msg;
 
+	/* Worker-tick backoff for ensure_subscription_for_handle().
+	 *
+	 * Touched only by the consumer process from reconcile_subs_cb(); not
+	 * read by SIP workers, so no inter-process synchronisation needed.
+	 *
+	 * Without backoff, a handle whose broker-side consumer has been
+	 * deleted (e.g. operator-side `nats consumer rm`) would retry its
+	 * js_AddConsumer / js_PullSubscribe sequence every IDLE_RETRY_MS
+	 * (1 s default) indefinitely, flooding logs and starving fresh
+	 * handles' setup on a busy registry tick.
+	 *
+	 * Semantics:
+	 *   ensure_failures        = consecutive ensure_subscription_for_handle
+	 *                            calls that returned -1.  Reset to 0 on
+	 *                            the first success.
+	 *   ensure_next_retry_at   = monotonic-seconds gate (time(NULL))
+	 *                            below which the next reconcile tick
+	 *                            skips this handle.  0 = retry immediately
+	 *                            (clean handles, freshly bound handles).
+	 *
+	 * Backoff schedule is exponential, capped at 60 s, computed inline
+	 * in reconcile_subs_cb so handles needing custom policy can still be
+	 * added later without re-walking every call site.
+	 *
+	 * sub_torn_down=1 forces both back to zero so a rebind starts fresh. */
+	unsigned ensure_failures;
+	time_t   ensure_next_retry_at;
+
 	/* SHM ring for this handle -- created on bind, destroyed on unbind.
 	 * Producer: the dedicated consumer process.
 	 * Consumer: SIP workers.
