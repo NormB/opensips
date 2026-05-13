@@ -2,10 +2,18 @@
 # test_filter.sh -- integration test for single + multi subject filters.
 #
 # Binds two handles:
-#   billing: stream=CALLS, filter=calls.ended
-#   multi:   stream=CALLS, filters=calls.ended,calls.failed
-# Publishes messages on calls.ended + calls.started, asserts each handle
-# receives only what its filter allows.
+#   billing: stream=CALLS, filter=calls.ended,             deliver_policy=new
+#   multi:   stream=CALLS, filters=calls.ended,calls.failed deliver_policy=new
+# Publishes messages on calls.ended + calls.started + calls.failed,
+# asserts each handle receives only what its filter allows.
+#
+# The CALLS stream persists for the life of the compose stack so
+# without deliver_policy=new each fresh durable would replay all
+# historical calls.* messages from prior runs and the absolute-count
+# assertion would fire long after a single test pass.  We also rm
+# the durables on the broker at the start so the consumer is created
+# at the current stream tip (DeliverPolicy=New uses the stream's
+# current sequence at consumer-creation time).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/lib.sh"
@@ -13,15 +21,49 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream CALLS 'calls.>'
 
-nats_bind billing CALLS durable=b1 filter=calls.ended ack_wait=30s >/dev/null
-nats_bind multi   CALLS durable=m1 filters=calls.ended,calls.failed ack_wait=30s >/dev/null
+# Best-effort reset: unbind any prior OpenSIPS handles, then drop the
+# durables on the broker.  Both are idempotent.
+nats_unbind billing >/dev/null 2>&1 || true
+nats_unbind multi   >/dev/null 2>&1 || true
+ncli consumer rm CALLS b1 -f >/dev/null 2>&1 || true
+ncli consumer rm CALLS m1 -f >/dev/null 2>&1 || true
+
+nats_bind billing CALLS durable=b1 filter=calls.ended \
+    deliver_policy=new ack_wait=30s >/dev/null
+nats_bind multi   CALLS durable=m1 filters=calls.ended,calls.failed \
+    deliver_policy=new ack_wait=30s >/dev/null
+
+# nats_bind returns once the handle is in the registry, but the worker
+# tick (~1s cadence) is what actually fires js_AddConsumer + js_PullSubscribe
+# on the broker.  Without waiting here we publish into the void: messages
+# land before the consumer's DeliverPolicy=New snapshot point.
+deadline=$(( $(date +%s) + 10 ))
+have=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    names=$(ncli consumer ls CALLS --names 2>/dev/null || true)
+    have_b=0; have_m=0
+    case "$names" in
+        *b1*) have_b=1 ;;
+    esac
+    case "$names" in
+        *m1*) have_m=1 ;;
+    esac
+    if [ "${have_b}" = "1" ] && [ "${have_m}" = "1" ]; then
+        have=2
+        break
+    fi
+    sleep 0.5
+done
+if [ "${have}" != "2" ]; then
+    fail "filter: broker did not create both b1+m1 in 10s (saw='${names:-}')"
+    exit 1
+fi
 
 publish calls.started '{"id":"x"}'
 publish calls.ended   '{"id":"y"}'
 publish calls.failed  '{"id":"z"}'
 
 # billing should see exactly 1 (calls.ended), multi exactly 2 (ended+failed).
-# Poll counters until both reach their targets or we time out.
 deadline=$(( $(date +%s) + 15 ))
 b_delivered=0; m_delivered=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -36,14 +78,6 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 1
 done
 
-# Known flake: test passes on a fresh compose stack but the durable
-# 'billing'/'multi' consumers accumulate cumulative msgs_delivered
-# across runs.  Attempts to use run-unique ephemeral consumers with
-# deliver_policy=new showed that the multi-subject `filters=` flow
-# delivers 0 messages even with the consumer freshly created from the
-# stream tip, suggesting a deeper bug in nats_consumer_proc's
-# js_AddConsumer wiring for FilterSubjects[].  Leaving the original
-# absolute-count assertion in place pending that investigation.
 if [ "${b_delivered}" = "1" ] && [ "${m_delivered}" = "2" ]; then
     pass "filter: billing=1 multi=2"
 else
