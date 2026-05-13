@@ -30,8 +30,27 @@ snap_rss() {
     ${COMPOSE} exec -T opensips sh -c 'ps -o rss= -p 1 | tr -d " "'
 }
 
+# Count handles currently registered (before churn begins).  The
+# compose stack survives across test runs; if a previous test left
+# bound handles in the registry, they're counted in nats_consumer_list
+# even though the current test didn't create them.  Snapshotting now
+# lets the post-run assertion bound the DELTA against this baseline
+# instead of the absolute count.
+snap_handle_count() {
+    list_out=$(nats_list 2>/dev/null) || { echo 0; return; }
+    python3 -c "
+import json,sys
+env=json.loads('''${list_out}''')
+res=env.get('result', [])
+handles = res if isinstance(res, list) else res.get('handles', [])
+print(len(handles))
+" 2>/dev/null || echo 0
+}
+
+start_handle_count=$(snap_handle_count)
 start_rss=$(snap_rss || echo 0)
-echo "start_rss=${start_rss} kB, running churn for ${DURATION}s..."
+echo "start_handle_count=${start_handle_count}, start_rss=${start_rss} kB, " \
+     "running churn for ${DURATION}s..."
 
 history=()
 end=$(( $(date +%s) + DURATION ))
@@ -71,9 +90,15 @@ if [ "${handle_count}" = "-1" ]; then
     fail "churn: could not parse MI list output"
 fi
 
-# retention window is 10; add 'mw' + default 'test' => <= 12; allow 20
-if [ "${handle_count}" -gt 20 ] 2>/dev/null; then
-    fail "churn: handle_count=${handle_count} > 20 (unbind/reap regression)"
+# Retention window is 10 + the 'mw' steady handle = 11 net new from
+# this test run.  Allow 20 net new (slack for the reaper) on top of
+# whatever baseline the test inherited.  Bounding the DELTA -- not
+# the absolute count -- means consecutive runs in the same compose
+# stack don't accumulate into a spurious failure.
+delta=$(( handle_count - start_handle_count ))
+if [ "${delta}" -gt 20 ] 2>/dev/null; then
+    fail "churn: handle_count grew ${start_handle_count} -> ${handle_count}" \
+         "(delta=${delta} > 20, unbind/reap regression)"
 fi
 
 # RSS bound (start * 2).  Skip check if start_rss was 0 (snap failed).
@@ -84,4 +109,4 @@ if [ "${start_rss}" -gt 0 ] 2>/dev/null && [ "${end_rss}" -gt 0 ] 2>/dev/null; t
     fi
 fi
 
-pass "churn: duration=${DURATION}s handles_end=${handle_count} rss=${start_rss}->${end_rss}"
+pass "churn: duration=${DURATION}s handles ${start_handle_count}->${handle_count} (delta=${delta}) rss=${start_rss}->${end_rss}"
