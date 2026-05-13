@@ -103,13 +103,6 @@ ifeq ($(shell test $(MAJOR_RELEASE) -ge $(REL_STRETCH_OR_XENIAL); echo $$?),0)
 endif
 
 #
-# OPENTELEMETRY package
-#
-ifneq (,$(filter opentelemetry,$(DEB_BUILD_PROFILES)))
-	ALL_MODPKG_LIST += OPENTELEMETRY
-endif
-
-#
 # PROTO_SCTP package
 #
 # add SCTP only on linux systems
@@ -136,9 +129,6 @@ AUTH_JWT_MOD_PATH=$(addprefix modules/, $(AUTH_JWT_MODULES))
 AUTH_WEB3_CLIENT_PKGNAME = opensips-auth-web3-module
 AUTH_WEB3_CLIENT_MODULES = auth_web3
 AUTH_WEB3_CLIENT_MOD_PATH=$(addprefix modules/, $(AUTH_WEB3_CLIENT_MODULES))
-OPENTELEMETRY_PKGNAME = opensips-opentelemetry-module
-OPENTELEMETRY_MODULES = opentelemetry
-OPENTELEMETRY_MOD_PATH=$(addprefix modules/, $(OPENTELEMETRY_MODULES))
 AUTH_PKGNAME = opensips-auth-modules
 AUTH_MODULES = auth auth_aka uac_auth
 AUTH_MOD_PATH=$(addprefix modules/, $(AUTH_MODULES))
