@@ -1,6 +1,6 @@
 # Unit tests for event_nats.
-# Each test_*.c is self-contained with its own main(); the test_nats_module.sh
-# script is an end-to-end integration harness invoked separately.
+# Each test_*.c is self-contained with its own main(); the sip_e2e/
+# directory holds the end-to-end integration harness invoked separately.
 
 CC      ?= cc
 CFLAGS  ?= -g -O0 -Wall

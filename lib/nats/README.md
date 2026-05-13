@@ -96,10 +96,11 @@ variants installed override via `$NATS_DL_LIBNATS_PATH`.
 | Suite                           | Trigger                          |
 | ------------------------------- | -------------------------------- |
 | `lib/nats/tests/`               | `make -C lib/nats/tests check`   |
-| `modules/event_nats/tests/`     | unit + `test_nats_module.sh`     |
-| `modules/cachedb_nats/tests/`   | unit + integration shell tests   |
-| `modules/nats_consumer/tests/`  | unit + docker-compose integration |
+| `modules/event_nats/tests/`     | unit + `sip_e2e/run.sh` integration suite |
+| `modules/cachedb_nats/tests/`   | unit + `sip_e2e/run.sh` + KV CRUD/watch shell tests |
+| `modules/nats_consumer/tests/`  | unit + docker-compose functional & stress |
 | `lib/nats/tests/test_three_module_e2e.sh` | shared-pool round-trip across all three modules |
+| `lib/nats/tests/test_tls_mgm_smoke.sh` | TLS handshake via tls_mgm + negative-path scenarios |
 
 The CI workflow `.github/workflows/nats-sanitizers.yml` runs every
 unit suite under AddressSanitizer + UBSan and ThreadSanitizer.  Tests
