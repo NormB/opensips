@@ -19,16 +19,25 @@ all_modules:=$(addprefix modules/, $(all_modules))
 all_modules:=$(addprefix net/, $(builtin_modules)) $(all_modules)
 all_utils:=$(addprefix utils/, $(all_utils))
 all_misclibs=digest_auth reg
-# lib/nats only when libnats is detectable on the build host.  The
-# consuming modules (event_nats, cachedb_nats, nats_consumer) gate
-# themselves on the same probe, so a missing libnats produces a clean
-# skip across the whole NATS surface rather than a hard compile fail.
+# lib/nats only when libnats is detectable on the build host AND the
+# tls_mgm module headers are present in-tree.  lib/nats/nats_pool.c
+# #includes modules/tls_mgm/api.h directly (the TLS-routing pivot
+# landed in v4.0-nats-rc1), so a build that prunes modules/tls_mgm
+# from the source tree -- e.g., the rtp.io CI workflow which does
+# `rm -rf modules/*` to keep only an rtp.io-relevant subset -- would
+# otherwise fail to compile libnats_pool.so even though no NATS
+# module is being built.  The consuming modules (event_nats,
+# cachedb_nats, nats_consumer) gate themselves on the same libnats
+# probe, so a missing libnats produces a clean skip across the whole
+# NATS surface rather than a hard compile fail.
 NATS_DETECTED := $(shell { pkg-config --exists libnats || pkg-config --exists nats; } 2>/dev/null && echo yes)
 ifeq ($(NATS_DETECTED),)
 NATS_DETECTED := $(if $(wildcard $(LOCALBASE)/include/nats/nats.h),yes,)
 endif
 ifneq ($(NATS_DETECTED),)
+ifneq ($(wildcard modules/tls_mgm/api.h),)
 all_misclibs += nats
+endif
 endif
 all_misclibs:=$(addprefix lib/, $(all_misclibs))
 
