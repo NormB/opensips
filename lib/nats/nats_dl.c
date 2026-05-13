@@ -52,10 +52,10 @@ static const char *_path   = NULL;
  *           surfaces here instead of at first call from production
  *           code paths.
  * RTLD_GLOBAL: place libnats's symbols in the global dynamic-linker
- *           namespace.  Currently unused (no other DT_NEEDED is
- *           expected to resolve against libnats post-Phase-1), but
- *           cheap and forwards-compatible if a future module wants
- *           to mix dlopen + DT_NEEDED.
+ *           namespace.  Currently unused (no other DT_NEEDED in this
+ *           tree resolves against libnats), but cheap and forwards-
+ *           compatible if a future module wants to mix dlopen +
+ *           DT_NEEDED.
  */
 static void *try_dlopen(const char *path)
 {

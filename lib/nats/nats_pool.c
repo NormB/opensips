@@ -406,11 +406,10 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 	 * — see lib/nats/nats_dl.h for the architectural rationale.
 	 * Idempotent: repeated calls are no-ops once libnats is in.
 	 *
-	 * Phase 2 will replace the NULL search-list default with a
-	 * tls_mgm-driven backend choice; for now this picks the first
-	 * libnats SONAME on the default path, regardless of TLS
-	 * backend.  No-TLS and openssl-libnats deployments are
-	 * unaffected since either variant satisfies the table. */
+	 * Operator picks the libnats variant via standard ld.so
+	 * mechanisms (LD_LIBRARY_PATH, ldconfig priorities) or via
+	 * the $NATS_DL_LIBNATS_PATH env-var override; lib/nats does
+	 * not bake in version numbers or install-prefix conventions. */
 	if (nats_dl_load(NULL) < 0) {
 		LM_ERR("[%s] nats_dl_load failed; libnats not available\n",
 		       module ? module : "?");
