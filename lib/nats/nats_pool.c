@@ -78,6 +78,7 @@
 #include "../../mem/mem.h"
 #include "../../ut.h"
 #include "nats_pool.h"
+#include "nats_ca_dir.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
 /* This is a shared library (lib/nats), not a loadable module.
@@ -564,141 +565,10 @@ int nats_pool_register(const char *url, const char *module,
 /*
  * nats_load_ca_directory -- read every regular file in @dir whose
  * name ends in ".pem", concatenate the contents in lexicographic
- * order, and return the result as a single nul-terminated SHM
- * buffer (caller frees via shm_free).  Returns NULL on any error
- * (open / readdir / stat / read / OOM).
- *
- * Mirrors OpenSSL's SSL_CTX_load_verify_locations(NULL, dir)
- * semantics for libnats, which only exposes file-path and PEM-string
- * APIs (natsOptions_LoadCATrustedCertificates / SetCATrustedCertificates),
- * not a directory-load.  The OpenSIPS-side concat keeps libnats
- * unmodified.
+ * order, and hand it to libnats via the in-memory PEM API.  The
+ * actual implementation is in lib/nats/nats_ca_dir.c (libc-only,
+ * unit-testable independently).  This file just calls it.
  */
-static char *nats_load_ca_directory(const char *dir)
-{
-	DIR *d;
-	struct dirent *e;
-	char path[1024];
-	char **pem_files = NULL;
-	int    pem_cnt = 0, pem_cap = 0;
-	int    i;
-	char  *out = NULL, *p;
-	size_t total = 0;
-
-	d = opendir(dir);
-	if (!d) {
-		LM_ERR("nats CA dir open failed: '%s'\n", dir);
-		return NULL;
-	}
-
-	/* Collect .pem filenames first so we can sort them; lexicographic
-	 * order is what OpenSSL's hash-dir convention assumes. */
-	while ((e = readdir(d))) {
-		size_t nlen = strlen(e->d_name);
-		if (nlen < 5 || strcmp(e->d_name + nlen - 4, ".pem") != 0)
-			continue;
-		if (pem_cnt == pem_cap) {
-			int    newcap = pem_cap ? pem_cap * 2 : 8;
-			char **next = pkg_realloc(pem_files,
-			                          newcap * sizeof(*pem_files));
-			if (!next) {
-				LM_ERR("pkg_realloc for CA dir scan failed\n");
-				goto fail;
-			}
-			pem_files = next;
-			pem_cap   = newcap;
-		}
-		pem_files[pem_cnt] = pkg_malloc(nlen + 1);
-		if (!pem_files[pem_cnt]) {
-			LM_ERR("pkg_malloc for CA dir entry failed\n");
-			goto fail;
-		}
-		memcpy(pem_files[pem_cnt], e->d_name, nlen + 1);
-		pem_cnt++;
-	}
-	closedir(d);
-	d = NULL;
-
-	if (pem_cnt == 0) {
-		LM_ERR("no .pem files in CA dir '%s'\n", dir);
-		goto fail;
-	}
-
-	/* sort with strcmp -- lexicographic */
-	for (i = 1; i < pem_cnt; i++) {
-		int j;
-		char *cur = pem_files[i];
-		for (j = i; j > 0 && strcmp(pem_files[j-1], cur) > 0; j--)
-			pem_files[j] = pem_files[j-1];
-		pem_files[j] = cur;
-	}
-
-	/* Sum sizes to allocate one shm buffer */
-	for (i = 0; i < pem_cnt; i++) {
-		struct stat st;
-		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
-		if (stat(path, &st) != 0) {
-			LM_ERR("stat failed on '%s'\n", path);
-			goto fail;
-		}
-		if (!S_ISREG(st.st_mode))
-			continue;
-		total += st.st_size + 1; /* +1 for newline separator */
-	}
-	if (total == 0) {
-		LM_ERR("CA dir '%s' has no regular .pem files\n", dir);
-		goto fail;
-	}
-
-	out = shm_malloc(total + 1);
-	if (!out) {
-		LM_ERR("shm_malloc(%zu) for CA-dir concat failed\n", total + 1);
-		goto fail;
-	}
-	p = out;
-
-	for (i = 0; i < pem_cnt; i++) {
-		FILE *f;
-		struct stat st;
-		size_t got;
-		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
-		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-			continue;
-		f = fopen(path, "rb");
-		if (!f) {
-			LM_ERR("fopen failed on '%s'\n", path);
-			shm_free(out);
-			out = NULL;
-			goto fail;
-		}
-		got = fread(p, 1, st.st_size, f);
-		fclose(f);
-		if (got != (size_t)st.st_size) {
-			LM_ERR("short read on '%s' (%zu/%lld)\n",
-			       path, got, (long long)st.st_size);
-			shm_free(out);
-			out = NULL;
-			goto fail;
-		}
-		p += got;
-		*p++ = '\n';   /* separator between files */
-	}
-	*p = '\0';
-
-	for (i = 0; i < pem_cnt; i++)
-		pkg_free(pem_files[i]);
-	pkg_free(pem_files);
-	return out;
-
-fail:
-	if (d) closedir(d);
-	if (pem_files) {
-		for (i = 0; i < pem_cnt; i++)
-			pkg_free(pem_files[i]);
-		pkg_free(pem_files);
-	}
-	return NULL;
-}
 
 /*
  * apply_tls_from_mgm -- look up the tls_mgm "nats" client domain
@@ -742,17 +612,22 @@ static int apply_tls_from_mgm(natsOptions *opts)
 
 	/* CA: ca_list (single file) preferred; fall back to ca_directory
 	 * (concatenate all .pem in the directory).  libnats has no
-	 * directory-load API, so the OpenSIPS-side helper does it. */
+	 * directory-load API, so nats_ca_dir.c does it OpenSIPS-side. */
 	if (dom->ca.len > 0 && dom->ca.s) {
 		nats_dl.natsOptions_LoadCATrustedCertificates(opts, dom->ca.s);
 	} else if (dom->ca_directory) {
-		char *concat = nats_load_ca_directory(dom->ca_directory);
+		char *err = NULL;
+		char *concat = nats_load_ca_directory(dom->ca_directory, &err);
 		if (!concat) {
+			LM_ERR("nats CA-dir load failed for tls_mgm 'nats': %s\n",
+			       err ? err : "unknown");
+			free(err);
 			_tls_api->release_domain(dom);
 			return -1;
 		}
+		free(err);
 		nats_dl.natsOptions_SetCATrustedCertificates(opts, concat);
-		shm_free(concat);
+		free(concat);  /* libnats copies internally */
 	}
 
 	/* Client cert + key (mutual TLS).  libnats wants both or neither. */
