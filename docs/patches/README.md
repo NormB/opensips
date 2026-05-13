@@ -4,17 +4,14 @@ This directory ships small, hand-maintained patches that we apply to
 external NATS-related source trees during build.  Each patch is
 independent; this README is the directory's index.
 
-> **Status (2026-05-11):** `nats.c-wolfssl-v3.12.0.patch` is
-> CI-validated.  The
-> [`NATS TLS Backends`](../../.github/workflows/nats-tls-backends.yml)
-> workflow applies it on every push that touches NATS source,
-> builds a wolfSSL-linked `libnats.so.3.12`, and smoke-tests the
-> wrapper module against it.  See
+> **Status (v4.0-nats-rc1):** `nats.c-wolfssl-v3.12.0.patch` is
+> a CI-validated optional build path.  TLS routing through
+> `tls_mgm`'s `nats` client domain is what the NATS modules
+> actually use; the libnats variant the modules load against
+> (OpenSSL-default or wolfSSL-built-from-this-patch) is selected
+> by `ld.so` search or by `$NATS_DL_LIBNATS_PATH`.  See
 > [`docs/nats-tls-backends.md`](../nats-tls-backends.md) for the
-> full status matrix and the implementation-notes section that
-> captures the non-obvious gotchas (mod_load timing, wolfSSL
-> compat-header path requirements, required configure flags,
-> ldconfig registration, cache invalidation).
+> operator guide and the wolfSSL build recipe.
 
 ## nats.c-wolfssl-v3.12.0.patch
 
@@ -45,8 +42,9 @@ itself.
 
 Until native wolfSSL support is part of upstream, we carry this
 patch in-tree so OpenSIPS operators who need wolfSSL on the NATS
-side have a working path.  Operators who don't need wolfSSL should
-load `nats_tls_openssl.so` instead and skip this patch entirely.
+side have a working path.  Operators who don't need wolfSSL skip
+this patch entirely and use whichever libnats their distro ships
+(typically the OpenSSL-backed `libnats.so.3.x`).
 
 ### Why we ship this anyway
 

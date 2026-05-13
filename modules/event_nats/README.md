@@ -11,7 +11,8 @@ persistence.
 
 ## Dependencies
 
-- `nats_connection.so` — must be loaded first (provides the shared connection pool)
+- `lib/nats/libnats_pool.so` — built once and located by every NATS module via `$ORIGIN` rpath; provides the shared connection pool. No `loadmodule` line needed.
+- `tls_mgm` — required only when `nats_url` starts with `tls://`. See [`docs/nats-tls-backends.md`](../../docs/nats-tls-backends.md) for the `nats` client-domain pattern.
 
 ## Parameters
 
@@ -21,7 +22,7 @@ full string.  Long defaults split across `<br>` breaks.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See nats_connection README for topology details. |
+| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See [`lib/nats/README.md`](../../lib/nats/README.md) for the registration contract that governs URL precedence when more than one NATS module is loaded. |
 | `jetstream` | int | 0 | Enable JetStream for persistent async publish (1=on, 0=off) |
 | `reconnect_wait` | int | 2000 | Milliseconds between startup connection retries |
 | `max_reconnect` | int | 60 | Max startup connection attempts. Does NOT limit runtime reconnection (that is unlimited). |
@@ -91,12 +92,12 @@ modparam("event_nats", "nats_url", "nats://nats-1:4222,nats://nats-2:4222,nats:/
 
 The URL list is a **seed list for bootstrap only**. After the initial connection, nats.c
 discovers the full cluster topology via the INFO protocol gossip and adds/removes servers
-dynamically. See the `nats_connection` README for details.
+dynamically. See [`lib/nats/README.md`](../../lib/nats/README.md) for the
+shared-pool registration contract.
 
 ## Usage
 
 ```
-loadmodule "nats_connection.so"
 loadmodule "event_nats.so"
 
 modparam("event_nats", "nats_url", "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")

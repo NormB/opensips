@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 Summit-2026 / nats_connection contributors
+ * Copyright (C) 2026 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *

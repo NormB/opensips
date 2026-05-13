@@ -9,7 +9,8 @@ with an in-process JSON full-text search index and live KV change watching.
 
 ## Dependencies
 
-- `nats_connection.so` — must be loaded first (provides the shared connection pool)
+- `lib/nats/libnats_pool.so` — built once and located by every NATS module via `$ORIGIN` rpath; provides the shared connection pool. No `loadmodule` line needed.
+- `tls_mgm` — required only when `nats_url` starts with `tls://`. See [`docs/nats-tls-backends.md`](../../docs/nats-tls-backends.md) for the `nats` client-domain pattern.
 
 ## Features
 
@@ -121,7 +122,6 @@ self-heal.
 ## Cluster Configuration
 
 ```
-loadmodule "nats_connection.so"
 loadmodule "cachedb_nats.so"
 
 modparam("cachedb_nats", "cachedb_url", "nats://localhost:4222/")
@@ -130,8 +130,9 @@ modparam("cachedb_nats", "kv_bucket", "opensips")
 modparam("cachedb_nats", "kv_replicas", 3)
 ```
 
-The `nats_url` is a seed list — see the `nats_connection` README for cluster topology
-and resilience details. Use DNS hostnames for automatic discovery of topology changes.
+The `nats_url` is a seed list — see [`lib/nats/README.md`](../../lib/nats/README.md) for
+the shared-pool registration contract and reconnect semantics. Use DNS hostnames for
+automatic discovery of topology changes.
 
 The `kv_replicas` setting only takes effect when the bucket is first created. To change
 replication on an existing bucket, use the NATS CLI: `nats kv update <bucket> --replicas=N`.
