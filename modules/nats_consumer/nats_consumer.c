@@ -45,6 +45,7 @@
 #include "../../sr_module.h"
 #include "../../dprint.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../tls_mgm/api.h"
 #include "nats_consumer.h"
 #include "nats_handle_parse.h"
 #include "nats_handle_registry.h"
@@ -439,13 +440,28 @@ static const proc_export_t procs[] = {
 	{ 0, 0, 0, 0, 0, 0 }
 };
 
+/* tls_mgm bind table -- handed to lib/nats so the pool's connect path
+ * can look up the "nats" client domain for tls:// URLs.  DEP_SILENT
+ * lets plaintext-only deployments load nats_consumer without tls_mgm. */
+static struct tls_mgm_binds tls_api;
+
+static const dep_export_t deps = {
+	{
+		{MOD_TYPE_DEFAULT, "tls_mgm", DEP_SILENT},
+		{MOD_TYPE_NULL, NULL, 0},
+	},
+	{
+		{NULL, NULL},
+	},
+};
+
 struct module_exports exports = {
 	"nats_consumer",            /* module name */
 	MOD_TYPE_DEFAULT,           /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,            /* dlopen flags */
 	0,                          /* load function */
-	NULL,                       /* OpenSIPS module dependencies */
+	&deps,                      /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
 	acmds,                      /* exported async functions */
 	params,                     /* exported parameters */
@@ -466,8 +482,25 @@ static int mod_init(void)
 {
 	LM_INFO("nats_consumer %s initializing\n", NATS_CONSUMER_VERSION);
 
-	/* Surface which libnats TLS backend the operator's loadmodule
-	 * choices resolved to.  Pure observability. */
+	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
+	 * pool's connect path can look up the "nats" client domain.  No
+	 * effect on plaintext (nats://) URLs; tls:// URLs error at
+	 * connect time if tls_mgm isn't bound or the "nats" domain
+	 * isn't defined.
+	 *
+	 * nats_consumer doesn't call nats_pool_register itself -- it
+	 * inherits whatever pool event_nats / cachedb_nats already
+	 * registered -- but it still binds tls_mgm so the call ordering
+	 * is robust if nats_consumer happens to load before the others. */
+	if (find_export("load_tls_mgm", 0)) {
+		if (load_tls_mgm_api(&tls_api) == 0) {
+			nats_pool_set_tls_api(&tls_api);
+			LM_INFO("nats_consumer: tls_mgm bound\n");
+		} else {
+			LM_WARN("nats_consumer: tls_mgm exports load_tls_mgm but "
+			        "the bind failed; tls:// URLs may not work\n");
+		}
+	}
 
 	if (nats_registry_init(NATS_CONSUMER_REGISTRY_BUCKETS) < 0) {
 		LM_ERR("nats_consumer: registry init failed\n");

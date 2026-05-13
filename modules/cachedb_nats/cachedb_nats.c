@@ -68,6 +68,7 @@
 
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
+#include "../tls_mgm/api.h"
 #include "cachedb_nats_json.h"
 #include "cachedb_nats_intern.h"
 #include "cachedb_nats_watch.h"
@@ -136,14 +137,12 @@ int kv_ttl = 0;
 int index_resync_on_reconnect = 0;
 int index_resync_interval_secs = 0;
 
-/* TLS parameters (mirrored from event_nats for independent pool) */
-static char *nats_url = NULL;      /* NATS server URL(s) -- overrides cachedb_url host */
-static char *tls_ca = NULL;
-static char *tls_cert = NULL;
-static char *tls_key = NULL;
-static char *tls_hostname = NULL;
-static int   tls_skip_verify = 0;
-static int   tls_allow_downgrade = 0;  /* require explicit opt-in to plaintext fallback */
+/* NATS server URL(s) -- overrides cachedb_url host when set.  TLS
+ * configuration is sourced from the tls_mgm "nats" client domain at
+ * connect time (apply_tls_from_mgm in lib/nats); no per-module TLS
+ * modparams. */
+static char *nats_url = NULL;
+static struct tls_mgm_binds tls_api;
 
 /* JSON full-text search parameters */
 /* Default uses '_' rather than ':' because NATS-KV rejects ':' in
@@ -291,12 +290,6 @@ static const param_export_t params[] = {
 	 * lib/nats/nats_pool.h for the contract; last-writer wins
 	 * across modules. */
 	{"cdb_drain_timeout_ms",        INT_PARAM,    &nats_pool_drain_timeout_ms},
-	{"tls_ca",         STR_PARAM,                 &tls_ca},
-	{"tls_cert",       STR_PARAM,                 &tls_cert},
-	{"tls_key",        STR_PARAM,                 &tls_key},
-	{"tls_hostname",   STR_PARAM,                 &tls_hostname},
-	{"tls_skip_verify", INT_PARAM,                &tls_skip_verify},
-	{"tls_allow_downgrade", INT_PARAM,            &tls_allow_downgrade},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
@@ -372,8 +365,14 @@ static const mi_export_t mi_cmds[] = {
 	{EMPTY_MI_EXPORT}
 };
 
+/* tls_mgm is required only when the operator wants TLS (URL begins
+ * with tls://).  DEP_SILENT lets plaintext-only deployments load
+ * cachedb_nats without tls_mgm; the tls:// path checks at connect
+ * time and errors with operator-friendly guidance if tls_mgm is
+ * missing or the "nats" domain isn't defined. */
 static const dep_export_t deps = {
 	{
+		{MOD_TYPE_DEFAULT, "tls_mgm", DEP_SILENT},
 		{MOD_TYPE_NULL, NULL, 0},
 	},
 	{
@@ -442,8 +441,24 @@ static int mod_init(void)
 
 	LM_NOTICE("initializing module cachedb_nats ...\n");
 
-	/* Surface which libnats TLS backend the operator's loadmodule
-	 * choices resolved to.  Pure observability. */
+	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
+	 * pool's connect path can look up the "nats" client domain.  No
+	 * effect on plaintext (nats://) URLs; tls:// URLs error at
+	 * connect time if tls_mgm isn't bound or the "nats" domain
+	 * isn't defined. */
+	if (find_export("load_tls_mgm", 0)) {
+		if (load_tls_mgm_api(&tls_api) == 0) {
+			nats_pool_set_tls_api(&tls_api);
+			LM_INFO("cachedb_nats: tls_mgm bound; "
+			        "tls:// URLs will use the \"nats\" client domain\n");
+		} else {
+			LM_WARN("cachedb_nats: tls_mgm exports load_tls_mgm but "
+			        "the bind failed; tls:// URLs will not work\n");
+		}
+	} else {
+		LM_INFO("cachedb_nats: tls_mgm not loaded; only nats:// URLs "
+		        "will work (tls:// will error at connect)\n");
+	}
 
 	/*
 	 * Register with the NATS connection pool.
@@ -456,7 +471,6 @@ static int mod_init(void)
 	 * and build a plain nats:// URL from the host:port portion.
 	 */
 	{
-		nats_tls_opts tls_opts, *tls_ptr = NULL;
 		const char *url_to_use = NULL;
 		static char url_buf[1024];
 
@@ -496,26 +510,12 @@ static int mod_init(void)
 			url_to_use = "nats://localhost:4222";
 		}
 
-		/* build TLS opts if tls_ca is configured */
-		if (tls_ca && *tls_ca) {
-			memset(&tls_opts, 0, sizeof(tls_opts));
-			tls_opts.ca = tls_ca;
-			tls_opts.cert = tls_cert;
-			tls_opts.key = tls_key;
-			tls_opts.hostname = tls_hostname;
-			tls_opts.skip_verify = tls_skip_verify;
-			tls_opts.allow_downgrade = tls_allow_downgrade;
-			tls_ptr = &tls_opts;
+		/* TLS comes from the tls_mgm "nats" client domain at connect
+		 * time (apply_tls_from_mgm in lib/nats).  Operator switches to
+		 * TLS by writing tls:// in cachedb_url and defining the
+		 * tls_mgm domain. */
 
-			/* if URL doesn't start with tls://, rewrite it */
-			if (strncmp(url_to_use, "nats://", 7) == 0) {
-				snprintf(url_buf, sizeof(url_buf),
-					"tls://%s", url_to_use + 7);
-				url_to_use = url_buf;
-			}
-		}
-
-		if (nats_pool_register(url_to_use, tls_ptr,
+		if (nats_pool_register(url_to_use,
 				"cachedb_nats",
 				nats_cdb_reconnect_wait_ms,
 				nats_cdb_max_reconnect) < 0) {

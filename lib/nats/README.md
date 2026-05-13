@@ -54,12 +54,32 @@ which case that module owns the registration.
 
 ## TLS handling
 
-`nats_pool` carries a single `natsTLS_t` view of the connection's TLS
-state.  All three modules ship matching `tls_*` modparams whose values
-must agree if all three are loaded; the registrant's values are
-authoritative and a mismatch warns at load time.  The `tls_allow_downgrade`
-flag is independent per-module (used to refuse a plaintext-only
-server) and is checked locally before an operation.
+TLS configuration is sourced from OpenSIPS's central `tls_mgm` module
+at connect time -- see `apply_tls_from_mgm()` in `nats_pool.c`.
+NATS user modules bind `tls_mgm` via `load_tls_mgm_api()` in their
+`mod_init` and pass the bind table to `lib/nats` via
+`nats_pool_set_tls_api()`.  The pool then looks up the `tls_mgm`
+client domain named `"nats"` for cert / CA / key / cipher / verify
+settings.
+
+When a `tls://` URL is configured but `tls_mgm` isn't loaded (or the
+"nats" domain isn't defined), `nats_pool_get` errors out at connect
+time with operator-friendly guidance pointing at the missing config.
+Plaintext (`nats://`) URLs work without `tls_mgm`.
+
+For CA directories (`tls_mgm`'s `ca_directory` field), `nats_pool`
+reads every `.pem` in the directory and concatenates them in
+lexicographic order, then passes the result to libnats via
+`natsOptions_SetCATrustedCertificates` (PEM-string API).  This
+mirrors OpenSSL's `SSL_CTX_load_verify_locations(NULL, dir)`
+semantics without requiring a libnats change.
+
+The libnats backend (OpenSSL vs wolfSSL) is implicit: whichever
+backend `tls_mgm` reports via its `get_tls_library_used()` API is
+the one operators chose by loading `tls_openssl.so` vs `tls_wolfssl.so`
+for their SIP-side TLS.  `lib/nats` itself dlopens whatever libnats
+the standard `ld.so` search resolves -- operators with multiple
+variants installed override via `$NATS_DL_LIBNATS_PATH`.
 
 ## Disconnect / reconnect semantics
 

@@ -67,11 +67,18 @@
 
 #include <nats/nats.h>
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include "../../dprint.h"
-#include "../../sr_module.h"   /* module_loaded() */
+#include "../../sr_module.h"   /* find_export() */
 #include "../../mem/shm_mem.h"
+#include "../../mem/mem.h"
 #include "../../ut.h"
 #include "nats_pool.h"
+#include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
 /* This is a shared library (lib/nats), not a loadable module.
  * Compiled as libnats_pool.a and linked into event_nats.so
@@ -96,8 +103,6 @@ typedef struct nats_pool_cfg {
 	int   server_cnt;
 	int   use_tls;                        /* 1 if any URL starts with tls:// */
 
-	nats_tls_opts tls;                    /* deep-copied into shm */
-
 	int   reconnect_wait;                 /* ms */
 	int   max_reconnect;
 } nats_pool_cfg;
@@ -114,6 +119,17 @@ static natsConnection  *_nc = NULL;              /* NATS connection handle */
 static jsCtx           *_js = NULL;              /* JetStream context */
 static atomic_int       _connected = 0;          /* 1 if connected */
 static atomic_int       _reconnect_epoch = 0;    /* bumped on each reconnect */
+
+/* tls_mgm bind table set by user-module mod_init via
+ * nats_pool_set_tls_api().  NULL means "tls_mgm not loaded" -- the
+ * connect path uses this to error out cleanly when a tls:// URL is
+ * configured but no TLS-domain source is available. */
+static struct tls_mgm_binds *_tls_api = NULL;
+
+void nats_pool_set_tls_api(void *binds)
+{
+	_tls_api = (struct tls_mgm_binds *)binds;
+}
 
 /* KV handle cache — maps bucket names to kvStore pointers.
  * Process-local; invalidated on reconnection via _kv_stale. */
@@ -391,9 +407,8 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
  *
  * Thread safety: Must only be called from mod_init (single-threaded).
  */
-int nats_pool_register(const char *url, nats_tls_opts *tls,
-                       const char *module, int reconnect_wait,
-                       int max_reconnect)
+int nats_pool_register(const char *url, const char *module,
+                       int reconnect_wait, int max_reconnect)
 {
 	if (!url || !*url) {
 		LM_ERR("[%s] empty NATS URL\n", module ? module : "?");
@@ -432,33 +447,10 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 			return -1;
 		}
 
-		/* deep-copy TLS config into shared memory */
-		if (tls) {
-			pool_cfg->tls.ca = tls->ca ? shm_strdup(tls->ca) : NULL;
-			pool_cfg->tls.cert = tls->cert ? shm_strdup(tls->cert) : NULL;
-			pool_cfg->tls.key = tls->key ? shm_strdup(tls->key) : NULL;
-			pool_cfg->tls.hostname = tls->hostname ?
-				shm_strdup(tls->hostname) : NULL;
-
-			/* Verify required TLS fields were allocated */
-			if ((tls->ca && !pool_cfg->tls.ca) ||
-			    (tls->cert && !pool_cfg->tls.cert) ||
-			    (tls->key && !pool_cfg->tls.key) ||
-			    (tls->hostname && !pool_cfg->tls.hostname)) {
-				LM_ERR("shm_strdup failed for TLS config\n");
-				if (pool_cfg->tls.ca) shm_free(pool_cfg->tls.ca);
-				if (pool_cfg->tls.cert) shm_free(pool_cfg->tls.cert);
-				if (pool_cfg->tls.key) shm_free(pool_cfg->tls.key);
-				if (pool_cfg->tls.hostname)
-					shm_free(pool_cfg->tls.hostname);
-				shm_free(pool_cfg);
-				pool_cfg = NULL;
-				return -1;
-			}
-
-			pool_cfg->tls.skip_verify = tls->skip_verify;
-			pool_cfg->tls.allow_downgrade = tls->allow_downgrade;
-		}
+		/* TLS configuration (cert/CA/key/verify) is sourced from the
+		 * tls_mgm "nats" client domain at connect time -- see
+		 * apply_tls_from_mgm() below.  Caller MUST have called
+		 * nats_pool_set_tls_api(&binds) first if any URL is tls://. */
 
 		pool_cfg->reconnect_wait = reconnect_wait > 0 ?
 			reconnect_wait : NATS_POOL_DEFAULT_RECONNECT_WAIT;
@@ -533,15 +525,9 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 			}
 		}
 
-		/* warn on TLS config conflict if both provide TLS */
-		if (tls && pool_cfg->tls.skip_verify != tls->skip_verify) {
-			LM_WARN("NATS pool: TLS skip_verify conflict between "
-				"modules (using first registration's value)\n");
-		}
-		if (tls && pool_cfg->tls.allow_downgrade != tls->allow_downgrade) {
-			LM_WARN("NATS pool: TLS allow_downgrade conflict between "
-				"modules (using first registration's value)\n");
-		}
+		/* TLS config conflicts no longer possible: every NATS
+		 * module reads from the same tls_mgm "nats" domain, so
+		 * there's nothing to conflict over. */
 
 		/* use the larger reconnect values */
 		if (reconnect_wait > 0 &&
@@ -575,6 +561,220 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
  * initialization is not thread-safe, but OpenSIPS processes are forked
  * (not threaded), so each process has its own _nc.
  */
+/*
+ * nats_load_ca_directory -- read every regular file in @dir whose
+ * name ends in ".pem", concatenate the contents in lexicographic
+ * order, and return the result as a single nul-terminated SHM
+ * buffer (caller frees via shm_free).  Returns NULL on any error
+ * (open / readdir / stat / read / OOM).
+ *
+ * Mirrors OpenSSL's SSL_CTX_load_verify_locations(NULL, dir)
+ * semantics for libnats, which only exposes file-path and PEM-string
+ * APIs (natsOptions_LoadCATrustedCertificates / SetCATrustedCertificates),
+ * not a directory-load.  The OpenSIPS-side concat keeps libnats
+ * unmodified.
+ */
+static char *nats_load_ca_directory(const char *dir)
+{
+	DIR *d;
+	struct dirent *e;
+	char path[1024];
+	char **pem_files = NULL;
+	int    pem_cnt = 0, pem_cap = 0;
+	int    i;
+	char  *out = NULL, *p;
+	size_t total = 0;
+
+	d = opendir(dir);
+	if (!d) {
+		LM_ERR("nats CA dir open failed: '%s'\n", dir);
+		return NULL;
+	}
+
+	/* Collect .pem filenames first so we can sort them; lexicographic
+	 * order is what OpenSSL's hash-dir convention assumes. */
+	while ((e = readdir(d))) {
+		size_t nlen = strlen(e->d_name);
+		if (nlen < 5 || strcmp(e->d_name + nlen - 4, ".pem") != 0)
+			continue;
+		if (pem_cnt == pem_cap) {
+			int    newcap = pem_cap ? pem_cap * 2 : 8;
+			char **next = pkg_realloc(pem_files,
+			                          newcap * sizeof(*pem_files));
+			if (!next) {
+				LM_ERR("pkg_realloc for CA dir scan failed\n");
+				goto fail;
+			}
+			pem_files = next;
+			pem_cap   = newcap;
+		}
+		pem_files[pem_cnt] = pkg_malloc(nlen + 1);
+		if (!pem_files[pem_cnt]) {
+			LM_ERR("pkg_malloc for CA dir entry failed\n");
+			goto fail;
+		}
+		memcpy(pem_files[pem_cnt], e->d_name, nlen + 1);
+		pem_cnt++;
+	}
+	closedir(d);
+	d = NULL;
+
+	if (pem_cnt == 0) {
+		LM_ERR("no .pem files in CA dir '%s'\n", dir);
+		goto fail;
+	}
+
+	/* sort with strcmp -- lexicographic */
+	for (i = 1; i < pem_cnt; i++) {
+		int j;
+		char *cur = pem_files[i];
+		for (j = i; j > 0 && strcmp(pem_files[j-1], cur) > 0; j--)
+			pem_files[j] = pem_files[j-1];
+		pem_files[j] = cur;
+	}
+
+	/* Sum sizes to allocate one shm buffer */
+	for (i = 0; i < pem_cnt; i++) {
+		struct stat st;
+		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		if (stat(path, &st) != 0) {
+			LM_ERR("stat failed on '%s'\n", path);
+			goto fail;
+		}
+		if (!S_ISREG(st.st_mode))
+			continue;
+		total += st.st_size + 1; /* +1 for newline separator */
+	}
+	if (total == 0) {
+		LM_ERR("CA dir '%s' has no regular .pem files\n", dir);
+		goto fail;
+	}
+
+	out = shm_malloc(total + 1);
+	if (!out) {
+		LM_ERR("shm_malloc(%zu) for CA-dir concat failed\n", total + 1);
+		goto fail;
+	}
+	p = out;
+
+	for (i = 0; i < pem_cnt; i++) {
+		FILE *f;
+		struct stat st;
+		size_t got;
+		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		f = fopen(path, "rb");
+		if (!f) {
+			LM_ERR("fopen failed on '%s'\n", path);
+			shm_free(out);
+			out = NULL;
+			goto fail;
+		}
+		got = fread(p, 1, st.st_size, f);
+		fclose(f);
+		if (got != (size_t)st.st_size) {
+			LM_ERR("short read on '%s' (%zu/%lld)\n",
+			       path, got, (long long)st.st_size);
+			shm_free(out);
+			out = NULL;
+			goto fail;
+		}
+		p += got;
+		*p++ = '\n';   /* separator between files */
+	}
+	*p = '\0';
+
+	for (i = 0; i < pem_cnt; i++)
+		pkg_free(pem_files[i]);
+	pkg_free(pem_files);
+	return out;
+
+fail:
+	if (d) closedir(d);
+	if (pem_files) {
+		for (i = 0; i < pem_cnt; i++)
+			pkg_free(pem_files[i]);
+		pkg_free(pem_files);
+	}
+	return NULL;
+}
+
+/*
+ * apply_tls_from_mgm -- look up the tls_mgm "nats" client domain
+ * and pass its cert / CA / key / verify / cipher settings to libnats
+ * via nats_dl.natsOptions_*.  Caller must already have called
+ * nats_dl.natsOptions_SetSecure(opts, true).
+ *
+ * Returns 0 on success (opts populated or no TLS settings to apply),
+ * -1 if tls_mgm isn't bound or the "nats" domain isn't defined.
+ * Either condition means the operator asked for TLS (tls:// URL) but
+ * didn't configure tls_mgm to back it -- a hard error.
+ */
+static int apply_tls_from_mgm(natsOptions *opts)
+{
+	str dom_name = str_init("nats");
+	struct tls_domain *dom;
+
+	if (!_tls_api) {
+		LM_ERR("NATS pool: tls:// URL configured but tls_mgm is not "
+		       "loaded.  Add `loadmodule \"tls_mgm.so\"` plus a "
+		       "client_domain named \"nats\" before any NATS module "
+		       "loads, or use a plain nats:// URL.\n");
+		return -1;
+	}
+
+	dom = _tls_api->find_client_domain_name(&dom_name);
+	if (!dom) {
+		LM_ERR("NATS pool: tls:// URL configured but tls_mgm has no "
+		       "client_domain named \"nats\".  Define one in "
+		       "opensips.cfg, e.g.:\n"
+		       "  modparam(\"tls_mgm\", \"client_domain\", \"nats\")\n"
+		       "  modparam(\"tls_mgm\", \"certificate\", "
+		       "\"[nats]/etc/opensips/nats-cert.pem\")\n"
+		       "  modparam(\"tls_mgm\", \"private_key\", "
+		       "\"[nats]/etc/opensips/nats-key.pem\")\n"
+		       "  modparam(\"tls_mgm\", \"ca_list\", "
+		       "\"[nats]/etc/opensips/nats-ca.pem\")\n"
+		       "  modparam(\"tls_mgm\", \"verify_cert\", \"[nats]1\")\n");
+		return -1;
+	}
+
+	/* CA: ca_list (single file) preferred; fall back to ca_directory
+	 * (concatenate all .pem in the directory).  libnats has no
+	 * directory-load API, so the OpenSIPS-side helper does it. */
+	if (dom->ca.len > 0 && dom->ca.s) {
+		nats_dl.natsOptions_LoadCATrustedCertificates(opts, dom->ca.s);
+	} else if (dom->ca_directory) {
+		char *concat = nats_load_ca_directory(dom->ca_directory);
+		if (!concat) {
+			_tls_api->release_domain(dom);
+			return -1;
+		}
+		nats_dl.natsOptions_SetCATrustedCertificates(opts, concat);
+		shm_free(concat);
+	}
+
+	/* Client cert + key (mutual TLS).  libnats wants both or neither. */
+	if (dom->cert.len > 0 && dom->cert.s &&
+	    dom->pkey.len > 0 && dom->pkey.s) {
+		nats_dl.natsOptions_LoadCertificatesChain(opts,
+		                                          dom->cert.s,
+		                                          dom->pkey.s);
+	}
+
+	if (dom->ciphers_list)
+		nats_dl.natsOptions_SetCiphers(opts, dom->ciphers_list);
+
+	/* tls_mgm verify_cert: 1 = verify (default), 0 = skip.
+	 * libnats SkipServerVerification is the inverse polarity. */
+	if (!dom->verify_cert)
+		nats_dl.natsOptions_SkipServerVerification(opts, true);
+
+	_tls_api->release_domain(dom);
+	return 0;
+}
+
 natsConnection *nats_pool_get(void)
 {
 	natsOptions *opts = NULL;
@@ -637,51 +837,14 @@ natsConnection *nats_pool_get(void)
 			}
 
 			if (!tls_ok) {
-				int i;
-				if (!pool_cfg->tls.allow_downgrade) {
-					LM_ERR("NATS pool: TLS requested "
-						"(tls:// URLs) but the linked "
-						"nats.c library was built "
-						"without TLS support;"
-						" refusing to downgrade tls:// to plaintext."
-						" Set tls_allow_downgrade=1 to opt"
-						" in to plaintext fallback (NOT"
-						" recommended -- credentials"
-						" will be sent in the clear).\n");
-					return NULL;
-				}
-				LM_WARN("NATS pool: TLS requested (tls:// URLs) "
-					"but not available in nats.c library. "
-					"tls_allow_downgrade=1 -- downgrading "
-					"to plain nats:// connections "
-					"(credentials will be sent in the "
-					"clear).\n");
-				pool_cfg->use_tls = 0;
-
-				/* Rewrite tls:// URLs to nats:// in-place */
-				for (i = 0; i < pool_cfg->server_cnt; i++) {
-					if (strncmp(pool_cfg->servers[i],
-					    "tls://", 6) == 0) {
-						char *old =
-							pool_cfg->servers[i];
-						int hlen = strlen(old + 6);
-						char *p = shm_malloc(
-							7 + hlen + 1);
-						if (p) {
-							snprintf(p,
-								7 + hlen + 1,
-								"nats://%s",
-								old + 6);
-							shm_free(old);
-							pool_cfg->servers[i]
-								= p;
-						} else {
-							LM_ERR("shm_malloc failed"
-								" for TLS URL"
-								" rewrite\n");
-						}
-					}
-				}
+				LM_ERR("NATS pool: TLS requested "
+					"(tls:// URLs) but the linked "
+					"libnats was built without TLS "
+					"support.  Install a TLS-built "
+					"libnats (or set $NATS_DL_LIBNATS_PATH "
+					"to one) and reload.  No silent "
+					"plaintext downgrade.\n");
+				return NULL;
 			}
 		}
 	}
@@ -719,26 +882,13 @@ natsConnection *nats_pool_get(void)
 	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
 	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
-	/* TLS configuration — only if URLs weren't downgraded to nats:// */
+	/* TLS configuration -- sourced from the tls_mgm "nats" client
+	 * domain (apply_tls_from_mgm).  Set up only when at least one
+	 * configured URL is tls://. */
 	if (pool_cfg->use_tls) {
 		nats_dl.natsOptions_SetSecure(opts, true);
-
-		if (pool_cfg->tls.ca && *pool_cfg->tls.ca)
-			nats_dl.natsOptions_LoadCATrustedCertificates(opts,
-				pool_cfg->tls.ca);
-
-		if (pool_cfg->tls.cert && *pool_cfg->tls.cert)
-			nats_dl.natsOptions_LoadCertificatesChain(opts,
-				pool_cfg->tls.cert,
-				(pool_cfg->tls.key && *pool_cfg->tls.key) ?
-					pool_cfg->tls.key : NULL);
-
-		if (pool_cfg->tls.hostname && *pool_cfg->tls.hostname)
-			nats_dl.natsOptions_SetExpectedHostname(opts,
-				pool_cfg->tls.hostname);
-
-		if (pool_cfg->tls.skip_verify)
-			nats_dl.natsOptions_SkipServerVerification(opts, true);
+		if (apply_tls_from_mgm(opts) < 0)
+			goto error;
 	}
 
 	/* Retry connection with bounded attempts. pool_cfg->max_reconnect
@@ -1028,14 +1178,6 @@ void nats_pool_destroy(void)
 			if (pool_cfg->servers[i])
 				shm_free(pool_cfg->servers[i]);
 		}
-		if (pool_cfg->tls.ca)
-			shm_free(pool_cfg->tls.ca);
-		if (pool_cfg->tls.cert)
-			shm_free(pool_cfg->tls.cert);
-		if (pool_cfg->tls.key)
-			shm_free(pool_cfg->tls.key);
-		if (pool_cfg->tls.hostname)
-			shm_free(pool_cfg->tls.hostname);
 		shm_free(pool_cfg);
 		pool_cfg = NULL;
 	}
