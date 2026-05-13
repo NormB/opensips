@@ -46,85 +46,6 @@ static void       *_handle = NULL;
 static const char *_path   = NULL;
 
 /*
- * Backend hint set via nats_dl_set_backend_hint().  Read by
- * nats_dl_load(NULL) to shape the SONAME search order.  Default
- * NATS_DL_BACKEND_AUTO uses the generic search.
- */
-static enum nats_dl_backend _backend_hint = NATS_DL_BACKEND_AUTO;
-
-/*
- * Generic SONAME search list (used when backend hint is AUTO or
- * when the backend-specific search yields nothing).  libnats
- * upstream packaging uses MAJOR.MINOR as the SONAME (libnats.so.3.13,
- * .3.12, ...) instead of bare libnats.so.3, so we walk a window of
- * recent minor versions before falling back to the dev-package
- * symlink.  Operators on a libnats outside this window can pass an
- * explicit path to nats_dl_load() OR set $NATS_DL_LIBNATS_PATH.
- *
- * The list is short, dlopen failure on a missing path is sub-
- * millisecond (ld.so determines absence without disk I/O after the
- * first miss), and only the first hit dlopens the SO -- so the
- * worst-case startup-time cost is dominated by the one successful
- * load.
- */
-static const char *generic_libnats_search[] = {
-	"libnats.so.3.13",
-	"libnats.so.3.12",
-	"libnats.so.3.11",
-	"libnats.so.3.10",
-	"libnats.so.3.9",
-	"libnats.so.3.8",
-	"libnats.so.3.7",
-	"libnats.so.3",      /* hypothetical post-realign SONAME */
-	"libnats.so",        /* dev-package symlink */
-	NULL
-};
-
-/*
- * OpenSSL-built libnats SONAMEs.  Most distros' libnats packages
- * are openssl-linked, so this list is identical to the generic
- * search for now.  Kept as a separate array so a future operator-
- * facing convention (e.g. an alternate install path under
- * /opt/libnats-openssl/) can be added here without touching the
- * generic list.
- */
-static const char *openssl_libnats_search[] = {
-	"libnats.so.3.13",
-	"libnats.so.3.12",
-	"libnats.so.3.11",
-	"libnats.so.3.10",
-	"libnats.so.3.9",
-	"libnats.so.3.8",
-	"libnats.so.3.7",
-	"libnats.so.3",
-	"libnats.so",
-	NULL
-};
-
-/*
- * wolfSSL-built libnats SONAMEs.  Convention from the previous
- * nats_tls_wolfssl module: operators install a wolfssl-linked
- * libnats under /opt/libnats-wolfssl/ via the build recipe in
- * docs/nats-tls-backends.md.  Try those explicit paths first; fall
- * back to the generic SONAMEs if no /opt install is present (some
- * deployments may have wolfssl-libnats on the system path under the
- * standard libnats.so name).
- */
-static const char *wolfssl_libnats_search[] = {
-	"/opt/libnats-wolfssl/lib/libnats.so.3.13",
-	"/opt/libnats-wolfssl/lib/libnats.so.3.12",
-	"/opt/libnats-wolfssl/lib/libnats.so.3.11",
-	"/opt/libnats-wolfssl/lib/libnats.so.3.10",
-	"/opt/libnats-wolfssl/lib/libnats.so.3.9",
-	"/opt/libnats-wolfssl/lib/libnats.so",
-	"libnats.so.3.13",   /* fall back to system libnats if wolfssl-built there */
-	"libnats.so.3.12",
-	"libnats.so.3.11",
-	"libnats.so",
-	NULL
-};
-
-/*
  * try_dlopen -- dlopen with RTLD_NOW | RTLD_GLOBAL.
  *
  * RTLD_NOW: resolve every symbol up-front so a missing function
@@ -142,33 +63,21 @@ static void *try_dlopen(const char *path)
 }
 
 /*
- * Pick the SONAME search list that matches the backend hint.
+ * Default SONAME tried when no explicit path or env override is set.
+ * The dev-package symlink (libnats.so) is what every distro's
+ * `libnats-dev` / `libnats-devel` ships, and what the build's
+ * pkg-config probe found at compile time.  ld.so's standard search
+ * (LD_LIBRARY_PATH, ldconfig cache, default /lib + /usr/lib) finds
+ * whichever libnats install the operator has activated -- exactly
+ * the same selection mechanism every other shared lib uses.
+ *
+ * Operators with multiple libnats installs (e.g. an openssl-linked
+ * one and a wolfssl-linked one side-by-side) point at the desired
+ * variant via $NATS_DL_LIBNATS_PATH.  Lib/nats deliberately does
+ * NOT bake in install-prefix conventions like /opt/libnats-wolfssl/
+ * -- those are deployment policy, not library policy.
  */
-static const char *const *select_search(enum nats_dl_backend backend)
-{
-	switch (backend) {
-	case NATS_DL_BACKEND_OPENSSL: return openssl_libnats_search;
-	case NATS_DL_BACKEND_WOLFSSL: return wolfssl_libnats_search;
-	case NATS_DL_BACKEND_AUTO:
-	default:                      return generic_libnats_search;
-	}
-}
-
-void nats_dl_set_backend_hint(enum nats_dl_backend backend)
-{
-	if (_handle) {
-		LM_WARN("nats_dl: backend hint set after libnats already "
-		        "loaded; new hint (%d) ignored, current = %d\n",
-		        (int)backend, (int)_backend_hint);
-		return;
-	}
-	_backend_hint = backend;
-}
-
-enum nats_dl_backend nats_dl_get_backend(void)
-{
-	return _backend_hint;
-}
+#define NATS_DL_DEFAULT_SONAME "libnats.so"
 
 int nats_dl_load(const char *libnats_path)
 {
@@ -179,7 +88,7 @@ int nats_dl_load(const char *libnats_path)
 
 	/*
 	 * Explicit path argument wins (caller knows exactly what they
-	 * want).  No env var or backend hint considered.
+	 * want).  No env var or default considered.
 	 */
 	if (libnats_path && *libnats_path) {
 		_handle = try_dlopen(libnats_path);
@@ -189,51 +98,39 @@ int nats_dl_load(const char *libnats_path)
 			return -1;
 		}
 		_path = libnats_path;
-	} else {
-		const char *const *search;
-		const char *const *np;
-
-		/*
-		 * Env var override is the operator's escape hatch when
-		 * neither the backend hint nor the default search picks
-		 * the right libnats (custom install path, non-default
-		 * SONAME, etc.).  Honoured before the backend-driven
-		 * search; if set and the path fails, we DO fall back to
-		 * the search list with an LM_WARN.
-		 */
-		env_override = getenv("NATS_DL_LIBNATS_PATH");
-		if (env_override && *env_override) {
-			_handle = try_dlopen(env_override);
-			if (_handle) {
-				_path = env_override;
-				goto loaded;
-			}
-			LM_WARN("nats_dl: $NATS_DL_LIBNATS_PATH='%s' dlopen "
-			        "failed (%s); falling back to backend search\n",
-			        env_override, dlerror());
-		}
-
-		search = select_search(_backend_hint);
-		for (np = search; *np; np++) {
-			_handle = try_dlopen(*np);
-			if (_handle) {
-				_path = *np;
-				break;
-			}
-		}
-		if (!_handle) {
-			const char *backend_str =
-			    _backend_hint == NATS_DL_BACKEND_OPENSSL ? "openssl" :
-			    _backend_hint == NATS_DL_BACKEND_WOLFSSL ? "wolfssl" :
-			    "auto";
-			LM_ERR("nats_dl: no libnats build found for backend "
-			       "hint '%s' via SONAME search.  Install libnats "
-			       "from a distro package or set "
-			       "$NATS_DL_LIBNATS_PATH to an explicit path.\n",
-			       backend_str);
-			return -1;
-		}
+		goto loaded;
 	}
+
+	/*
+	 * Env-var override is the operator's escape hatch when the
+	 * default SONAME isn't on ld.so's search path (custom install
+	 * prefix, side-by-side openssl + wolfssl libnats variants,
+	 * etc.).  If set and the path fails, fall back to the default
+	 * SONAME with an LM_WARN -- the operator gets a loud signal
+	 * about the bad env var instead of a silent retry.
+	 */
+	env_override = getenv("NATS_DL_LIBNATS_PATH");
+	if (env_override && *env_override) {
+		_handle = try_dlopen(env_override);
+		if (_handle) {
+			_path = env_override;
+			goto loaded;
+		}
+		LM_WARN("nats_dl: $NATS_DL_LIBNATS_PATH='%s' dlopen failed "
+		        "(%s); falling back to default SONAME '%s'\n",
+		        env_override, dlerror(), NATS_DL_DEFAULT_SONAME);
+	}
+
+	_handle = try_dlopen(NATS_DL_DEFAULT_SONAME);
+	if (!_handle) {
+		LM_ERR("nats_dl: dlopen('%s') failed: %s.  Install libnats "
+		       "(libnats-dev / libnats-devel) so the dev-package "
+		       "symlink is on ld.so's search path, or set "
+		       "$NATS_DL_LIBNATS_PATH to an explicit libnats path.\n",
+		       NATS_DL_DEFAULT_SONAME, dlerror());
+		return -1;
+	}
+	_path = NATS_DL_DEFAULT_SONAME;
 
 loaded:
 

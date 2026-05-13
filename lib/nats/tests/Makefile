@@ -42,12 +42,21 @@ test_nats_dl: test_nats_dl.c ../nats_dl.c
 	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
 		-o $@ test_nats_dl.c ../nats_dl.c -ldl
 
+# LD_LIBRARY_PATH covers the case where libnats was installed to
+# /usr/local/lib (the upstream `cmake --install` default), which
+# isn't on the default ld.so search path on most distros.  Production
+# OpenSIPS startup is unaffected: operators normally either install
+# libnats from a distro package (which lands in /usr/lib) or run
+# ldconfig after the upstream install.  This is purely a test-host
+# convenience.
+NATS_TEST_ENV = LD_LIBRARY_PATH=/usr/local/lib:$$LD_LIBRARY_PATH
+
 check: all
 	./test_redact_url
 	./test_tls_downgrade_policy
 	./test_validate_publish_subject
 	./test_validate_subject_cache
-	./test_nats_dl
+	$(NATS_TEST_ENV) ./test_nats_dl
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
