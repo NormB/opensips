@@ -524,9 +524,6 @@ nats_consumer_bind("id=adv;stream=ADV;ephemeral=1;
   name must be a literal pseudo-variable parameter.  If you need a computed
   name, pre-select the value with `nats_hdr_set` at bind time or walk a
   small switch of literal names in script.
-- **TLS NATS cluster integration test is not part of the unit harness.**
-  TLS uses the shared `lib/nats` pool and is exercised by `event_nats`
-  harnesses; no consumer-specific regression for a TLS cluster ships yet.
 
 ## Design + implementation notes
 
