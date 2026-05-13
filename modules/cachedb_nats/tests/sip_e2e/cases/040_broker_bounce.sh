@@ -51,7 +51,7 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$BOUNCE_CFG"
 
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$BOUNCE_CFG" -m 64 -M 4 \
     > "$WORKDIR/opensips_bounce.log" 2>&1 &
 BOUNCE_OPENSIPS_PID=$!

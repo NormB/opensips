@@ -126,7 +126,15 @@ start_opensips() {
     # start_opensips <instance> <sip-port> <mi-port> <cluster-port> <node-id> <cfg-out> <log-out>
     local inst=$1 sip=$2 mi=$3 cport=$4 nid=$5 cfg=$6 log=$7
     render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
-    LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+    # /usr/local/lib is where the upstream `cmake --install` for libnats
+    # lands by default; on hosts that also ship a stale libnats from a
+    # system package (libnats3.7 in /lib/<arch>-linux-gnu on Debian-family)
+    # the upstream-installed version wins via this path order.  Without
+    # this, nats_dl_load picks the system libnats whose older minor
+    # version is missing kvStore_WatchMulti, kvStore_WatchAll, and other
+    # symbols added in 3.10+ and cachedb_nats mod_init aborts before the
+    # MI socket comes up.
+    LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
         "$OPENSIPS_BIN" -F -f "$cfg" -m 64 -M 4 > "$log" 2>&1 &
     local pid=$!
     sleep 2
