@@ -26,7 +26,14 @@ REPO_ROOT="$(cd "${_local_lib_dir}/../../.." && pwd)"
 : "${OPENSIPS_LIBDIR:=${REPO_ROOT}/lib/nats}"
 : "${NATS_URL:=nats://127.0.0.1:4222}"
 
-export LD_LIBRARY_PATH="${OPENSIPS_LIBDIR}:${LD_LIBRARY_PATH:-}"
+# /usr/local/lib is where the upstream `cmake --install` for libnats
+# lands by default; on hosts that also have a stale libnats from a
+# system package (e.g., libnats3.7 in /lib/aarch64-linux-gnu) the
+# upstream-installed version wins via this path order.  Without
+# this, nats_dl_load picks the system libnats whose older minor
+# version is missing kvStore_WatchMulti, kvStore_WatchAll, and other
+# symbols added in 3.10+.
+export LD_LIBRARY_PATH="${OPENSIPS_LIBDIR}:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 # --- skip / fail helpers -------------------------------------------------
 skip() { echo "SKIP: $*"; exit 77; }
