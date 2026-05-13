@@ -23,13 +23,13 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_persist test_request_route_restriction \
                   test_consumer_heartbeat test_persist_precision \
                   test_async_request_skeleton test_async_request_inflight \
-                  test_header_propagation
+                  test_header_propagation test_start_time_roundtrip
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
      test_async_request_skeleton test_async_request_inflight \
-     test_header_propagation
+     test_header_propagation test_start_time_roundtrip
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -85,6 +85,7 @@ check: all
 	./test_async_request_skeleton
 	./test_async_request_inflight
 	./test_header_propagation
+	./test_start_time_roundtrip
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -95,7 +96,7 @@ clean:
 	      test_slurp_file_cap test_request_route_restriction \
 	      test_consumer_heartbeat test_persist_precision \
 	      test_async_request_skeleton test_async_request_inflight \
-	      test_header_propagation
+	      test_header_propagation test_start_time_roundtrip
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
@@ -108,4 +109,10 @@ test_persist_precision: test_persist_precision.c
 # header propagation.  Self-contained; runs from the tests/ directory
 # (reads ../nats_rpc_async.c + ../nats_rpc_consumer.c).
 test_header_propagation: test_header_propagation.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
+# Round-trip test for the start_time_ns -> RFC3339 -> ns conversion
+# on persistence rehydrate.  Self-contained; runs from the tests/
+# directory (reads ../nats_persist.c).
+test_start_time_roundtrip: test_start_time_roundtrip.c
 	$(CC) -g -O0 -Wall -o $@ $<

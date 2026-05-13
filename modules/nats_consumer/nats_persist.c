@@ -846,15 +846,51 @@ static char *build_config_from_json(cJSON *obj)
 			continue;
 		}
 		if (strcmp(c->string, "start_time_ns") == 0) {
-			/* The parser accepts RFC3339 only -- skip on rehydrate.
-			 * If the handle was configured with by_start_time we
-			 * cannot round-trip without saving the raw string; a
-			 * later change can extend serialization to persist the
-			 * original RFC3339 form.  For now, log and skip.  The
-			 * uint64-string serialization above keeps the value
-			 * lossless on disk so a future rehydrate can use it. */
-			LM_WARN("nats_persist: start_time_ns not round-trippable; "
-					"handle will rehydrate without start_time\n");
+			/* The serializer keeps lossless uint64-ns on disk to dodge
+			 * IEEE-754 precision loss; the bind parser only accepts
+			 * RFC3339.  Bridge the two by converting back to RFC3339
+			 * with 9-digit fractional seconds + 'Z' and feeding the
+			 * parser via the regular `start_time` key.  parse_rfc3339_ns
+			 * round-trips this back to the same int64 the
+			 * serializer wrote, so the rehydrated handle matches the
+			 * pre-snapshot start time exactly.
+			 *
+			 * On a malformed value (non-numeric, negative, or wall-
+			 * clock conversion failure) skip the field and WARN so the
+			 * handle still binds; the operator can reissue with an
+			 * explicit start_time. */
+			char         iso[64];
+			char        *endp = NULL;
+			long long    ns_signed;
+			uint64_t     ns;
+			time_t       secs;
+			long         frac_ns;
+			struct tm    tm;
+
+			ns_signed = strtoll(v, &endp, 10);
+			if (!endp || endp == v || *endp != '\0' || ns_signed < 0) {
+				LM_WARN("nats_persist: start_time_ns '%.*s' "
+					"unparseable; handle will rehydrate "
+					"without start_time\n", (int)vlen, v);
+				continue;
+			}
+			ns      = (uint64_t)ns_signed;
+			secs    = (time_t)(ns / 1000000000ULL);
+			frac_ns = (long)(ns % 1000000000ULL);
+			if (!gmtime_r(&secs, &tm)) {
+				LM_WARN("nats_persist: start_time_ns %llu out of "
+					"gmtime range; handle will rehydrate "
+					"without start_time\n",
+					(unsigned long long)ns);
+				continue;
+			}
+			snprintf(iso, sizeof(iso),
+				"%04d-%02d-%02dT%02d:%02d:%02d.%09ldZ",
+				tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				tm.tm_hour, tm.tm_min, tm.tm_sec, frac_ns);
+			if (append_kv(&buf, &len, &cap,
+					"start_time", iso, strlen(iso)) < 0)
+				goto oom;
 			continue;
 		}
 

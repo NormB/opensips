@@ -524,10 +524,6 @@ nats_consumer_bind("id=adv;stream=ADV;ephemeral=1;
   name must be a literal pseudo-variable parameter.  If you need a computed
   name, pre-select the value with `nats_hdr_set` at bind time or walk a
   small switch of literal names in script.
-- **`deliver_policy=by_start_time` does not round-trip through persistence.**
-  The handle rehydrates without the `start_time` field; re-apply at runtime
-  if needed.  (The JSON snapshot stores a ns-precision timestamp that the
-  parser does not accept; a future revision can round-trip RFC3339.)
 - **TLS NATS cluster integration test is not part of the unit harness.**
   TLS uses the shared `lib/nats` pool and is exercised by `event_nats`
   harnesses; no consumer-specific regression for a TLS cluster ships yet.
