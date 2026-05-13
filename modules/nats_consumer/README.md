@@ -54,9 +54,11 @@ Long paths split across `<br>` breaks to avoid stretching the column.
 | `request_id_header` | string | `X-Request-Id`     | Outbound header name used to carry the per-call UUIDv7 correlation id minted by both the sync and async `nats_request` start paths.  The id is also exposed to the script via `$nats_request_id` and persists across an `async()` yield so it is readable from the resume route.  Auto-stage skips the header iff the script already set the same name via `nats_hdr_set()`.  Set to `""` to mint without staging.  Per-call cost ≈ 200 ns (one `clock_gettime` + one `getrandom` of 10 bytes). |
 | `allow_sync_anywhere` | int  | `0`                | Opt-in switch that widens the route mask of the sync `nats_request` so it may be called from `REQUEST_ROUTE` / `FAILURE_ROUTE` / `BRANCH_ROUTE` / `ERROR_ROUTE`.  Default 0 keeps the parser rejecting bare `nats_request(...)` from those contexts.  Each route has its own blocking blast radius (REQUEST/BRANCH/ERROR block one SIP worker; FAILURE via negative-reply trigger blocks one SIP worker; FAILURE via `fr_timer`/`fr_inv_timer` expiry blocks the single-threaded **timer ticker** process, which queues every other module's tick callback — significantly worse).  The setter emits a multi-line `LM_WARN` at config-parse time detailing each route's consequences, and the DocBook admin guide carries the verified source-path references; read both before opting in.  The recommended pattern from any reactor-backed route is `async(nats_request(...), rt)`, which yields on an eventfd and is accepted regardless of this modparam — async works from `request_route` / `branch_route` / `error_route` / `timer_route` / `event_route` / `onreply_route` and reply-triggered `failure_route`.  The one remaining gap is `fr_timer`-triggered `failure_route`, which runs on the reactor-less timer ticker; lifting that requires an upstream TM change to dispatch fr_timer expiry through a Timer-handler process. |
 
-NATS transport parameters (`nats_url`, `tls_*`, `reconnect_wait`,
-`max_reconnect`, `skip_tls_init`) are set on the `event_nats` module;
-`nats_consumer` reads the same connection pool via `lib/nats`.
+NATS transport parameters (`nats_url`, `reconnect_wait`,
+`max_reconnect`) are set on the `event_nats` module; `nats_consumer`
+reads the same connection pool via `lib/nats`.  TLS is configured
+via the `tls_mgm` "nats" client domain — see the event_nats README
+"TLS configuration" section for the canonical pattern.
 
 ## Bind configuration
 

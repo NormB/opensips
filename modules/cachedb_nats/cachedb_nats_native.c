@@ -81,6 +81,15 @@ extern int nats_request_default_timeout_ms;
  * effectively "give up before the request leaves the host." */
 #define NATS_REQUEST_MIN_TIMEOUT_MS  10
 
+/* Ceiling for any caller-supplied timeout.  A SIP worker holding the
+ * w_nats_request call cannot service other traffic until the request
+ * either replies or times out, so the upper bound has to keep the
+ * worker available for SIP work even when the responder is wedged.
+ * 30 s matches OpenSIPS's default fr_timer for in-flight transactions
+ * -- a request that hasn't replied in that window is dead from the
+ * caller's perspective. */
+#define NATS_REQUEST_MAX_TIMEOUT_MS  30000
+
 /*
  * native_str_to_buf() — Null-terminate an OpenSIPS str into a fixed buffer.
  *
@@ -157,11 +166,12 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	}
 
 	/* Normalize the caller-supplied timeout into a sane range.
-	 *   - <= 0:        substitute the configured default
-	 *   - 1..MIN-1:    clamp up to MIN (cnats behavior under tiny
-	 *                  timeouts is implementation-defined)
-	 *   - > 30000:     clamp down to 30 s upper bound
-	 *   - in-range:    unchanged
+	 *   - <= 0:                                substitute the configured default
+	 *   - 1..NATS_REQUEST_MIN_TIMEOUT_MS-1:    clamp up to MIN (cnats
+	 *                                          behavior under tiny
+	 *                                          timeouts is impl-defined)
+	 *   - > NATS_REQUEST_MAX_TIMEOUT_MS:       clamp down to MAX
+	 *   - in-range:                            unchanged
 	 *
 	 * Use a local variable for the effective timeout so we don't
 	 * mutate the caller's pvar in-place (which the old code did). */
@@ -170,14 +180,14 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		if (eff <= 0) eff = nats_request_default_timeout_ms;
 		if (eff < NATS_REQUEST_MIN_TIMEOUT_MS)
 			eff = NATS_REQUEST_MIN_TIMEOUT_MS;
-		if (eff > 30000) {
+		if (eff > NATS_REQUEST_MAX_TIMEOUT_MS) {
 			static int warned = 0;
 			if (!warned) {
-				LM_WARN("nats_request timeout %d ms clamped to 30000 ms\n",
-					eff);
+				LM_WARN("nats_request timeout %d ms clamped to %d ms\n",
+					eff, NATS_REQUEST_MAX_TIMEOUT_MS);
 				warned = 1;
 			}
-			eff = 30000;
+			eff = NATS_REQUEST_MAX_TIMEOUT_MS;
 		}
 		*timeout_ms = eff;
 	}
