@@ -31,19 +31,54 @@ ensure_stream MW 'mw.>'
 # time to be drained + acked by the drain_mw timer (which runs at 1 Hz
 # with a 16-call unroll, so the worst-case latency from ring-push to
 # ack is ~1 s, but a stalled drain can fall behind under bursty load
-# from the producer side).  Without this, the broker considers any
-# message older than ack_wait as a redelivery candidate and the test
-# fails its "0 redeliveries" assertion.
+# from the producer side).
+#
+# The compose stack outlives test runs and js_AddConsumer falls back to
+# js_UpdateConsumer for an existing durable -- but a JetStream durable
+# is created with its initial config and the broker silently ignores
+# most subsequent updates (max_ack_pending, ack_wait, ...).  A prior
+# run that booted with stale max_ack_pending=1024 would therefore
+# remain capped at 1024 even after this bind requests 16384, and the
+# burst would stall on backpressure for minutes.
+#
+# Drop the durable on the broker and unbind any OpenSIPS-side handle
+# so the bind below creates a fresh consumer at the current stream
+# tip (deliver_policy=new) with exactly the configuration we ask for.
+nats_unbind mw >/dev/null 2>&1 || true
+ncli consumer rm MW mw -f >/dev/null 2>&1 || true
+
+#
+# fetch_batch=256 is what the proc-level comment in nats_consumer_proc.c
+# cites as 'loopback measures ~89 000 msgs/sec vs. ~2 000 at the default
+# of 10' -- the module-wide default is intentionally low (favors latency
+# for trickle workloads), but a 10k-message stress burst at 10 msgs per
+# 1 Hz tick caps at ~10 msgs/sec and would run for 16 min.
 nats_bind mw MW durable=mw filter=mw.job ack_wait=600s \
+    deliver_policy=new \
+    fetch_batch=256 \
     max_ack_pending=16384 ring_capacity=16384 >/dev/null
 
-# Snapshot the mw handle's delivered + redeliveries counters BEFORE we
-# publish, so the assertion can bound per-run delta instead of absolute
-# counts.  The compose stack survives across test runs and the
-# durable 'mw' handle keeps cumulative counters; prior runs' values
-# would otherwise either satisfy "delivered >= N_MESSAGES" before any
-# new publish (false PASS) or carry redeliveries that the test
-# attributes to this run (false FAIL).
+# Wait for the worker tick (~1s) to actually call js_AddConsumer +
+# js_PullSubscribe before we publish.  Without this, publishes can
+# land before the DeliverPolicy=New snapshot point and disappear.
+# Allow up to 30s -- a populated handle registry from earlier tests
+# in the same compose stack lengthens the per-tick foreach.
+deadline=$(( $(date +%s) + 30 ))
+broker_ready=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    names=$(ncli consumer ls MW --names 2>/dev/null || true)
+    case "$names" in
+        *mw*) broker_ready=1; break ;;
+    esac
+    sleep 0.5
+done
+if [ "${broker_ready}" != "1" ]; then
+    fail "multi_worker: broker did not create consumer 'mw' on MW within 10s"
+    exit 1
+fi
+
+# Fresh durable -> counters start at 0.  Keep snapshotting in case the
+# OpenSIPS-side msgs_delivered field carries over for some reason.
 list_start=$(nats_list 2>/dev/null || true)
 start_delivered=$(nats_list_field "${list_start}" mw msgs_delivered 2>/dev/null || echo 0)
 start_redeliveries=$(nats_list_field "${list_start}" mw redeliveries 2>/dev/null || echo 0)
