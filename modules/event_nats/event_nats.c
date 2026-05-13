@@ -72,6 +72,7 @@
 #include "nats_consumer.h"
 #include "nats_jetstream.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../tls_mgm/api.h"
 
 /* module lifecycle */
 static int mod_init(void);
@@ -96,26 +97,17 @@ int nats_jetstream = 0;
 int nats_reconnect_wait = 2000;   /* ms */
 int nats_max_reconnect = 60;
 
-/* TLS parameters */
-int nats_tls_skip_verify = 0;     /* skip server cert verification (default: no - verify) */
-char *nats_tls_ca = NULL;         /* CA certificate file for verification */
-char *nats_tls_cert = NULL;       /* client certificate file (mutual TLS) */
-char *nats_tls_key = NULL;        /* client private key file (mutual TLS) */
-char *nats_tls_hostname = NULL;   /* expected server cert hostname (overrides URL host) */
-int nats_tls_allow_downgrade = 0; /* allow silent rewrite of tls:// -> nats:// when
-                                   * nats.c was built without TLS (default: no - fail) */
+/* TLS configuration is sourced from the tls_mgm "nats" client domain
+ * at connect time (see lib/nats/nats_pool.c: apply_tls_from_mgm).
+ * The user module just binds tls_mgm and hands the bind table to
+ * lib/nats; cert/CA/key/verify/cipher all come from the domain. */
+static struct tls_mgm_binds tls_api;
 
 static const param_export_t mod_params[] = {
 	{"nats_url",            STR_PARAM, &nats_url},
 	{"jetstream",           INT_PARAM, &nats_jetstream},
 	{"reconnect_wait",      INT_PARAM, &nats_reconnect_wait},
 	{"max_reconnect",       INT_PARAM, &nats_max_reconnect},
-	{"tls_skip_verify",     INT_PARAM, &nats_tls_skip_verify},
-	{"tls_ca",              STR_PARAM, &nats_tls_ca},
-	{"tls_cert",            STR_PARAM, &nats_tls_cert},
-	{"tls_key",             STR_PARAM, &nats_tls_key},
-	{"tls_hostname",        STR_PARAM, &nats_tls_hostname},
-	{"tls_allow_downgrade", INT_PARAM, &nats_tls_allow_downgrade},
 	/* Tunable shutdown drain timeout, ms.  Sets the shared
 	 * lib/nats nats_pool_drain_timeout_ms global; later modules
 	 * loading the same lib see the same value (last writer wins). */
@@ -123,6 +115,20 @@ static const param_export_t mod_params[] = {
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
 	{0,0,0}
+};
+
+/* tls_mgm is required only when the operator wants TLS (URL begins
+ * with tls://).  DEP_SILENT lets plaintext-only deployments load
+ * event_nats without tls_mgm; the tls:// path checks at connect time
+ * and errors with operator-friendly guidance if tls_mgm is missing. */
+static const dep_export_t deps = {
+	{ /* OpenSIPS module dependencies */
+		{ MOD_TYPE_DEFAULT, "tls_mgm", DEP_SILENT },
+		{ MOD_TYPE_NULL, NULL, 0 },
+	},
+	{ /* modparam dependencies */
+		{ NULL, NULL },
+	},
 };
 
 /* MI commands */
@@ -235,7 +241,7 @@ struct module_exports exports = {
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,            /* dlopen flags */
 	0,                          /* load function */
-	NULL,                       /* OpenSIPS module dependencies */
+	&deps,                      /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
 	0,                          /* exported async functions */
 	mod_params,                 /* exported parameters */
@@ -277,13 +283,7 @@ static const evi_export_t trans_export_nats = {
  */
 static int mod_init(void)
 {
-	nats_tls_opts tls_opts;
-
 	LM_NOTICE("initializing event_nats module ...\n");
-
-	/* Surface which libnats TLS backend the operator's
-	 * loadmodule choices resolved to.  Pure observability;
-	 * runtime behaviour is unaffected. */
 
 	if (nats_stats_init() < 0) {
 		LM_ERR("cannot init stats\n");
@@ -297,16 +297,26 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* Build TLS opts from modparam globals and register with pool */
-	memset(&tls_opts, 0, sizeof(tls_opts));
-	tls_opts.ca = nats_tls_ca;
-	tls_opts.cert = nats_tls_cert;
-	tls_opts.key = nats_tls_key;
-	tls_opts.hostname = nats_tls_hostname;
-	tls_opts.skip_verify = nats_tls_skip_verify;
-	tls_opts.allow_downgrade = nats_tls_allow_downgrade;
+	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
+	 * pool's connect path can look up the "nats" client domain.  No
+	 * effect on plaintext (nats://) URLs; tls:// URLs error at
+	 * connect time if tls_mgm isn't bound or the "nats" domain
+	 * isn't defined. */
+	if (find_export("load_tls_mgm", 0)) {
+		if (load_tls_mgm_api(&tls_api) == 0) {
+			nats_pool_set_tls_api(&tls_api);
+			LM_INFO("event_nats: tls_mgm bound; "
+			        "tls:// URLs will use the \"nats\" client domain\n");
+		} else {
+			LM_WARN("event_nats: tls_mgm exports load_tls_mgm but "
+			        "the bind failed; tls:// URLs will not work\n");
+		}
+	} else {
+		LM_INFO("event_nats: tls_mgm not loaded; only nats:// URLs "
+		        "will work (tls:// will error at connect)\n");
+	}
 
-	if (nats_pool_register(nats_url, &tls_opts, "event_nats",
+	if (nats_pool_register(nats_url, "event_nats",
 			nats_reconnect_wait, nats_max_reconnect) < 0) {
 		LM_ERR("cannot register with NATS connection pool\n");
 		return -1;
@@ -320,17 +330,9 @@ static int mod_init(void)
 	{
 		char redacted[512];
 		nats_redact_url(nats_url, redacted, sizeof(redacted));
-		LM_INFO("NATS URL: %s, JetStream: %s, TLS verify: %s\n",
+		LM_INFO("NATS URL: %s, JetStream: %s\n",
 			redacted,
-			nats_jetstream ? "enabled" : "disabled",
-			nats_tls_skip_verify ? "off" : "on");
-	}
-
-	if (nats_tls_skip_verify) {
-		LM_WARN("NATS TLS server certificate verification is DISABLED "
-			"(tls_skip_verify=1) -- connections are vulnerable to "
-			"man-in-the-middle attacks. Set tls_skip_verify=0 and "
-			"provide tls_ca for production deployments.\n");
+			nats_jetstream ? "enabled" : "disabled");
 	}
 
 	/* Register EVI events for all configured subscriptions */

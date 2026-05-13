@@ -9,11 +9,12 @@
  * natsConnection handle.  JetStream and KV store handles are similarly
  * cached per-process.
  *
- * Key types:
- *   nats_tls_opts  — TLS configuration (CA, client cert/key, hostname)
- *
  * Key constants:
  *   NATS_POOL_MAX_KV_BUCKETS — maximum cached KV bucket handles
+ *
+ * TLS configuration is sourced from the OpenSIPS tls_mgm "nats"
+ * client domain at connect time -- see the doc block above
+ * nats_pool_set_tls_api() below for the operator-facing pattern.
  *
  * Thread model:
  *   - nats_pool_register() is called from mod_init (single-threaded,
@@ -54,31 +55,34 @@
 #include "nats_dl.h"
 
 /*
- * TLS configuration for NATS connections.
+ * TLS configuration source.
  *
- * Passed to nats_pool_register() to configure TLS on the shared connection.
- * All string fields are borrowed pointers (must remain valid for the
- * lifetime of the process).  Pass NULL to nats_pool_register() for
- * plaintext connections.
+ * NATS modules no longer carry their own TLS modparams.  When the
+ * operator wants TLS for a NATS connection (URL starts with tls://),
+ * lib/nats looks up the OpenSIPS tls_mgm client domain named "nats"
+ * and reads cert / CA / key / verify / cipher settings from there.
+ * That domain MUST be defined in opensips.cfg before any NATS module
+ * connects, e.g.:
+ *
+ *   loadmodule "tls_mgm.so"
+ *   modparam("tls_mgm", "client_domain", "nats")
+ *   modparam("tls_mgm", "certificate", "[nats]/etc/opensips/nats-cert.pem")
+ *   modparam("tls_mgm", "private_key", "[nats]/etc/opensips/nats-key.pem")
+ *   modparam("tls_mgm", "ca_list",     "[nats]/etc/opensips/nats-ca.pem")
+ *   modparam("tls_mgm", "verify_cert", "[nats]1")
+ *   loadmodule "tls_openssl.so"   # or tls_wolfssl.so
+ *
+ *   loadmodule "cachedb_nats.so"
+ *   loadmodule "event_nats.so"
+ *   loadmodule "nats_consumer.so"
+ *
+ * Plaintext deployments (URL starts with nats://) don't need tls_mgm
+ * loaded at all -- the NATS user modules declare it as DEP_SILENT.
+ *
+ * The user modules call nats_pool_set_tls_api(&binds) in mod_init
+ * after binding tls_mgm via load_tls_mgm_api(); lib/nats's connect
+ * path then uses that API to look up the "nats" domain.
  */
-typedef struct nats_tls_opts {
-    char *ca;               /* Path to CA certificate file (PEM).
-                             * Used to verify the NATS server certificate. */
-    char *cert;             /* Path to client certificate file (PEM).
-                             * Required for mutual TLS authentication. */
-    char *key;              /* Path to client private key file (PEM).
-                             * Must correspond to the client certificate. */
-    char *hostname;         /* Expected server hostname for TLS verification.
-                             * Required when connecting by IP address, since
-                             * nats.c enables host verification by default. */
-    int skip_verify;        /* If non-zero, skip server certificate verification.
-                             * Use only for development/testing. */
-    int allow_downgrade;    /* If non-zero, allow silent rewrite of tls://
-                             * URLs to nats:// when the linked nats.c was
-                             * built without TLS support.  Default 0 (fail
-                             * loudly rather than silently expose
-                             * credentials in plaintext). */
-} nats_tls_opts;
 
 /* Maximum number of KV bucket handles cached per process. */
 #define NATS_POOL_MAX_KV_BUCKETS 16
@@ -103,9 +107,27 @@ typedef struct nats_tls_opts {
  *
  * Thread safety: NOT thread-safe.  Call only from mod_init.
  */
-int nats_pool_register(const char *url, nats_tls_opts *tls,
-                       const char *module, int reconnect_wait,
-                       int max_reconnect);
+int nats_pool_register(const char *url, const char *module,
+                       int reconnect_wait, int max_reconnect);
+
+/*
+ * Hand the OpenSIPS tls_mgm bind table to lib/nats.
+ *
+ * @binds  pointer to a populated `struct tls_mgm_binds` from
+ *         load_tls_mgm_api(); lib/nats stores this opaquely (void *
+ *         in the public header to avoid pulling tls_mgm/api.h into
+ *         every source that uses nats_pool.h) and casts back inside
+ *         nats_pool.c.  Pass NULL to clear (used by tests).
+ *
+ * Must be called BEFORE the first nats_pool_register on a TLS URL.
+ * Subsequent calls overwrite the stored pointer; first-non-NULL wins
+ * in practice since all NATS user modules read the same tls_mgm
+ * instance.
+ *
+ * Idempotent: calling twice with the same pointer is a no-op.  No
+ * effect on plaintext (nats://) URLs.
+ */
+void nats_pool_set_tls_api(void *binds);
 
 /*
  * Get the shared NATS connection for this worker process.

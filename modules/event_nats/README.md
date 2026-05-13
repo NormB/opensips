@@ -25,14 +25,6 @@ full string.  Long defaults split across `<br>` breaks.
 | `jetstream` | int | 0 | Enable JetStream for persistent async publish (1=on, 0=off) |
 | `reconnect_wait` | int | 2000 | Milliseconds between startup connection retries |
 | `max_reconnect` | int | 60 | Max startup connection attempts. Does NOT limit runtime reconnection (that is unlimited). |
-| `tls_skip_verify` | int | 0 | Skip TLS server certificate verification (default 0 = verify; production default since the secure-defaults pass). |
-| `tls_allow_downgrade` | int | 0 | Permit silent rewrite of `tls://` URLs to `nats://` when nats.c was built without TLS support. Default 0 fails fast; set to 1 only for development. |
-| `tls_ca` | string | NULL | CA certificate file path |
-| `tls_cert` | string | NULL | Client certificate file path (mutual TLS) |
-| `tls_key` | string | NULL | Client private key file path |
-| `tls_hostname` | string | NULL | Expected server certificate hostname |
-| `skip_tls_init` | int | 1 | Skip nats.c global TLS-library init/cleanup (1=skip, required when any of OpenSIPS's `tls_openssl`, `tls_wolfssl`, or one of the `nats_tls_*` wrappers is loaded -- which is almost always the case).  Backend-neutral name covering both OpenSSL and wolfSSL libnats builds. |
-| `skip_openssl_init` | int | 1 | **Deprecated** alias for `skip_tls_init` (kept for one release cycle).  Using this name emits a one-time `LM_WARN` and writes the same storage. |
 | `nats_drain_timeout_ms` | int | 5000 | Shutdown drain timeout for the shared `lib/nats` connection pool. Cross-DC deployments with high RTT may need a longer budget; this setting is shared with `cachedb_nats`'s `cdb_drain_timeout_ms` (last writer wins). |
 | `subscribe` | string (multi) | -- | Configure NATS→`event_route` subscriptions; format `subject=<pat>;event=<name>[;queue=<grp>]`. Each set adds one fire-and-forget core-NATS subscription that dispatches matching messages to the named `event_route[]` handler via IPC. No script ack, no durable consumer state — for explicit-ack JetStream pull semantics use the separate `nats_consumer` module. |
 
