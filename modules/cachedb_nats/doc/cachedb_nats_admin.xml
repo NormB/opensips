@@ -424,127 +424,62 @@ modparam("cachedb_nats", "kv_watch", "json_>")
 	</example>
 	</section>
 
-	<section id="param_tls_ca" xreflabel="tls_ca">
-	<title><varname>tls_ca</varname> (string)</title>
+
+	<section id="tls_configuration" xreflabel="TLS configuration">
+	<title>TLS configuration</title>
 	<para>
-		Path to a PEM-encoded CA certificate file used to verify the NATS
-		server's TLS certificate.  When this parameter is set, the module
-		automatically upgrades the NATS connection URL from
-		<emphasis>nats://</emphasis> to <emphasis>tls://</emphasis>.
+		NATS-side TLS for <emphasis>cachedb_nats</emphasis> is
+		configured via OpenSIPS's central <emphasis>tls_mgm</emphasis>
+		module — the same way <emphasis>proto_tls</emphasis>,
+		<emphasis>event_rabbitmq</emphasis>,
+		<emphasis>rest_client</emphasis>, and other TLS-using modules
+		do it.  <emphasis>cachedb_nats</emphasis> does not carry its
+		own <varname>tls_*</varname> modparams.
 	</para>
 	<para>
-		<emphasis>
-			Default value is <quote>NULL</quote> (TLS disabled).
-		</emphasis>
+		To use TLS, define a <emphasis>tls_mgm</emphasis> client
+		domain named <varname>"nats"</varname> and use a
+		<varname>tls://</varname> URL in
+		<varname>cachedb_url</varname> (or set
+		<varname>nats_url</varname> directly to a
+		<varname>tls://</varname> URL):
 	</para>
 	<example>
-	<title>Set <varname>tls_ca</varname> parameter</title>
+	<title>tls_mgm-driven NATS TLS</title>
 	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "tls_ca",   "/etc/ssl/certs/ca.pem")
-modparam("cachedb_nats", "tls_cert", "/etc/opensips/nats-client.crt")
-modparam("cachedb_nats", "tls_key",  "/etc/opensips/nats-client.key")
-...
+loadmodule "tls_mgm.so"
+modparam("tls_mgm", "client_domain", "nats")
+modparam("tls_mgm", "certificate", "[nats]/etc/opensips/nats-cert.pem")
+modparam("tls_mgm", "private_key", "[nats]/etc/opensips/nats-key.pem")
+modparam("tls_mgm", "ca_list",     "[nats]/etc/opensips/nats-ca.pem")
+modparam("tls_mgm", "verify_cert", "[nats]1")
+
+loadmodule "tls_wolfssl.so"     # or tls_openssl.so
+
+loadmodule "cachedb_nats.so"
+modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/")
 	</programlisting>
 	</example>
-	</section>
-
-	<section id="param_tls_cert" xreflabel="tls_cert">
-	<title><varname>tls_cert</varname> (string)</title>
 	<para>
-		Path to the PEM-encoded client certificate for mutual TLS
-		authentication with the NATS server.  Required only when the NATS
-		server is configured to demand client certificates
-		(<emphasis>verify: true</emphasis>).
+		Plaintext-only deployments (<varname>nats://</varname> URLs)
+		don't need <emphasis>tls_mgm</emphasis> loaded —
+		<emphasis>cachedb_nats</emphasis> declares it
+		<varname>DEP_SILENT</varname> and only attempts the lookup
+		when a <varname>tls://</varname> URL is actually used.
+		Operators who configure <varname>tls://</varname> without a
+		<varname>tls_mgm</varname> "nats" domain see a clear error
+		at connect time pointing at the missing config.
 	</para>
 	<para>
-		<emphasis>
-			Default value is <quote>NULL</quote>.
-		</emphasis>
-	</para>
-	</section>
-
-	<section id="param_tls_key" xreflabel="tls_key">
-	<title><varname>tls_key</varname> (string)</title>
-	<para>
-		Path to the PEM-encoded private key corresponding to
-		<varname>tls_cert</varname>.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>NULL</quote>.
-		</emphasis>
-	</para>
-	</section>
-
-	<section id="param_tls_hostname" xreflabel="tls_hostname">
-	<title><varname>tls_hostname</varname> (string)</title>
-	<para>
-		Override the expected TLS server hostname for certificate verification.
-		Required when connecting to a NATS server by IP address, since
-		nats.c has <emphasis>NATS_FORCE_HOST_VERIFICATION</emphasis> enabled
-		by default and the server certificate typically has DNS Subject
-		Alternative Names only (no IP SANs).
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>NULL</quote> (use the hostname from the URL).
-		</emphasis>
-	</para>
-	<example>
-	<title>Set <varname>tls_hostname</varname> parameter</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "nats_url",      "tls://172.20.0.50:4222")
-modparam("cachedb_nats", "tls_hostname",  "nats-1.example.com")
-...
-	</programlisting>
-	</example>
-	</section>
-
-	<section id="param_tls_skip_verify" xreflabel="tls_skip_verify">
-	<title><varname>tls_skip_verify</varname> (integer)</title>
-	<para>
-		When set to <emphasis role="bold">1</emphasis>, disables TLS server
-		certificate verification.  Useful for development environments with
-		self-signed certificates.  Do not use in production.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>0</quote> (verification enabled).
-		</emphasis>
-	</para>
-	<example>
-	<title>Set <varname>tls_skip_verify</varname> parameter</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "tls_skip_verify", 1)
-...
-	</programlisting>
-	</example>
-	</section>
-
-	<section id="param_tls_allow_downgrade" xreflabel="tls_allow_downgrade">
-	<title><varname>tls_allow_downgrade</varname> (integer)</title>
-	<para>
-		Permit silent rewrite of <emphasis>tls://</emphasis> URLs to
-		<emphasis>nats://</emphasis> when the linked nats.c library
-		was built without TLS support.  By default
-		(<emphasis>0</emphasis>) the connection refuses to start in
-		that situation -- with a clear <emphasis>LM_ERR</emphasis> --
-		so a deployment that reads &quot;TLS=yes&quot; in its config
-		never silently sends credentials in the clear.
-	</para>
-	<para>
-		Set to <emphasis>1</emphasis> only after explicitly accepting
-		the plaintext fallback.  When enabled and a downgrade actually
-		occurs, the module emits an <emphasis>LM_WARN</emphasis> noting
-		that credentials will travel unencrypted.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>0</quote> (refuse silent downgrade).
-		</emphasis>
+		<emphasis>tls_mgm</emphasis>'s
+		<varname>ca_directory</varname> field (a directory of PEM
+		files) is supported: <emphasis>cachedb_nats</emphasis> reads
+		every <filename>.pem</filename> in the directory in
+		lexicographic order, concatenates the contents in memory,
+		and hands the result to libnats via the PEM-string API.
+		This mirrors OpenSSL's
+		<function>SSL_CTX_load_verify_locations(NULL, dir)</function>
+		semantics.
 	</para>
 	</section>
 
@@ -946,30 +881,6 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</example>
 	</section>
 
-	<section id="param_skip_openssl_init" xreflabel="skip_openssl_init">
-	<title><varname>skip_openssl_init</varname> (integer)</title>
-	<para>
-		When set to <emphasis role="bold">1</emphasis>, instructs nats.c not
-		to call <function>SSL_library_init</function> and related OpenSSL
-		global initialisation functions.  This prevents double-initialisation
-		conflicts between nats.c and the OpenSIPS TLS subsystem, which also
-		manages OpenSSL.  This flag should remain enabled (the default) in
-		all deployments where &osips; is compiled with TLS support.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>1</quote> (OpenSSL init skipped).
-		</emphasis>
-	</para>
-	<example>
-	<title>Set <varname>skip_openssl_init</varname> parameter</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "skip_openssl_init", 1)
-...
-	</programlisting>
-	</example>
-	</section>
 
 	</section>
 

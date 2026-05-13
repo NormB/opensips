@@ -59,13 +59,15 @@
                 connection module is required.
             </para>
             <para>
-                When TLS is used, the <emphasis>tls_openssl</emphasis> module
-                must be loaded <emphasis>before</emphasis>
-                <emphasis>event_nats</emphasis> in
-                <filename>opensips.cfg</filename>.  In that configuration,
-                <varname>skip_openssl_init</varname> must be set to
-                <varname>1</varname> (the default) so that nats.c defers
-                OpenSSL lifecycle management to &osips;.
+                When TLS is used, the <emphasis>tls_mgm</emphasis>
+                module must be loaded with a
+                <varname>client_domain</varname> named
+                <varname>"nats"</varname> (see the "TLS configuration"
+                section below).  Either <emphasis>tls_openssl</emphasis>
+                or <emphasis>tls_wolfssl</emphasis> must also be loaded
+                so libnats can use the matching backend; the choice is
+                inferred at runtime from which one
+                <emphasis>tls_mgm</emphasis> reports as in use.
             </para>
         </section>
 
@@ -234,204 +236,64 @@ modparam("event_nats", "max_reconnect", 30)
             </example>
         </section>
 
-        <!-- tls_skip_verify -->
-        <section id="param_tls_skip_verify">
-            <title><varname>tls_skip_verify</varname> (integer)</title>
-            <para>
-                Skip server TLS certificate verification.  When set to
-                <varname>0</varname> (the default), nats.c verifies both
-                the server's certificate chain (against
-                <varname>tls_ca</varname>) and its hostname.  This is
-                the secure default for production deployments.
-            </para>
-            <para>
-                Set to <varname>1</varname> only for development or
-                lab environments where the NATS servers use self-signed
-                certificates and certificate procurement is not
-                feasible.  When enabled, the module emits an
-                <varname>LM_WARN</varname> at startup so the operator
-                can confirm the setting was intentional.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>0</varname>
-                (verify)
-            </para>
-            <example>
-                <title>Production: full TLS certificate verification</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "tls_ca",          "/etc/ssl/certs/nats-ca.pem")
-modparam("event_nats", "tls_hostname",    "nats-1.example.com")
-                </programlisting>
-            </example>
-            <example>
-                <title>Development: skip verification (insecure)</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "tls_skip_verify", 1)
-                </programlisting>
-            </example>
-        </section>
 
-        <!-- tls_allow_downgrade -->
-        <section id="param_tls_allow_downgrade">
-            <title><varname>tls_allow_downgrade</varname> (integer)</title>
+        <!-- TLS configuration source -->
+        <section id="tls_configuration">
+            <title>TLS configuration</title>
             <para>
-                Permit silent rewrite of <varname>tls://</varname>
-                URLs to <varname>nats://</varname> when the linked
-                nats.c library was built without TLS support.  By
-                default (<varname>0</varname>) the pool refuses to
-                start when TLS is requested but unavailable, with a
-                clear <varname>LM_ERR</varname> -- this prevents
-                deployments that read &quot;TLS=yes&quot; in their
-                config from silently sending credentials in the
-                clear.
+                NATS-side TLS is configured via OpenSIPS's central
+                <emphasis>tls_mgm</emphasis> module — the same way
+                <emphasis>proto_tls</emphasis>,
+                <emphasis>event_rabbitmq</emphasis>,
+                <emphasis>rest_client</emphasis>, and other TLS-using
+                modules do it.  <emphasis>event_nats</emphasis> does
+                not carry its own <varname>tls_*</varname> modparams.
             </para>
             <para>
-                Set to <varname>1</varname> only after explicitly
-                accepting the plaintext fallback risk.  When enabled
-                and a downgrade actually occurs, the module emits an
-                <varname>LM_WARN</varname> at startup noting that
-                credentials will travel unencrypted.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>0</varname>
-                (refuse silent downgrade)
+                To use TLS for NATS connections, define a
+                <emphasis>tls_mgm</emphasis> client domain named
+                <varname>"nats"</varname> and use a <varname>tls://</varname>
+                URL:
             </para>
             <example>
-                <title>Allow plaintext fallback (NOT recommended)</title>
+                <title>tls_mgm-driven NATS TLS</title>
                 <programlisting format="linespecific">
-modparam("event_nats", "tls_allow_downgrade", 1)
-                </programlisting>
-            </example>
-        </section>
+loadmodule "tls_mgm.so"
+modparam("tls_mgm", "client_domain", "nats")
+modparam("tls_mgm", "certificate", "[nats]/etc/opensips/nats-cert.pem")
+modparam("tls_mgm", "private_key", "[nats]/etc/opensips/nats-key.pem")
+modparam("tls_mgm", "ca_list",     "[nats]/etc/opensips/nats-ca.pem")
+modparam("tls_mgm", "verify_cert", "[nats]1")
 
-        <!-- tls_ca -->
-        <section id="param_tls_ca">
-            <title><varname>tls_ca</varname> (string)</title>
-            <para>
-                Path to the PEM-encoded CA certificate file used to verify
-                the NATS server's certificate.  Required when
-                <varname>tls_skip_verify</varname> is set to
-                <varname>0</varname>.  Has no effect when certificate
-                verification is skipped.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>NULL</varname>
-                (not set)
-            </para>
-            <example>
-                <title>Set CA certificate</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "tls_ca", "/etc/ssl/certs/nats-ca.pem")
-                </programlisting>
-            </example>
-        </section>
+loadmodule "tls_wolfssl.so"     # or tls_openssl.so
 
-        <!-- tls_cert -->
-        <section id="param_tls_cert">
-            <title><varname>tls_cert</varname> (string)</title>
-            <para>
-                Path to the PEM-encoded client certificate file for mutual
-                TLS (mTLS) authentication.  When set, the module presents
-                this certificate to the NATS server during the TLS handshake.
-                <varname>tls_key</varname> must also be configured.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>NULL</varname>
-                (not set; client certificate not presented)
-            </para>
-            <example>
-                <title>Configure mutual TLS</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "tls_cert", "/etc/opensips/nats-client.crt")
-modparam("event_nats", "tls_key",  "/etc/opensips/nats-client.key")
-                </programlisting>
-            </example>
-        </section>
-
-        <!-- tls_key -->
-        <section id="param_tls_key">
-            <title><varname>tls_key</varname> (string)</title>
-            <para>
-                Path to the PEM-encoded private key file corresponding to
-                <varname>tls_cert</varname>.  Required when
-                <varname>tls_cert</varname> is configured.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>NULL</varname>
-                (not set)
-            </para>
-            <example>
-                <title>Set client private key</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "tls_key", "/etc/opensips/nats-client.key")
-                </programlisting>
-            </example>
-        </section>
-
-        <!-- tls_hostname -->
-        <section id="param_tls_hostname">
-            <title><varname>tls_hostname</varname> (string)</title>
-            <para>
-                Expected hostname in the NATS server's TLS certificate,
-                used for SNI and hostname verification.  This parameter is
-                necessary when connecting to a NATS server by IP address and
-                <varname>tls_skip_verify</varname> is <varname>0</varname>,
-                because nats.c enforces hostname verification
-                (<varname>NATS_FORCE_HOST_VERIFICATION</varname> is
-                <varname>ON</varname> by default) and an IP address will not
-                match the certificate's DNS Subject Alternative Names.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>NULL</varname>
-                (derived from the URL hostname)
-            </para>
-            <example>
-                <title>Set expected hostname when connecting by IP</title>
-                <programlisting format="linespecific">
-modparam("event_nats", "nats_url",      "tls://10.0.0.50:4222")
-modparam("event_nats", "tls_skip_verify", 0)
-modparam("event_nats", "tls_ca",        "/etc/ssl/certs/nats-ca.pem")
-modparam("event_nats", "tls_hostname",  "nats-1.example.com")
-                </programlisting>
-            </example>
-        </section>
-
-        <!-- skip_openssl_init -->
-        <section id="param_skip_openssl_init">
-            <title><varname>skip_openssl_init</varname> (integer)</title>
-            <para>
-                Instruct nats.c to skip its own OpenSSL initialization and
-                cleanup.  When set to <varname>1</varname> (the default),
-                nats.c calls <function>nats_Open(-1)</function> before
-                establishing connections but does not call
-                <function>SSL_library_init()</function>,
-                <function>SSL_load_error_strings()</function>, or
-                <function>EVP_cleanup()</function>.  &osips; (via the
-                <emphasis>tls_openssl</emphasis> module) manages the OpenSSL
-                lifecycle.
-            </para>
-            <para>
-                Set to <varname>0</varname> only in configurations where no
-                other &osips; module initializes OpenSSL.  In practice this
-                situation does not arise — any deployment using TLS will have
-                <emphasis>tls_openssl</emphasis> loaded, and even non-TLS
-                deployments may have modules that depend indirectly on OpenSSL.
-                Allowing nats.c to initialize OpenSSL concurrently with &osips;
-                can cause double-initialization and subsequent heap corruption
-                at shutdown.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>1</varname>
-                (skip nats.c OpenSSL init)
-            </para>
-            <example>
-                <title>Default: skip nats.c OpenSSL init (tls_openssl loaded)</title>
-                <programlisting format="linespecific">
-loadmodule "tls_openssl.so"
 loadmodule "event_nats.so"
-modparam("event_nats", "skip_openssl_init", 1)
+modparam("event_nats", "nats_url", "tls://nats.example.org:4222")
                 </programlisting>
             </example>
+            <para>
+                Plaintext-only deployments (<varname>nats://</varname>
+                URLs) don't need <emphasis>tls_mgm</emphasis> loaded —
+                <emphasis>event_nats</emphasis> declares it
+                <varname>DEP_SILENT</varname> and only attempts the
+                lookup when a <varname>tls://</varname> URL is actually
+                used.  Operators who configure <varname>tls://</varname>
+                without a <varname>tls_mgm</varname> "nats" domain see
+                a clear error at connect time pointing at the missing
+                config.
+            </para>
+            <para>
+                The libnats backend (OpenSSL vs wolfSSL) is selected
+                by which <varname>tls_*.so</varname> is loaded for
+                SIP-side TLS — <emphasis>event_nats</emphasis> doesn't
+                make a separate choice.  Operators with multiple
+                libnats variants installed override the default
+                library lookup via the
+                <varname>$NATS_DL_LIBNATS_PATH</varname> environment
+                variable or via standard <command>ld.so</command>
+                mechanisms (<varname>LD_LIBRARY_PATH</varname>,
+                <command>ldconfig</command> priorities).
+            </para>
         </section>
 
         <section id="param_nats_drain_timeout_ms">
