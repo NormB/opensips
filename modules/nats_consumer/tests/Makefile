@@ -14,7 +14,7 @@ ACKTOK_SRCS := test_ack_token.c
 PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
                ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
 
-.PHONY: all clean check check-tsan
+.PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
 # test_slurp_file_cap pins -fsanitize=address in its own rule (it is
 # specifically asserting an ASan trip on a bad slurp), so it cannot
@@ -116,3 +116,16 @@ test_header_propagation: test_header_propagation.c
 # directory (reads ../nats_persist.c).
 test_start_time_roundtrip: test_start_time_roundtrip.c
 	$(CC) -g -O0 -Wall -o $@ $<
+
+# Live shell smokes (require a real nats-server + opensips binary in
+# the tree).  Skip with exit 77 if prerequisites are missing.  Not
+# part of `make check` because the unit suite is supposed to run
+# without external services; CI calls these explicitly when the
+# environment is provisioned.
+smoke: smoke-tls smoke-multi-instance
+
+smoke-tls: ./test_tls_mgm_consumer_smoke.sh
+	./test_tls_mgm_consumer_smoke.sh
+
+smoke-multi-instance: ./test_multi_instance_durable.sh
+	./test_multi_instance_durable.sh
