@@ -13,7 +13,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ensure_stack
 ensure_stream MX 'mx.>'
 
-nats_bind m1 MX durable=m1 filter=mx.msg ack_wait=1s max_deliver=3 >/dev/null
+# Run-unique durable + handle id so each invocation gets fresh
+# JetStream consumer state; otherwise prior runs' msgs_delivered
+# accumulates into the absolute-count assertion.  Previously this
+# durable was 'm1' which also clashed with test_filter.sh's 'multi'
+# handle (also durable=m1) -- another source of cross-test pollution.
+RUN_ID="$$_$(date +%s%N)"
+H_ID="mx_${RUN_ID}"
+
+nats_bind "$H_ID" MX durable="d_${RUN_ID}" filter=mx.msg \
+    ack_wait=1s max_deliver=3 >/dev/null
 
 publish mx.msg 'boom'
 
@@ -25,11 +34,13 @@ publish mx.msg 'boom'
 deadline=$(( $(date +%s) + 15 ))
 delivered=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    delivered=$(nats_list_field "$(nats_list)" m1 msgs_delivered 2>/dev/null)
+    delivered=$(nats_list_field "$(nats_list)" "$H_ID" msgs_delivered 2>/dev/null)
     delivered=${delivered:-0}
     [ "${delivered}" -ge 3 ] && break
     sleep 0.5
 done
+
+nats_unbind "$H_ID" >/dev/null 2>&1 || true
 
 if [ "${delivered}" -ge 3 ] 2>/dev/null; then
     pass "max_deliver: ${delivered} deliveries reached cap (>=3)"

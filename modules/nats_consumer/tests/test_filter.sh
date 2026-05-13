@@ -36,6 +36,14 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 1
 done
 
+# Known flake: test passes on a fresh compose stack but the durable
+# 'billing'/'multi' consumers accumulate cumulative msgs_delivered
+# across runs.  Attempts to use run-unique ephemeral consumers with
+# deliver_policy=new showed that the multi-subject `filters=` flow
+# delivers 0 messages even with the consumer freshly created from the
+# stream tip, suggesting a deeper bug in nats_consumer_proc's
+# js_AddConsumer wiring for FilterSubjects[].  Leaving the original
+# absolute-count assertion in place pending that investigation.
 if [ "${b_delivered}" = "1" ] && [ "${m_delivered}" = "2" ]; then
     pass "filter: billing=1 multi=2"
 else
