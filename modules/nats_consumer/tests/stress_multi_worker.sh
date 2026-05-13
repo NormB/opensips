@@ -17,6 +17,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/lib.sh"
 
 ensure_stack
+# Clear the OpenSIPS handle registry before binding: stale handles
+# from prior tests whose broker-side consumers are gone retry their
+# js_PullSubscribe every ~4 s and starve the worker tick that creates
+# new consumers, pushing broker-readiness past any reasonable wait.
+restart_opensips_clean
 
 N_MESSAGES="${N_MESSAGES:-10000}"
 
@@ -61,9 +66,12 @@ nats_bind mw MW durable=mw filter=mw.job ack_wait=600s \
 # Wait for the worker tick (~1s) to actually call js_AddConsumer +
 # js_PullSubscribe before we publish.  Without this, publishes can
 # land before the DeliverPolicy=New snapshot point and disappear.
-# Allow up to 30s -- a populated handle registry from earlier tests
-# in the same compose stack lengthens the per-tick foreach.
-deadline=$(( $(date +%s) + 30 ))
+# 60 s upper bound -- when run as part of the full suite the opensips
+# container has ~12 prior-test handles in the registry and the per-tick
+# foreach is materially slower; in isolation the consumer shows up
+# under a second.
+readiness_wait=60
+deadline=$(( $(date +%s) + readiness_wait ))
 broker_ready=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     names=$(ncli consumer ls MW --names 2>/dev/null || true)
@@ -73,7 +81,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 0.5
 done
 if [ "${broker_ready}" != "1" ]; then
-    fail "multi_worker: broker did not create consumer 'mw' on MW within 10s"
+    fail "multi_worker: broker did not create consumer 'mw' on MW within ${readiness_wait}s"
     exit 1
 fi
 

@@ -25,6 +25,26 @@ ensure_stack() {
     fi
 }
 
+# Restart the opensips container and wait for the MI FIFO to come back.
+# Use before stress tests that need a clean handle registry: the worker
+# tick retries failed js_PullSubscribe / js_AddConsumer indefinitely
+# for handles whose broker-side consumers have been deleted by earlier
+# tests, and that retry storm crowds out fresh binds for tens of
+# seconds even on an otherwise idle broker.
+restart_opensips_clean() {
+    ${COMPOSE} restart opensips >/dev/null 2>&1
+    local deadline=$(( $(date +%s) + 15 ))
+    while [ "$(date +%s)" -lt "${deadline}" ]; do
+        if ${COMPOSE} exec -T opensips test -p /var/run/opensips/mi.fifo \
+                >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "WARN: opensips MI FIFO not ready 15s after restart" >&2
+    return 1
+}
+
 # Run a nats CLI command in the natscli helper container.
 ncli() {
     ${COMPOSE} exec -T natscli nats --server nats://nats:4222 "$@"
