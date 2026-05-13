@@ -73,9 +73,6 @@ typedef struct nats_tls_opts {
                              * nats.c enables host verification by default. */
     int skip_verify;        /* If non-zero, skip server certificate verification.
                              * Use only for development/testing. */
-    int skip_openssl_init;  /* If non-zero, tell nats.c to skip OpenSSL_init().
-                             * Required when running inside OpenSIPS, which
-                             * manages OpenSSL lifecycle via tls_openssl. */
     int allow_downgrade;    /* If non-zero, allow silent rewrite of tls://
                              * URLs to nats:// when the linked nats.c was
                              * built without TLS support.  Default 0 (fail
@@ -321,23 +318,5 @@ int nats_validate_publish_subject(const char *s, int len);
  * callback pointer is read on the cnats thread without locking.
  */
 void nats_pool_set_pub_ack_cb(void (*cb)(int success));
-
-/*
- * Log the active libnats TLS backend at module init for operator
- * diagnostics.  Inspects which of nats_tls_openssl / nats_tls_wolfssl
- * is loaded via module_loaded() and emits one LM_INFO line:
- *
- *    <caller>: NATS TLS backend = openssl  (via nats_tls_openssl)
- *    <caller>: NATS TLS backend = wolfssl  (via nats_tls_wolfssl)
- *    <caller>: NATS TLS backend = system default (no wrapper loaded)
- *
- * The wrappers themselves log their own load lines; this helper
- * gives each NATS user module a uniform, grep-able record of what
- * the operator's loadmodule choice resolved to.  No effect on
- * runtime behaviour -- just observability.
- *
- * Thread safety: Call from mod_init.
- */
-void nats_pool_log_tls_backend(const char *caller);
 
 #endif /* NATS_POOL_H */

@@ -457,7 +457,6 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 			}
 
 			pool_cfg->tls.skip_verify = tls->skip_verify;
-			pool_cfg->tls.skip_openssl_init = tls->skip_openssl_init;
 			pool_cfg->tls.allow_downgrade = tls->allow_downgrade;
 		}
 
@@ -1100,33 +1099,4 @@ const char *nats_pool_get_server_info(void)
 int nats_pool_get_reconnect_epoch(void)
 {
 	return atomic_load(&_reconnect_epoch);
-}
-
-/* See nats_pool.h doc comment.  Pure observability helper: emits a
- * single LM_INFO at module init naming which TLS-backend wrapper
- * module (if any) is in effect.  Does not affect runtime behaviour. */
-void nats_pool_log_tls_backend(const char *caller)
-{
-	const char *who = caller ? caller : "nats";
-	int openssl_w = module_loaded("nats_tls_openssl");
-	int wolfssl_w = module_loaded("nats_tls_wolfssl");
-
-	if (openssl_w && !wolfssl_w) {
-		LM_INFO("%s: NATS TLS backend = openssl (via nats_tls_openssl)\n",
-		        who);
-	} else if (wolfssl_w && !openssl_w) {
-		LM_INFO("%s: NATS TLS backend = wolfssl (via nats_tls_wolfssl)\n",
-		        who);
-	} else if (openssl_w && wolfssl_w) {
-		/* The wrapper modules' own mod_init would have rejected
-		 * this with -1; if we reach here OpenSIPS would have
-		 * aborted already.  Log defensively in case the rejection
-		 * path is ever bypassed. */
-		LM_WARN("%s: both nats_tls_openssl and nats_tls_wolfssl are "
-		        "loaded -- this is invalid; one wrapper module's "
-		        "mod_init should have refused\n", who);
-	} else {
-		LM_INFO("%s: NATS TLS backend = system default "
-		        "(no nats_tls_* wrapper loaded)\n", who);
-	}
 }
