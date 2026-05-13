@@ -306,7 +306,7 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 	char url[256];
 	int len;
 
-	natsConnection_GetConnectedUrl(nc, url, sizeof(url));
+	nats_dl.natsConnection_GetConnectedUrl(nc, url, sizeof(url));
 	atomic_store(&_connected, 1);
 	atomic_fetch_add(&_reconnect_epoch, 1);
 	atomic_store(&_kv_stale, 1);
@@ -325,7 +325,7 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
  *   void (*)(jsCtx*, natsMsg*, jsPubAck*, jsPubAckErr*, void*)
  *
  * Memory ownership rules (set by nats.c js.c:_handleAsyncReply):
- * - pa and pae are STACK-ALLOCATED by nats.c — do NOT call jsPubAck_Destroy().
+ * - pa and pae are STACK-ALLOCATED by nats.c — do NOT call nats_dl.jsPubAck_Destroy().
  *   nats.c calls _freePubAck() after this callback returns.
  * - msg (the original published message) IS our responsibility to destroy.
  *   nats.c sets pmsg=NULL after calling us (js.c:719).
@@ -362,7 +362,7 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
 	if (_pub_ack_cb)
 		_pub_ack_cb(success);
 	if (msg)
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 }
 
 /* ----------------------------------------------------------------
@@ -397,6 +397,23 @@ int nats_pool_register(const char *url, nats_tls_opts *tls,
 {
 	if (!url || !*url) {
 		LM_ERR("[%s] empty NATS URL\n", module ? module : "?");
+		return -1;
+	}
+
+	/* Lazy-load libnats via dlopen on first registration.  All
+	 * subsequent libnats calls in this file (and in the user
+	 * modules that link this library) dispatch through nats_dl.X
+	 * — see lib/nats/nats_dl.h for the architectural rationale.
+	 * Idempotent: repeated calls are no-ops once libnats is in.
+	 *
+	 * Phase 2 will replace the NULL search-list default with a
+	 * tls_mgm-driven backend choice; for now this picks the first
+	 * libnats SONAME on the default path, regardless of TLS
+	 * backend.  No-TLS and openssl-libnats deployments are
+	 * unaffected since either variant satisfies the table. */
+	if (nats_dl_load(NULL) < 0) {
+		LM_ERR("[%s] nats_dl_load failed; libnats not available\n",
+		       module ? module : "?");
 		return -1;
 	}
 
@@ -587,10 +604,10 @@ natsConnection *nats_pool_get(void)
 	/* Initialize nats.c library — once per process.
 	 * -1 lets nats.c pick default lock spin count. */
 	if (!_lib_initialized) {
-		s = nats_Open(-1);
+		s = nats_dl.nats_Open(-1);
 		if (s != NATS_OK) {
 			LM_ERR("NATS pool: nats_Open failed: %s\n",
-				natsStatus_GetText(s));
+				nats_dl.natsStatus_GetText(s));
 			return NULL;
 		}
 		_lib_initialized = 1;
@@ -613,12 +630,12 @@ natsConnection *nats_pool_get(void)
 
 			_tls_probed = 1;
 
-			if (natsOptions_Create(&probe) == NATS_OK) {
-				if (natsOptions_SetServers(probe,
+			if (nats_dl.natsOptions_Create(&probe) == NATS_OK) {
+				if (nats_dl.natsOptions_SetServers(probe,
 				    (const char **)pool_cfg->servers,
 				    pool_cfg->server_cnt) == NATS_OK)
 					tls_ok = 1;
-				natsOptions_Destroy(probe);
+				nats_dl.natsOptions_Destroy(probe);
 			}
 
 			if (!tls_ok) {
@@ -672,19 +689,19 @@ natsConnection *nats_pool_get(void)
 	}
 
 	/* Create connection options */
-	s = natsOptions_Create(&opts);
+	s = nats_dl.natsOptions_Create(&opts);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_Create failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		return NULL;
 	}
 
 	/* Set server list (URLs now guaranteed compatible with nats.c) */
-	s = natsOptions_SetServers(opts,
+	s = nats_dl.natsOptions_SetServers(opts,
 		(const char **)pool_cfg->servers, pool_cfg->server_cnt);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_SetServers failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		goto error;
 	}
 
@@ -699,31 +716,31 @@ natsConnection *nats_pool_get(void)
 	 * Once connected, nats.c reconnect is unlimited so cluster gossip
 	 * (INFO connect_urls) keeps working through any partition length.
 	 */
-	natsOptions_SetMaxReconnect(opts, -1);
-	natsOptions_SetReconnectWait(opts, pool_cfg->reconnect_wait);
-	natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
-	natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
+	nats_dl.natsOptions_SetMaxReconnect(opts, -1);
+	nats_dl.natsOptions_SetReconnectWait(opts, pool_cfg->reconnect_wait);
+	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
+	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
 	/* TLS configuration — only if URLs weren't downgraded to nats:// */
 	if (pool_cfg->use_tls) {
-		natsOptions_SetSecure(opts, true);
+		nats_dl.natsOptions_SetSecure(opts, true);
 
 		if (pool_cfg->tls.ca && *pool_cfg->tls.ca)
-			natsOptions_LoadCATrustedCertificates(opts,
+			nats_dl.natsOptions_LoadCATrustedCertificates(opts,
 				pool_cfg->tls.ca);
 
 		if (pool_cfg->tls.cert && *pool_cfg->tls.cert)
-			natsOptions_LoadCertificatesChain(opts,
+			nats_dl.natsOptions_LoadCertificatesChain(opts,
 				pool_cfg->tls.cert,
 				(pool_cfg->tls.key && *pool_cfg->tls.key) ?
 					pool_cfg->tls.key : NULL);
 
 		if (pool_cfg->tls.hostname && *pool_cfg->tls.hostname)
-			natsOptions_SetExpectedHostname(opts,
+			nats_dl.natsOptions_SetExpectedHostname(opts,
 				pool_cfg->tls.hostname);
 
 		if (pool_cfg->tls.skip_verify)
-			natsOptions_SkipServerVerification(opts, true);
+			nats_dl.natsOptions_SkipServerVerification(opts, true);
 	}
 
 	/* Retry connection with bounded attempts. pool_cfg->max_reconnect
@@ -731,18 +748,18 @@ natsConnection *nats_pool_get(void)
 	{
 		int attempts = 0;
 		for (;;) {
-			s = natsConnection_Connect(&_nc, opts);
+			s = nats_dl.natsConnection_Connect(&_nc, opts);
 			if (s == NATS_OK)
 				break;
 
 			attempts++;
 			{
 				char stack_buf[1024];
-				nats_GetLastErrorStack(stack_buf, sizeof(stack_buf));
+				nats_dl.nats_GetLastErrorStack(stack_buf, sizeof(stack_buf));
 				LM_ERR("NATS pool: connection attempt %d/%d failed: "
 					"%s [%s]\n",
 					attempts, pool_cfg->max_reconnect,
-					natsStatus_GetText(s),
+					nats_dl.natsStatus_GetText(s),
 					stack_buf[0] ? stack_buf : "no detail");
 			}
 
@@ -752,11 +769,11 @@ natsConnection *nats_pool_get(void)
 				goto error;
 			}
 
-			nats_Sleep(pool_cfg->reconnect_wait);
+			nats_dl.nats_Sleep(pool_cfg->reconnect_wait);
 		}
 	}
 
-	natsOptions_Destroy(opts);
+	nats_dl.natsOptions_Destroy(opts);
 	atomic_store(&_connected, 1);
 
 	/* Log connected URL — natsConnection_GetConnectedUrl is documented
@@ -765,7 +782,7 @@ natsConnection *nats_pool_get(void)
 	{
 		char url[256];
 		char redacted[256];
-		natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
+		nats_dl.natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
 		nats_redact_url(url, redacted, sizeof(redacted));
 		LM_INFO("NATS pool: connected to %s (%d server(s) configured)\n",
 			redacted, pool_cfg->server_cnt);
@@ -775,7 +792,7 @@ natsConnection *nats_pool_get(void)
 
 error:
 	if (opts)
-		natsOptions_Destroy(opts);
+		nats_dl.natsOptions_Destroy(opts);
 	return NULL;
 }
 
@@ -806,13 +823,13 @@ jsCtx *nats_pool_get_js(void)
 		return NULL;
 
 	/* Initialize JetStream options with async publish ack handler */
-	jsOptions_Init(&jsOpts);
+	nats_dl.jsOptions_Init(&jsOpts);
 	jsOpts.PublishAsync.AckHandler = _js_pub_ack_handler;
 
-	s = natsConnection_JetStream(&_js, _nc, &jsOpts);
+	s = nats_dl.natsConnection_JetStream(&_js, _nc, &jsOpts);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: JetStream context creation failed: %s\n",
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 		return NULL;
 	}
 
@@ -888,7 +905,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 	}
 
 	/* Try to bind to existing bucket on the server first */
-	s = js_KeyValue(&kv, _js, bucket);
+	s = nats_dl.js_KeyValue(&kv, _js, bucket);
 	if (s != NATS_OK) {
 		/* Bucket does not exist on server — create it */
 		LM_DBG("NATS pool: KV bucket '%s' not found, creating\n",
@@ -901,10 +918,10 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		if (ttl_secs > 0)
 			kvCfg.TTL = ttl_secs * 1000000000LL; /* seconds to nanos */
 
-		s = js_CreateKeyValue(&kv, _js, &kvCfg);
+		s = nats_dl.js_CreateKeyValue(&kv, _js, &kvCfg);
 		if (s != NATS_OK) {
 			LM_ERR("NATS pool: KV bucket '%s' create failed: %s\n",
-				bucket, natsStatus_GetText(s));
+				bucket, nats_dl.natsStatus_GetText(s));
 			return NULL;
 		}
 		LM_INFO("NATS pool: KV bucket '%s' created "
@@ -942,11 +959,11 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
  *
  * 1. KV handles destroyed first — they depend on _js.
  * 2. JetStream context destroyed — it depends on _nc.
- * 3. Connection drained THEN destroyed — natsConnection_Drain() flushes
+ * 3. Connection drained THEN destroyed — nats_dl.natsConnection_Drain() flushes
  *    pending messages and waits for in-flight operations to complete
  *    before closing.  This ensures the I/O threads finish their work
  *    before we destroy the connection.  Without draining first,
- *    natsConnection_Destroy() would tear down the socket while I/O
+ *    nats_dl.natsConnection_Destroy() would tear down the socket while I/O
  *    threads may still be reading/writing, causing races.
  * 4. Shared config freed last — it's SHM, no thread dependency.
  *
@@ -967,7 +984,7 @@ void nats_pool_destroy(void)
 	/* Step 1: Destroy KV handles (depend on _js) */
 	for (i = 0; i < _kv_cache_cnt; i++) {
 		if (_kv_cache[i].kv) {
-			kvStore_Destroy(_kv_cache[i].kv);
+			nats_dl.kvStore_Destroy(_kv_cache[i].kv);
 			_kv_cache[i].kv = NULL;
 		}
 	}
@@ -975,7 +992,7 @@ void nats_pool_destroy(void)
 
 	/* Step 2: Destroy JetStream context (depends on _nc) */
 	if (_js) {
-		jsCtx_Destroy(_js);
+		nats_dl.jsCtx_Destroy(_js);
 		_js = NULL;
 	}
 
@@ -991,7 +1008,7 @@ void nats_pool_destroy(void)
 	if (_nc) {
 		int budget_ms = nats_pool_drain_timeout_ms > 0
 			? nats_pool_drain_timeout_ms : 5000;
-		natsStatus ds = natsConnection_DrainTimeout(_nc, budget_ms);
+		natsStatus ds = nats_dl.natsConnection_DrainTimeout(_nc, budget_ms);
 		if (ds != NATS_OK) {
 			LM_WARN("NATS pool: connection drain returned %s "
 				"after %d ms; in-flight JetStream publishes "
@@ -999,9 +1016,9 @@ void nats_pool_destroy(void)
 				"nats_drain_timeout_ms (event_nats) or "
 				"cdb_drain_timeout_ms (cachedb_nats) if you "
 				"are seeing ack loss on shutdown.\n",
-				natsStatus_GetText(ds), budget_ms);
+				nats_dl.natsStatus_GetText(ds), budget_ms);
 		}
-		natsConnection_Destroy(_nc);
+		nats_dl.natsConnection_Destroy(_nc);
 		_nc = NULL;
 	}
 
@@ -1042,7 +1059,7 @@ int nats_pool_is_connected(void)
 /**
  * Get the currently connected server URL for status reporting.
  *
- * Queries natsConnection_GetConnectedUrl() directly on each call to
+ * Queries nats_dl.natsConnection_GetConnectedUrl() directly on each call to
  * avoid returning a stale pointer.  The result is written into a
  * process-local static buffer and is valid until the next call.
  *
@@ -1051,7 +1068,7 @@ int nats_pool_is_connected(void)
  *
  * Thread safety: Called from OpenSIPS process context only.
  * The static buffer is process-local (each forked process has its own).
- * We call natsConnection_GetConnectedUrl() which is thread-safe in
+ * We call nats_dl.natsConnection_GetConnectedUrl() which is thread-safe in
  * nats.c (it locks internally), so this is safe even if the reconnect
  * callback fires concurrently — we always get a consistent snapshot.
  */
@@ -1062,7 +1079,7 @@ const char *nats_pool_get_server_info(void)
 	if (!_nc)
 		return "not connected";
 
-	if (natsConnection_GetConnectedUrl(_nc, _server_info_buf,
+	if (nats_dl.natsConnection_GetConnectedUrl(_nc, _server_info_buf,
 	    sizeof(_server_info_buf)) != NATS_OK)
 		return "not connected";
 

@@ -139,10 +139,10 @@ mi_response_t *mi_nats_account_info(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_GetAccountInfo(&ai, js, NULL, &jerr);
+	s = nats_dl.js_GetAccountInfo(&ai, js, NULL, &jerr);
 	if (s != NATS_OK || !ai) {
 		LM_ERR("js_GetAccountInfo failed: %s (jerr=%d)\n",
-			natsStatus_GetText(s), (int)jerr);
+			nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("GetAccountInfo failed"));
 	}
 
@@ -182,13 +182,13 @@ mi_response_t *mi_nats_account_info(const mi_params_t *params,
 			(double)ai->Limits.MaxConsumers) < 0)
 		goto error;
 
-	jsAccountInfo_Destroy(ai);
+	nats_dl.jsAccountInfo_Destroy(ai);
 	return resp;
 
 error:
 	free_mi_response(resp);
 cleanup:
-	if (ai) jsAccountInfo_Destroy(ai);
+	if (ai) nats_dl.jsAccountInfo_Destroy(ai);
 	return NULL;
 }
 
@@ -209,10 +209,10 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_Streams(&list, js, NULL, &jerr);
+	s = nats_dl.js_Streams(&list, js, NULL, &jerr);
 	if (s != NATS_OK || !list) {
 		LM_ERR("js_Streams failed: %s (jerr=%d)\n",
-			natsStatus_GetText(s), (int)jerr);
+			nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("Streams list failed"));
 	}
 
@@ -249,13 +249,13 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 			goto error;
 	}
 
-	jsStreamInfoList_Destroy(list);
+	nats_dl.jsStreamInfoList_Destroy(list);
 	return resp;
 
 error:
 	free_mi_response(resp);
 cleanup:
-	if (list) jsStreamInfoList_Destroy(list);
+	if (list) nats_dl.jsStreamInfoList_Destroy(list);
 	return NULL;
 }
 
@@ -291,12 +291,12 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	s = js_GetStreamInfo(&si, js, name_buf, NULL, &jerr);
+	s = nats_dl.js_GetStreamInfo(&si, js, name_buf, NULL, &jerr);
 	if (s != NATS_OK || !si) {
 		if (jerr == 10059) /* stream not found */
 			return init_mi_error(404, MI_SSTR("stream not found"));
-		LM_ERR("js_GetStreamInfo(%s) failed: %s (jerr=%d)\n",
-			name_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_GetStreamInfo(%s) failed: %s (jerr=%d)\n",
+			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("GetStreamInfo failed"));
 	}
 
@@ -394,13 +394,13 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 		}
 	}
 
-	jsStreamInfo_Destroy(si);
+	nats_dl.jsStreamInfo_Destroy(si);
 	return resp;
 
 error:
 	free_mi_response(resp);
 cleanup:
-	if (si) jsStreamInfo_Destroy(si);
+	if (si) nats_dl.jsStreamInfo_Destroy(si);
 	return NULL;
 }
 
@@ -444,7 +444,7 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	jsStreamConfig_Init(&cfg);
+	nats_dl.jsStreamConfig_Init(&cfg);
 	cfg.Name = name_buf;
 
 	/* Parse comma-separated subjects. Silent truncation on more than
@@ -513,28 +513,28 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 		}
 	}
 
-	s = js_AddStream(&si, js, &cfg, NULL, &jerr);
+	s = nats_dl.js_AddStream(&si, js, &cfg, NULL, &jerr);
 	if (s != NATS_OK) {
-		LM_ERR("js_AddStream(%s) failed: %s (jerr=%d)\n",
-			name_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_AddStream(%s) failed: %s (jerr=%d)\n",
+			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("AddStream failed"));
 	}
 
 	mi_response_t *resp;
 	mi_item_t *resp_obj;
 	resp = init_mi_result_object(&resp_obj);
-	if (!resp) { jsStreamInfo_Destroy(si); return NULL; }
+	if (!resp) { nats_dl.jsStreamInfo_Destroy(si); return NULL; }
 
 	if (add_mi_string(resp_obj, MI_SSTR("status"),
 			MI_SSTR("created")) < 0 ||
 		add_mi_string(resp_obj, MI_SSTR("name"),
 			name_buf, strlen(name_buf)) < 0) {
 		free_mi_response(resp);
-		jsStreamInfo_Destroy(si);
+		nats_dl.jsStreamInfo_Destroy(si);
 		return NULL;
 	}
 
-	jsStreamInfo_Destroy(si);
+	nats_dl.jsStreamInfo_Destroy(si);
 	return resp;
 }
 
@@ -565,12 +565,12 @@ mi_response_t *mi_nats_stream_delete(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_DeleteStream(js, name_buf, NULL, &jerr);
+	s = nats_dl.js_DeleteStream(js, name_buf, NULL, &jerr);
 	if (s != NATS_OK) {
 		if (jerr == 10059)
 			return init_mi_error(404, MI_SSTR("stream not found"));
-		LM_ERR("js_DeleteStream(%s) failed: %s (jerr=%d)\n",
-			name_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_DeleteStream(%s) failed: %s (jerr=%d)\n",
+			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("DeleteStream failed"));
 	}
 
@@ -604,12 +604,12 @@ mi_response_t *mi_nats_stream_purge(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_PurgeStream(js, name_buf, NULL, &jerr);
+	s = nats_dl.js_PurgeStream(js, name_buf, NULL, &jerr);
 	if (s != NATS_OK) {
 		if (jerr == 10059)
 			return init_mi_error(404, MI_SSTR("stream not found"));
-		LM_ERR("js_PurgeStream(%s) failed: %s (jerr=%d)\n",
-			name_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_PurgeStream(%s) failed: %s (jerr=%d)\n",
+			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("PurgeStream failed"));
 	}
 
@@ -652,13 +652,13 @@ mi_response_t *mi_nats_consumer_list(const mi_params_t *params,
 	{
 		jsStreamInfo *_si = NULL;
 		jsErrCode _je;
-		natsStatus _ss = js_GetStreamInfo(&_si, js, name_buf, NULL, &_je);
-		if (_si) jsStreamInfo_Destroy(_si);
+		natsStatus _ss = nats_dl.js_GetStreamInfo(&_si, js, name_buf, NULL, &_je);
+		if (_si) nats_dl.jsStreamInfo_Destroy(_si);
 		if (_ss != NATS_OK)
 			return init_mi_error(404, MI_SSTR("stream not found"));
 	}
 
-	s = js_Consumers(&list, js, name_buf, NULL, &jerr);
+	s = nats_dl.js_Consumers(&list, js, name_buf, NULL, &jerr);
 	if (s != NATS_OK || !list) {
 		/* Stream exists but has no consumers — return empty list */
 		if (s == NATS_NOT_FOUND || (list && list->Count == 0)) {
@@ -671,11 +671,11 @@ mi_response_t *mi_nats_consumer_list(const mi_params_t *params,
 				free_mi_response(r);
 				return NULL;
 			}
-			if (list) jsConsumerInfoList_Destroy(list);
+			if (list) nats_dl.jsConsumerInfoList_Destroy(list);
 			return r;
 		}
-		LM_ERR("js_Consumers(%s) failed: %s (jerr=%d)\n",
-			name_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_Consumers(%s) failed: %s (jerr=%d)\n",
+			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("Consumers list failed"));
 	}
 
@@ -707,13 +707,13 @@ mi_response_t *mi_nats_consumer_list(const mi_params_t *params,
 			goto error;
 	}
 
-	jsConsumerInfoList_Destroy(list);
+	nats_dl.jsConsumerInfoList_Destroy(list);
 	return resp;
 
 error:
 	free_mi_response(resp);
 cleanup:
-	if (list) jsConsumerInfoList_Destroy(list);
+	if (list) nats_dl.jsConsumerInfoList_Destroy(list);
 	return NULL;
 }
 
@@ -757,12 +757,12 @@ mi_response_t *mi_nats_consumer_info(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_GetConsumerInfo(&ci, js, stream_buf, consumer_buf, NULL, &jerr);
+	s = nats_dl.js_GetConsumerInfo(&ci, js, stream_buf, consumer_buf, NULL, &jerr);
 	if (s != NATS_OK || !ci) {
 		if (jerr == 10014 || jerr == 10059)
 			return init_mi_error(404, MI_SSTR("consumer not found"));
-		LM_ERR("js_GetConsumerInfo(%s/%s) failed: %s (jerr=%d)\n",
-			stream_buf, consumer_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_GetConsumerInfo(%s/%s) failed: %s (jerr=%d)\n",
+			stream_buf, consumer_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("GetConsumerInfo failed"));
 	}
 
@@ -842,13 +842,13 @@ mi_response_t *mi_nats_consumer_info(const mi_params_t *params,
 			(double)ci->AckFloor.Stream) < 0)
 		goto error;
 
-	jsConsumerInfo_Destroy(ci);
+	nats_dl.jsConsumerInfo_Destroy(ci);
 	return resp;
 
 error:
 	free_mi_response(resp);
 cleanup:
-	if (ci) jsConsumerInfo_Destroy(ci);
+	if (ci) nats_dl.jsConsumerInfo_Destroy(ci);
 	return NULL;
 }
 
@@ -894,7 +894,7 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	jsConsumerConfig_Init(&cfg);
+	nats_dl.jsConsumerConfig_Init(&cfg);
 	cfg.Durable = consumer_buf;
 	cfg.Name = consumer_buf;
 
@@ -943,28 +943,28 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 		}
 	}
 
-	s = js_AddConsumer(&ci, js, stream_buf, &cfg, NULL, &jerr);
+	s = nats_dl.js_AddConsumer(&ci, js, stream_buf, &cfg, NULL, &jerr);
 	if (s != NATS_OK) {
-		LM_ERR("js_AddConsumer(%s/%s) failed: %s (jerr=%d)\n",
-			stream_buf, consumer_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_AddConsumer(%s/%s) failed: %s (jerr=%d)\n",
+			stream_buf, consumer_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("AddConsumer failed"));
 	}
 
 	mi_response_t *resp;
 	mi_item_t *resp_obj;
 	resp = init_mi_result_object(&resp_obj);
-	if (!resp) { jsConsumerInfo_Destroy(ci); return NULL; }
+	if (!resp) { nats_dl.jsConsumerInfo_Destroy(ci); return NULL; }
 
 	if (add_mi_string(resp_obj, MI_SSTR("status"),
 			MI_SSTR("created")) < 0 ||
 		add_mi_string(resp_obj, MI_SSTR("name"),
 			consumer_buf, strlen(consumer_buf)) < 0) {
 		free_mi_response(resp);
-		jsConsumerInfo_Destroy(ci);
+		nats_dl.jsConsumerInfo_Destroy(ci);
 		return NULL;
 	}
 
-	jsConsumerInfo_Destroy(ci);
+	nats_dl.jsConsumerInfo_Destroy(ci);
 	return resp;
 }
 
@@ -1005,12 +1005,12 @@ mi_response_t *mi_nats_consumer_delete(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_DeleteConsumer(js, stream_buf, consumer_buf, NULL, &jerr);
+	s = nats_dl.js_DeleteConsumer(js, stream_buf, consumer_buf, NULL, &jerr);
 	if (s != NATS_OK) {
 		if (jerr == 10014 || jerr == 10059)
 			return init_mi_error(404, MI_SSTR("consumer not found"));
-		LM_ERR("js_DeleteConsumer(%s/%s) failed: %s (jerr=%d)\n",
-			stream_buf, consumer_buf, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_DeleteConsumer(%s/%s) failed: %s (jerr=%d)\n",
+			stream_buf, consumer_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("DeleteConsumer failed"));
 	}
 
@@ -1052,27 +1052,27 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_GetMsg(&msg, js, name_buf, (uint64_t)seq_int, NULL, &jerr);
+	s = nats_dl.js_GetMsg(&msg, js, name_buf, (uint64_t)seq_int, NULL, &jerr);
 	if (s != NATS_OK || !msg) {
 		if (jerr == 10037 || jerr == 10059)
 			return init_mi_error(404, MI_SSTR("message not found"));
-		LM_ERR("js_GetMsg(%s, %d) failed: %s (jerr=%d)\n",
-			name_buf, seq_int, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_GetMsg(%s, %d) failed: %s (jerr=%d)\n",
+			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(404, MI_SSTR("message not found"));
 	}
 
 	resp = init_mi_result_object(&resp_obj);
-	if (!resp) { natsMsg_Destroy(msg); return NULL; }
+	if (!resp) { nats_dl.natsMsg_Destroy(msg); return NULL; }
 
 	{
-		const char *subj = natsMsg_GetSubject(msg);
+		const char *subj = nats_dl.natsMsg_GetSubject(msg);
 		if (subj && add_mi_string(resp_obj, MI_SSTR("subject"),
 				subj, strlen(subj)) < 0)
 			goto error;
 	}
 	{
-		const char *data = natsMsg_GetData(msg);
-		int data_len = natsMsg_GetDataLength(msg);
+		const char *data = nats_dl.natsMsg_GetData(msg);
+		int data_len = nats_dl.natsMsg_GetDataLength(msg);
 		if (data && add_mi_string(resp_obj, MI_SSTR("data"),
 				data, data_len) < 0)
 			goto error;
@@ -1080,12 +1080,12 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("sequence"), (double)seq_int) < 0)
 		goto error;
 
-	natsMsg_Destroy(msg);
+	nats_dl.natsMsg_Destroy(msg);
 	return resp;
 
 error:
 	free_mi_response(resp);
-	natsMsg_Destroy(msg);
+	nats_dl.natsMsg_Destroy(msg);
 	return NULL;
 }
 
@@ -1121,12 +1121,12 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = js_DeleteMsg(js, name_buf, (uint64_t)seq_int, NULL, &jerr);
+	s = nats_dl.js_DeleteMsg(js, name_buf, (uint64_t)seq_int, NULL, &jerr);
 	if (s != NATS_OK) {
 		if (jerr == 10037 || jerr == 10059)
 			return init_mi_error(404, MI_SSTR("message not found"));
-		LM_ERR("js_DeleteMsg(%s, %d) failed: %s (jerr=%d)\n",
-			name_buf, seq_int, natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_DeleteMsg(%s, %d) failed: %s (jerr=%d)\n",
+			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("DeleteMsg failed"));
 	}
 

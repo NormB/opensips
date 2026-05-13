@@ -246,7 +246,7 @@ int   nats_cdb_skip_openssl_init = 1;
 
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
- * When one or more patterns are set, kvStore_WatchMulti() is used.
+ * When one or more patterns are set, nats_dl.kvStore_WatchMulti() is used.
  * Definition lives in cachedb_nats_watch.h so the dedicated-process
  * watcher (when running as a dedicated process) can read it from cachedb_nats_watch.c. */
 struct kv_watch_entry *kv_watch_list = NULL;
@@ -754,7 +754,7 @@ static int child_init(int rank)
 		struct kv_watch_entry *e;
 		int i = 0;
 
-		/* convert linked list to array for kvStore_WatchMulti() */
+		/* convert linked list to array for nats_dl.kvStore_WatchMulti() */
 		patterns = pkg_malloc((kv_watch_count + 1) * sizeof(char *));
 		if (!patterns) {
 			LM_ERR("no more pkg memory for watch patterns\n");

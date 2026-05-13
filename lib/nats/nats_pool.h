@@ -45,6 +45,15 @@
 #include <nats/nats.h>
 
 /*
+ * Pull in the libnats function-pointer table.  Every NATS source file
+ * that includes nats_pool.h gets nats_dl transitively, so direct calls
+ * like natsConnection_Connect(...) are written nats_dl.natsConnection_Connect(...)
+ * and dispatched through the dlopen-populated table.  See nats_dl.h for
+ * the architectural rationale and lifecycle.
+ */
+#include "nats_dl.h"
+
+/*
  * TLS configuration for NATS connections.
  *
  * Passed to nats_pool_register() to configure TLS on the shared connection.

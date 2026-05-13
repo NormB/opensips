@@ -342,7 +342,7 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 
 	/* kvEntry lifecycle: kvStore_Get allocates an entry that we must
 	 * destroy with kvEntry_Destroy once we have extracted the value. */
-	s = kvStore_Get(&entry, ncon->kv, key_buf);
+	s = nats_dl.kvStore_Get(&entry, ncon->kv, key_buf);
 
 	/* NATS_NOT_FOUND is not an error — the cachedb framework uses -2
 	 * to distinguish "key absent" from "operation failed". */
@@ -354,20 +354,20 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
 	/* Read the value from the entry before destroying it — the pointer
 	 * returned by kvEntry_ValueString is only valid while entry exists. */
-	data = kvEntry_ValueString(entry);
-	data_len = kvEntry_ValueLen(entry);
+	data = nats_dl.kvEntry_ValueString(entry);
+	data_len = nats_dl.kvEntry_ValueLen(entry);
 
 	if (!data || data_len <= 0) {
 		/* key exists but empty value */
 		val->s = NULL;
 		val->len = 0;
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		return 0;
 	}
 
@@ -376,13 +376,13 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 	val->s = pkg_malloc(data_len);
 	if (!val->s) {
 		LM_ERR("no more pkg memory for value (%d bytes)\n", data_len);
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		return -1;
 	}
 	memcpy(val->s, data, data_len);
 	val->len = data_len;
 
-	kvEntry_Destroy(entry);
+	nats_dl.kvEntry_Destroy(entry);
 	return 0;
 }
 
@@ -449,14 +449,14 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 	memcpy(val_buf, val->s, val->len);
 	val_buf[val->len] = '\0';
 
-	s = kvStore_PutString(&rev, ncon->kv, key_buf, val_buf);
+	s = nats_dl.kvStore_PutString(&rev, ncon->kv, key_buf, val_buf);
 
 	if (use_heap)
 		pkg_free(val_buf);
 
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_PutString failed for key '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -467,7 +467,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 /**
  * nats_cache_remove() — delete a key from the NATS KV store.
  *
- * Issues a kvStore_Delete (soft delete / purge marker) for the given key.
+ * Issues a nats_dl.kvStore_Delete(soft delete / purge marker) for the given key.
  * Deleting a key that does not exist is treated as success to maintain
  * idempotent semantics expected by the cachedb framework.
  *
@@ -501,10 +501,10 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
-	s = kvStore_Delete(ncon->kv, key_buf);
+	s = nats_dl.kvStore_Delete(ncon->kv, key_buf);
 	if (s != NATS_OK && s != NATS_NOT_FOUND) {
 		LM_ERR("kvStore_Delete failed for key '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -588,18 +588,18 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 
 		/* Step 1: read current value.  NATS_NOT_FOUND means the
 		 * counter doesn't exist yet — we'll use CreateString below. */
-		s = kvStore_Get(&entry, ncon->kv, key_buf);
+		s = nats_dl.kvStore_Get(&entry, ncon->kv, key_buf);
 		if (s == NATS_OK) {
 			/* kvEntry lifecycle: extract value + revision, then
 			 * destroy immediately — we don't need it after this. */
-			const char *vs = kvEntry_ValueString(entry);
+			const char *vs = nats_dl.kvEntry_ValueString(entry);
 			current = vs ? strtoll(vs, NULL, 10) : 0;
-			last_rev = kvEntry_Revision(entry);
-			kvEntry_Destroy(entry);
+			last_rev = nats_dl.kvEntry_Revision(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 		} else if (s != NATS_NOT_FOUND) {
 			LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-				key_buf, natsStatus_GetText(s));
+				key_buf, nats_dl.natsStatus_GetText(s));
 			return -1;
 		}
 
@@ -612,10 +612,10 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 		 * CreateString fails if the key already exists (another
 		 * process created it between our Get and this call). */
 		if (last_rev > 0)
-			s = kvStore_UpdateString(&new_rev, ncon->kv, key_buf,
+			s = nats_dl.kvStore_UpdateString(&new_rev, ncon->kv, key_buf,
 				buf, last_rev);
 		else
-			s = kvStore_CreateString(&new_rev, ncon->kv, key_buf, buf);
+			s = nats_dl.kvStore_CreateString(&new_rev, ncon->kv, key_buf, buf);
 
 		if (s == NATS_OK) {
 			if (new_val)
@@ -721,7 +721,7 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 		return -1;
 
 	/* kvEntry lifecycle: Get allocates, we read, then Destroy. */
-	s = kvStore_Get(&entry, ncon->kv, key_buf);
+	s = nats_dl.kvStore_Get(&entry, ncon->kv, key_buf);
 
 	/* NATS_NOT_FOUND → return -2 so the cachedb framework knows the
 	 * counter has not been initialised yet (distinct from error). */
@@ -731,17 +731,17 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
 	/* Parse the string value as an integer; kvEntry_ValueString returns
 	 * a pointer valid only while entry is alive. */
 	{
-		const char *val_str = kvEntry_ValueString(entry);
+		const char *val_str = nats_dl.kvEntry_ValueString(entry);
 		*val = val_str ? (int)strtol(val_str, NULL, 10) : 0;
 	}
-	kvEntry_Destroy(entry);
+	nats_dl.kvEntry_Destroy(entry);
 
 	LM_DBG("GET_COUNTER '%s' = %d\n", key_buf, *val);
 	return 0;

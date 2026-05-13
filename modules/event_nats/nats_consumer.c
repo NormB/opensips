@@ -203,18 +203,18 @@ void nats_consumer_process(int rank)
 
 		if (sub->queue_group[0]) {
 			/* Queue subscribe — load-balanced across group members */
-			s = natsConnection_QueueSubscribe(&sub->sub, nc,
+			s = nats_dl.natsConnection_QueueSubscribe(&sub->sub, nc,
 				sub->subject, sub->queue_group,
 				nats_msg_handler, sub);
 		} else {
 			/* Regular subscribe */
-			s = natsConnection_Subscribe(&sub->sub, nc,
+			s = nats_dl.natsConnection_Subscribe(&sub->sub, nc,
 				sub->subject, nats_msg_handler, sub);
 		}
 
 		if (s != NATS_OK) {
 			LM_ERR("subscribe to '%s' failed: %s\n",
-				sub->subject, natsStatus_GetText(s));
+				sub->subject, nats_dl.natsStatus_GetText(s));
 			continue;
 		}
 
@@ -234,7 +234,7 @@ void nats_consumer_process(int rank)
 	 * marked it invalid (server-side state was lost across the
 	 * reconnect), destroy it and re-subscribe.  Subscriptions that
 	 * survived the reconnect on the broker side report
-	 * natsSubscription_IsValid()=true and are left alone. */
+	 * nats_dl.natsSubscription_IsValid()=true and are left alone. */
 	{
 		int last_epoch = nats_pool_get_reconnect_epoch();
 		int prev_connected = nats_pool_is_connected();
@@ -253,19 +253,19 @@ void nats_consumer_process(int rank)
 					nats_subscription_t *sub =
 						&nats_subscriptions[i];
 					if (sub->sub &&
-					    natsSubscription_IsValid(sub->sub))
+					    nats_dl.natsSubscription_IsValid(sub->sub))
 						continue;
 					if (sub->sub) {
-						natsSubscription_Destroy(sub->sub);
+						nats_dl.natsSubscription_Destroy(sub->sub);
 						sub->sub = NULL;
 					}
 					if (sub->queue_group[0]) {
-						s = natsConnection_QueueSubscribe(
+						s = nats_dl.natsConnection_QueueSubscribe(
 							&sub->sub, nc, sub->subject,
 							sub->queue_group,
 							nats_msg_handler, sub);
 					} else {
-						s = natsConnection_Subscribe(
+						s = nats_dl.natsConnection_Subscribe(
 							&sub->sub, nc, sub->subject,
 							nats_msg_handler, sub);
 					}
@@ -278,7 +278,7 @@ void nats_consumer_process(int rank)
 							"resubscribe to '%s' "
 							"failed: %s\n",
 							sub->subject,
-							natsStatus_GetText(s));
+							nats_dl.natsStatus_GetText(s));
 					}
 				}
 				last_epoch = cur_epoch;
@@ -313,15 +313,15 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	const char *data;
 	int subject_len, data_len;
 
-	subject = natsMsg_GetSubject(msg);
-	data = natsMsg_GetData(msg);
-	data_len = natsMsg_GetDataLength(msg);
+	subject = nats_dl.natsMsg_GetSubject(msg);
+	data = nats_dl.natsMsg_GetData(msg);
+	data_len = nats_dl.natsMsg_GetDataLength(msg);
 	subject_len = subject ? strlen(subject) : 0;
 
 	/* Allocate IPC event in shared memory */
 	evt = shm_malloc(sizeof(nats_ipc_event_t));
 	if (!evt) {
-		natsMsg_Destroy(msg);
+		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
 	memset(evt, 0, sizeof(*evt));
@@ -333,7 +333,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	if (subject_len > 0) {
 		evt->subject = shm_malloc(subject_len + 1);
 		if (!evt->subject) {
-			natsMsg_Destroy(msg);
+			nats_dl.natsMsg_Destroy(msg);
 			shm_free(evt);
 			return;
 		}
@@ -346,7 +346,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	if (data && data_len > 0) {
 		evt->data = shm_malloc(data_len + 1);
 		if (!evt->data) {
-			natsMsg_Destroy(msg);
+			nats_dl.natsMsg_Destroy(msg);
 			if (evt->subject) shm_free(evt->subject);
 			shm_free(evt);
 			return;
@@ -356,7 +356,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 		evt->data_len = data_len;
 	}
 
-	natsMsg_Destroy(msg);
+	nats_dl.natsMsg_Destroy(msg);
 
 	/* Dispatch to next available SIP worker */
 	if (ipc_dispatch_rpc(nats_ipc_raise_event, evt) < 0) {

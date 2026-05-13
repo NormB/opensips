@@ -35,6 +35,7 @@
  */
 
 #include <nats/nats.h>
+#include "../../lib/nats/nats_dl.h"   /* libnats function-pointer table */
 #include "../../dprint.h"
 #include "nats_producer.h"
 #include "nats_stats.h"
@@ -84,9 +85,9 @@ int nats_publish(const char *subject, const void *data, int len)
         return -1;
     }
 
-    natsStatus s = natsConnection_Publish(_nc, subject, data, len);
+    natsStatus s = nats_dl.natsConnection_Publish(_nc, subject, data, len);
     if (s != NATS_OK) {
-        LM_ERR("NATS publish to '%s' failed: %s\n", subject, natsStatus_GetText(s));
+        LM_ERR("NATS publish to '%s' failed: %s\n", subject, nats_dl.natsStatus_GetText(s));
         NATS_STATS_BUMP(failed);
         return -1;
     }
@@ -110,10 +111,10 @@ int nats_js_publish_async(const char *subject, const void *data, int len)
 {
     if (!_js) return nats_publish(subject, data, len);
 
-    natsStatus s = js_PublishAsync(_js, subject, data, len, NULL);
+    natsStatus s = nats_dl.js_PublishAsync(_js, subject, data, len, NULL);
     if (s != NATS_OK) {
         LM_ERR("JetStream async publish to '%s' failed: %s\n",
-               subject, natsStatus_GetText(s));
+               subject, nats_dl.natsStatus_GetText(s));
         NATS_STATS_BUMP(failed);
         return -1;
     }

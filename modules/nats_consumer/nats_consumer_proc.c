@@ -730,7 +730,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		}
 	}
 	/* Build jsConsumerConfig with the full handle-config matrix. */
-	jsConsumerConfig_Init(&cc);
+	nats_dl.jsConsumerConfig_Init(&cc);
 
 	durable_c    = str_to_cstr(&h->durable);
 	filter_c     = str_to_cstr(&h->filter);
@@ -828,7 +828,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 			h->id.len, h->id.s);
 	}
 
-	jsSubOptions_Init(&so);
+	nats_dl.jsSubOptions_Init(&so);
 	so.Stream    = stream_c;
 	so.Config    = cc;
 	/* We drive acks ourselves via the worker-driven ack-IPC path,
@@ -841,7 +841,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * jsOptions.Prefix to override the default "$JS.API" prefix when a
 	 * site has a custom gateway. */
 	if (domain_c || api_prefix_c) {
-		jsOptions_Init(&js_opts);
+		nats_dl.jsOptions_Init(&js_opts);
 		if (domain_c)     js_opts.Domain = domain_c;
 		if (api_prefix_c) js_opts.Prefix = api_prefix_c;
 		js_opts_p = &js_opts;
@@ -869,36 +869,36 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 		jsConsumerInfo *ci_tmp = NULL;
 		natsStatus      cs;
 
-		cs = js_AddConsumer(&ci_tmp, g_js, stream_c, &cc,
+		cs = nats_dl.js_AddConsumer(&ci_tmp, g_js, stream_c, &cc,
 			js_opts_p, NULL);
 		if (cs != NATS_OK) {
 			natsStatus us;
-			us = js_UpdateConsumer(&ci_tmp, g_js, stream_c, &cc,
+			us = nats_dl.js_UpdateConsumer(&ci_tmp, g_js, stream_c, &cc,
 				js_opts_p, NULL);
 			if (us != NATS_OK) {
-				LM_ERR("nats_consumer_proc: js_AddConsumer('%.*s')"
+				LM_ERR("nats_consumer_proc: nats_dl.js_AddConsumer('%.*s')"
 					" failed: %s (update also %s)\n",
 					h->id.len, h->id.s,
-					natsStatus_GetText(cs),
-					natsStatus_GetText(us));
+					nats_dl.natsStatus_GetText(cs),
+					nats_dl.natsStatus_GetText(us));
 				goto fail_free_sub;
 			}
 		}
 		if (ci_tmp)
-			jsConsumerInfo_Destroy(ci_tmp);
+			nats_dl.jsConsumerInfo_Destroy(ci_tmp);
 
 		/* In the bound path nats.c does not consult so.Config; it
 		 * looks up the existing consumer via Stream + Consumer. */
 		so.Consumer = durable_c;
 
-		s = js_PullSubscribe(&ss->sub, g_js,
+		s = nats_dl.js_PullSubscribe(&ss->sub, g_js,
 			"" /* subject empty: bound path uses opts->Consumer */,
 			NULL /* durable NULL: same reason */,
 			js_opts_p,
 			&so,
 			NULL);
 	} else {
-		s = js_PullSubscribe(&ss->sub, g_js,
+		s = nats_dl.js_PullSubscribe(&ss->sub, g_js,
 			filter_c /* may be NULL when Config has FilterSubject */,
 			durable_c /* may be NULL for ephemeral */,
 			js_opts_p,
@@ -906,8 +906,8 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 			NULL);
 	}
 	if (s != NATS_OK) {
-		LM_ERR("nats_consumer_proc: js_PullSubscribe('%.*s') failed: %s\n",
-			h->id.len, h->id.s, natsStatus_GetText(s));
+		LM_ERR("nats_consumer_proc: nats_dl.js_PullSubscribe('%.*s') failed: %s\n",
+			h->id.len, h->id.s, nats_dl.natsStatus_GetText(s));
 		goto fail_free_sub;
 	}
 
@@ -923,7 +923,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	/* Stash the allocations on ss so the retire / rebuild paths can
 	 * free them without leaking.  nats.c has borrowed pointers into
 	 * these for the life of the subscription, so they must outlive
-	 * the natsSubscription_Destroy() call but NOT the
+	 * the nats_dl.natsSubscription_Destroy() call but NOT the
 	 * proc_sub_state_t itself. */
 	ss->c_durable       = durable_c;
 	ss->c_filter        = filter_c;
@@ -1053,7 +1053,7 @@ static int serialize_headers(natsMsg *m, char *out, int out_cap,
 	/* Reserve the count prefix; patched after the loop. */
 	pos = 2;
 
-	s = natsMsgHeader_Keys(m, &keys, &nkeys);
+	s = nats_dl.natsMsgHeader_Keys(m, &keys, &nkeys);
 	if (s != NATS_OK || !keys || nkeys <= 0) {
 		/* No headers -- still emit the zero count so the stream is
 		 * valid.  Callers that see headers_len == 2 know the message
@@ -1077,7 +1077,7 @@ static int serialize_headers(natsMsg *m, char *out, int out_cap,
 		if (klen <= 0 || klen > 0xFFFF)
 			continue;
 
-		vs = natsMsgHeader_Values(m, keys[i], &vals, &nvals);
+		vs = nats_dl.natsMsgHeader_Values(m, keys[i], &vals, &nvals);
 		if (vs != NATS_OK || !vals || nvals <= 0) {
 			if (vals) free((void *)vals);
 			continue;
@@ -1184,7 +1184,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 
 		memset(&list, 0, sizeof(list));
 		hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
-		s = natsSubscription_Fetch(&list, ss->sub,
+		s = nats_dl.natsSubscription_Fetch(&list, ss->sub,
 		        eff_fb,
 		        eff_fetch_timeout_ms(ss->h_ref), NULL);
 	}
@@ -1215,10 +1215,10 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	if (s == NATS_NOT_FOUND || s == NATS_INVALID_SUBSCRIPTION) {
 		LM_INFO("nats_consumer_proc: consumer for %.*s vanished (%s); "
 			"will recreate\n",
-			ss->id.len, ss->id.s, natsStatus_GetText(s));
+			ss->id.len, ss->id.s, nats_dl.natsStatus_GetText(s));
 		if (ss->sub) {
-			natsSubscription_Unsubscribe(ss->sub);
-			natsSubscription_Destroy(ss->sub);
+			nats_dl.natsSubscription_Unsubscribe(ss->sub);
+			nats_dl.natsSubscription_Destroy(ss->sub);
 			ss->sub = NULL;
 		}
 		ss->dirty = 1;
@@ -1231,7 +1231,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		 * when e.g. max_ack_pending gates us out. */
 		ss->total_fetch_errors++;
 		LM_DBG("nats_consumer_proc: fetch id='%.*s': %s\n",
-			ss->id.len, ss->id.s, natsStatus_GetText(s));
+			ss->id.len, ss->id.s, nats_dl.natsStatus_GetText(s));
 		goto out;
 	}
 
@@ -1266,14 +1266,14 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		if (!m)
 			continue;
 
-		subject     = natsMsg_GetSubject(m);
-		data        = natsMsg_GetData(m);
-		data_len    = natsMsg_GetDataLength(m);
-		reply       = natsMsg_GetReply(m);
+		subject     = nats_dl.natsMsg_GetSubject(m);
+		data        = nats_dl.natsMsg_GetData(m);
+		data_len    = nats_dl.natsMsg_GetDataLength(m);
+		reply       = nats_dl.natsMsg_GetReply(m);
 		subject_len = subject ? strlen(subject) : 0;
 		reply_len   = reply   ? strlen(reply)   : 0;
 
-		/* JetStream pull-delivered messages have natsMsg_GetReply()
+		/* JetStream pull-delivered messages have nats_dl.natsMsg_GetReply()
 		 * set to the per-delivery $JS.ACK.<...> subject for ack
 		 * tracking, NOT to the publisher's application reply.  Acks
 		 * are dispatched separately via the ref-table token, so the
@@ -1290,7 +1290,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 			const char *hdr_reply = NULL;
 			natsStatus  hs;
 
-			hs = natsMsgHeader_Get(m, "Nats-Reply-To", &hdr_reply);
+			hs = nats_dl.natsMsgHeader_Get(m, "Nats-Reply-To", &hdr_reply);
 			if (hs == NATS_OK && hdr_reply != NULL) {
 				reply     = hdr_reply;
 				reply_len = (int)strlen(hdr_reply);
@@ -1312,13 +1312,13 @@ static int pull_one_batch(proc_sub_state_t *ss)
 				hdr_count, (int)sizeof(hdr_buf));
 		}
 
-		if (natsMsg_GetMetaData(&md, m) == NATS_OK && md) {
+		if (nats_dl.natsMsg_GetMetaData(&md, m) == NATS_OK && md) {
 			stream_seq   = md->Sequence.Stream;
 			consumer_seq = md->Sequence.Consumer;
 			delivered    = md->NumDelivered;
 			pending      = md->NumPending;
 			timestamp_ns = md->Timestamp;
-			jsMsgMetaData_Destroy(md);
+			nats_dl.jsMsgMetaData_Destroy(md);
 		}
 
 		/* Stash the natsMsg under a fresh (handle, slot, gen) token.
@@ -1330,7 +1330,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 			nats_ring_capacity(ss->ring), m, &ref_ok);
 		if (!ref_ok) {
 			ss->total_dropped_backpressure++;
-			natsMsg_Destroy(m);
+			nats_dl.natsMsg_Destroy(m);
 			list.Msgs[i] = NULL;
 			continue;
 		}
@@ -1362,7 +1362,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 			LM_DBG("nats_consumer_proc: ring full id='%.*s', "
 				"deferring message\n",
 				ss->id.len, ss->id.s);
-			natsMsg_Destroy(m);
+			nats_dl.natsMsg_Destroy(m);
 			list.Msgs[i] = NULL;
 		} else {
 			/* -2 / -3: payload or subject too large.  These are
@@ -1377,9 +1377,9 @@ static int pull_one_batch(proc_sub_state_t *ss)
 				"terminating\n",
 				ss->id.len, ss->id.s,
 				subject_len, data_len, rc);
-			(void)natsMsg_Term(m, NULL);
+			(void)nats_dl.natsMsg_Term(m, NULL);
 			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
-			natsMsg_Destroy(m);
+			nats_dl.natsMsg_Destroy(m);
 			list.Msgs[i] = NULL;
 		}
 	}
@@ -1387,7 +1387,7 @@ static int pull_one_batch(proc_sub_state_t *ss)
 	/* natsMsgList_Destroy walks the Msgs array and destroys any
 	 * non-NULL entries; we've already consumed (or destroyed) ours
 	 * above, so this just frees the Msgs array itself. */
-	natsMsgList_Destroy(&list);
+	nats_dl.natsMsgList_Destroy(&list);
 
 out:
 	nats_handle_pending_dec(ss->h_ref);
@@ -1435,7 +1435,7 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 
 	switch ((nats_ack_action_e)m->action) {
 		case NATS_ACK_ACTION_ACK:
-			s = natsMsg_Ack(nmsg, NULL);
+			s = nats_dl.natsMsg_Ack(nmsg, NULL);
 			if (s == NATS_OK)
 				hstat_add(cb_h, &cb_h->acks, 1);
 			break;
@@ -1451,30 +1451,30 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 			 * This matches the user-observable semantics of +NXT
 			 * (finish the current message and immediately hand me the
 			 * next one) without depending on library internals. */
-			s = natsMsg_AckSync(nmsg, NULL, NULL);
+			s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
 			if (s == NATS_OK)
 				hstat_add(cb_h, &cb_h->acks, 1);
 			if (ctx)
 				next_bits_set(ctx, h_idx);
 			break;
 		case NATS_ACK_ACTION_NAK:
-			s = natsMsg_Nak(nmsg, NULL);
+			s = nats_dl.natsMsg_Nak(nmsg, NULL);
 			if (s == NATS_OK)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_NAK_DELAY:
-			s = natsMsg_NakWithDelay(nmsg,
+			s = nats_dl.natsMsg_NakWithDelay(nmsg,
 				(int64_t)m->delay_ms * 1000000LL, NULL);
 			if (s == NATS_OK)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_TERM:
-			s = natsMsg_Term(nmsg, NULL);
+			s = nats_dl.natsMsg_Term(nmsg, NULL);
 			if (s == NATS_OK)
 				hstat_add(cb_h, &cb_h->terms, 1);
 			break;
 		case NATS_ACK_ACTION_IN_PROGRESS:
-			s = natsMsg_InProgress(nmsg, NULL);
+			s = nats_dl.natsMsg_InProgress(nmsg, NULL);
 			/* in_progress does NOT finalize the message; we must
 			 * keep it alive.  Put it back in the ref table under
 			 * the same token (same handle, slot, and generation). */
@@ -1513,10 +1513,10 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 		LM_DBG("nats_consumer_proc: ack action=%u token=0x%016lx "
 			"returned %s\n",
 			(unsigned)m->action, (unsigned long)m->ack_token,
-			natsStatus_GetText(s));
+			nats_dl.natsStatus_GetText(s));
 	}
 
-	natsMsg_Destroy(nmsg);
+	nats_dl.natsMsg_Destroy(nmsg);
 	if (ctx)
 		ctx->count++;
 }
@@ -1587,8 +1587,8 @@ static void tear_down_retired_subs(void)
 			ss->id.len, ss->id.s);
 
 		if (ss->sub) {
-			natsSubscription_Unsubscribe(ss->sub);
-			natsSubscription_Destroy(ss->sub);
+			nats_dl.natsSubscription_Unsubscribe(ss->sub);
+			nats_dl.natsSubscription_Destroy(ss->sub);
 			ss->sub = NULL;
 		}
 
@@ -1703,8 +1703,8 @@ void nats_consumer_proc_main(int rank)
 				baseline_epoch, cur_epoch);
 			for (ss = g_subs; ss; ss = ss->next) {
 				if (ss->sub) {
-					natsSubscription_Unsubscribe(ss->sub);
-					natsSubscription_Destroy(ss->sub);
+					nats_dl.natsSubscription_Unsubscribe(ss->sub);
+					nats_dl.natsSubscription_Destroy(ss->sub);
 					ss->sub = NULL;
 				}
 				ss->dirty = 1;

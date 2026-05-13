@@ -202,7 +202,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		pay_heap = 1;
 	}
 
-	s = natsConnection_RequestString(&reply, nc, subj_buf,
+	s = nats_dl.natsConnection_RequestString(&reply, nc, subj_buf,
 		pay_ptr, *timeout_ms);
 
 	if (pay_heap)
@@ -215,29 +215,29 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	}
 	if (s != NATS_OK) {
 		LM_ERR("nats_request to '%s' failed: %s\n",
-			subj_buf, natsStatus_GetText(s));
+			subj_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
 	/* copy reply data before destroying message — but cap the size
 	 * first to bound peer-controlled allocation. */
-	reply_len = natsMsg_GetDataLength(reply);
+	reply_len = nats_dl.natsMsg_GetDataLength(reply);
 	if (reply_len < 0 || reply_len > nats_request_max_reply) {
 		LM_ERR("nats_request to '%s' rejected: reply size %d "
 			"exceeds nats_request_max_reply=%d\n",
 			subj_buf, reply_len, nats_request_max_reply);
-		natsMsg_Destroy(reply);
+		nats_dl.natsMsg_Destroy(reply);
 		return -1;
 	}
 	reply_copy = pkg_malloc(reply_len + 1);
 	if (!reply_copy) {
 		LM_ERR("no more pkg memory for reply (%d bytes)\n", reply_len);
-		natsMsg_Destroy(reply);
+		nats_dl.natsMsg_Destroy(reply);
 		return -1;
 	}
-	memcpy(reply_copy, natsMsg_GetData(reply), reply_len);
+	memcpy(reply_copy, nats_dl.natsMsg_GetData(reply), reply_len);
 	reply_copy[reply_len] = '\0';
-	natsMsg_Destroy(reply);
+	nats_dl.natsMsg_Destroy(reply);
 
 	/* set result variable */
 	memset(&val, 0, sizeof(val));
@@ -295,7 +295,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		return -1;
 
 	memset(&list, 0, sizeof(list));
-	s = kvStore_History(&list, kv, key_buf, NULL);
+	s = nats_dl.kvStore_History(&list, kv, key_buf, NULL);
 
 	if (s == NATS_NOT_FOUND) {
 		LM_DBG("key '%s' not found in history\n", key_buf);
@@ -303,7 +303,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_History failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -313,7 +313,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	buf = pkg_malloc(buf_size);
 	if (!buf) {
 		LM_ERR("no more pkg memory for history buffer\n");
-		kvEntryList_Destroy(&list);
+		nats_dl.kvEntryList_Destroy(&list);
 		return -1;
 	}
 
@@ -322,8 +322,8 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 
 	for (i = 0; i < list.Count && pos < buf_size - 128; i++) {
 		kvEntry *e = list.Entries[i];
-		const char *eval = kvEntry_ValueString(e);
-		int eval_len = kvEntry_ValueLen(e);
+		const char *eval = nats_dl.kvEntry_ValueString(e);
+		int eval_len = nats_dl.kvEntry_ValueLen(e);
 
 		if (i > 0)
 			pos += snprintf(buf + pos, buf_size - pos, ",");
@@ -331,7 +331,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		/* JSON-encode: escape quotes in value for safety */
 		pos += snprintf(buf + pos, buf_size - pos,
 			"{\"rev\":%llu,\"value\":\"",
-			(unsigned long long)kvEntry_Revision(e));
+			(unsigned long long)nats_dl.kvEntry_Revision(e));
 
 		/* Simple JSON string escape: replace '"' and '\' with their
 		 * backslash-escaped forms.  The direct buf[pos++] writes bypass
@@ -351,7 +351,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 
 	pos += snprintf(buf + pos, buf_size - pos, "]");
 
-	kvEntryList_Destroy(&list);
+	nats_dl.kvEntryList_Destroy(&list);
 
 	/* set result variable */
 	memset(&val, 0, sizeof(val));
@@ -410,14 +410,14 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	s = kvStore_Get(&entry, kv, key_buf);
+	s = nats_dl.kvStore_Get(&entry, kv, key_buf);
 	if (s == NATS_NOT_FOUND) {
 		LM_DBG("key '%s' not found\n", key_buf);
 		return -2;
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -427,19 +427,19 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	 * existing inline use was safe today, but the explicit copy keeps
 	 * us robust if any future module-defined pvar setter forgets to. */
 	{
-		const char *entry_val = kvEntry_ValueString(entry);
-		int entry_len = kvEntry_ValueLen(entry);
-		uint64_t rev = kvEntry_Revision(entry);
+		const char *entry_val = nats_dl.kvEntry_ValueString(entry);
+		int entry_len = nats_dl.kvEntry_ValueLen(entry);
+		uint64_t rev = nats_dl.kvEntry_Revision(entry);
 		char *value_copy = pkg_malloc(entry_len + 1);
 		if (!value_copy) {
 			LM_ERR("no more pkg memory for kv value (%d bytes)\n",
 				entry_len);
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			return -1;
 		}
 		memcpy(value_copy, entry_val, entry_len);
 		value_copy[entry_len] = '\0';
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 		entry = NULL;
 
 		/* set value pvar */
@@ -549,12 +549,12 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		return -1;
 	}
 
-	s = kvStore_PutString(&rev, kv, key_buf, val_ptr);
+	s = nats_dl.kvStore_PutString(&rev, kv, key_buf, val_ptr);
 	if (val_heap) pkg_free(val_ptr);
 
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_PutString failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -623,7 +623,7 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	s = kvStore_UpdateString(&new_rev, kv, key_buf, val_ptr,
+	s = nats_dl.kvStore_UpdateString(&new_rev, kv, key_buf, val_ptr,
 		(uint64_t)*expected_rev);
 	if (val_heap) pkg_free(val_ptr);
 
@@ -635,7 +635,7 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_UpdateString failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -679,10 +679,10 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 		return -1;
 	}
 
-	s = kvStore_Delete(kv, key_buf);
+	s = nats_dl.kvStore_Delete(kv, key_buf);
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Delete failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -729,21 +729,21 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	s = kvStore_Get(&entry, kv, key_buf);
+	s = nats_dl.kvStore_Get(&entry, kv, key_buf);
 	if (s == NATS_NOT_FOUND) {
 		LM_DBG("key '%s' not found\n", key_buf);
 		return -2;
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			key_buf, natsStatus_GetText(s));
+			key_buf, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
-	uint64_t rev = kvEntry_Revision(entry);
+	uint64_t rev = nats_dl.kvEntry_Revision(entry);
 	char rev_buf[24];
 	int rev_buf_len;
-	kvEntry_Destroy(entry);
+	nats_dl.kvEntry_Destroy(entry);
 
 	rev_buf_len = snprintf(rev_buf, sizeof(rev_buf), "%llu",
 		(unsigned long long)rev);
@@ -878,7 +878,7 @@ int nats_cache_raw_query_impl(cachedb_con *con, str *attr,
 /**
  * raw_kv_keys() — List all keys in the NATS KV bucket.
  *
- * Calls kvStore_Keys() to enumerate every key in the bucket, then builds
+ * Calls nats_dl.kvStore_Keys() to enumerate every key in the bucket, then builds
  * a cdb_raw_entry result set with one row per key.  Each row contains a
  * single CDB_STR column holding the key name.  The caller (cachedb core)
  * owns the returned memory and is responsible for freeing it.
@@ -894,7 +894,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 	int i, key_count;
 
 	memset(&keys, 0, sizeof(keys));
-	s = kvStore_Keys(&keys, kv, NULL);
+	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
 
 	if (s == NATS_NOT_FOUND) {
 		/* empty bucket */
@@ -903,14 +903,14 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 		return 0;
 	}
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_Keys failed: %s\n", natsStatus_GetText(s));
+		LM_ERR("kvStore_Keys failed: %s\n", nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
 	key_count = keys.Count;
 
 	if (key_count <= 0) {
-		kvKeysList_Destroy(&keys);
+		nats_dl.kvKeysList_Destroy(&keys);
 		if (reply_no)
 			*reply_no = 0;
 		return 0;
@@ -925,13 +925,13 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 	rows = pkg_malloc(key_count * sizeof(cdb_raw_entry *));
 	if (!rows) {
 		LM_ERR("no more pkg memory for keys reply\n");
-		kvKeysList_Destroy(&keys);
+		nats_dl.kvKeysList_Destroy(&keys);
 		return -1;
 	}
 
 	/* Iterate over kvKeysList: keys.Keys[i] is a C string owned by
 	 * the NATS client library.  We must copy each key before calling
-	 * kvKeysList_Destroy() which frees the underlying storage. */
+	 * nats_dl.kvKeysList_Destroy() which frees the underlying storage. */
 	for (i = 0; i < key_count; i++) {
 		rows[i] = pkg_malloc(sizeof(cdb_raw_entry));
 		if (!rows[i]) {
@@ -941,7 +941,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 			for (j = 0; j < i; j++)
 				pkg_free(rows[j]);
 			pkg_free(rows);
-			kvKeysList_Destroy(&keys);
+			nats_dl.kvKeysList_Destroy(&keys);
 			return -1;
 		}
 		memset(rows[i], 0, sizeof(cdb_raw_entry));
@@ -959,7 +959,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 				pkg_free(rows[j]);
 			}
 			pkg_free(rows);
-			kvKeysList_Destroy(&keys);
+			nats_dl.kvKeysList_Destroy(&keys);
 			return -1;
 		}
 		memcpy(rows[i][0].val.s.s, keys.Keys[i], klen);
@@ -967,7 +967,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 		rows[i][0].val.s.len = klen;
 	}
 
-	kvKeysList_Destroy(&keys);
+	nats_dl.kvKeysList_Destroy(&keys);
 
 	if (reply)
 		*reply = rows;
@@ -992,14 +992,14 @@ static int raw_kv_purge(kvStore *kv, const char *key)
 {
 	natsStatus s;
 
-	s = kvStore_Purge(kv, key, NULL);
+	s = nats_dl.kvStore_Purge(kv, key, NULL);
 	if (s == NATS_NOT_FOUND) {
 		LM_DBG("KV PURGE: key '%s' not found\n", key);
 		return 0; /* idempotent */
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Purge failed for key '%s': %s\n",
-			key, natsStatus_GetText(s));
+			key, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -1030,28 +1030,28 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
 	const char *bname;
 	int blen;
 
-	s = kvStore_Status(&sts, kv);
+	s = nats_dl.kvStore_Status(&sts, kv);
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_Status failed: %s\n", natsStatus_GetText(s));
+		LM_ERR("kvStore_Status failed: %s\n", nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
 	/* allocate 1 row with 6 columns */
 	rows = pkg_malloc(sizeof(cdb_raw_entry *));
 	if (!rows) {
-		kvStatus_Destroy(sts);
+		nats_dl.kvStatus_Destroy(sts);
 		return -1;
 	}
 	rows[0] = pkg_malloc(6 * sizeof(cdb_raw_entry));
 	if (!rows[0]) {
 		pkg_free(rows);
-		kvStatus_Destroy(sts);
+		nats_dl.kvStatus_Destroy(sts);
 		return -1;
 	}
 	memset(rows[0], 0, 6 * sizeof(cdb_raw_entry));
 
 	/* col 0: bucket name */
-	bname = kvStatus_Bucket(sts);
+	bname = nats_dl.kvStatus_Bucket(sts);
 	blen = bname ? strlen(bname) : 0;
 	rows[0][0].type = CDB_STR;
 	if (blen > 0) {
@@ -1064,25 +1064,25 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
 
 	/* col 1: values count */
 	rows[0][1].type = CDB_INT32;
-	rows[0][1].val.n = (int)kvStatus_Values(sts);
+	rows[0][1].val.n = (int)nats_dl.kvStatus_Values(sts);
 
 	/* col 2: history */
 	rows[0][2].type = CDB_INT32;
-	rows[0][2].val.n = (int)kvStatus_History(sts);
+	rows[0][2].val.n = (int)nats_dl.kvStatus_History(sts);
 
 	/* col 3: ttl (in nanoseconds from NATS, convert to seconds) */
 	rows[0][3].type = CDB_INT32;
-	rows[0][3].val.n = (int)(kvStatus_TTL(sts) / 1000000000LL);
+	rows[0][3].val.n = (int)(nats_dl.kvStatus_TTL(sts) / 1000000000LL);
 
 	/* col 4: replicas */
 	rows[0][4].type = CDB_INT32;
-	rows[0][4].val.n = (int)kvStatus_Replicas(sts);
+	rows[0][4].val.n = (int)nats_dl.kvStatus_Replicas(sts);
 
 	/* col 5: bytes */
 	rows[0][5].type = CDB_INT32;
-	rows[0][5].val.n = (int)kvStatus_Bytes(sts);
+	rows[0][5].val.n = (int)nats_dl.kvStatus_Bytes(sts);
 
-	kvStatus_Destroy(sts);
+	nats_dl.kvStatus_Destroy(sts);
 
 	if (reply)
 		*reply = rows;
@@ -1145,7 +1145,7 @@ static int build_map_key(char *buf, size_t buf_size,
  * NATS KV has no native hash-map type, so map semantics are emulated by
  * storing each field as a separate KV entry with the key "prefix:field".
  *
- * This function lists all keys in the bucket via kvStore_Keys(), filters
+ * This function lists all keys in the bucket via nats_dl.kvStore_Keys(), filters
  * for those starting with "key:", fetches each matching value, and builds
  * a cdb_res_t result set.  Each result row contains one cdb_pair_t whose
  * key name is the subkey portion (after the ':') and whose value is the
@@ -1187,14 +1187,14 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 
 	/* list all keys */
 	memset(&keys, 0, sizeof(keys));
-	s = kvStore_Keys(&keys, ncon->kv, NULL);
+	s = nats_dl.kvStore_Keys(&keys, ncon->kv, NULL);
 
 	if (s == NATS_NOT_FOUND) {
 		LM_DBG("map_get: no keys in bucket\n");
 		return 0;
 	}
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_Keys failed: %s\n", natsStatus_GetText(s));
+		LM_ERR("kvStore_Keys failed: %s\n", nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -1218,20 +1218,20 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 			continue;
 
 		/* fetch the value */
-		s = kvStore_Get(&entry, ncon->kv, keys.Keys[i]);
+		s = nats_dl.kvStore_Get(&entry, ncon->kv, keys.Keys[i]);
 		if (s != NATS_OK) {
 			LM_DBG("map_get: skipping key '%s' (get failed)\n",
 				keys.Keys[i]);
 			continue;
 		}
 
-		val_data = kvEntry_ValueString(entry);
-		val_len = kvEntry_ValueLen(entry);
+		val_data = nats_dl.kvEntry_ValueString(entry);
+		val_len = nats_dl.kvEntry_ValueLen(entry);
 
 		/* create result row */
 		row = pkg_malloc(sizeof(cdb_row_t));
 		if (!row) {
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			continue;
 		}
 		memset(row, 0, sizeof(cdb_row_t));
@@ -1241,7 +1241,7 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		pair = pkg_malloc(sizeof(cdb_pair_t));
 		if (!pair) {
 			pkg_free(row);
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			continue;
 		}
 		memset(pair, 0, sizeof(cdb_pair_t));
@@ -1256,7 +1256,7 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 			LM_ERR("no more pkg memory for subkey name\n");
 			pkg_free(pair);
 			pkg_free(row);
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			continue;
 		}
 		memcpy(pair->key.name.s, subkey_str.s, subkey_str.len);
@@ -1276,10 +1276,10 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		list_add_tail(&row->list, &res->rows);
 		res->count++;
 
-		kvEntry_Destroy(entry);
+		nats_dl.kvEntry_Destroy(entry);
 	}
 
-	kvKeysList_Destroy(&keys);
+	nats_dl.kvKeysList_Destroy(&keys);
 
 	LM_DBG("map_get for '%.*s': %d entries\n", key->len, key->s,
 		res->count);
@@ -1365,10 +1365,10 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 				continue;
 			}
 
-			s = kvStore_PutString(&rev, ncon->kv, full_key, val_buf);
+			s = nats_dl.kvStore_PutString(&rev, ncon->kv, full_key, val_buf);
 			if (s != NATS_OK) {
 				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					full_key, natsStatus_GetText(s));
+					full_key, nats_dl.natsStatus_GetText(s));
 				return -1;
 			}
 			LM_DBG("map_set: stored '%s' rev=%llu\n", full_key,
@@ -1402,10 +1402,10 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 				continue;
 			}
 
-			s = kvStore_PutString(&rev, ncon->kv, map_key, val_buf);
+			s = nats_dl.kvStore_PutString(&rev, ncon->kv, map_key, val_buf);
 			if (s != NATS_OK) {
 				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					map_key, natsStatus_GetText(s));
+					map_key, nats_dl.natsStatus_GetText(s));
 				return -1;
 			}
 			LM_DBG("map_set: stored '%s' rev=%llu\n", map_key,
@@ -1455,10 +1455,10 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 		if (build_map_key(map_key, sizeof(map_key), key, subkey) < 0)
 			return -1;
 
-		s = kvStore_Delete(ncon->kv, map_key);
+		s = nats_dl.kvStore_Delete(ncon->kv, map_key);
 		if (s != NATS_OK && s != NATS_NOT_FOUND) {
 			LM_ERR("kvStore_Delete failed for '%s': %s\n",
-				map_key, natsStatus_GetText(s));
+				map_key, nats_dl.natsStatus_GetText(s));
 			return -1;
 		}
 		LM_DBG("map_remove: deleted '%s'\n", map_key);
@@ -1480,14 +1480,14 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 		prefix_len = key->len + 1;
 
 		memset(&keys, 0, sizeof(keys));
-		s = kvStore_Keys(&keys, ncon->kv, NULL);
+		s = nats_dl.kvStore_Keys(&keys, ncon->kv, NULL);
 		if (s == NATS_NOT_FOUND) {
 			LM_DBG("map_remove: no keys in bucket\n");
 			return 0;
 		}
 		if (s != NATS_OK) {
 			LM_ERR("kvStore_Keys failed: %s\n",
-				natsStatus_GetText(s));
+				nats_dl.natsStatus_GetText(s));
 			return -1;
 		}
 
@@ -1498,17 +1498,17 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 			if (strncmp(keys.Keys[i], prefix, prefix_len) != 0)
 				continue;
 
-			s = kvStore_Delete(ncon->kv, keys.Keys[i]);
+			s = nats_dl.kvStore_Delete(ncon->kv, keys.Keys[i]);
 			if (s != NATS_OK && s != NATS_NOT_FOUND) {
 				LM_WARN("map_remove: failed to delete '%s': %s\n",
-					keys.Keys[i], natsStatus_GetText(s));
+					keys.Keys[i], nats_dl.natsStatus_GetText(s));
 			} else {
 				LM_DBG("map_remove: deleted '%s'\n",
 					keys.Keys[i]);
 			}
 		}
 
-		kvKeysList_Destroy(&keys);
+		nats_dl.kvKeysList_Destroy(&keys);
 	}
 
 	return 0;

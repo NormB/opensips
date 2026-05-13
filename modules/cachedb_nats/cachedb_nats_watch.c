@@ -40,7 +40,7 @@
  *   2. Acquire a fresh KV handle and rebuild the search index
  *      from the full bucket contents (crash-recovery path).
  *   3. Create a kvWatcher on the bucket (with optional key pattern).
- *   4. Process live kvWatcher_Next() updates until disconnect or
+ *   4. Process live nats_dl.kvWatcher_Next() updates until disconnect or
  *      reconnect-epoch change, then loop back to step 1.
  *
  * On disconnect, the watcher is stopped BEFORE nats.c tears down internal
@@ -105,8 +105,8 @@ static atomic_int      _watcher_running = 0;
 static kvWatcher      *_watcher         = NULL;
 
 /* Multiple watch patterns -- set by nats_watch_start(), read by thread.
- * When _num_patterns == 0, watches all keys via kvStore_WatchAll().
- * When > 0, uses kvStore_WatchMulti() for selective watching. */
+ * When _num_patterns == 0, watches all keys via nats_dl.kvStore_WatchAll().
+ * When > 0, uses nats_dl.kvStore_WatchMulti() for selective watching. */
 static const char    **_watch_patterns  = NULL;
 static int             _num_patterns    = 0;
 
@@ -224,7 +224,7 @@ done:
  * No pkg_malloc is used in this function -- only shm_malloc (thread-safe)
  * and ipc_dispatch_rpc (atomic pipe write, thread-safe).
  *
- * @param entry  The kvEntry delivered by kvWatcher_Next().
+ * @param entry  The kvEntry delivered by nats_dl.kvWatcher_Next().
  * @param op     The KV operation type (put, delete, or purge).
  */
 static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
@@ -239,12 +239,12 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	if (evi_kv_change_id == EVI_ERROR)
 		return;
 
-	key     = kvEntry_Key(entry);
+	key     = nats_dl.kvEntry_Key(entry);
 	key_len = strlen(key);
 
 	if (op == kvOp_Put) {
-		val     = kvEntry_ValueString(entry);
-		val_len = kvEntry_ValueLen(entry);
+		val     = nats_dl.kvEntry_ValueString(entry);
+		val_len = nats_dl.kvEntry_ValueLen(entry);
 		if (!val) val_len = 0;
 	}
 
@@ -260,7 +260,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	}
 
 	ev->op       = op;
-	ev->revision = (int)kvEntry_Revision(entry);
+	ev->revision = (int)nats_dl.kvEntry_Revision(entry);
 	ev->key_len  = key_len;
 	ev->val_len  = val_len;
 
@@ -283,7 +283,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	}
 #else
 	/* EVI not available at build time -- log the change instead */
-	const char *key = kvEntry_Key(entry);
+	const char *key = nats_dl.kvEntry_Key(entry);
 	const char *op_name;
 
 	switch (op) {
@@ -293,7 +293,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	}
 
 	LM_DBG("KV change (EVI unavailable): key=%s op=%s rev=%llu\n",
-		key, op_name, (unsigned long long)kvEntry_Revision(entry));
+		key, op_name, (unsigned long long)nats_dl.kvEntry_Revision(entry));
 #endif /* HAVE_EVI */
 }
 
@@ -312,7 +312,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
  *      JSON full-text search index from the complete bucket state.
  *   3. Create a kvWatcher with the configured key pattern (or
  *      watch all keys if no pattern is set).
- *   4. Process live updates from kvWatcher_Next() in a tight loop.
+ *   4. Process live updates from nats_dl.kvWatcher_Next() in a tight loop.
  *      On reconnect-epoch change or disconnect, break out and
  *      restart from step 1 to get a fresh KV handle and index.
  *
@@ -400,15 +400,15 @@ static void _watcher_loop(void)
 		 * Set UpdatesOnly so we only receive mutations after the
 		 * current revision (the full state was already loaded via
 		 * the index_rebuild above). */
-		kvWatchOptions_Init(&opts);
+		nats_dl.kvWatchOptions_Init(&opts);
 		opts.UpdatesOnly = true;
 
-		s = kvStore_WatchMulti(&_watcher, kv,
+		s = nats_dl.kvStore_WatchMulti(&_watcher, kv,
 			_watch_patterns, _num_patterns, &opts);
 
 		if (s != NATS_OK) {
 			LM_ERR("watcher: kvStore_WatchMulti failed: %s, "
-				"retrying in 2s\n", natsStatus_GetText(s));
+				"retrying in 2s\n", nats_dl.natsStatus_GetText(s));
 			sleep(2);
 			continue;
 		}
@@ -438,14 +438,14 @@ static void _watcher_loop(void)
 			 * watcher BEFORE nats.c's reconnection logic destroys
 			 * internal subscription state (race -> free(): invalid
 			 * pointer).  Short timeout (500ms) minimizes the window
-			 * where kvWatcher_Next() is blocked with stale state. */
+			 * where nats_dl.kvWatcher_Next() is blocked with stale state. */
 			if (!nats_pool_is_connected()) {
 				LM_INFO("watcher: disconnect detected, stopping "
 					"watcher to prevent use-after-free\n");
 				break;
 			}
 
-			s = kvWatcher_Next(&entry, _watcher, 500);
+			s = nats_dl.kvWatcher_Next(&entry, _watcher, 500);
 
 			if (s == NATS_TIMEOUT) {
 				/* Belt-and-suspenders for the dedicated-process
@@ -469,16 +469,16 @@ static void _watcher_loop(void)
 			if (s != NATS_OK) {
 				if (atomic_load(&_watcher_running))
 					LM_WARN("watcher: kvWatcher_Next failed: %s\n",
-						natsStatus_GetText(s));
+						nats_dl.natsStatus_GetText(s));
 				break;
 			}
 
-			const char   *key = kvEntry_Key(entry);
-			kvOperation   op  = kvEntry_Operation(entry);
+			const char   *key = nats_dl.kvEntry_Key(entry);
+			kvOperation   op  = nats_dl.kvEntry_Operation(entry);
 
 			if (op == kvOp_Put) {
-				const char *val     = kvEntry_ValueString(entry);
-				int         val_len = kvEntry_ValueLen(entry);
+				const char *val     = nats_dl.kvEntry_ValueString(entry);
+				int         val_len = nats_dl.kvEntry_ValueLen(entry);
 
 				/* Only index keys that match the JSON prefix and
 				 * actually contain JSON data. Non-JSON keys are
@@ -495,7 +495,7 @@ static void _watcher_loop(void)
 			/* Raise EVI event for downstream script consumers */
 			_raise_kv_change_event(entry, op);
 
-			kvEntry_Destroy(entry);
+			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 		}
 
@@ -505,13 +505,13 @@ static void _watcher_loop(void)
 		if (_watcher) {
 			kvWatcher      *w = _watcher;
 			_watcher = NULL;  /* clear first -- prevent races */
-			kvWatcher_Stop(w);
+			nats_dl.kvWatcher_Stop(w);
 			/* Only destroy if still connected.  During disconnect,
 			 * nats.c's I/O thread may be cleaning up the same
 			 * internal structures -- destroying here causes
 			 * double-free.  The handle is tiny; leak is bounded. */
 			if (nats_pool_is_connected())
-				kvWatcher_Destroy(w);
+				nats_dl.kvWatcher_Destroy(w);
 		}
 
 		/* Brief pause before restarting to avoid tight loop on
@@ -599,7 +599,7 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
  * nats_watch_stop() -- Stop the KV watcher thread and clean up.
  *
  * Called from mod_destroy() during OpenSIPS shutdown.  Clears the
- * running flag, stops the kvWatcher (which unblocks kvWatcher_Next()),
+ * running flag, stops the kvWatcher (which unblocks nats_dl.kvWatcher_Next()),
  * then joins the thread.  After the thread exits, the kvWatcher handle
  * is destroyed.
  *
@@ -612,15 +612,15 @@ void nats_watch_stop(void)
 
 	atomic_store(&_watcher_running, 0);
 
-	/* Stop the watcher first -- this unblocks kvWatcher_Next() */
+	/* Stop the watcher first -- this unblocks nats_dl.kvWatcher_Next() */
 	if (_watcher) {
-		kvWatcher_Stop(_watcher);
+		nats_dl.kvWatcher_Stop(_watcher);
 	}
 
 	pthread_join(_watcher_tid, NULL);
 
 	if (_watcher) {
-		kvWatcher_Destroy(_watcher);
+		nats_dl.kvWatcher_Destroy(_watcher);
 		_watcher = NULL;
 	}
 
