@@ -32,9 +32,12 @@ of which NATS modules are loaded.
 
 - `event_nats` (optional, but typically loaded for publishing and for the
   shared transport modparams)
-- `tls_openssl` **or** `tls_wolfssl` (only when SIP-side TLS is also in use; independent of NATS-side TLS choice)
-- **For NATS-side TLS backend selection (optional, recommended):** load exactly one of `nats_tls_openssl.so` or `nats_tls_wolfssl.so` before this module.  See `modules/nats_tls_openssl/README.md` / `modules/nats_tls_wolfssl/README.md`.
-- `nats.c` 3.13+ at `libnats.so`
+- `tls_openssl` **or** `tls_wolfssl` (when SIP-side TLS is also in use)
+- `nats.c` 3.x at `libnats.so` (the dev-package symlink).  Operators
+  with multiple libnats variants installed pick which one to use via
+  standard `ld.so` mechanisms (`LD_LIBRARY_PATH`, `ldconfig` priorities)
+  or via the `$NATS_DL_LIBNATS_PATH` env-var override that
+  `lib/nats/nats_dl_load` honours.
 
 ## Parameters
 
