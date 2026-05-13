@@ -40,6 +40,7 @@
 #include "nats_rpc_slot.h"
 #include "nats_rpc_ipc.h"
 #include "nats_ring.h"     /* NATS_RING_*_MAX */
+#include "nats_rpc.h"      /* nats_rpc_hdr_deserialize_to_msg */
 
 /* Shared headers helper -- promoted to public in nats_rpc.c so
  * the sync, async-worker, and consumer-process-routed async reply
@@ -277,18 +278,12 @@ void nats_rpc_consumer_unsubscribe(void)
  * publish it with reply-to pointing at our inbox subject so the
  * remote responder echoes a reply back into us.
  *
- * Header staging is intentionally NOT handled here -- the
- * worker does NOT call PublishMsg; it queues a slot to the
- * consumer.  Header propagation embeds the staged headers in
- * the slot's out_headers buffer (which the worker fills before
- * publish) and this function would attach them via
- * natsMsgHeader_Set before publishing.
- *
- * The slot has out_headers space and the worker is wired to
- * fill it, but the actual natsMsgHeader_Set deserialise loop
- * is not yet wired here.  Calls with no custom headers (just
- * the UUIDv7 inbox subject) work today; richer header
- * propagation is a TODO.
+ * Headers serialized into slot->out_headers by the worker-side
+ * w_nats_request_async (compact length-prefixed wire format --
+ * see nats_rpc.h) are materialized onto the outbound natsMsg via
+ * nats_rpc_hdr_deserialize_to_msg() before PublishMsg, so the
+ * X-Request-Id auto-stage and any nats_hdr_set() calls reach the
+ * remote responder verbatim.
  */
 static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 {
@@ -350,6 +345,15 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
 			memory_order_release);
 		return;
+	}
+
+	/* Apply any worker-staged headers before publishing.  A malformed
+	 * out_headers stream (return -1) means the worker emitted a
+	 * truncated buffer; ignore the failure and publish whatever fit
+	 * -- the worker already logged the truncation warning. */
+	if (s->out_headers_len > 0) {
+		(void)nats_rpc_hdr_deserialize_to_msg(s->out_headers,
+			(int)s->out_headers_len, out);
 	}
 
 	st = nats_dl.natsConnection_PublishMsg(nc, out);

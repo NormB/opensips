@@ -22,12 +22,14 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
 TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_persist test_request_route_restriction \
                   test_consumer_heartbeat test_persist_precision \
-                  test_async_request_skeleton test_async_request_inflight
+                  test_async_request_skeleton test_async_request_inflight \
+                  test_header_propagation
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
-     test_async_request_skeleton test_async_request_inflight
+     test_async_request_skeleton test_async_request_inflight \
+     test_header_propagation
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -82,6 +84,7 @@ check: all
 	./test_persist_precision
 	./test_async_request_skeleton
 	./test_async_request_inflight
+	./test_header_propagation
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -91,11 +94,18 @@ clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \
 	      test_slurp_file_cap test_request_route_restriction \
 	      test_consumer_heartbeat test_persist_precision \
-	      test_async_request_skeleton test_async_request_inflight
+	      test_async_request_skeleton test_async_request_inflight \
+	      test_header_propagation
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
 	$(CC) -g -O0 -Wall -pthread -o $@ $<
 
 test_persist_precision: test_persist_precision.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
+# Source-pattern + wire-format round-trip for the async nats_request
+# header propagation.  Self-contained; runs from the tests/ directory
+# (reads ../nats_rpc_async.c + ../nats_rpc_consumer.c).
+test_header_propagation: test_header_propagation.c
 	$(CC) -g -O0 -Wall -o $@ $<

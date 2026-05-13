@@ -159,4 +159,47 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
  * state without publishing. */
 void nats_rpc_staged_clear(void);
 
+/*
+ * Serialize the per-worker staged-header table into the compact
+ * length-prefixed wire format used by ring/slot header buffers
+ * (see nats_ring.h `headers[]`).  Wire layout:
+ *
+ *   [ count          : 2 bytes little-endian ]
+ *   foreach pair (count times):
+ *     [ name_len     : 2 bytes little-endian ]
+ *     [ name bytes ]
+ *     [ value_len    : 2 bytes little-endian ]
+ *     [ value bytes ]
+ *
+ * On overflow the function emits as many full pairs as fit and sets
+ * `*truncated` to 1.  `*count_out` reports the number of pairs
+ * actually emitted.  Returns the byte length written.  An empty
+ * stage produces a 2-byte zero count and returns 2.
+ *
+ * Caller-supplied buffer must be at least 2 bytes.  Returns 0 if
+ * `out` is NULL or `cap` < 2.  Does NOT clear the staging table --
+ * pair with `nats_rpc_staged_clear()` after the slot is published.
+ */
+int nats_rpc_staged_serialize(char *out, int cap,
+                              int *truncated, int *count_out);
+
+/*
+ * Inverse of nats_rpc_staged_serialize / nats_rpc_hdr_serialize_from_reply:
+ * parse a wire-format header stream and apply each (name, value) pair
+ * to the supplied libnats natsMsg via natsMsgHeader_Set.
+ *
+ * `msg_void` is treated as a `natsMsg *`; declared as `void *` to
+ * avoid pulling <nats/nats.h> into every translation unit that
+ * includes nats_rpc.h.  The implementation casts and invokes
+ * `nats_dl.natsMsgHeader_Set`.
+ *
+ * Used by the consumer-process publish path to materialize the
+ * worker-staged headers onto the outbound natsMsg.  Safe on a stream
+ * with count=0 (no-op) and on a NULL/empty buffer.  Returns the
+ * number of headers applied; -1 on malformed input (length runs past
+ * buffer end -- the caller may still publish, with whatever headers
+ * were applied before the truncation point).
+ */
+int nats_rpc_hdr_deserialize_to_msg(const char *buf, int len, void *msg_void);
+
 #endif /* NATS_RPC_H */

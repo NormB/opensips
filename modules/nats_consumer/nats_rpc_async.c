@@ -1182,11 +1182,14 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
  *      async_status = timerfd, ctx->resume_f =
  *      resume_nats_request_slot, ctx->resume_param = wrap.
  *
- * Headers from nats_rpc_staged are NOT propagated to the
- * consumer yet -- the slot's out_headers buffer exists but
- * w_nats_request_async writes only an empty header block.
- * The X-Request-Id is still observable via $nats_request_id on
- * the script side; on-the-wire header propagation is a TODO.
+ * Headers staged via nats_hdr_set() (including the auto-staged
+ * X-Request-Id) are serialized into the slot's out_headers buffer
+ * using the same compact length-prefixed wire format as the ring
+ * slot's headers field, and the consumer process applies them via
+ * natsMsgHeader_Set() before PublishMsg in publish_cb().  Headers
+ * that don't fit the 1 KB out_headers buffer set the truncated
+ * flag (logged on emit); the remaining oversize names/values are
+ * dropped quietly rather than silently corrupting the wire format.
  *
  * On any pre-IPC failure the slot is freed and the worker
  * returns the appropriate negative rc.  On post-IPC failure
@@ -1271,7 +1274,20 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	} else {
 		slot->out_data_len = 0;
 	}
-	slot->out_headers_len = 0;
+	{
+		int hdr_trunc = 0, hdr_count = 0;
+		int hdr_len = nats_rpc_staged_serialize(slot->out_headers,
+			(int)sizeof(slot->out_headers),
+			&hdr_trunc, &hdr_count);
+		if (hdr_len < 0) hdr_len = 0;
+		slot->out_headers_len = (uint16_t)hdr_len;
+		if (hdr_trunc) {
+			LM_WARN("nats_request[async]: staged-header buffer "
+				"truncated (emitted %d/%d pairs) on slot %u\n",
+				hdr_count, NATS_MAX_STAGED_HDRS,
+				(unsigned)slot->slot_idx);
+		}
+	}
 	if (id_len > 0) {
 		int cp = id_len < (int)sizeof(slot->corr_id) - 1
 			? id_len : (int)sizeof(slot->corr_id) - 1;
