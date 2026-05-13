@@ -242,7 +242,6 @@ int   nats_dedicated_watcher_proc = 0;
  * as before this commit. */
 int   nats_cdb_reconnect_wait_ms = 2000;
 int   nats_cdb_max_reconnect     = 60;
-int   nats_cdb_skip_openssl_init = 1;
 
 /* KV watcher patterns -- built via repeated modparam("kv_watch", "pattern")
  * calls.  When empty (no kv_watch configured), the watcher watches all keys.
@@ -255,28 +254,6 @@ int kv_watch_count = 0;
 static int set_connection(unsigned int type, void *val)
 {
 	return cachedb_store_url(&nats_cdb_urls, (char *)val);
-}
-
-/* Deprecated-alias setter for the old `skip_openssl_init` modparam.
- * Same shape as event_nats' setter: logs a one-time LM_WARN nudging
- * operators toward `skip_tls_init`, then writes the same storage. */
-static int nats_cdb_skip_openssl_init_setter(modparam_t type, void *val)
-{
-	static int warned;
-	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
-		LM_ERR("skip_openssl_init: must be an integer\n");
-		return -1;
-	}
-	if (!warned) {
-		LM_WARN("cachedb_nats: modparam 'skip_openssl_init' is "
-		        "deprecated; use 'skip_tls_init' instead (same "
-		        "semantics, backend-neutral name).  The old name "
-		        "still works and will continue to do so for one "
-		        "release cycle.\n");
-		warned = 1;
-	}
-	nats_cdb_skip_openssl_init = (int)(long)val;
-	return 0;
 }
 
 static int set_watch_pattern(unsigned int type, void *val)
@@ -331,12 +308,6 @@ static const param_export_t params[] = {
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{"reconnect_wait",      INT_PARAM,             &nats_cdb_reconnect_wait_ms},
 	{"max_reconnect",       INT_PARAM,             &nats_cdb_max_reconnect},
-	/* Primary, backend-neutral name. */
-	{"skip_tls_init",       INT_PARAM,             &nats_cdb_skip_openssl_init},
-	/* Deprecated alias -- retained for one release cycle.  The
-	 * setter emits a one-time LM_WARN and writes the same storage. */
-	{"skip_openssl_init",   INT_PARAM | USE_FUNC_PARAM,
-	                        (void *)nats_cdb_skip_openssl_init_setter},
 	{0, 0, 0}
 };
 
@@ -473,7 +444,6 @@ static int mod_init(void)
 
 	/* Surface which libnats TLS backend the operator's loadmodule
 	 * choices resolved to.  Pure observability. */
-	nats_pool_log_tls_backend("cachedb_nats");
 
 	/*
 	 * Register with the NATS connection pool.
@@ -534,7 +504,6 @@ static int mod_init(void)
 			tls_opts.key = tls_key;
 			tls_opts.hostname = tls_hostname;
 			tls_opts.skip_verify = tls_skip_verify;
-			tls_opts.skip_openssl_init = nats_cdb_skip_openssl_init;
 			tls_opts.allow_downgrade = tls_allow_downgrade;
 			tls_ptr = &tls_opts;
 

@@ -468,7 +468,6 @@ static int mod_init(void)
 
 	/* Surface which libnats TLS backend the operator's loadmodule
 	 * choices resolved to.  Pure observability. */
-	nats_pool_log_tls_backend("nats_consumer");
 
 	if (nats_registry_init(NATS_CONSUMER_REGISTRY_BUCKETS) < 0) {
 		LM_ERR("nats_consumer: registry init failed\n");
@@ -547,15 +546,6 @@ static int child_init(int rank)
 		return 0;
 	}
 	LM_DBG("nats_consumer: child_init rank=%d\n", rank);
-
-	/* Debug gate: eager-subscribe at child_init triggers a
-	 * segfault in SIP workers within seconds of boot (id=6 in
-	 * test runs).  Disable to confirm the crash is from
-	 * natsConnection_Subscribe in worker context. */
-#if 0
-	(void)nats_rpc_async_child_init(rank);
-#endif
-
 	return 0;
 }
 
