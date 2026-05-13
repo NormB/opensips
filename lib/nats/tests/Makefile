@@ -8,7 +8,7 @@ ASAN    := -fsanitize=address
 .PHONY: all check check-tsan clean
 
 TESTS = test_redact_url test_validate_publish_subject \
-        test_validate_subject_cache test_nats_dl
+        test_validate_subject_cache test_nats_dl test_nats_ca_dir
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -40,6 +40,11 @@ test_nats_dl: test_nats_dl.c ../nats_dl.c
 	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
 		-o $@ test_nats_dl.c ../nats_dl.c -ldl
 
+# nats_load_ca_directory: libc-only directory walker; no OpenSIPS
+# runtime needed.  ASan-clean.
+test_nats_ca_dir: test_nats_ca_dir.c ../nats_ca_dir.c
+	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_nats_ca_dir.c ../nats_ca_dir.c
+
 # LD_LIBRARY_PATH covers the case where libnats was installed to
 # /usr/local/lib (the upstream `cmake --install` default), which
 # isn't on the default ld.so search path on most distros.  Production
@@ -54,6 +59,7 @@ check: all
 	./test_validate_publish_subject
 	./test_validate_subject_cache
 	$(NATS_TEST_ENV) ./test_nats_dl
+	./test_nats_ca_dir
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
