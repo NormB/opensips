@@ -924,12 +924,13 @@ int nats_json_index_build(kvStore *kv, const char *prefix)
  *
  * Returns 0 on success, -1 if parsing fails or parameters are NULL.
  */
-/* Two-phase index_add: parse the document into a stack/heap-backed
- * field-value list outside the lock, then take the lock briefly only
- * to insert each (field:value, key) pair.  The previous design held
- * the index mutex for the full duration of _parse_json_fields, which
- * scaled with document size and serialised concurrent index work
- * (queries, removes, other adds) on the entire CPU-bound parse.
+/* Parse-then-insert split for index_add: parse the document into a
+ * stack/heap-backed field-value list outside the lock, then take the
+ * lock briefly only to insert each (field:value, key) pair.  The
+ * previous design held the index mutex for the full duration of
+ * _parse_json_fields, which scaled with document size and serialised
+ * concurrent index work (queries, removes, other adds) on the entire
+ * CPU-bound parse.
  *
  * For a typical AoR document (~500 bytes, 2-3 top-level string
  * fields) the lock-held window drops from "parse + N inserts" to
@@ -1003,10 +1004,10 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 	if (!g_idx || !key || !json_str)
 		return -1;
 
-	/* Phase A: parse the document into a flat (field, value) list
-	 * with no lock held.  The parser is CPU-bound at ~bytes/cycle,
-	 * so this is where the heavy lifting happens; running it
-	 * unlocked lets concurrent queries / removes / adds proceed. */
+	/* Parse the document into a flat (field, value) list with no
+	 * lock held.  The parser is CPU-bound at ~bytes/cycle, so this
+	 * is where the heavy lifting happens; running it unlocked lets
+	 * concurrent queries / removes / adds proceed. */
 	_idx_fv_init(&list);
 	rc = _parse_json_fields(json_str, json_len, _collect_fv_cb, &list);
 	if (rc < 0 || list.oom) {
@@ -1015,12 +1016,12 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		return -1;
 	}
 
-	/* Phase B: per-field shard locking.  Each collected pair hashes
-	 * to one bucket → one shard; we lock only that shard for the
-	 * insert, release between fields.  Two concurrent index_add
-	 * calls whose fields happen to land on disjoint shards
-	 * therefore proceed in parallel rather than serialising on a
-	 * shared lock-all.
+	/* Per-field shard locking.  Each collected pair hashes to one
+	 * bucket → one shard; we lock only that shard for the insert,
+	 * release between fields.  Two concurrent index_add calls
+	 * whose fields happen to land on disjoint shards therefore
+	 * proceed in parallel rather than serialising on a shared
+	 * lock-all.
 	 *
 	 * Locking order is determined per-field by NATS_IDX_SHARD_OF
 	 * so all callers acquire shards in increasing index order

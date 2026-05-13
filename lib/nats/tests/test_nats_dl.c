@@ -19,8 +19,8 @@
  */
 
 /*
- * test_nats_dl.c -- Phase 1 unit test for the libnats function-
- * pointer table.
+ * test_nats_dl.c -- unit test for the libnats function-pointer
+ * table (lib/nats/nats_dl.{c,h}).
  *
  * Build:
  *   make -C lib/nats/tests test_nats_dl
@@ -97,11 +97,11 @@ int main(void)
 
 	fprintf(stderr, "==== nats_dl unit test ====\n");
 
-	/* Phase 1.1: pre-load state */
+	/* Pre-load state */
 	ASSERT_TRUE(!nats_dl_is_loaded(), "is_loaded false before any load");
 	ASSERT_TRUE(nats_dl_path() == NULL, "path NULL before any load");
 
-	/* Phase 1.2: default-search load */
+	/* Default-search load */
 	ASSERT_EQ_INT(nats_dl_load(NULL), 0, "default search load succeeds");
 	ASSERT_TRUE(nats_dl_is_loaded(), "is_loaded true after load");
 	path = nats_dl_path();
@@ -109,9 +109,9 @@ int main(void)
 	if (path)
 		fprintf(stderr, "      loaded: '%s'\n", path);
 
-	/* Phase 1.3: indirect call through the table — natsStatus_GetText
-	 * is a pure function with deterministic output for known statuses.
-	 * NATS_OK is always 0; its text is "OK". */
+	/* Indirect call through the table — natsStatus_GetText is a pure
+	 * function with deterministic output for known statuses.  NATS_OK
+	 * is always 0; its text is "OK". */
 	ASSERT_NOT_NULL(nats_dl.natsStatus_GetText, "natsStatus_GetText pointer non-NULL");
 	if (nats_dl.natsStatus_GetText) {
 		txt = nats_dl.natsStatus_GetText(NATS_OK);
@@ -120,18 +120,18 @@ int main(void)
 			ASSERT_TRUE(strcmp(txt, "OK") == 0, "natsStatus_GetText(NATS_OK) == 'OK'");
 	}
 
-	/* Phase 1.4: spot-check a few other expected pointers */
+	/* Spot-check a few other expected pointers */
 	ASSERT_NOT_NULL(nats_dl.natsConnection_Connect, "natsConnection_Connect populated");
 	ASSERT_NOT_NULL(nats_dl.natsOptions_Create,     "natsOptions_Create populated");
 	ASSERT_NOT_NULL(nats_dl.kvStore_Get,            "kvStore_Get populated");
 	ASSERT_NOT_NULL(nats_dl.jsCtx_Destroy,          "jsCtx_Destroy populated");
 	ASSERT_NOT_NULL(nats_dl.kvWatchOptions_Init,    "kvWatchOptions_Init populated");
 
-	/* Phase 1.5: idempotent load */
+	/* Idempotent load */
 	ASSERT_EQ_INT(nats_dl_load(NULL), 0, "second load is no-op (idempotent)");
 	ASSERT_TRUE(nats_dl_is_loaded(), "still loaded after idempotent call");
 
-	/* Phase 1.6: unload, then re-load with the same SONAME explicitly.
+	/* Unload, then re-load with the same SONAME explicitly.
 	 * Capturing the path before unload guarantees we pass a SONAME we
 	 * know dlopen can find on this host (whatever the default search
 	 * picked first time).  Hard-coding "libnats.so" would fail when
@@ -151,14 +151,14 @@ int main(void)
 		nats_dl_unload();
 	}
 
-	/* Phase 1.8: bad path fails closed */
+	/* Bad explicit path fails closed */
 	ASSERT_EQ_INT(nats_dl_load("/nonexistent/libnats.so.999"), -1,
 	              "bad explicit path returns -1");
 	ASSERT_TRUE(!nats_dl_is_loaded(), "is_loaded stays false after bad load");
 	ASSERT_TRUE(nats_dl_path() == NULL, "path stays NULL after bad load");
 
-	/* Phase 2.1: env var override (NATS_DL_LIBNATS_PATH) takes
-	 * precedence over the default SONAME */
+	/* Env-var override ($NATS_DL_LIBNATS_PATH) takes precedence over
+	 * the default SONAME */
 	{
 		char saved_path[256] = {0};
 		nats_dl_load(NULL);
@@ -177,7 +177,7 @@ int main(void)
 		nats_dl_unload();
 	}
 
-	/* Phase 2.2: bad env var falls back to default SONAME */
+	/* Bad env var falls back to default SONAME */
 	setenv("NATS_DL_LIBNATS_PATH", "/nonexistent/libnats.so.bad", 1);
 	ASSERT_EQ_INT(nats_dl_load(NULL), 0,
 	              "bad env var falls back to default SONAME and succeeds");

@@ -34,9 +34,10 @@
  *   table populated at lib/nats init time via dlopen + dlsym.
  *
  *   Result: no .so produced from this tree carries DT_NEEDED for
- *   libnats.so.  lib/nats's runtime backend selector (Phase 2) is
- *   then free to dlopen whichever libnats variant matches the
- *   tls_mgm-configured TLS backend.
+ *   libnats.so.  Operators select which libnats variant to load
+ *   via standard ld.so mechanisms (LD_LIBRARY_PATH, ldconfig) or
+ *   via the $NATS_DL_LIBNATS_PATH env-var override that
+ *   nats_dl_load honours when called with a NULL path.
  *
  * Single source of truth
  *   The list of every libnats function this codebase calls lives in
