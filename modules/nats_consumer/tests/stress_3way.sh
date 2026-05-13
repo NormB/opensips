@@ -195,7 +195,11 @@ nats --server "$NATS_URL" kv add "$KV_BUCKET" --replicas 1 --history 3 \
 
 # ---- 3. start opensips ----------------------------------------------
 
-LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:${LD_LIBRARY_PATH:-}" \
+# Prepend /usr/local/lib so nats_dl_load resolves the upstream-installed
+# libnats (3.10+) instead of the system libnats3.7 that's missing
+# kvStore_WatchMulti / kvStore_WatchAll.  Mirrors the precedence already
+# used by lib/nats/tests/nats_local_lib.sh for host-side tests.
+LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$CFG_FILE" -m 256 -M 16 \
     > "$LOG_FILE" 2>&1 &
 OPENSIPS_PID=$!

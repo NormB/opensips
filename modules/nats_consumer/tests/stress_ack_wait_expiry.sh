@@ -18,17 +18,49 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/lib.sh"
 
 ensure_stack
+# Same handle-registry hygiene as stress_multi_worker -- prior tests'
+# wedged subscribes block the worker tick from picking up our bind.
+restart_opensips_clean
 
 N_MESSAGES="${N_MESSAGES:-500}"
 
 ensure_stream AE 'ae.>'
 
+# Compose stack outlives test runs and js_AddConsumer falls back to
+# js_UpdateConsumer on an existing durable -- but the broker silently
+# rejects most update fields, so a fresh 'ae' could otherwise inherit
+# whatever max_ack_pending / fetch shape the first run baked in.  Drop
+# and recreate at the current stream tip so the test runs against the
+# exact config it asks for.
+nats_unbind ae >/dev/null 2>&1 || true
+ncli consumer rm AE ae -f >/dev/null 2>&1 || true
+
 # ring_capacity=2048 ensures N_MESSAGES * max_deliver (=2) fits before
 # the consumer worker would back-pressure on a full ring.  The default
 # 128 is sized for steady-state drain scripts, not 500-message bursts
-# with nothing acking.
+# with nothing acking.  fetch_batch=256 raises throughput well above
+# the 10-per-tick module default so the 1000-deliveries-in-60s budget
+# is realistic (defaults would cap at ~10 msgs/sec = 100 in 10 s).
 nats_bind ae AE durable=ae filter=ae.msg ack_wait=1s max_deliver=2 \
+    deliver_policy=new fetch_batch=256 \
     ring_capacity=2048 >/dev/null
+
+# Wait for the worker tick to actually subscribe before publishing,
+# otherwise DeliverPolicy=New snapshots past our messages.
+readiness_wait=60
+deadline=$(( $(date +%s) + readiness_wait ))
+broker_ready=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    names=$(ncli consumer ls AE --names 2>/dev/null || true)
+    case "$names" in
+        *ae*) broker_ready=1; break ;;
+    esac
+    sleep 0.5
+done
+if [ "${broker_ready}" != "1" ]; then
+    fail "ack_wait_expiry: broker did not create 'ae' on AE within ${readiness_wait}s"
+    exit 1
+fi
 
 echo "publishing ${N_MESSAGES} messages..."
 # Batch publishes inside a single natscli shell.  Per-iteration
