@@ -1492,6 +1492,40 @@ opensips-cli -x mi nats_consumer_unbind id=jobs
                 (pulls_requested, msgs_delivered, acks, naks, terms,
                 redeliveries, last_error_code, last_error_msg).
             </para>
+            <para>
+                Each handle entry also carries two backoff-state
+                fields that surface the worker's
+                <function>ensure_subscription_for_handle()</function>
+                retry budget:
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis role="bold">ensure_failures</emphasis> —
+                    consecutive ensure-subscription failures.  Zero on
+                    a healthy handle; non-zero while the worker is in
+                    backoff after the broker rejected
+                    <function>js_AddConsumer</function> /
+                    <function>js_PullSubscribe</function> (e.g. the
+                    broker-side durable was deleted out from under
+                    &osips;, or the underlying stream is missing).
+                    The next failed retry would push the value to
+                    seven, at which point the backoff saturates at
+                    the 60 s cap and a one-shot WARN names the handle.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">ensure_next_retry_at</emphasis> —
+                    unix timestamp (CLOCK_REALTIME seconds) before
+                    which the worker will skip this handle's reconcile
+                    tick.  Zero means "retry on the next tick".
+                </para></listitem>
+            </itemizedlist>
+            <para>
+                Both fields reset to zero on the first successful
+                resubscribe; a corresponding INFO ("recovered after N
+                failed ensure attempt(s)") fires once per recovery
+                edge so log forwarders can tell wedge from recovery
+                without polling.
+            </para>
         </section>
 
         <section id="mi_nats_handle_reload">
