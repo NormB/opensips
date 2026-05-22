@@ -543,6 +543,9 @@ static int parse_backoff_csv(const str *csv, int64_t **out_arr, int *out_len)
 			v = v * 10 + (p[i] - '0');
 			digits++;
 			i++;
+			/* clamp to keep v * mult * 1e6 within int64; INT64_MAX/1e6
+			 * is ~9.2e12 ms, well past any sane backoff. */
+			if (v > 9000000000000LL) { free(arr); return -1; }
 		}
 		if (!digits) { free(arr); return -1; }
 
@@ -553,6 +556,12 @@ static int parse_backoff_csv(const str *csv, int64_t **out_arr, int *out_len)
 		else if (i + 1 == tok_len && p[i]=='h') mult = 60LL*60LL*1000LL;
 		else if (i + 1 == tok_len && p[i]=='d') mult = 24LL*60LL*60LL*1000LL;
 		else { free(arr); return -1; }
+
+		/* Reject if conversion to nanoseconds would overflow int64. */
+		if (mult > 0 && v > INT64_MAX / mult / 1000000LL) {
+			free(arr);
+			return -1;
+		}
 
 		if (n == cap) {
 			int newcap = cap ? cap * 2 : 8;

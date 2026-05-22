@@ -105,6 +105,14 @@ mi_response_t *mi_consumer_bind(const mi_params_t *params,
 		nats_handle_free(h);
 		return init_mi_error(500, MI_SSTR("registry internal error"));
 	}
+	if (rc == -3) {
+		nats_handle_free(h);
+		return init_mi_error(507, MI_SSTR("handle count limit reached"));
+	}
+	if (rc != 0) {
+		nats_handle_free(h);
+		return init_mi_error(500, MI_SSTR("registry bind failed"));
+	}
 
 	LM_INFO("nats_consumer: bound handle id=%.*s stream=%.*s\n",
 		h->id.len, h->id.s, h->stream.len, h->stream.s);

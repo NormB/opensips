@@ -112,18 +112,30 @@ int nats_consumer_parse_subscribe(modparam_t type, void *val)
 		while (*val_str == ' ') val_str++;
 
 		if (strcmp(tok, "subject") == 0) {
+			if (s->subject[0]) {
+				LM_ERR("duplicate 'subject=' in subscribe\n");
+				return -1;
+			}
 			if (strlen(val_str) >= sizeof(s->subject)) {
 				LM_ERR("subject too long: %s\n", val_str);
 				return -1;
 			}
 			strcpy(s->subject, val_str);
 		} else if (strcmp(tok, "event") == 0) {
+			if (s->event_name[0]) {
+				LM_ERR("duplicate 'event=' in subscribe\n");
+				return -1;
+			}
 			if (strlen(val_str) >= sizeof(s->event_name)) {
 				LM_ERR("event name too long: %s\n", val_str);
 				return -1;
 			}
 			strcpy(s->event_name, val_str);
 		} else if (strcmp(tok, "queue") == 0) {
+			if (s->queue_group[0]) {
+				LM_ERR("duplicate 'queue=' in subscribe\n");
+				return -1;
+			}
 			if (strlen(val_str) >= sizeof(s->queue_group)) {
 				LM_ERR("queue group too long: %s\n", val_str);
 				return -1;
@@ -187,6 +199,12 @@ void nats_consumer_process(int rank)
 	natsConnection *nc;
 	natsStatus s;
 	int i;
+
+	if (nats_subscription_count == 0) {
+		LM_INFO("NATS consumer process: no subscriptions configured, "
+			"exiting (pid=%d)\n", getpid());
+		return;
+	}
 
 	LM_INFO("NATS consumer process starting (pid=%d)\n", getpid());
 

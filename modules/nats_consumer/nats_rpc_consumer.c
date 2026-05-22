@@ -204,11 +204,19 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		s->reply_headers_truncated = (uint8_t)(trunc ? 1 : 0);
 	}
 
-	/* Publish the slot transition.  Release ordering ensures the
-	 * worker (acquire on state load in the resume function) sees
-	 * the reply_* fields on its next timerfd-tick poll. */
-	atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
-		memory_order_release);
+	/* Publish the slot transition.  Use CAS from INFLIGHT to DELIVERED:
+	 * the worker may have ABANDONED + freed the slot between the
+	 * acquire-load above and here, and another caller could have
+	 * already CLAIMed it.  Blind-storing DELIVERED in that case would
+	 * clobber the new claimer's state and hand them a stale reply.
+	 * Release ordering on success ensures the worker observes the
+	 * reply_* writes above on its next timerfd tick. */
+	{
+		int expected = NATS_RPC_SLOT_INFLIGHT;
+		(void)atomic_compare_exchange_strong_explicit(
+			&s->state, &expected, NATS_RPC_SLOT_DELIVERED,
+			memory_order_release, memory_order_relaxed);
+	}
 
 	nats_dl.natsMsg_Destroy(msg);
 }
@@ -320,8 +328,19 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	if (n <= 0 || n >= (int)sizeof(reply_subject)) {
 		LM_ERR("nats_rpc_consumer: reply-subject overflow for slot %u\n",
 			(unsigned)s->slot_idx);
-		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
-			memory_order_release);
+		{
+			/* CAS INFLIGHT -> ABANDONED.  The worker may have
+			 * already timed out, freed the slot, and another
+			 * caller may have re-CLAIMed it; in that case a blind
+			 * store would clobber the new claimer's state.  See
+			 * the matching commentary in on_inbox_reply above. */
+			int expected = NATS_RPC_SLOT_INFLIGHT;
+			(void)atomic_compare_exchange_strong_explicit(
+				&s->state, &expected,
+				NATS_RPC_SLOT_ABANDONED,
+				memory_order_release,
+				memory_order_relaxed);
+		}
 		return;
 	}
 
@@ -330,8 +349,19 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	if (s->out_subject_len > NATS_RING_SUBJECT_MAX) {
 		LM_ERR("nats_rpc_consumer: subject overflow on slot %u\n",
 			(unsigned)s->slot_idx);
-		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
-			memory_order_release);
+		{
+			/* CAS INFLIGHT -> ABANDONED.  The worker may have
+			 * already timed out, freed the slot, and another
+			 * caller may have re-CLAIMed it; in that case a blind
+			 * store would clobber the new claimer's state.  See
+			 * the matching commentary in on_inbox_reply above. */
+			int expected = NATS_RPC_SLOT_INFLIGHT;
+			(void)atomic_compare_exchange_strong_explicit(
+				&s->state, &expected,
+				NATS_RPC_SLOT_ABANDONED,
+				memory_order_release,
+				memory_order_relaxed);
+		}
 		return;
 	}
 	memcpy(subj_c, s->out_subject, s->out_subject_len);
@@ -342,8 +372,19 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	if (st != NATS_OK || !out) {
 		LM_ERR("nats_rpc_consumer: natsMsg_Create failed for slot %u: %s\n",
 			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
-		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
-			memory_order_release);
+		{
+			/* CAS INFLIGHT -> ABANDONED.  The worker may have
+			 * already timed out, freed the slot, and another
+			 * caller may have re-CLAIMed it; in that case a blind
+			 * store would clobber the new claimer's state.  See
+			 * the matching commentary in on_inbox_reply above. */
+			int expected = NATS_RPC_SLOT_INFLIGHT;
+			(void)atomic_compare_exchange_strong_explicit(
+				&s->state, &expected,
+				NATS_RPC_SLOT_ABANDONED,
+				memory_order_release,
+				memory_order_relaxed);
+		}
 		return;
 	}
 
@@ -361,8 +402,19 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	if (st != NATS_OK) {
 		LM_ERR("nats_rpc_consumer: PublishMsg failed for slot %u: %s\n",
 			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
-		atomic_store_explicit(&s->state, NATS_RPC_SLOT_ABANDONED,
-			memory_order_release);
+		{
+			/* CAS INFLIGHT -> ABANDONED.  The worker may have
+			 * already timed out, freed the slot, and another
+			 * caller may have re-CLAIMed it; in that case a blind
+			 * store would clobber the new claimer's state.  See
+			 * the matching commentary in on_inbox_reply above. */
+			int expected = NATS_RPC_SLOT_INFLIGHT;
+			(void)atomic_compare_exchange_strong_explicit(
+				&s->state, &expected,
+				NATS_RPC_SLOT_ABANDONED,
+				memory_order_release,
+				memory_order_relaxed);
+		}
 		return;
 	}
 	/* Slot stays INFLIGHT; the reply (matching reply_subject)

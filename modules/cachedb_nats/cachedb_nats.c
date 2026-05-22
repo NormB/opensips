@@ -742,8 +742,14 @@ static int child_init(int rank)
 
 	/* open cachedb connections for each configured URL */
 	for (it = nats_cdb_urls; it; it = it->next) {
-		LM_DBG("opening cachedb_nats connection for [%.*s]\n",
-			it->url.len, it->url.s);
+		char _redacted[512];
+		char _tmp[512];
+		int _n = it->url.len < (int)sizeof(_tmp) - 1
+			? it->url.len : (int)sizeof(_tmp) - 1;
+		memcpy(_tmp, it->url.s, _n);
+		_tmp[_n] = '\0';
+		nats_redact_url(_tmp, _redacted, sizeof(_redacted));
+		LM_DBG("opening cachedb_nats connection for [%s]\n", _redacted);
 		con = nats_cachedb_init(&it->url);
 		if (con == NULL) {
 			LM_ERR("failed to open cachedb_nats connection\n");

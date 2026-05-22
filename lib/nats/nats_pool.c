@@ -195,13 +195,13 @@ static int parse_urls(const char *url)
 		if (pool_cfg->server_cnt >= NATS_POOL_MAX_SERVERS) {
 			LM_ERR("too many NATS servers (max %d)\n",
 				NATS_POOL_MAX_SERVERS);
-			return -1;
+			goto err_free_partial;
 		}
 
 		pool_cfg->servers[pool_cfg->server_cnt] = shm_malloc(len + 1);
 		if (!pool_cfg->servers[pool_cfg->server_cnt]) {
 			LM_ERR("shm_malloc for server URL failed\n");
-			return -1;
+			goto err_free_partial;
 		}
 		memcpy(pool_cfg->servers[pool_cfg->server_cnt], tok, len);
 		pool_cfg->servers[pool_cfg->server_cnt][len] = '\0';
@@ -220,6 +220,17 @@ static int parse_urls(const char *url)
 	}
 
 	return 0;
+
+err_free_partial:
+	{
+		int i;
+		for (i = 0; i < pool_cfg->server_cnt; i++) {
+			shm_free(pool_cfg->servers[i]);
+			pool_cfg->servers[i] = NULL;
+		}
+		pool_cfg->server_cnt = 0;
+	}
+	return -1;
 }
 
 /* ----------------------------------------------------------------
@@ -907,15 +918,18 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 	 * a reconnect callback could set _kv_stale=1 between our read
 	 * and our clear, causing us to lose the invalidation signal.
 	 *
-	 * We do NOT destroy old kvStore handles here.  They are derived
-	 * from _nc and _js which remain valid across reconnects (nats.c
-	 * reconnects the underlying socket transparently).  We simply
-	 * discard our cached pointers and let nats.c's refcounting
-	 * clean them up.  Creating fresh handles ensures we pick up
-	 * any server-side state changes (new stream leaders, etc.). */
+	 * libnats requires the caller to destroy kvStore handles when
+	 * done; see nats/nats.h kvStore_Destroy().  Earlier revisions
+	 * relied on refcounting to clean these up on reconnect, but the
+	 * public contract puts destruction on us, and skipping it leaks
+	 * one handle per bucket per reconnect event. */
 	if (atomic_exchange(&_kv_stale, 0)) {
-		for (i = 0; i < _kv_cache_cnt; i++)
-			_kv_cache[i].kv = NULL;
+		for (i = 0; i < _kv_cache_cnt; i++) {
+			if (_kv_cache[i].kv) {
+				nats_dl.kvStore_Destroy(_kv_cache[i].kv);
+				_kv_cache[i].kv = NULL;
+			}
+		}
 		_kv_cache_cnt = 0;
 		LM_NOTICE("NATS pool: KV cache cleared after reconnect\n");
 	}

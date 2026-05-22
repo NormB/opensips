@@ -581,6 +581,7 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	batch_opts_t     bo = { .count = 1, .expires_ms = 0 };
 	nats_ring_slot_t slot;
 	int              cap, fd;
+	int              rc;
 
 	(void)msg;
 
@@ -594,16 +595,24 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 			id->len, id->s);
 		return -3;
 	}
+	/* Hold a pending_ops reference for the duration of the batch
+	 * fetch.  Without this, a concurrent unbind + reap can free the
+	 * handle (and destroy h->ring) while we're still calling
+	 * nats_ring_pop / nats_ring_wait below -- use-after-free. */
+	nats_handle_pending_inc(h);
+
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 		LM_DBG("nats_fetch_batch: handle '%.*s' retiring\n",
 			id->len, id->s);
-		return -3;
+		rc = -3;
+		goto out;
 	}
 
 	if (batch_parse_opts(opts, &bo) < 0) {
 		LM_ERR("nats_fetch_batch: bad opts '%.*s'\n",
 			opts ? opts->len : 0, opts ? opts->s : "");
-		return -1;
+		rc = -1;
+		goto out;
 	}
 	if (bo.count <= 0) bo.count = 1;
 	cap = bo.count < NATS_BATCH_MAX ? bo.count : NATS_BATCH_MAX;
@@ -613,8 +622,10 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 		if (nats_ring_pop(h->ring, &slot) != 0) break;
 		batch_push_slot(h->index, &slot);
 	}
-	if (g_batch.count >= cap)
-		return g_batch.count;
+	if (g_batch.count >= cap) {
+		rc = g_batch.count;
+		goto out;
+	}
 	if (bo.no_wait || bo.expires_ms <= 0) {
 		/* No-wait path with nothing queued: distinguish "empty
 		 * but healthy" (return -1) from "empty because the
@@ -625,18 +636,22 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 		if (g_batch.count == 0) {
 			if (!nats_pool_is_connected()) {
 				set_last_error("connection lost");
-				return -2;
+				rc = -2;
+				goto out;
 			}
-			return -1;
+			rc = -1;
+			goto out;
 		}
-		return g_batch.count;
+		rc = g_batch.count;
+		goto out;
 	}
 
 	/* Blocking path: if already disconnected, don't bother blocking.
 	 * The eventfd will not fire while the consumer process can't push. */
 	if (!nats_pool_is_connected()) {
 		set_last_error("connection lost");
-		return g_batch.count > 0 ? g_batch.count : -2;
+		rc = g_batch.count > 0 ? g_batch.count : -2;
+		goto out;
 	}
 
 	/* Wait up to expires_ms total.
@@ -677,8 +692,13 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	 * `$var(n) = nats_fetch_batch(...)` form should treat
 	 * $var(n) <= 0 as the empty case. */
 	if (g_batch.count == 0)
-		return -1;
-	return g_batch.count;
+		rc = -1;
+	else
+		rc = g_batch.count;
+
+out:
+	nats_handle_pending_dec(h);
+	return rc;
 }
 
 /* Async batch fetch parameter -- lives in SHM across resume. */

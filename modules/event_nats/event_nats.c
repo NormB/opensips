@@ -227,9 +227,10 @@ static const cmd_export_t cmds[] = {
 	{0,0,{{0,0,0}},0}
 };
 
-/* Consumer process — spawned only if subscribe modparams are configured.
- * The 'no' field is set dynamically in mod_init based on
- * nats_subscription_count > 0. */
+/* Consumer process — always spawned, but the main loop returns
+ * immediately when no `subscribe` modparams were configured (see
+ * nats_consumer_process()).  We don't mutate `no` here because the
+ * proc_export_t table is consumed before mod_init runs. */
 static const proc_export_t procs[] = {
 	{"NATS consumer", 0, 0, nats_consumer_process, 1, 0},
 	{0, 0, 0, 0, 0, 0}
@@ -466,21 +467,21 @@ static evi_reply_sock *nats_evi_parse(str socket)
 static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	evi_reply_sock *sock, evi_params_t *params, evi_async_ctx_t *async_ctx)
 {
-	char *payload;
+	char *payload = NULL;
 	int payload_len;
 	char subj_buf[512];
 	int subj_len;
-	int rc;
+	int rc = -1;
 
 	if (!sock) {
 		LM_ERR("invalid evi socket\n");
-		return -1;
+		goto out;
 	}
 
 	payload = evi_build_payload(params, ev_name, 0, NULL, NULL);
 	if (!payload) {
 		LM_ERR("failed to build event payload\n");
-		return -1;
+		goto out;
 	}
 	payload_len = strlen(payload);
 
@@ -490,24 +491,21 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
 			subj_len, (int)sizeof(subj_buf) - 1,
 			sock->address.len, sock->address.s);
-		evi_free_payload(payload);
-		return -1;
+		goto out;
 	}
 	if (nats_validate_publish_subject(sock->address.s, subj_len) < 0) {
 		LM_ERR("NATS subject rejected (wildcard / control char / "
 			"empty token / leading-trailing dot): %.*s\n",
 			subj_len, sock->address.s);
-		evi_free_payload(payload);
-		return -1;
+		goto out;
 	}
 	/* Fast-fail if the pool is disconnected -- avoid blocking the SIP
 	 * worker on cnats's internal write buffer.  Lost events are noted
 	 * in nats_stats->failed via the publish helpers. */
 	if (!nats_pool_is_connected()) {
 		LM_DBG("nats_evi_raise: pool disconnected, dropping event\n");
-		evi_free_payload(payload);
 		NATS_STATS_BUMP(failed);
-		return -1;
+		goto out;
 	}
 	memcpy(subj_buf, sock->address.s, subj_len);
 	subj_buf[subj_len] = '\0';
@@ -518,13 +516,17 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	else
 		rc = nats_publish(subj_buf, payload, payload_len);
 
-	evi_free_payload(payload);
-
 	/* update per-type stats on success */
 	if (rc == 0)
 		NATS_STATS_BUMP(evi_published);
 
-	/* report async status -- non-blocking publish, report immediately */
+out:
+	if (payload)
+		evi_free_payload(payload);
+
+	/* report async status -- non-blocking publish, report immediately.
+	 * Must run on every exit path so subscribers waiting on async
+	 * status don't hang on early-failure returns. */
 	if (async_ctx && async_ctx->status_cb) {
 		async_ctx->status_cb(async_ctx->cb_param,
 			rc == 0 ? EVI_STATUS_SUCCESS : EVI_STATUS_FAIL);

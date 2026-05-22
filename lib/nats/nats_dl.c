@@ -147,9 +147,10 @@ loaded:
 	do { \
 		nats_dl.sym = (__typeof__(nats_dl.sym)) dlsym(_handle, #sym); \
 		if (!nats_dl.sym) { \
+			const char *_dlerr = dlerror(); \
 			LM_ERR("nats_dl: '%s' missing required libnats " \
 			       "symbol '%s' (%s)\n", _path, #sym, \
-			       dlerror() ? dlerror() : "no error string"); \
+			       _dlerr ? _dlerr : "no error string"); \
 			dlclose(_handle); \
 			_handle = NULL; \
 			_path   = NULL; \
