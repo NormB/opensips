@@ -200,13 +200,17 @@ void nats_consumer_process(int rank)
 	natsStatus s;
 	int i;
 
+	LM_INFO("NATS consumer process starting (pid=%d)\n", getpid());
+
+	/* No subscriptions configured: stay alive (sleep loop below)
+	 * rather than returning.  Returning from a proc_export entry
+	 * triggers SIGCHLD in the attendant, which OpenSIPS treats as
+	 * a fatal child exit and shuts the whole instance down. */
 	if (nats_subscription_count == 0) {
-		LM_INFO("NATS consumer process: no subscriptions configured, "
-			"exiting (pid=%d)\n", getpid());
+		for (;;)
+			sleep(60);
 		return;
 	}
-
-	LM_INFO("NATS consumer process starting (pid=%d)\n", getpid());
 
 	/* Get NATS connection from shared pool */
 	nc = nats_pool_get();
