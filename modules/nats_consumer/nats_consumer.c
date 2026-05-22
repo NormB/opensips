@@ -119,6 +119,16 @@ static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
 		nats_handle_free(h);
 		return -1;
 	}
+	if (rc == -3) {
+		LM_ERR("nats_consumer_bind: handle count limit reached\n");
+		nats_handle_free(h);
+		return -1;
+	}
+	if (rc != 0) {
+		LM_ERR("nats_consumer_bind: bind failed rc=%d\n", rc);
+		nats_handle_free(h);
+		return -1;
+	}
 
 	LM_INFO("nats_consumer: bound handle id=%.*s stream=%.*s "
 		"(via script)\n",
