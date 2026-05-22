@@ -107,3 +107,10 @@ unit suite under AddressSanitizer + UBSan and ThreadSanitizer.  Tests
 that deliberately exercise UAF or `volatile`-vs-atomic races are
 listed in each Makefile's `TESTS_TSAN_SAFE` and excluded from the
 `check-tsan` target.
+
+## Review history
+
+- 2026-05-22 — static + semantic audit, ten correctness fixes
+  landed in `c7b37eb27` (with revert in `230a6802e`); see
+  [REVIEW.md](REVIEW.md) for the per-finding write-up, test tally,
+  and items left for human review.
