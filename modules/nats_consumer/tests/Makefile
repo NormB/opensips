@@ -13,6 +13,7 @@ RING_SRCS   := test_ring.c     $(SHIM) ../nats_ring.c
 ACKTOK_SRCS := test_ack_token.c
 PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
                ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
+SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
@@ -23,13 +24,15 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_persist test_request_route_restriction \
                   test_consumer_heartbeat test_persist_precision \
                   test_async_request_skeleton test_async_request_inflight \
-                  test_header_propagation test_start_time_roundtrip
+                  test_header_propagation test_start_time_roundtrip \
+                  test_rpc_subject
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
      test_async_request_skeleton test_async_request_inflight \
-     test_header_propagation test_start_time_roundtrip
+     test_header_propagation test_start_time_roundtrip \
+     test_rpc_subject
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -72,6 +75,11 @@ ASYNC_SRCS := test_async_request_inflight.c $(SHIM) ../nats_rpc_async.c
 test_async_request_inflight: $(ASYNC_SRCS) test_shim.h ../nats_rpc_async.h
 	$(CC) $(CFLAGS) -o $@ $(ASYNC_SRCS) $(LDFLAGS)
 
+# Generation guard for the consumer-routed async reply correlation.
+# Links the pure subject grammar + the SHM slot allocator under the shim.
+test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_slot.h
+	$(CC) $(CFLAGS) -o $@ $(SUBJECT_SRCS) $(LDFLAGS)
+
 check: all
 	./test_registry
 	./test_parser
@@ -86,6 +94,7 @@ check: all
 	./test_async_request_inflight
 	./test_header_propagation
 	./test_start_time_roundtrip
+	./test_rpc_subject
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -96,7 +105,8 @@ clean:
 	      test_slurp_file_cap test_request_route_restriction \
 	      test_consumer_heartbeat test_persist_precision \
 	      test_async_request_skeleton test_async_request_inflight \
-	      test_header_propagation test_start_time_roundtrip
+	      test_header_propagation test_start_time_roundtrip \
+	      test_rpc_subject
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c

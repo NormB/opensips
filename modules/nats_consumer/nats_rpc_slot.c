@@ -136,6 +136,15 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 				memory_order_relaxed)) {
 			atomic_fetch_add_explicit(&g_inflight_count, 1,
 				memory_order_relaxed);
+			/* Bump the per-claim generation.  Only the CAS
+			 * winner writes it for this claim, so the
+			 * relaxed RMW is safe; it is published to the
+			 * consumer via the CLAIMED -> INFLIGHT release in
+			 * nats_rpc_slot_publish().  A reply echoing a
+			 * previous claim's generation is rejected by
+			 * on_inbox_reply. */
+			atomic_fetch_add_explicit(&s->generation, 1,
+				memory_order_relaxed);
 			/* Zero out the carry-over reply / outbound fields
 			 * so a recycled slot looks pristine to the next
 			 * caller.  state, slot_idx, wake_fd, epoch are

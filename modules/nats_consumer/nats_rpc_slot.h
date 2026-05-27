@@ -145,6 +145,16 @@ typedef struct nats_rpc_slot {
 	 * worker resume compares against the current value to surface
 	 * -2 (connection lost) if a reconnect intervened. */
 	uint32_t epoch_at_start;
+
+	/* Per-claim generation, bumped on every FREE -> CLAIMED
+	 * transition.  Echoed in the reply-inbox subject (see
+	 * nats_rpc_subject.h) and revalidated by on_inbox_reply: a late
+	 * reply whose generation no longer matches the slot's current
+	 * claim is dropped instead of being delivered to whatever request
+	 * has since re-claimed the slot.  Atomic because the consumer's
+	 * libnats reply thread reads it while a worker may be claiming the
+	 * slot for a new request. */
+	_Atomic uint32_t generation;
 } nats_rpc_slot_t;
 
 /*
