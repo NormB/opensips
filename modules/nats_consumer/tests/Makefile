@@ -25,14 +25,14 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_consumer_heartbeat test_persist_precision \
                   test_async_request_skeleton test_async_request_inflight \
                   test_header_propagation test_start_time_roundtrip \
-                  test_rpc_subject
+                  test_rpc_subject test_fetch_async_timerfd
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
      test_async_request_skeleton test_async_request_inflight \
      test_header_propagation test_start_time_roundtrip \
-     test_rpc_subject
+     test_rpc_subject test_fetch_async_timerfd
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -80,6 +80,12 @@ test_async_request_inflight: $(ASYNC_SRCS) test_shim.h ../nats_rpc_async.h
 test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_slot.h
 	$(CC) $(CFLAGS) -o $@ $(SUBJECT_SRCS) $(LDFLAGS)
 
+# Async-fetch wake mechanism: behavioural timerfd-fires check + source
+# assertions that the async paths use a worker-private timerfd, not the
+# fork-inherited ring eventfd.  Self-contained; reads ../nats_fetch.c.
+test_fetch_async_timerfd: test_fetch_async_timerfd.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 check: all
 	./test_registry
 	./test_parser
@@ -95,6 +101,7 @@ check: all
 	./test_header_propagation
 	./test_start_time_roundtrip
 	./test_rpc_subject
+	./test_fetch_async_timerfd
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -106,7 +113,7 @@ clean:
 	      test_consumer_heartbeat test_persist_precision \
 	      test_async_request_skeleton test_async_request_inflight \
 	      test_header_propagation test_start_time_roundtrip \
-	      test_rpc_subject
+	      test_rpc_subject test_fetch_async_timerfd
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c

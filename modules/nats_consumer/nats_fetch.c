@@ -67,6 +67,7 @@
 #include <stdint.h>
 #include <poll.h>
 #include <time.h>
+#include <sys/timerfd.h>
 
 #include "../../dprint.h"
 #include "../../async.h"
@@ -148,6 +149,45 @@ static inline void evfd_drain(int fd)
 	} while (r < 0 && errno == EINTR);
 	/* r == -1 && errno == EAGAIN is the "nothing to drain" path --
 	 * benign and expected after the ring pop consumed the edge. */
+}
+
+/* ── worker-private timerfd poll for the async fetch paths ───────
+ *
+ * The ring's eventfd is created in whatever process allocated the ring
+ * (the MI handler at bind time, or main at startup) -- NOT the SIP
+ * worker that runs the async fetch.  Registering that fork-inherited fd
+ * with the worker's reactor is undefined (see commit 8eae39a5b1 and the
+ * matching note in nats_rpc_async.c); in practice the resume only ever
+ * fired on the async-core timeout, never on real message arrival.
+ *
+ * Instead each async fetch creates a fresh worker-private timerfd that
+ * ticks every NATS_FETCH_ASYNC_POLL_NS; the resume polls the ring on
+ * each tick and enforces its own per-call deadline. */
+#define NATS_FETCH_ASYNC_POLL_NS 1000000L   /* 1 ms */
+
+static int64_t fetch_now_us(void)
+{
+	struct timespec ts;
+	(void)clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
+}
+
+/* Create + arm a periodic worker-private timerfd.  Returns the fd, or
+ * -1 on failure with errno set. */
+static int fetch_arm_timerfd(void)
+{
+	struct itimerspec its;
+	int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (tfd < 0)
+		return -1;
+	memset(&its, 0, sizeof(its));
+	its.it_value.tv_nsec    = NATS_FETCH_ASYNC_POLL_NS;
+	its.it_interval.tv_nsec = NATS_FETCH_ASYNC_POLL_NS;
+	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
+		close(tfd);
+		return -1;
+	}
+	return tfd;
 }
 
 /* Populate g_cur from a freshly-popped ring slot.
@@ -301,7 +341,7 @@ out:
 
 typedef struct nats_fetch_async_param {
 	uint16_t  handle_idx;
-	int       evfd;
+	int64_t   deadline_us;   /* CLOCK_MONOTONIC us; 0 = no deadline */
 	/* Borrowed refs into the registry-owned handle.  pending_ops
 	 * guards against unbind-while-in-flight: the param holds a pending
 	 * ref across the reactor round-trip and the resume path releases it.
@@ -319,35 +359,40 @@ static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
 
 	(void)msg;
 
-	/* Default: we are done with this fd.  The async core will tear
-	 * the reactor registration down unless we explicitly ask to
-	 * continue via async_status = ASYNC_CONTINUE. */
-	async_status = ASYNC_DONE;
-
 	if (!p) {
 		LM_ERR("nats_fetch: resume with NULL param\n");
+		async_status = ASYNC_DONE;
 		return -1;
 	}
 
-	/* Drain the eventfd counter so the next edge wakes us again.
-	 * The ring signals exactly once per empty->non-empty edge; a
-	 * single read clears the counter. */
+	/* Drain the timerfd tick counter so the next tick wakes us. */
 	evfd_drain(fd);
 
 	rc = nats_ring_pop(p->ring, &slot);
 	if (rc == 0) {
 		cur_set_from_slot(p->handle_idx, &slot);
+		/* worker-private timerfd: ask the core to close it for us. */
+		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
 		shm_free(p);
 		return 1;    /* script rc=1, "got a message" */
 	}
 
-	/* Spurious wake -- another consumer raced us to the pop.
-	 * Re-arm by asking the reactor to keep us registered and try
-	 * again on the next edge.  Substitute for a dedicated timerfd;
-	 * if this loops forever (unlikely, because another worker already
-	 * consumed the message), the only cost is a wasted wakeup.
-	 * A future change can add the timerfd. */
+	/* Per-call deadline: the async core has no built-in timeout for raw
+	 * FDs, so we enforce it here.  On expiry surface -2 if the pool is
+	 * disconnected (so the script can short-circuit), else -1. */
+	if (p->deadline_us && fetch_now_us() >= p->deadline_us) {
+		int disc = !nats_pool_is_connected();
+		if (disc)
+			set_last_error("connection lost");
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_handle_pending_dec(p->h_ref);
+		shm_free(p);
+		return disc ? -2 : -1;
+	}
+
+	/* Ring still empty, deadline not reached -- keep polling on the
+	 * next timerfd tick (same fd stays registered). */
 	async_status = ASYNC_CONTINUE;
 	return 0;
 }
@@ -360,7 +405,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	nats_fetch_async_param_t  *p;
 	int                        rc;
 	int                        tmo;
-	int                        fd;
+	int                        tfd;
 
 	(void)msg;
 
@@ -408,41 +453,38 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -2;
 	}
 
-	fd = nats_ring_eventfd(h->ring);
-	if (fd < 0) {
-		LM_ERR("nats_fetch_async: handle '%.*s' has no eventfd\n",
-			id->len, id->s);
+	tmo = timeout_ms ? *timeout_ms : 0;
+
+	/* Worker-private timerfd, created post-fork so the reactor can
+	 * register it (unlike the ring's fork-inherited eventfd). */
+	tfd = fetch_arm_timerfd();
+	if (tfd < 0) {
+		LM_ERR("nats_fetch_async: timerfd setup failed: %s\n",
+			strerror(errno));
 		async_status = ASYNC_NO_IO;
-		return -6;     /* internal: handle bound but ring lacks fd */
+		return -6;
 	}
 
 	p = (nats_fetch_async_param_t *)shm_malloc(sizeof(*p));
 	if (!p) {
 		LM_ERR("nats_fetch_async: oom for resume param\n");
+		close(tfd);
 		async_status = ASYNC_NO_IO;
 		return -6;     /* internal: shm oom */
 	}
-	p->handle_idx = h->index;
-	p->evfd       = fd;
-	p->ring       = h->ring;
-	p->h_ref      = h;
+	p->handle_idx  = h->index;
+	p->ring        = h->ring;
+	p->h_ref       = h;
+	p->deadline_us = (tmo > 0) ? fetch_now_us() + (int64_t)tmo * 1000 : 0;
 	/* Hold the handle across the reactor round-trip so unbind defers. */
 	nats_handle_pending_inc(h);
-
-	tmo = timeout_ms ? *timeout_ms : 0;
-	if (tmo > 0) {
-		/* round up to seconds for the async core's coarse timer */
-		ctx->timeout_s = (unsigned int)((tmo + 999) / 1000);
-	} else {
-		ctx->timeout_s = 0;
-	}
 
 	ctx->resume_f     = resume_nats_fetch;
 	ctx->resume_param = p;
 
-	/* Tell the reactor: "read-monitor this fd on our behalf and
-	 * invoke resume_f when it becomes readable." */
-	async_status = fd;
+	/* Reactor monitors our worker-private timerfd; resume_f polls the
+	 * ring on each tick and enforces the deadline. */
+	async_status = tfd;
 	return 1;
 }
 
@@ -704,7 +746,7 @@ out:
 /* Async batch fetch parameter -- lives in SHM across resume. */
 typedef struct nats_batch_async_param {
 	uint16_t       handle_idx;
-	int            evfd;
+	int64_t        deadline_us;   /* CLOCK_MONOTONIC us; 0 = no deadline */
 	int            cap;
 	nats_ring_t   *ring;
 	nats_handle_t *h_ref;  /* pending_ops guard across resume */
@@ -717,13 +759,13 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 
 	(void)msg;
 
-	async_status = ASYNC_DONE;
-
 	if (!p) {
 		LM_ERR("nats_fetch_batch: resume with NULL param\n");
+		async_status = ASYNC_DONE;
 		return -6;     /* internal error */
 	}
 
+	/* Drain the timerfd tick counter so the next tick wakes us. */
 	evfd_drain(fd);
 
 	while (g_batch.count < p->cap) {
@@ -731,19 +773,29 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 		batch_push_slot(p->handle_idx, &slot);
 	}
 
+	/* Return as soon as anything arrived (original blocking semantics). */
 	if (g_batch.count > 0) {
+		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
 		shm_free(p);
 		return g_batch.count;
 	}
 
-	/* Spurious wake -- another worker drained the ring before we
-	 * could.  Re-arm; with ASYNC_CONTINUE the async core ignores
-	 * the return value and keeps the FD registered.  We still
-	 * return 0 here intentionally because this is the resume-
-	 * function-level control flow, not a script-visible $retcode
-	 * (the route only sees the value when async_status is
-	 * ASYNC_DONE on a subsequent wake). */
+	/* Per-call deadline: the async core has no built-in timeout for raw
+	 * FDs.  On expiry return the (empty) batch as -1, or -2 if the pool
+	 * is disconnected. */
+	if (p->deadline_us && fetch_now_us() >= p->deadline_us) {
+		int disc = !nats_pool_is_connected();
+		if (disc)
+			set_last_error("connection lost");
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_handle_pending_dec(p->h_ref);
+		shm_free(p);
+		return disc ? -2 : -1;
+	}
+
+	/* Empty ring, deadline not reached -- keep polling on the next
+	 * timerfd tick (same fd stays registered). */
 	async_status = ASYNC_CONTINUE;
 	return 0;
 }
@@ -755,7 +807,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	batch_opts_t               bo = { .count = 1, .expires_ms = 0 };
 	nats_ring_slot_t           slot;
 	nats_batch_async_param_t  *p;
-	int                        cap, fd;
+	int                        cap, tfd;
 
 	(void)msg;
 
@@ -810,29 +862,36 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -2;
 	}
 
-	fd = nats_ring_eventfd(h->ring);
-	if (fd < 0) {
+	/* Worker-private timerfd, created post-fork so the reactor can
+	 * register it (unlike the ring's fork-inherited eventfd). */
+	tfd = fetch_arm_timerfd();
+	if (tfd < 0) {
+		LM_ERR("nats_fetch_batch_async: timerfd setup failed: %s\n",
+			strerror(errno));
 		async_status = ASYNC_NO_IO;
-		return -6;     /* internal: handle has no eventfd */
+		return -6;
 	}
 
 	p = (nats_batch_async_param_t *)shm_malloc(sizeof(*p));
 	if (!p) {
+		close(tfd);
 		async_status = ASYNC_NO_IO;
 		return -6;     /* internal: shm oom */
 	}
-	p->handle_idx = h->index;
-	p->evfd       = fd;
-	p->cap        = cap;
-	p->ring       = h->ring;
-	p->h_ref      = h;
+	p->handle_idx  = h->index;
+	p->cap         = cap;
+	p->ring        = h->ring;
+	p->h_ref       = h;
+	p->deadline_us = (bo.expires_ms > 0)
+		? fetch_now_us() + (int64_t)bo.expires_ms * 1000 : 0;
 	nats_handle_pending_inc(h);
 
-	ctx->timeout_s    = (unsigned int)((bo.expires_ms + 999) / 1000);
 	ctx->resume_f     = resume_nats_fetch_batch;
 	ctx->resume_param = p;
 
-	async_status = fd;
+	/* Reactor monitors our worker-private timerfd; resume_f polls the
+	 * ring on each tick and enforces the deadline. */
+	async_status = tfd;
 	return 0;
 }
 
