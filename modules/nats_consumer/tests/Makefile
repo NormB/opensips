@@ -26,14 +26,17 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_async_request_skeleton test_async_request_inflight \
                   test_header_propagation test_start_time_roundtrip \
                   test_rpc_subject test_fetch_async_timerfd \
-                  test_persist_cross_process
+                  test_persist_cross_process test_msg_ref_teardown \
+                  test_ring_bounded_spin test_registry_ring_ref_safety
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
      test_async_request_skeleton test_async_request_inflight \
      test_header_propagation test_start_time_roundtrip \
-     test_rpc_subject test_fetch_async_timerfd test_persist_cross_process
+     test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
+     test_msg_ref_teardown test_ring_bounded_spin \
+     test_registry_ring_ref_safety
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -93,6 +96,28 @@ test_fetch_async_timerfd: test_fetch_async_timerfd.c
 test_persist_cross_process: test_persist_cross_process.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# msg-ref leak in tear_down_retired_subs: behavioural re-implementation of
+# the msg-ref row lifecycle proving the teardown destroys outstanding
+# natsMsgs + frees the slots buffer, plus source assertions that the real
+# tear_down_retired_subs walks g_msg_refs.  Self-contained;
+# reads ../nats_consumer_proc.c.
+test_msg_ref_teardown: test_msg_ref_teardown.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
+# Bounded-spin bail-out in nats_ring_pop: #includes ../nats_ring.c so it
+# can forge a stalled-producer state (head>tail, slot unpublished) and a
+# SIGALRM watchdog proves pop returns instead of spinning forever.
+# Links test_shim.c for the SHM allocator.
+RINGSPIN_SRCS := test_ring_bounded_spin.c $(SHIM)
+test_ring_bounded_spin: $(RINGSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
+	$(CC) $(CFLAGS) -o $@ $(RINGSPIN_SRCS) $(LDFLAGS)
+
+# Guards the removal of the unused, ref-unsafe registry ring helpers
+# (nats_registry_ring_get / nats_registry_set_ring_capacity).  Source
+# assertion; self-contained, reads ../nats_handle_registry.{c,h}.
+test_registry_ring_ref_safety: test_registry_ring_ref_safety.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 check: all
 	./test_registry
 	./test_parser
@@ -110,6 +135,9 @@ check: all
 	./test_rpc_subject
 	./test_fetch_async_timerfd
 	./test_persist_cross_process
+	./test_msg_ref_teardown
+	./test_ring_bounded_spin
+	./test_registry_ring_ref_safety
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -121,7 +149,9 @@ clean:
 	      test_consumer_heartbeat test_persist_precision \
 	      test_async_request_skeleton test_async_request_inflight \
 	      test_header_propagation test_start_time_roundtrip \
-	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process
+	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
+	      test_msg_ref_teardown test_ring_bounded_spin \
+	      test_registry_ring_ref_safety
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
