@@ -22,7 +22,7 @@ full string.  Long defaults split across `<br>` breaks.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See [`lib/nats/README.md`](../../lib/nats/README.md) for the registration contract that governs URL precedence when more than one NATS module is loaded. |
+| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | Comma-separated NATS server URLs (seed list). Use DNS hostnames for cluster resilience. See [`lib/nats/README.md`](../../lib/nats/README.md) for the registration contract that governs URL precedence when more than one NATS module is loaded. Embedded credentials (`nats://user:pass@host`) are masked as `[redacted]` in all log output — see [Credential redaction in logs](../../lib/nats/README.md#credential-redaction-in-logs). |
 | `jetstream` | int | 0 | Enable JetStream for persistent async publish (1=on, 0=off) |
 | `reconnect_wait` | int | 2000 | Milliseconds between startup connection retries |
 | `max_reconnect` | int | 60 | Max startup connection attempts. Does NOT limit runtime reconnection (that is unlimited). |

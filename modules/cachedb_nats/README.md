@@ -32,7 +32,7 @@ full string.  Long defaults split across `<br>` breaks.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cachedb_url` | string (func) | -- | OpenSIPS cachedb URL (e.g., `nats://127.0.0.1:4222/`) |
-| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | NATS server seed list. Use DNS hostnames for cluster resilience. |
+| `nats_url` | string | `nats://`<br>`127.0.0.1:`<br>`4222` | NATS server seed list. Use DNS hostnames for cluster resilience. Embedded credentials (`nats://user:pass@host`) are masked as `[redacted]` in all log output — see [Credential redaction in logs](../../lib/nats/README.md#credential-redaction-in-logs). |
 | `kv_bucket` | string | `opensips` | JetStream KV bucket name |
 | `kv_replicas` | int | 3 | Replication factor (only used when creating a new bucket) |
 | `kv_history` | int | 5 | Version history depth per key |
