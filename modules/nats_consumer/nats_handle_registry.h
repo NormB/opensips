@@ -296,15 +296,6 @@ nats_handle_t *nats_registry_lookup_weak(const str *id);
  * ever sets sub_torn_down, so calling it from elsewhere is a no-op. */
 void nats_registry_reap(void);
 
-/* Optional runtime ring-capacity override helper.  Convenience wrapper
- * for scripts / MI to resize a handle's ring after bind.  Declared so
- * callers have a known entry point, but the current implementation
- * only supports setting the override at bind time via the
- * `ring_capacity` field on the parsed handle and rejects runtime
- * resize (returns -1 if the handle already has a ring).  A future
- * change can wire up a proper pause-teardown-recreate flow. */
-int nats_registry_set_ring_capacity(const str *id, uint32_t cap);
-
 /* Borrowed lookup.  Returns NULL if not found.
  * Caller must not free.  Handle content is stable until unbind. */
 nats_handle_t *nats_registry_lookup(const str *id);
@@ -323,16 +314,6 @@ int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
  * if initialized, then frees the handle itself.
  * Used by parse-then-fail paths where the caller still owns the handle. */
 void nats_handle_free(nats_handle_t *h);
-
-/* Accessor -- returns the SHM ring owned by the handle with the given
- * `id`, or NULL if no such handle is bound.  Intended for SIP worker
- * side script functions that need to pop messages.
- *
- * The registry keeps the handle alive until nats_registry_unbind(), so
- * the returned pointer is valid until a concurrent unbind -- callers
- * that race with unbind must be prepared for the ring to disappear
- * underneath them.  A future change will add proper refcounting. */
-struct nats_ring *nats_registry_ring_get(const str *id);
 
 /* pending_ops helpers.  Use these from any path that holds a borrowed
  * nats_handle_t * across a blocking call (e.g. the consumer process's
