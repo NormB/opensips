@@ -2131,7 +2131,14 @@ static int _sink_emit_string(json_sink_t *s, const char *p, int n)
 	if (_sink_grow(s, needed + 1) < 0) return -1;
 	s->buf[s->len++] = '"';
 	if (esc_len > 0) {
-		int written = _json_escape(p, n, s->buf + s->len, esc_len);
+		/* _json_escape reserves one byte of out_sz for a trailing NUL
+		 * (and rejects an exact fit), so it needs esc_len + 1 to emit
+		 * esc_len escaped bytes.  Passing bare esc_len made it return
+		 * -1 for ANY non-empty string, tripping the sink's sticky oom
+		 * flag and truncating the output.  The sink already reserved
+		 * the byte (grow took needed + 1); the NUL is overwritten by
+		 * the closing quote below. */
+		int written = _json_escape(p, n, s->buf + s->len, esc_len + 1);
 		if (written < 0) { s->oom = 1; return -1; }
 		s->len += written;
 	}

@@ -15,7 +15,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_intern_wiring test_intern_unit test_entry_blob_combine \
         test_json_name_passthrough test_entry_add_key_oom \
         test_watcher_atomic_race test_watch_null_key_guard \
-        test_kv_history_bounds test_request_payload_guard
+        test_kv_history_bounds test_request_payload_guard \
+        test_sink_emit_string
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -28,7 +29,8 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_kv_key_encode test_resync_modparams \
                   test_enable_search_index test_dedicated_watcher_proc \
                   test_intern_wiring test_intern_unit test_entry_blob_combine \
-                  test_watcher_atomic_race test_watch_null_key_guard
+                  test_watcher_atomic_race test_watch_null_key_guard \
+                  test_sink_emit_string
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -123,6 +125,9 @@ test_kv_history_bounds: test_kv_history_bounds.c
 
 # Behavioural: w_nats_request guards NULL / negative-length payloads
 # before memcpy.  ASan'd.
+test_sink_emit_string: test_sink_emit_string.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 test_request_payload_guard: test_request_payload_guard.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
@@ -150,6 +155,7 @@ check: all
 	./test_watch_null_key_guard
 	./test_kv_history_bounds
 	./test_request_payload_guard
+	./test_sink_emit_string
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
