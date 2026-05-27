@@ -215,7 +215,9 @@ static int parse_urls(const char *url)
 	}
 
 	if (pool_cfg->server_cnt == 0) {
-		LM_ERR("no valid NATS server URLs found in '%s'\n", url);
+		char redacted[256];
+		nats_redact_url(url, redacted, sizeof(redacted));
+		LM_ERR("no valid NATS server URLs found in '%s'\n", redacted);
 		return -1;
 	}
 
@@ -332,15 +334,17 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 {
 	char buf[300];
 	char url[256];
+	char redacted[256];
 	int len;
 
 	nats_dl.natsConnection_GetConnectedUrl(nc, url, sizeof(url));
+	nats_redact_url(url, redacted, sizeof(redacted));
 	atomic_store(&_connected, 1);
 	atomic_fetch_add(&_reconnect_epoch, 1);
 	atomic_store(&_kv_stale, 1);
 
 	len = snprintf(buf, sizeof(buf),
-		"NATS pool: reconnected to %s\n", url);
+		"NATS pool: reconnected to %s\n", redacted);
 	if (len > 0)
 		nats_pool_unsafe_log(buf, (size_t)len);
 }
