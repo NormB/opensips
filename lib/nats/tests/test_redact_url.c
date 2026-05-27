@@ -15,7 +15,7 @@
  *
  * Contract:
  *   - Replaces every "user[:pass]@" segment after a "scheme://" prefix
- *     with "****@".
+ *     with "[redacted]@".
  *   - Handles comma-separated lists of URLs.
  *   - Leaves URLs without userinfo unchanged.
  *   - Always NUL-terminates @out unless out_sz == 0.
@@ -56,26 +56,26 @@ int main(void)
 
 	/* CASE 2: user:pass — both components scrubbed */
 	nats_redact_url("nats://alice:secret@host:4222", buf, sizeof(buf));
-	ASSERT_EQ(buf, "nats://****@host:4222", "user:pass redacted");
+	ASSERT_EQ(buf, "nats://[redacted]@host:4222", "user:pass redacted");
 
 	/* CASE 3: token-only (no colon) — still scrubbed */
 	nats_redact_url("nats://my-token@host:4222", buf, sizeof(buf));
-	ASSERT_EQ(buf, "nats://****@host:4222", "single-token userinfo redacted");
+	ASSERT_EQ(buf, "nats://[redacted]@host:4222", "single-token userinfo redacted");
 
 	/* CASE 4: tls:// scheme */
 	nats_redact_url("tls://u:p@h:4222", buf, sizeof(buf));
-	ASSERT_EQ(buf, "tls://****@h:4222", "tls:// scheme");
+	ASSERT_EQ(buf, "tls://[redacted]@h:4222", "tls:// scheme");
 
 	/* CASE 5: comma-separated list — only the one with creds is redacted */
 	nats_redact_url("nats://h1:4222,nats://u:p@h2:4222",
 		buf, sizeof(buf));
-	ASSERT_EQ(buf, "nats://h1:4222,nats://****@h2:4222",
+	ASSERT_EQ(buf, "nats://h1:4222,nats://[redacted]@h2:4222",
 		"comma-separated list");
 
 	/* CASE 6: list where both have creds */
 	nats_redact_url("nats://a:b@h1:4222,tls://c:d@h2:4222",
 		buf, sizeof(buf));
-	ASSERT_EQ(buf, "nats://****@h1:4222,tls://****@h2:4222",
+	ASSERT_EQ(buf, "nats://[redacted]@h1:4222,tls://[redacted]@h2:4222",
 		"both have creds");
 
 	/* CASE 7: NULL input */
@@ -99,7 +99,7 @@ int main(void)
 	 *           the authority (before next '/') is what we redact. */
 	nats_redact_url("nats://u:p@h:4222/topic@home",
 		buf, sizeof(buf));
-	ASSERT_EQ(buf, "nats://****@h:4222/topic@home",
+	ASSERT_EQ(buf, "nats://[redacted]@h:4222/topic@home",
 		"only authority @ is redacted");
 
 	/* CASE 12: out_sz == 0 — must not crash, no write */

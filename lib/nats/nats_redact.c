@@ -14,6 +14,9 @@
 #include <string.h>
 #include "nats_pool.h"
 
+/* Mask written in place of any "scheme://userinfo@" credentials. */
+#define NATS_REDACT_MASK "[redacted]"
+
 /*
  * Scan a single NATS URL ("nats://..." or "tls://...") starting at @url
  * and write its redacted form to @dst (advancing @dst).  Returns the
@@ -62,15 +65,15 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 		return url_end;
 	}
 
-	/* Copy the prefix (scheme + authority slashes), four mask
-	 * asterisks, '@', and the rest of the host portion through
+	/* Copy the prefix (scheme + authority slashes), the redaction
+	 * mask, '@', and the rest of the host portion through
 	 * url_end.  (Inline scheme://STARS@host examples are avoided in
 	 * this comment because gcc's -Wcomment treats a slash-asterisk
 	 * inside a block comment as a possible nested-comment opener
 	 * and -Werror promotes the warning.) */
 	{
 		size_t prefix_n = (size_t)(authority - url);   /* through scheme + "//" */
-		size_t mask_n   = 4;                             /* four asterisks */
+		size_t mask_n   = sizeof(NATS_REDACT_MASK) - 1;  /* redaction mask */
 		size_t at_n     = 1;                             /* "@" */
 		size_t host_n   = (size_t)(url_end - (at + 1));
 		size_t total    = prefix_n + mask_n + at_n + host_n;
@@ -83,10 +86,10 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 			memcpy(*dst, url, want);
 			*dst += want; *rem -= want;
 			if (*rem >= mask_n) {
-				memcpy(*dst, "****", mask_n);
+				memcpy(*dst, NATS_REDACT_MASK, mask_n);
 				*dst += mask_n; *rem -= mask_n;
 			} else {
-				memcpy(*dst, "****", *rem);
+				memcpy(*dst, NATS_REDACT_MASK, *rem);
 				*dst += *rem; *rem = 0;
 				return url_end;
 			}
@@ -101,7 +104,7 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 
 		memcpy(*dst, url, prefix_n);
 		*dst += prefix_n; *rem -= prefix_n;
-		memcpy(*dst, "****", mask_n);
+		memcpy(*dst, NATS_REDACT_MASK, mask_n);
 		*dst += mask_n; *rem -= mask_n;
 		**dst = '@'; (*dst)++; (*rem)--;
 		memcpy(*dst, at + 1, host_n);
