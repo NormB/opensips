@@ -8,7 +8,8 @@ ASAN    := -fsanitize=address
 .PHONY: all check check-tsan clean
 
 TESTS = test_redact_url test_validate_publish_subject \
-        test_validate_subject_cache test_nats_dl test_nats_ca_dir
+        test_validate_subject_cache test_nats_dl test_nats_ca_dir \
+        test_nats_pool_fixes
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -45,6 +46,12 @@ test_nats_dl: test_nats_dl.c ../nats_dl.c
 test_nats_ca_dir: test_nats_ca_dir.c ../nats_ca_dir.c
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_nats_ca_dir.c ../nats_ca_dir.c
 
+# Source-structure regression guards for the nats_ca_dir bounded-read +
+# nats_pool kvStore-cache-full + GetConnectedUrl-init fixes.  Reads the
+# production sources; self-contained.
+test_nats_pool_fixes: test_nats_pool_fixes.c
+	$(CC) $(CFLAGS) -o $@ test_nats_pool_fixes.c
+
 # LD_LIBRARY_PATH covers the case where libnats was installed to
 # /usr/local/lib (the upstream `cmake --install` default), which
 # isn't on the default ld.so search path on most distros.  Production
@@ -60,6 +67,7 @@ check: all
 	./test_validate_subject_cache
 	$(NATS_TEST_ENV) ./test_nats_dl
 	./test_nats_ca_dir
+	./test_nats_pool_fixes
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the
