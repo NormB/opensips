@@ -53,6 +53,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,8 +102,6 @@ typedef struct nats_persist_state {
 	pthread_cond_t  cond;
 
 	int             stop;        /* writer-thread exit flag */
-	int             dirty;       /* 1 = pending write */
-	long long       dirty_ms;    /* when dirty was last set */
 
 	int             init_done;
 } nats_persist_state_t;
@@ -111,10 +110,35 @@ static nats_persist_state_t g_state = {
 	.path           = NULL,
 	.writer_running = 0,
 	.stop           = 0,
-	.dirty          = 0,
-	.dirty_ms       = 0,
 	.init_done      = 0,
 };
+
+/* Dirty-tracking lives in SHM so nats_persist_schedule_write() works
+ * from ANY process.  The writer pthread runs only in the attendant
+ * (created in nats_persist_init, pre-fork); SIP workers and the MI
+ * process call schedule_write from nats_registry_bind/unbind, so the
+ * "dirty" signal must cross the fork boundary.  These two atomics are
+ * shm_malloc'd pre-fork (every child shares one copy) and the writer
+ * polls them on each NATS_PERSIST_TICK_MS wake.  The per-process
+ * pthread condvar can only deliver an *immediate* wake for a
+ * schedule_write made in the attendant itself, so that is now just a
+ * latency optimisation rather than the delivery mechanism. */
+typedef struct nats_persist_shared {
+	_Atomic int       dirty;       /* 1 = pending write */
+	_Atomic long long dirty_ms;    /* now_ms() when dirty was last set */
+} nats_persist_shared_t;
+
+static nats_persist_shared_t *g_shared;   /* SHM, shared across fork */
+
+static inline void persist_mark_dirty(void)
+{
+	if (!g_shared)
+		return;
+	/* stamp first so a reader observing dirty=1 sees a sane dirty_ms */
+	atomic_store_explicit(&g_shared->dirty_ms, now_ms(),
+		memory_order_relaxed);
+	atomic_store_explicit(&g_shared->dirty, 1, memory_order_relaxed);
+}
 
 /* ── helpers: enum <-> string ─────────────────────────────────── */
 
@@ -509,8 +533,10 @@ static void *writer_main(void *arg)
 
 		if (g_state.stop) {
 			/* Flush any dirty state one last time before exiting. */
-			if (g_state.dirty) {
-				g_state.dirty = 0;
+			if (atomic_load_explicit(&g_shared->dirty,
+					memory_order_relaxed)) {
+				atomic_store_explicit(&g_shared->dirty, 0,
+					memory_order_relaxed);
 				pthread_mutex_unlock(&g_state.lock);
 				(void)do_write();
 			} else {
@@ -519,11 +545,17 @@ static void *writer_main(void *arg)
 			break;
 		}
 
-		if (g_state.dirty) {
-			long long age = now_ms() - g_state.dirty_ms;
+		if (atomic_load_explicit(&g_shared->dirty, memory_order_relaxed)) {
+			long long age = now_ms() -
+				atomic_load_explicit(&g_shared->dirty_ms,
+					memory_order_relaxed);
 			if (age >= NATS_PERSIST_DEBOUNCE_MS) {
 				should_write = 1;
-				g_state.dirty = 0;
+				/* Claim the dirty flag.  If a writer in another
+				 * process sets it again after this clear, the next
+				 * tick simply writes again -- no update is lost. */
+				atomic_store_explicit(&g_shared->dirty, 0,
+					memory_order_relaxed);
 			}
 		}
 
@@ -531,13 +563,11 @@ static void *writer_main(void *arg)
 
 		if (should_write) {
 			if (do_write() < 0) {
-				/* on failure, re-mark dirty so we retry next tick */
-				pthread_mutex_lock(&g_state.lock);
-				g_state.dirty = 1;
-				/* bump ts so the next write is properly debounced
-				 * instead of firing immediately on the very next tick */
-				g_state.dirty_ms = now_ms();
-				pthread_mutex_unlock(&g_state.lock);
+				/* on failure, re-mark dirty so we retry next tick.
+				 * persist_mark_dirty() re-stamps dirty_ms so the
+				 * retry is debounced, not fired on the very next
+				 * tick. */
+				persist_mark_dirty();
 			}
 		}
 	}
@@ -556,9 +586,16 @@ void nats_persist_schedule_write(void)
 {
 	if (!g_state.init_done)
 		return;
+	/* Cross-process: set the SHM dirty flag the attendant's writer
+	 * polls each tick.  Works from SIP workers / MI, not just the
+	 * attendant. */
+	persist_mark_dirty();
+	/* Wake the writer immediately when called *in the attendant* (the
+	 * only process whose condvar the writer waits on).  In other
+	 * processes this signals a private condvar nobody waits on --
+	 * harmless; the attendant's writer still picks up the SHM flag on
+	 * its next tick. */
 	pthread_mutex_lock(&g_state.lock);
-	g_state.dirty = 1;
-	g_state.dirty_ms = now_ms();
 	pthread_cond_signal(&g_state.cond);
 	pthread_mutex_unlock(&g_state.lock);
 }
@@ -570,21 +607,14 @@ int nats_persist_flush_now(void)
 	if (!g_state.init_done)
 		return 0;
 
-	/* Clear the dirty flag under the lock, then write outside -- so
-	 * the writer thread does not race us and produce two snapshots of
-	 * the same state.  If it does win the race it will just see
-	 * dirty=0 and skip. */
-	pthread_mutex_lock(&g_state.lock);
-	g_state.dirty = 0;
-	pthread_mutex_unlock(&g_state.lock);
+	/* Clear the dirty flag, then write -- so the writer thread does not
+	 * race us and produce two snapshots of the same state.  If it does
+	 * win the race it will just see dirty=0 and skip. */
+	atomic_store_explicit(&g_shared->dirty, 0, memory_order_relaxed);
 
 	rc = do_write();
-	if (rc < 0) {
-		pthread_mutex_lock(&g_state.lock);
-		g_state.dirty = 1;
-		g_state.dirty_ms = now_ms();
-		pthread_mutex_unlock(&g_state.lock);
-	}
+	if (rc < 0)
+		persist_mark_dirty();
 	return rc;
 }
 
@@ -635,12 +665,26 @@ int nats_persist_init(const char *path)
 	}
 
 	g_state.stop           = 0;
-	g_state.dirty          = 0;
-	g_state.dirty_ms       = 0;
 	g_state.writer_running = 0;
+
+	/* SHM dirty-tracking, allocated pre-fork so every child shares one
+	 * copy and schedule_write() from any process reaches the writer. */
+	g_shared = (nats_persist_shared_t *)shm_malloc(sizeof(*g_shared));
+	if (!g_shared) {
+		LM_ERR("nats_persist: shm_malloc for shared state failed\n");
+		pthread_cond_destroy(&g_state.cond);
+		pthread_mutex_destroy(&g_state.lock);
+		free(g_state.path);
+		g_state.path = NULL;
+		return -2;
+	}
+	atomic_init(&g_shared->dirty, 0);
+	atomic_init(&g_shared->dirty_ms, 0);
 
 	if (pthread_create(&g_state.writer, NULL, writer_main, NULL) != 0) {
 		LM_ERR("nats_persist: thread spawn failed: %s\n", strerror(errno));
+		shm_free(g_shared);
+		g_shared = NULL;
 		pthread_cond_destroy(&g_state.cond);
 		pthread_mutex_destroy(&g_state.lock);
 		free(g_state.path);
@@ -672,6 +716,11 @@ void nats_persist_destroy(void)
 
 	pthread_cond_destroy(&g_state.cond);
 	pthread_mutex_destroy(&g_state.lock);
+
+	if (g_shared) {
+		shm_free(g_shared);
+		g_shared = NULL;
+	}
 
 	if (g_state.path) {
 		free(g_state.path);
