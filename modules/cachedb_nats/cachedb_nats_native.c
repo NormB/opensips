@@ -196,8 +196,18 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	if (native_str_to_buf(subject, subj_buf, sizeof(subj_buf)) < 0)
 		return -1;
 
-	/* null-terminate payload (use heap for large payloads) */
-	if ((size_t)payload->len < sizeof(pay_buf)) {
+	/* null-terminate payload (use heap for large payloads).
+	 * Guard the source descriptor: a corrupted str with a negative
+	 * length would underflow the (size_t) cast below and an empty/NULL
+	 * payload must not be fed to memcpy. Treat NULL/empty as "". */
+	if (payload->len < 0) {
+		LM_ERR("nats_request: negative payload length (%d)\n",
+			payload->len);
+		return -1;
+	}
+	if (!payload->s || payload->len == 0) {
+		pay_buf[0] = '\0';
+	} else if ((size_t)payload->len < sizeof(pay_buf)) {
 		memcpy(pay_buf, payload->s, payload->len);
 		pay_buf[payload->len] = '\0';
 	} else {
@@ -328,7 +338,24 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	}
 
 	pos = 0;
-	pos += snprintf(buf + pos, buf_size - pos, "[");
+
+	/* snprintf() returns the number of bytes it WOULD have written, which
+	 * on truncation exceeds the size limit and can push `pos` past
+	 * buf_size.  The next call would then compute buf_size - pos as a
+	 * negative int that converts to a huge size_t, defeating the bound
+	 * and overrunning the buffer.  Clamp pos after every advance so the
+	 * remaining size can never underflow. */
+#define HIST_ADVANCE(...) do { \
+		int _w = snprintf(buf + pos, (size_t)(buf_size - pos), \
+			__VA_ARGS__); \
+		if (_w < 0) { pos = buf_size - 1; } \
+		else { \
+			pos += _w; \
+			if (pos >= buf_size) pos = buf_size - 1; \
+		} \
+	} while (0)
+
+	HIST_ADVANCE("[");
 
 	for (i = 0; i < list.Count && pos < buf_size - 128; i++) {
 		kvEntry *e = list.Entries[i];
@@ -336,11 +363,10 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		int eval_len = nats_dl.kvEntry_ValueLen(e);
 
 		if (i > 0)
-			pos += snprintf(buf + pos, buf_size - pos, ",");
+			HIST_ADVANCE(",");
 
 		/* JSON-encode: escape quotes in value for safety */
-		pos += snprintf(buf + pos, buf_size - pos,
-			"{\"rev\":%llu,\"value\":\"",
+		HIST_ADVANCE("{\"rev\":%llu,\"value\":\"",
 			(unsigned long long)nats_dl.kvEntry_Revision(e));
 
 		/* Simple JSON string escape: replace '"' and '\' with their
@@ -348,7 +374,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		 * snprintf bounds checking, so we use a conservative limit:
 		 * room for escape char + char + closing '"}' + NUL = 4 bytes. */
 		int j;
-		for (j = 0; j < eval_len && pos < buf_size - 4; j++) {
+		for (j = 0; eval && j < eval_len && pos < buf_size - 4; j++) {
 			if (eval[j] == '"' || eval[j] == '\\') {
 				if (pos >= buf_size - 4) break;
 				buf[pos++] = '\\';
@@ -356,10 +382,11 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 			buf[pos++] = eval[j];
 		}
 
-		pos += snprintf(buf + pos, buf_size - pos, "\"}");
+		HIST_ADVANCE("\"}");
 	}
 
-	pos += snprintf(buf + pos, buf_size - pos, "]");
+	HIST_ADVANCE("]");
+#undef HIST_ADVANCE
 
 	nats_dl.kvEntryList_Destroy(&list);
 
