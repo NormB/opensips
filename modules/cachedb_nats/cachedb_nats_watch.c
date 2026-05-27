@@ -102,7 +102,12 @@ extern char *fts_json_prefix;
 /* ---- watcher thread state (process-local) ---- */
 static pthread_t       _watcher_tid;
 static atomic_int      _watcher_running = 0;
-static kvWatcher      *_watcher         = NULL;
+/* _watcher is written by the watcher thread (create + per-iteration
+ * teardown) and read/torn-down by nats_watch_stop() on another thread.
+ * Make it atomic and have every teardown path atomic_exchange() it to
+ * NULL: only the caller that observes the non-NULL value owns the
+ * Stop/Destroy, so overlapping shutdown can never double-free. */
+static _Atomic(kvWatcher *) _watcher    = NULL;
 
 /* Multiple watch patterns -- set by nats_watch_start(), read by thread.
  * When _num_patterns == 0, watches all keys via nats_dl.kvStore_WatchAll().
@@ -240,6 +245,10 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 		return;
 
 	key     = nats_dl.kvEntry_Key(entry);
+	if (!key) {
+		LM_WARN("kv-change: entry has NULL key, skipping event\n");
+		return;
+	}
 	key_len = strlen(key);
 
 	if (op == kvOp_Put) {
@@ -285,6 +294,11 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	/* EVI not available at build time -- log the change instead */
 	const char *key = nats_dl.kvEntry_Key(entry);
 	const char *op_name;
+
+	if (!key) {
+		LM_WARN("kv-change: entry has NULL key, skipping log\n");
+		return;
+	}
 
 	switch (op) {
 		case kvOp_Put:    op_name = "put";    break;
@@ -351,6 +365,7 @@ static void _watcher_loop(void)
 	natsStatus      s;
 	kvWatchOptions  opts;
 	kvStore        *kv;
+	kvWatcher      *w;
 	int             last_epoch;
 	int             prefix_len;
 
@@ -403,7 +418,11 @@ static void _watcher_loop(void)
 		nats_dl.kvWatchOptions_Init(&opts);
 		opts.UpdatesOnly = true;
 
-		s = nats_dl.kvStore_WatchMulti(&_watcher, kv,
+		/* Create into a local handle, then publish it atomically.
+		 * libnats wants a plain kvWatcher**, so we cannot pass
+		 * &_watcher (it is _Atomic). */
+		w = NULL;
+		s = nats_dl.kvStore_WatchMulti(&w, kv,
 			_watch_patterns, _num_patterns, &opts);
 
 		if (s != NATS_OK) {
@@ -412,6 +431,8 @@ static void _watcher_loop(void)
 			sleep(2);
 			continue;
 		}
+
+		atomic_store(&_watcher, w);
 
 		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d)\n",
 			_num_patterns, last_epoch);
@@ -445,7 +466,8 @@ static void _watcher_loop(void)
 				break;
 			}
 
-			s = nats_dl.kvWatcher_Next(&entry, _watcher, 500);
+			s = nats_dl.kvWatcher_Next(&entry,
+				atomic_load(&_watcher), 500);
 
 			if (s == NATS_TIMEOUT) {
 				/* Belt-and-suspenders for the dedicated-process
@@ -476,6 +498,15 @@ static void _watcher_loop(void)
 			const char   *key = nats_dl.kvEntry_Key(entry);
 			kvOperation   op  = nats_dl.kvEntry_Operation(entry);
 
+			/* A NULL key would crash strncmp / index_add below.
+			 * Drop the entry and keep watching. */
+			if (!key) {
+				LM_WARN("watcher: entry has NULL key, skipping\n");
+				nats_dl.kvEntry_Destroy(entry);
+				entry = NULL;
+				continue;
+			}
+
 			if (op == kvOp_Put) {
 				const char *val     = nats_dl.kvEntry_ValueString(entry);
 				int         val_len = nats_dl.kvEntry_ValueLen(entry);
@@ -500,18 +531,23 @@ static void _watcher_loop(void)
 		}
 
 		/* ---- Cleanup before retry ----
-		 * Destroy the stale watcher.  Clear the pointer first to
-		 * prevent races with nats_watch_stop() reading it. */
-		if (_watcher) {
-			kvWatcher      *w = _watcher;
-			_watcher = NULL;  /* clear first -- prevent races */
-			nats_dl.kvWatcher_Stop(w);
-			/* Only destroy if still connected.  During disconnect,
-			 * nats.c's I/O thread may be cleaning up the same
-			 * internal structures -- destroying here causes
-			 * double-free.  The handle is tiny; leak is bounded. */
-			if (nats_pool_is_connected())
-				nats_dl.kvWatcher_Destroy(w);
+		 * Destroy the stale watcher.  atomic_exchange claims the
+		 * handle: whoever swaps the non-NULL value to NULL owns the
+		 * Stop/Destroy.  If nats_watch_stop() raced us and already
+		 * claimed it, we observe NULL here and do nothing -- no
+		 * double Stop/Destroy. */
+		{
+			kvWatcher *w_claim = atomic_exchange(&_watcher, NULL);
+			if (w_claim) {
+				nats_dl.kvWatcher_Stop(w_claim);
+				/* Only destroy if still connected.  During
+				 * disconnect, nats.c's I/O thread may be cleaning
+				 * up the same internal structures -- destroying
+				 * here causes double-free.  The handle is tiny;
+				 * leak is bounded. */
+				if (nats_pool_is_connected())
+					nats_dl.kvWatcher_Destroy(w_claim);
+			}
 		}
 
 		/* Brief pause before restarting to avoid tight loop on
@@ -607,22 +643,28 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
  */
 void nats_watch_stop(void)
 {
+	kvWatcher *w_claim;
+
 	if (!atomic_load(&_watcher_running))
 		return;
 
 	atomic_store(&_watcher_running, 0);
 
-	/* Stop the watcher first -- this unblocks nats_dl.kvWatcher_Next() */
-	if (_watcher) {
-		nats_dl.kvWatcher_Stop(_watcher);
-	}
+	/* Claim the watcher handle with a single atomic_exchange.  The
+	 * watcher thread's per-iteration teardown does the same; only the
+	 * thread that swaps the non-NULL value to NULL owns Stop/Destroy,
+	 * so an overlapping shutdown can never double-free.  Stopping the
+	 * watcher we claimed unblocks nats_dl.kvWatcher_Next() so the
+	 * thread can observe _watcher_running == 0 and exit. */
+	w_claim = atomic_exchange(&_watcher, NULL);
+	if (w_claim)
+		nats_dl.kvWatcher_Stop(w_claim);
 
 	pthread_join(_watcher_tid, NULL);
 
-	if (_watcher) {
-		nats_dl.kvWatcher_Destroy(_watcher);
-		_watcher = NULL;
-	}
+	/* Thread has exited; safe to destroy the handle we claimed. */
+	if (w_claim)
+		nats_dl.kvWatcher_Destroy(w_claim);
 
 	if (_watch_patterns) {
 		free(_watch_patterns);
