@@ -1669,6 +1669,38 @@ static void tear_down_retired_subs(void)
 		 * the natsSubscription. */
 		free_proc_sub_strings(ss);
 
+		/*
+		 * Reclaim the process-local msg-ref row for this handle.  After
+		 * the subscription is destroyed no more acks can arrive for it,
+		 * but messages that were pushed to the ring and not yet acked
+		 * still hold a live natsMsg* in g_msg_refs[handle_idx].slots[*].
+		 * Normally those are released + destroyed on the ack drain path
+		 * (release_msg_ref + nats_dl.natsMsg_Destroy); here we must walk
+		 * the row ourselves, destroy every in-use natsMsg, then free the
+		 * row's slots buffer (calloc'd in ensure_row) and zero the row.
+		 * handle_idx is monotonic and never reused, so leaving the row
+		 * populated would leak both the slots buffer and the libnats
+		 * messages for the lifetime of the process.
+		 */
+		if (ss->handle_idx < NATS_REGISTRY_MAX_HANDLES) {
+			msg_ref_row_t *row = &g_msg_refs[ss->handle_idx];
+			if (row->slots) {
+				uint32_t i;
+				for (i = 0; i < row->capacity; i++) {
+					msg_ref_slot_t *slot = &row->slots[i];
+					if (slot->in_use && slot->msg) {
+						nats_dl.natsMsg_Destroy(slot->msg);
+						slot->msg    = NULL;
+						slot->in_use = 0;
+					}
+				}
+				free(row->slots);
+			}
+			row->slots     = NULL;
+			row->capacity  = 0;
+			row->next_slot = 0;
+		}
+
 		if (h) {
 			/* Publish the teardown completion so the reaper can
 			 * free the handle.  This store MUST happen AFTER the
