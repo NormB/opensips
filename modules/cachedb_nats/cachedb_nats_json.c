@@ -504,6 +504,9 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 			new_keys = shm_malloc(sizeof(char *) * new_alloc);
 			if (!new_keys) {
 				LM_ERR("no SHM to grow inline keys array\n");
+				/* release the ref acquired above so the intern
+				 * entry's refcount stays balanced on OOM. */
+				nats_intern_release(interned);
 				return -1;
 			}
 			memcpy(new_keys, e->keys,
@@ -517,6 +520,9 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 				sizeof(char *) * new_alloc);
 			if (!new_keys) {
 				LM_ERR("no SHM to grow keys array\n");
+				/* release the ref acquired above so the intern
+				 * entry's refcount stays balanced on OOM. */
+				nats_intern_release(interned);
 				return -1;
 			}
 			e->keys = new_keys;
@@ -2134,6 +2140,21 @@ static int _sink_emit_string(json_sink_t *s, const char *p, int n)
 	return 0;
 }
 
+/* Emit a JSON string whose bytes are ALREADY escaped — i.e. a name or
+ * value slice that came straight out of _parse_json_string() and still
+ * points into the source document.  Those bytes carry their original
+ * RFC 8259 escaping (\", \\, \uXXXX, …) verbatim, so they must be copied
+ * through raw with surrounding quotes.  Re-running them through
+ * _sink_emit_string() would escape the backslashes a second time
+ * (\" -> \\\", \\ -> \\\\) and corrupt the name on every update. */
+static int _sink_emit_raw_string(json_sink_t *s, const char *p, int n)
+{
+	if (s->oom) return -1;
+	if (_sink_putc(s, '"') < 0) return -1;
+	if (_sink_write(s, p, n) < 0) return -1;
+	return _sink_putc(s, '"');
+}
+
 static int _sink_emit_int(json_sink_t *s, int64_t v)
 {
 	char tmp[32];
@@ -2543,7 +2564,9 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 					continue; /* drop this subkey */
 				if (!first && _sink_putc(s, ',') < 0) return -1;
 				first = 0;
-				if (_sink_emit_string(s, kfield, kflen) < 0)
+				/* kfield is an already-escaped existing name —
+				 * copy it through raw, do not re-escape. */
+				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
 					return -1;
 				if (_sink_putc(s, ':') < 0) return -1;
 				if (_sink_emit_op_value(s, &ops[op_idx]) < 0)
@@ -2552,7 +2575,9 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 				/* Copy through the existing entry. */
 				if (!first && _sink_putc(s, ',') < 0) return -1;
 				first = 0;
-				if (_sink_emit_string(s, kfield, kflen) < 0)
+				/* kfield is an already-escaped existing name —
+				 * copy it through raw, do not re-escape. */
+				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
 					return -1;
 				if (_sink_putc(s, ':') < 0) return -1;
 				if (_sink_write(s, kvstart,
@@ -2641,7 +2666,8 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 				continue; /* drop the field entirely */
 			if (!first && _sink_putc(&s, ',') < 0) goto out;
 			first = 0;
-			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			/* fname is an already-escaped existing name — raw copy. */
+			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
 			if (_sink_putc(&s, ':') < 0) goto out;
 			if (_sink_emit_op_value(&s, &ops[top_idx]) < 0) goto out;
 			/* Mark any subkey ops on the same field as consumed —
@@ -2657,14 +2683,16 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 		} else if (sk_count > 0) {
 			if (!first && _sink_putc(&s, ',') < 0) goto out;
 			first = 0;
-			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			/* fname is an already-escaped existing name — raw copy. */
+			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
 			if (_sink_putc(&s, ':') < 0) goto out;
 			if (_sink_merge_subkeys(&s, vstart, vend,
 					ops, n_ops, fname, flen) < 0) goto out;
 		} else {
 			if (!first && _sink_putc(&s, ',') < 0) goto out;
 			first = 0;
-			if (_sink_emit_string(&s, fname, flen) < 0) goto out;
+			/* fname is an already-escaped existing name — raw copy. */
+			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
 			if (_sink_putc(&s, ':') < 0) goto out;
 			if (_sink_write(&s, vstart, (int)(vend - vstart)) < 0)
 				goto out;

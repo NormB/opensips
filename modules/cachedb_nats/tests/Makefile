@@ -12,7 +12,10 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_update_nested_dict test_update_creates_doc test_cas_backoff \
         test_index_stale_recovery test_kv_key_encode test_resync_modparams \
         test_enable_search_index test_dedicated_watcher_proc \
-        test_intern_wiring test_intern_unit test_entry_blob_combine
+        test_intern_wiring test_intern_unit test_entry_blob_combine \
+        test_json_name_passthrough test_entry_add_key_oom \
+        test_watcher_atomic_race test_watch_null_key_guard \
+        test_kv_history_bounds test_request_payload_guard
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -24,7 +27,16 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_cas_backoff test_index_stale_recovery \
                   test_kv_key_encode test_resync_modparams \
                   test_enable_search_index test_dedicated_watcher_proc \
-                  test_intern_wiring test_intern_unit test_entry_blob_combine
+                  test_intern_wiring test_intern_unit test_entry_blob_combine \
+                  test_watcher_atomic_race test_watch_null_key_guard
+
+# test_watcher_atomic_race is the canonical TSan target for the watcher
+# claim-once property -- it spawns threads racing atomic_exchange and is
+# built WITHOUT ASan so the CI TSan job can wrap it.  The other four new
+# tests (json_name_passthrough, entry_add_key_oom, kv_history_bounds,
+# request_payload_guard) are ASan'd to surface the corruption / OOB /
+# leak they guard against -- ASan-only contracts, kept out of the TSan
+# subset like the other ASan tests above.
 
 all: $(TESTS)
 
@@ -84,6 +96,36 @@ test_intern_unit: test_intern_unit.c
 test_entry_blob_combine: test_entry_blob_combine.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Behavioural + structural: existing JSON field/subkey NAMES are copied
+# through RAW (not re-escaped) on a KV-doc update.
+test_json_name_passthrough: test_json_name_passthrough.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
+# Behavioural: _entry_add_key must not leak the interned doc-key ref
+# when the keys[] array growth fails (OOM).  ASan'd.
+test_entry_add_key_oom: test_entry_add_key_oom.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
+# Behavioural (atomic claim-once) + structural: the kvWatcher* handle is
+# _Atomic and torn down via atomic_exchange so overlapping shutdown can't
+# double-free.  pthread, no ASan -> safe under TSan.
+test_watcher_atomic_race: test_watcher_atomic_race.c
+	$(CC) $(CFLAGS) -pthread -o $@ $<
+
+# Structural: every kvEntry_Key(entry) call site has a NULL guard.
+test_watch_null_key_guard: test_watch_null_key_guard.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+# Behavioural: w_nats_kv_history's snprintf chain never lets `pos`
+# underflow the remaining-size and overrun the buffer.  ASan'd.
+test_kv_history_bounds: test_kv_history_bounds.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
+# Behavioural: w_nats_request guards NULL / negative-length payloads
+# before memcpy.  ASan'd.
+test_request_payload_guard: test_request_payload_guard.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -102,6 +144,12 @@ check: all
 	./test_intern_wiring
 	./test_intern_unit
 	./test_entry_blob_combine
+	./test_json_name_passthrough
+	./test_entry_add_key_oom
+	./test_watcher_atomic_race
+	./test_watch_null_key_guard
+	./test_kv_history_bounds
+	./test_request_payload_guard
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
