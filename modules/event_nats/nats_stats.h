@@ -76,13 +76,16 @@
  * constraint. */
 #define NATS_STATS_MAX_PROCS 512
 
-/* Per-process counter slot.  Each running OpenSIPS worker writes
- * exclusively to its own slot indexed by process_no, so the bumps
- * don't need to be atomic w.r.t. other writers — they're the only
- * writer for their slot.  Reads from the MI handler still use
- * relaxed atomic loads to avoid torn reads on the off chance the
- * compiler decides to split a 64-bit store on a non-64-bit
- * platform.
+/* Per-process counter slot, indexed by process_no.  Most counters have
+ * a single writer (the owning OpenSIPS process), but that is NOT true
+ * for the JetStream ack counters (js_ack_ok / js_ack_failed): the
+ * cnats AckHandler runs on a libnats internal thread that shares the
+ * owning process's process_no, so it writes the SAME slot the OpenSIPS
+ * main thread writes published/evi_published into — two concurrent
+ * writers per slot.  All counters are therefore `_Atomic` and bumped
+ * with atomic_fetch_add (NATS_STATS_BUMP); do NOT downgrade them to
+ * plain increments on the assumption of a single writer.  MI reads use
+ * relaxed atomic loads to avoid torn reads.
  *
  * One cacheline per slot keeps the bump path off any other
  * worker's hot lines. */
@@ -93,7 +96,8 @@ typedef struct _nats_stats {
     _Atomic unsigned long failed;
     _Atomic unsigned long evi_published;
     _Atomic unsigned long script_published;
-    _Atomic unsigned long reconnects;
+    _Atomic unsigned long reconnects;   /* DEPRECATED -- never bumped; MI
+                                         * reports nats_pool_get_reconnect_epoch() */
     _Atomic unsigned long js_ack_ok;
     _Atomic unsigned long js_ack_failed;
 } __attribute__((aligned(64))) nats_stats_t;

@@ -129,6 +129,19 @@ int main(void)
 	ASSERT(sum_atomic >= 1,
 		"nats_stats_sum() uses atomic_load for cross-slot reads");
 
+	/* CASE 5: the per-process `reconnects` counter was never bumped, so
+	 * MI now reports the shared pool's reconnect epoch instead; and the
+	 * slot comment no longer claims a single writer (the cnats ack
+	 * thread shares the slot, so atomics are mandatory). */
+	ASSERT(grep_count("../nats_stats.c",
+			"nats_pool_get_reconnect_epoch") >= 1,
+		"MI reports the pool reconnect epoch (real reconnect count)");
+	ASSERT(grep_count("../nats_stats.c", "NATS_STATS_SUM(reconnects)") == 0,
+		"MI no longer sums the never-incremented reconnects counter");
+	ASSERT(grep_count("../nats_stats.h", "AckHandler") >= 1,
+		"nats_stats.h documents the JS ack thread shares the slot "
+		"(atomics required)");
+
 	/* CASE 4: functional concurrent-increment check */
 	volatile_ctr = 0;
 	atomic_store(&atomic_ctr, 0);

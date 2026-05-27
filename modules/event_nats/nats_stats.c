@@ -188,8 +188,11 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
     if (add_mi_number(resp_obj, MI_SSTR("failed"),
             NATS_STATS_SUM(failed)) < 0)
         goto error;
+    /* The per-process `reconnects` counter was never incremented
+     * anywhere; the authoritative reconnect count is the shared pool's
+     * reconnect epoch (bumped in _pool_reconnected_cb). */
     if (add_mi_number(resp_obj, MI_SSTR("reconnects"),
-            NATS_STATS_SUM(reconnects)) < 0)
+            (unsigned long)nats_pool_get_reconnect_epoch()) < 0)
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("js_ack_ok"),
             NATS_STATS_SUM(js_ack_ok)) < 0)
