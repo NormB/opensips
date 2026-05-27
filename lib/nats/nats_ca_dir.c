@@ -143,14 +143,28 @@ char *nats_load_ca_directory(const char *dir, char **err)
 	}
 	p = out;
 
-	/* Pass 3: read + concatenate. */
+	/* Pass 3: read + concatenate.  Every write is bounded by the
+	 * budget computed in pass 2 (`out` holds `total` payload bytes + a
+	 * trailing NUL): a .pem that GREW between the two stat() passes
+	 * (TOCTOU) must never overflow `out`.  A file that SHRANK is
+	 * tolerated -- we copy whatever fread returns and move on rather
+	 * than failing on a "short read", since the file legitimately
+	 * changed under us. */
 	for (i = 0; i < pem_cnt; i++) {
-		FILE *f;
+		FILE  *f;
 		struct stat st;
 		size_t got;
+		size_t avail;     /* bytes left in `out`, excluding final NUL */
+		size_t budget;    /* max payload bytes we may read this file */
 		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
 		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
 			continue;
+		avail = (size_t)(total - (size_t)(p - out));
+		if (avail <= 1)
+			break;            /* no room left for data + separator */
+		budget = avail - 1;   /* reserve 1 byte for the '\n' separator */
+		if ((size_t)st.st_size < budget)
+			budget = (size_t)st.st_size;
 		f = fopen(path, "rb");
 		if (!f) {
 			set_err(err, "fopen('%s') failed", path);
@@ -158,15 +172,8 @@ char *nats_load_ca_directory(const char *dir, char **err)
 			out = NULL;
 			goto fail;
 		}
-		got = fread(p, 1, st.st_size, f);
+		got = fread(p, 1, budget, f);
 		fclose(f);
-		if (got != (size_t)st.st_size) {
-			set_err(err, "short read on '%s' (%zu/%lld)",
-			        path, got, (long long)st.st_size);
-			free(out);
-			out = NULL;
-			goto fail;
-		}
 		p += got;
 		*p++ = '\n';   /* separator between files */
 	}

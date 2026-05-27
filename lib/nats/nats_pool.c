@@ -337,6 +337,10 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 	char redacted[256];
 	int len;
 
+	/* Init defensively: on a non-OK status GetConnectedUrl may leave
+	 * the buffer unterminated, and nats_redact_url() would then read
+	 * uninitialised stack. */
+	url[0] = '\0';
 	nats_dl.natsConnection_GetConnectedUrl(nc, url, sizeof(url));
 	nats_redact_url(url, redacted, sizeof(redacted));
 	atomic_store(&_connected, 1);
@@ -820,6 +824,7 @@ natsConnection *nats_pool_get(void)
 	{
 		char url[256];
 		char redacted[256];
+		url[0] = '\0';   /* defensive: see _pool_reconnected_cb */
 		nats_dl.natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
 		nats_redact_url(url, redacted, sizeof(redacted));
 		LM_INFO("NATS pool: connected to %s (%d server(s) configured)\n",
@@ -980,9 +985,18 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		_kv_cache[_kv_cache_cnt].kv = kv;
 		_kv_cache_cnt++;
 	} else {
-		LM_WARN("NATS pool: KV cache full (%d buckets), "
-			"handle for '%s' will not be cached\n",
+		/* Cache full: do NOT hand back an uncached handle.  Callers
+		 * treat the result as pool-owned and never kvStore_Destroy()
+		 * it, so every subsequent call for this bucket would create
+		 * and leak another handle.  Destroy this one and fail loudly
+		 * instead -- raise NATS_POOL_MAX_KV_BUCKETS if more buckets
+		 * are genuinely needed. */
+		LM_ERR("NATS pool: KV bucket cache full (%d buckets); refusing "
+			"bucket '%s' to avoid leaking handles.  Raise "
+			"NATS_POOL_MAX_KV_BUCKETS if you need more.\n",
 			NATS_POOL_MAX_KV_BUCKETS, bucket);
+		nats_dl.kvStore_Destroy(kv);
+		return NULL;
 	}
 
 	return kv;
