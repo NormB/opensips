@@ -38,6 +38,7 @@
 
 #include "nats_rpc_consumer.h"
 #include "nats_rpc_slot.h"
+#include "nats_rpc_subject.h" /* reply-subject build/parse + generation */
 #include "nats_rpc_ipc.h"
 #include "nats_ring.h"     /* NATS_RING_*_MAX */
 #include "nats_rpc.h"      /* nats_rpc_hdr_deserialize_to_msg */
@@ -66,44 +67,6 @@ static int  g_inbox_prefix_len;
 /* ── reply callback (libnats thread) ─────────────────────────── */
 
 /*
- * Parse the slot_idx suffix from a reply subject.  Returns -1 on
- * malformed input.  Format expected:
- *
- *     <g_inbox_prefix>.<decimal-slot-idx>
- *
- * The prefix already contains the consumer pid so we don't need
- * to revalidate it.  We only need the slot_idx.
- */
-static int parse_slot_idx(const char *subject, int subject_len,
-                          uint32_t *out_slot)
-{
-	const char *dot;
-	long        v;
-	int         i;
-	const char *p;
-
-	if (!subject || subject_len <= 0 || !out_slot) return -1;
-
-	/* find the LAST '.' which separates the slot_idx suffix */
-	dot = NULL;
-	for (i = subject_len - 1; i >= 0; i--) {
-		if (subject[i] == '.') { dot = subject + i; break; }
-	}
-	if (!dot || dot >= subject + subject_len - 1)
-		return -1;
-
-	/* digit-only scan of the tail */
-	v = 0;
-	for (p = dot + 1; p < subject + subject_len; p++) {
-		if (*p < '0' || *p > '9') return -1;
-		v = v * 10 + (*p - '0');
-		if (v > 0x7fffffffL) return -1;   /* clamp */
-	}
-	*out_slot = (uint32_t)v;
-	return 0;
-}
-
-/*
  * libnats subscription callback.  Runs on a libnats internal
  * thread INSIDE the consumer process -- safe for libnats use
  * but MUST NOT touch OpenSIPS APIs that are worker-private.
@@ -125,6 +88,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	int         subj_len;
 	int         reply_len = 0;
 	uint32_t    slot_idx = 0;
+	uint32_t    gen = 0;
 	nats_rpc_slot_t *s;
 
 	(void)nc; (void)sub; (void)closure;
@@ -138,7 +102,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	reply_to = nats_dl.natsMsg_GetReply(msg);
 	if (reply_to) reply_len = (int)strlen(reply_to);
 
-	if (parse_slot_idx(subject, subj_len, &slot_idx) < 0) {
+	if (nats_rpc_subject_parse(subject, subj_len, &slot_idx, &gen) < 0) {
 		/* malformed reply subject -- drop quietly.  Could be
 		 * an unrelated message that matched our wildcard or a
 		 * malicious peer; either way, no slot to deliver to. */
@@ -152,6 +116,18 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		 * timed out and freed the slot before the reply
 		 * arrived, or a stale reply from a previous use of
 		 * the same slot.  Drop silently. */
+		nats_dl.natsMsg_Destroy(msg);
+		return;
+	}
+
+	/* Generation guard: a reply echoes the generation captured when
+	 * its request was published.  If the slot has since been freed and
+	 * re-claimed by a different request, the slot's generation has
+	 * advanced and this is a stale reply for the previous claim.  Drop
+	 * it rather than deliver another request's payload to the new
+	 * claimant.  (Reading state==INFLIGHT below is not sufficient: the
+	 * new claim may also be INFLIGHT.) */
+	if (atomic_load_explicit(&s->generation, memory_order_relaxed) != gen) {
 		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
@@ -298,7 +274,7 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 	nats_rpc_slot_t *s;
 	natsMsg         *out = NULL;
 	natsStatus       st;
-	char             reply_subject[80 + 16];
+	char             reply_subject[128];
 	natsConnection  *nc = (natsConnection *)user;
 	char             subj_c[NATS_RING_SUBJECT_MAX + 1];
 	int              n;
@@ -322,10 +298,13 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 			return;
 	}
 
-	/* Format the reply-to inbox subject pointing back at us. */
-	n = snprintf(reply_subject, sizeof(reply_subject), "%s.%u",
-		g_inbox_prefix, (unsigned)s->slot_idx);
-	if (n <= 0 || n >= (int)sizeof(reply_subject)) {
+	/* Format the reply-to inbox subject pointing back at us, including
+	 * the slot's current generation so a stale reply for a recycled
+	 * slot is rejected (see nats_rpc_subject.h). */
+	n = nats_rpc_subject_build(reply_subject, sizeof(reply_subject),
+		g_inbox_prefix, s->slot_idx,
+		atomic_load_explicit(&s->generation, memory_order_relaxed));
+	if (n < 0) {
 		LM_ERR("nats_rpc_consumer: reply-subject overflow for slot %u\n",
 			(unsigned)s->slot_idx);
 		{
