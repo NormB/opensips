@@ -214,11 +214,21 @@ void nats_consumer_process(int rank)
 			pause();
 	}
 
-	/* Get NATS connection from shared pool */
+	/* Get NATS connection from shared pool.  If the broker is down at
+	 * startup, nats_pool_get() exhausts its max_reconnect attempts and
+	 * returns NULL.  We MUST NOT return from this proc_export entry on
+	 * that path: returning raises SIGCHLD in the attendant, which
+	 * OpenSIPS treats as a fatal child exit and shuts the whole instance
+	 * down (the same hazard the no-subscriptions branch above guards
+	 * against).  Instead, stay alive and keep retrying — cnats
+	 * establishes the connection on its background thread and a later
+	 * nats_pool_get() succeeds once the broker becomes reachable. */
 	nc = nats_pool_get();
-	if (!nc) {
-		LM_ERR("cannot get NATS connection for consumer process\n");
-		return;
+	while (!nc) {
+		LM_WARN("NATS consumer: connection unavailable (broker "
+			"down?); staying alive, retrying in 5s\n");
+		sleep(5);
+		nc = nats_pool_get();
 	}
 
 	/* Subscribe to all configured subjects */

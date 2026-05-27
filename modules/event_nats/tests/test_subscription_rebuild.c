@@ -48,6 +48,54 @@ static int grep_count(const char *path, const char *needle)
 	return hits;
 }
 
+/*
+ * Extract the body (between the outermost braces) of a top-level
+ * function `funcname` from `path`.  Returns a malloc'd NUL-terminated
+ * string the caller must free, or NULL if not found.  Brace-counts so
+ * nested blocks are included.
+ */
+static char *extract_func_body(const char *path, const char *funcname)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) return NULL;
+	if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+	long sz = ftell(f);
+	if (sz < 0) { fclose(f); return NULL; }
+	rewind(f);
+	char *buf = malloc((size_t)sz + 1);
+	if (!buf) { fclose(f); return NULL; }
+	size_t n = fread(buf, 1, (size_t)sz, f);
+	fclose(f);
+	buf[n] = '\0';
+
+	/* find the definition: "funcname(" followed (later) by '{' before
+	 * any ';' (skips the forward declaration). */
+	char *p = buf;
+	char *body = NULL;
+	size_t flen = strlen(funcname);
+	while ((p = strstr(p, funcname)) != NULL) {
+		char *q = p + flen;
+		while (*q == ' ' || *q == '\t') q++;
+		if (*q != '(') { p += flen; continue; }
+		char *brace = q;
+		while (*brace && *brace != '{' && *brace != ';') brace++;
+		if (*brace != '{') { p += flen; continue; }  /* a decl/proto */
+		/* brace-count from here */
+		int depth = 0;
+		char *s = brace;
+		for (; *s; s++) {
+			if (*s == '{') depth++;
+			else if (*s == '}') { depth--; if (depth == 0) { s++; break; } }
+		}
+		size_t blen = (size_t)(s - brace);
+		body = malloc(blen + 1);
+		if (body) { memcpy(body, brace, blen); body[blen] = '\0'; }
+		break;
+	}
+	free(buf);
+	return body;
+}
+
 int main(void)
 {
 	const char *src = "../nats_consumer.c";
@@ -70,6 +118,25 @@ int main(void)
 	/* old loop slept 60 s; the fix should poll faster */
 	ASSERT(grep_count(src, "sleep(60)") == 0,
 		"consumer no longer uses sleep(60)");
+
+	/* Regression (connect-fail must not exit the proc): nats_consumer_process
+	 * is a proc_export entry.  Returning from it raises SIGCHLD in the
+	 * attendant and shuts the whole instance down, so on a broker-down
+	 * startup it must retry, never return.  Assert the function body
+	 * contains no `return;` and retries pool_get in a loop. */
+	{
+		char *body = extract_func_body(src, "nats_consumer_process");
+		ASSERT(body != NULL, "found nats_consumer_process body");
+		if (body) {
+			ASSERT(strstr(body, "return;") == NULL,
+				"nats_consumer_process never returns (proc_export "
+				"entry: a return SIGCHLDs the instance)");
+			ASSERT(strstr(body, "while (!nc)") != NULL,
+				"consumer retries nats_pool_get on connect failure "
+				"instead of returning");
+			free(body);
+		}
+	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);
