@@ -81,6 +81,31 @@ for their SIP-side TLS.  `lib/nats` itself dlopens whatever libnats
 the standard `ld.so` search resolves -- operators with multiple
 variants installed override via `$NATS_DL_LIBNATS_PATH`.
 
+## Credential redaction in logs
+
+NATS URLs may embed credentials as `scheme://user:pass@host` (or a
+single bearer token, `scheme://token@host`).  To keep those secrets out
+of the logs, **every** log line that prints a URL first passes it
+through `nats_redact_url()` (`nats_redact.c`):
+
+* The entire `userinfo` segment between `://` and `@` — username,
+  password, or token — is replaced with the literal `[redacted]`.
+  `nats://alice:s3cr3t@host:4222` is logged as
+  `nats://[redacted]@host:4222`.
+* Comma-separated seed lists are redacted per-URL; only the entries
+  that actually carry credentials are masked.
+* URLs without `userinfo` are logged verbatim.
+
+This covers the startup `NATS URL: …` line, the pool's `connected to …`
+and `reconnected to …` lines, and the `no valid NATS server URLs found
+in …` parse error.  Redaction affects logging only — the unmodified URL
+is still used for the connection itself.
+
+> **Contributor rule:** any new log statement that includes a URL or
+> server string MUST redact it via `nats_redact_url()` first — never log
+> a raw `url`/server value.  The behavior is pinned by
+> `lib/nats/tests/test_redact_url.c`.
+
 ## Disconnect / reconnect semantics
 
 * Publish-side modules (`event_nats`, `cachedb_nats`) fast-fail any
