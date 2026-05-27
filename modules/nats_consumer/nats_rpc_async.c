@@ -19,6 +19,46 @@
  */
 
 /*
+ * ============================================================================
+ *  IMPORTANT -- READ BEFORE TOUCHING THIS FILE
+ * ----------------------------------------------------------------------------
+ *  This translation unit contains TWO distinct things; only the second is
+ *  wired into production:
+ *
+ *   (A) The per-worker inbox-subscription async-RPC state machine -- the
+ *       ctx hash table, ensure_inbox_subscription(), on_inbox_reply(),
+ *       nats_rpc_async_deliver(), nats_rpc_async_child_init(), and the
+ *       refcount/lifecycle primitives documented just below.  This was the
+ *       ORIGINAL async transport: it runs a libnats subscription directly
+ *       on each SIP worker and dispatches replies from libnats's own
+ *       thread.  It is **TEST-ONLY / SUPERSEDED**.  Production no longer
+ *       wires it up -- nats_consumer.c::child_init() does NOT call
+ *       nats_rpc_async_child_init(), and nothing in the live path calls
+ *       ensure_inbox_subscription() or nats_rpc_async_deliver().  It is
+ *       retained solely because the unit tests
+ *       (tests/test_async_request_inflight.c, test_header_propagation.c)
+ *       link and exercise the pure state machine under -DTEST_SHIM.
+ *
+ *       DO NOT wire nats_rpc_async_child_init() (or any other entry into
+ *       this state machine) into child_init or the request path.  Running
+ *       a libnats subscription on a SIP worker is exactly the pattern that
+ *       crashes libnats 3.x on aarch64 (see nats_rpc_async.h) -- it was
+ *       replaced for that reason.
+ *
+ *   (B) w_nats_request_async() at the bottom of this file -- the LIVE
+ *       async acmd entry point registered by nats_consumer.c.  It does NOT
+ *       use the inbox-subscription machinery above; it uses the
+ *       consumer-routed SHM-slot transport (nats_rpc_slot.c +
+ *       nats_rpc_ipc.c, serviced in the consumer process by
+ *       nats_rpc_consumer.c) and yields the worker on a private timerfd.
+ *       No libnats subscription is ever created on a worker.
+ *
+ *  The big architecture comment immediately below describes subsystem (A)
+ *  for historical / test context.
+ * ============================================================================
+ */
+
+/*
  * nats_rpc_async.c -- async entry point for nats_request.
  *
  * Implements a non-blocking JetStream/core NATS request/reply RPC

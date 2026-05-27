@@ -339,13 +339,33 @@ int nats_ring_push(nats_ring_t *r,
 	return 0;
 }
 
+/*
+ * Bound on how many times pop will spin waiting for a single reserved
+ * slot to be published (ready_gen == tail) before giving up and
+ * reporting "empty".  The producer is the consumer process; if it dies
+ * or is preempted for a long time AFTER bumping head but BEFORE the
+ * release-store to ready_gen, the popper would otherwise spin forever
+ * (head > tail, so the ring looks non-empty, but the slot never
+ * publishes).  Bailing to the empty path lets the worker re-arm its
+ * reactor / futex wait and try again later instead of burning a core.
+ * The cap is generous so a merely-preempted producer that comes back
+ * within a few microseconds is still observed on the fast path; only a
+ * genuinely stalled producer trips it.
+ */
+#define NATS_RING_POP_SPIN_MAX  100000u
+
 int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 {
 	uint64_t t, h, ready;
+	uint64_t spin_t;        /* tail value the spin counter is tracking */
+	unsigned spins = 0;
 	nats_ring_slot_t *slot;
 
 	if (!r || !out)
 		return -1;
+
+	t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+	spin_t = t;
 
 	for (;;) {
 		t = atomic_load_explicit(&r->tail, memory_order_relaxed);
@@ -360,6 +380,19 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 			 * concurrent consumer already advanced tail.  Loop:
 			 * the next iteration's head/tail load will tell us
 			 * which case we're in. */
+			if (t != spin_t) {
+				/* Tail moved (a concurrent consumer made progress
+				 * or we are on a fresh slot): real forward motion,
+				 * reset the stall counter. */
+				spin_t = t;
+				spins  = 0;
+			} else if (++spins >= NATS_RING_POP_SPIN_MAX) {
+				/* Same slot has been un-published for too long --
+				 * treat as a stalled / dead producer and report
+				 * empty rather than spinning indefinitely.  The
+				 * caller re-arms its wait and retries. */
+				return -1;
+			}
 			nats_ring_cpu_relax();
 			continue;
 		}
