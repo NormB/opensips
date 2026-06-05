@@ -122,6 +122,11 @@ unsigned int default_expires = 3600;
 unsigned int timer_interval = 100;
 unsigned int failure_retry_interval = 0;
 unsigned int reregister_exp_percentage=100;
+/* on a 423 reply whose Min-Expires is not greater than the requested
+ * expires (a non-conformant 423 per RFC 3261 10.3): 1 = treat as a
+ * registrar error (default), 0 = tolerate it and retry with the
+ * advertised Min-Expires (legacy behavior) */
+unsigned int min_expires_strict = 1;
 
 reg_table_t reg_htable = NULL;
 unsigned int reg_hsize = 1;
@@ -170,6 +175,7 @@ static const param_export_t params[]= {
 	{"cluster_shtag_column",	STR_PARAM,	&cluster_shtag_column.s},
 	{"state_column",	STR_PARAM,		&state_column.s},
 	{"reregister_expiry_percentage", INT_PARAM,	&reregister_exp_percentage},
+	{"min_expires_strict",	INT_PARAM,			&min_expires_strict},
 	{0,0,0}
 };
 
@@ -729,13 +735,56 @@ int run_reg_tm_cback(void *e_data, void *data, void *r_data)
 			goto done;
 		}
 		if (0 == parse_min_expires(msg)) {
-			rec->expires = (unsigned int)(long)msg->min_expires->parsed;
-			if(send_register(cb_param->hash_index, rec, NULL)==1) {
-				reg_change_state(rec,REGISTERING_STATE);
+			exp = (unsigned int)(long)msg->min_expires->parsed;
+			/* RFC 3261 10.3: a registrar may only reply 423 when the
+			 * requested expiration is *smaller* than its configured
+			 * minimum, so a conformant Min-Expires is always strictly
+			 * greater than what we requested. RFC 3261 10.2.8 then lets
+			 * us retry with an expiration "equal to or greater than"
+			 * Min-Expires - we use exactly Min-Expires.
+			 *
+			 * The new value is stored in rec->wanted_expires (the value
+			 * actually put on the wire by send_register), so that the
+			 * retry carries it AND the subsequent re-registrations reuse
+			 * it directly, avoiding a 423 round-trip on every refresh.
+			 * Note: updating rec->expires here would have no effect, as
+			 * send_register() sends rec->wanted_expires.
+			 *
+			 * A Min-Expires that is not greater than what we requested is
+			 * a non-conformant 423. By default (min_expires_strict=1) we
+			 * treat it as a registrar error; with min_expires_strict=0 we
+			 * tolerate it and retry with the advertised value anyway. */
+			if (exp > rec->wanted_expires || !min_expires_strict) {
+				if (exp > rec->wanted_expires)
+					LM_DBG("registrar requested Min-Expires=[%u] > requested "
+						"expires=[%u] for AOR=[%.*s], retrying REGISTER\n",
+						exp, rec->wanted_expires,
+						rec->td.rem_uri.len, rec->td.rem_uri.s);
+				else
+					LM_WARN("non-conformant 423 for AOR=[%.*s]: Min-Expires=[%u] "
+						"not greater than requested expires=[%u]; accepting it "
+						"anyway (min_expires_strict=0)\n",
+						rec->td.rem_uri.len, rec->td.rem_uri.s,
+						exp, rec->wanted_expires);
+				rec->wanted_expires = exp;
+				if(send_register(cb_param->hash_index, rec, NULL)==1) {
+					reg_change_state(rec,REGISTERING_STATE);
+				} else {
+					reg_change_state(rec,INTERNAL_ERROR_STATE);
+				}
 			} else {
-				reg_change_state(rec,INTERNAL_ERROR_STATE);
+				LM_ERR("bogus 423 reply for AOR=[%.*s]: Min-Expires=[%u] "
+					"not greater than requested expires=[%u] "
+					"(set min_expires_strict=0 to accept it anyway)\n",
+					rec->td.rem_uri.len, rec->td.rem_uri.s,
+					exp, rec->wanted_expires);
+				reg_change_state(rec,REGISTRAR_ERROR_STATE);
+				rec->registration_timeout = now + (failure_retry_interval?failure_retry_interval:(rec->expires*reregister_exp_percentage/100)) - timer_interval;
 			}
 		} else {
+			LM_ERR("received 423 reply with no valid Min-Expires header "
+				"for AOR=[%.*s], treating as registrar error\n",
+				rec->td.rem_uri.len, rec->td.rem_uri.s);
 			reg_change_state(rec,REGISTRAR_ERROR_STATE);
 			rec->registration_timeout = now + (failure_retry_interval?failure_retry_interval:(rec->expires*reregister_exp_percentage/100)) - timer_interval;
 		}

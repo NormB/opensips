@@ -541,6 +541,46 @@ modparam("uac_registrant", "reregister_expiry_percentage", 90)
 		</example>
 	</section>
 
+	<section id="param_min_expires_strict" xreflabel="min_expires_strict">
+		<title><varname>min_expires_strict</varname> (integer)</title>
+		<para>
+		Controls how a <emphasis>423 (Interval Too Brief)</emphasis> reply is
+		handled when its <emphasis>Min-Expires</emphasis> header carries a value
+		that is <emphasis>not greater</emphasis> than the expiration interval the
+		registrant requested. As per RFC 3261 (sections 10.3 and 10.2.8) a
+		registrar must only reply 423 when the requested expiration is smaller
+		than its configured minimum, so a conformant Min-Expires is always
+		strictly greater than the requested value; a Min-Expires that is not
+		greater is therefore a non-conformant reply.
+		</para>
+		<para>
+		When set to <quote>1</quote> (default), such a 423 is treated as a
+		registrar error (the registration enters the registrar-error state and
+		is retried later according to the failure back-off). When set to
+		<quote>0</quote>, the registrant tolerates the non-conformant reply and
+		retries the REGISTER using the advertised Min-Expires value anyway
+		(legacy behavior).
+		</para>
+		<para>
+		Note that a 423 reply with a missing or unparsable Min-Expires header is
+		always treated as a registrar error, regardless of this parameter, since
+		there is no value to retry with.
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>1</quote>.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <quote>min_expires_strict</quote> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("uac_registrant", "min_expires_strict", 0)
+...
+</programlisting>
+		</example>
+	</section>
+
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
