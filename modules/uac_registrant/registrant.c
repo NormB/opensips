@@ -43,6 +43,7 @@
 #include "reg_db_handler.h"
 #include "clustering.h"
 #include "reg_events.h"
+#include "min_expires.h"
 
 
 #define UAC_REGISTRAR_URI_PARAM              1
@@ -734,59 +735,57 @@ int run_reg_tm_cback(void *e_data, void *data, void *r_data)
 			LM_ERR("FAKED_REPLY\n");
 			goto done;
 		}
-		if (0 == parse_min_expires(msg)) {
-			exp = (unsigned int)(long)msg->min_expires->parsed;
-			/* RFC 3261 10.3: a registrar may only reply 423 when the
-			 * requested expiration is *smaller* than its configured
-			 * minimum, so a conformant Min-Expires is always strictly
-			 * greater than what we requested. RFC 3261 10.2.8 then lets
-			 * us retry with an expiration "equal to or greater than"
-			 * Min-Expires - we use exactly Min-Expires.
-			 *
-			 * The new value is stored in rec->wanted_expires (the value
-			 * actually put on the wire by send_register), so that the
-			 * retry carries it AND the subsequent re-registrations reuse
-			 * it directly, avoiding a 423 round-trip on every refresh.
-			 * Note: updating rec->expires here would have no effect, as
-			 * send_register() sends rec->wanted_expires.
-			 *
-			 * A Min-Expires that is not greater than what we requested is
-			 * a non-conformant 423. By default (min_expires_strict=1) we
-			 * treat it as a registrar error; with min_expires_strict=0 we
-			 * tolerate it and retry with the advertised value anyway. */
-			if (exp > rec->wanted_expires || !min_expires_strict) {
-				if (exp > rec->wanted_expires)
-					LM_DBG("registrar requested Min-Expires=[%u] > requested "
-						"expires=[%u] for AOR=[%.*s], retrying REGISTER\n",
-						exp, rec->wanted_expires,
-						rec->td.rem_uri.len, rec->td.rem_uri.s);
-				else
-					LM_WARN("non-conformant 423 for AOR=[%.*s]: Min-Expires=[%u] "
-						"not greater than requested expires=[%u]; accepting it "
-						"anyway (min_expires_strict=0)\n",
-						rec->td.rem_uri.len, rec->td.rem_uri.s,
-						exp, rec->wanted_expires);
-				rec->wanted_expires = exp;
-				if(send_register(cb_param->hash_index, rec, NULL)==1) {
-					reg_change_state(rec,REGISTERING_STATE);
-				} else {
-					reg_change_state(rec,INTERNAL_ERROR_STATE);
-				}
+		/* exp == 0 means "no usable Min-Expires" (no/unparsable header, or an
+		 * explicit 0); min_expires_decide() treats both the same. On an accepted
+		 * retry we store exp into rec->wanted_expires (the value send_register()
+		 * puts on the wire), so it carries into this retry and every later
+		 * refresh - negotiated once, no 423 round-trip per refresh. Full
+		 * RFC-3261 rationale and the truth table live with enum
+		 * min_expires_action in min_expires.h. */
+		exp = (0 == parse_min_expires(msg)) ?
+			(unsigned int)(long)msg->min_expires->parsed : 0;
+		switch (min_expires_decide(exp, rec->wanted_expires, min_expires_strict)) {
+		case ME_RETRY_CONFORMANT:
+			LM_DBG("registrar requested Min-Expires=[%u] > requested "
+				"expires=[%u] for AOR=[%.*s], retrying REGISTER\n",
+				exp, rec->wanted_expires,
+				rec->td.rem_uri.len, rec->td.rem_uri.s);
+			goto retry_register;
+		case ME_RETRY_TOLERATED:
+			LM_WARN("non-conformant 423 for AOR=[%.*s]: Min-Expires=[%u] "
+				"not greater than requested expires=[%u]; accepting it "
+				"anyway (min_expires_strict=0)\n",
+				rec->td.rem_uri.len, rec->td.rem_uri.s,
+				exp, rec->wanted_expires);
+retry_register:
+			rec->wanted_expires = exp;
+			if(send_register(cb_param->hash_index, rec, NULL)==1) {
+				reg_change_state(rec,REGISTERING_STATE);
 			} else {
-				LM_ERR("bogus 423 reply for AOR=[%.*s]: Min-Expires=[%u] "
-					"not greater than requested expires=[%u] "
-					"(set min_expires_strict=0 to accept it anyway)\n",
-					rec->td.rem_uri.len, rec->td.rem_uri.s,
-					exp, rec->wanted_expires);
-				reg_change_state(rec,REGISTRAR_ERROR_STATE);
-				rec->registration_timeout = now + (failure_retry_interval?failure_retry_interval:(rec->expires*reregister_exp_percentage/100)) - timer_interval;
+				reg_change_state(rec,INTERNAL_ERROR_STATE);
 			}
-		} else {
-			LM_ERR("received 423 reply with no valid Min-Expires header "
+			break;
+		case ME_ERR_NO_VALUE:
+			LM_ERR("received 423 reply with no usable Min-Expires value "
 				"for AOR=[%.*s], treating as registrar error\n",
 				rec->td.rem_uri.len, rec->td.rem_uri.s);
+			goto registrar_error;
+		case ME_ERR_INSANE:
+			LM_ERR("423 reply for AOR=[%.*s] demands Min-Expires=[%u] above "
+				"the sane maximum [%u]; refusing as a registrar error\n",
+				rec->td.rem_uri.len, rec->td.rem_uri.s,
+				exp, (unsigned int)UAC_REG_MAX_SANE_EXPIRES);
+			goto registrar_error;
+		case ME_ERR_NONCONFORMANT:
+			LM_ERR("bogus 423 reply for AOR=[%.*s]: Min-Expires=[%u] "
+				"not greater than requested expires=[%u] "
+				"(set min_expires_strict=0 to accept it anyway)\n",
+				rec->td.rem_uri.len, rec->td.rem_uri.s,
+				exp, rec->wanted_expires);
+registrar_error:
 			reg_change_state(rec,REGISTRAR_ERROR_STATE);
 			rec->registration_timeout = now + (failure_retry_interval?failure_retry_interval:(rec->expires*reregister_exp_percentage/100)) - timer_interval;
+			break;
 		}
 		break;
 

@@ -1,0 +1,47 @@
+#
+# OpenSIPS config for the uac_registrant 423/Min-Expires SIPp test.
+#
+# This is a TEMPLATE. run.sh substitutes the following placeholders and writes
+# a concrete opensips.cfg into a per-run working directory:
+#
+#   @MPATH@      absolute path to the built modules/ directory
+#   @SIP_SOCK@   SIP UDP listen socket  (e.g. udp:127.0.0.1:5060)
+#   @DBDIR@      db_text database dir (holds the empty 'registrant' table)
+#   @FIFO@       MI FIFO path
+#   @REPLYDIR@   MI FIFO reply directory
+#   @STRICT@     value of the min_expires_strict modparam (0 or 1)
+#
+# The registrant itself is NOT defined here; run.sh injects it at runtime with
+# the MI command 'reg_upsert', so a single config drives every test case.
+#
+
+log_level = 3
+stderror_enabled = yes
+syslog_enabled = no
+
+socket = @SIP_SOCK@
+
+mpath = "@MPATH@"
+
+loadmodule "proto_udp.so"
+loadmodule "tm.so"
+loadmodule "uac_auth.so"
+loadmodule "db_text.so"
+loadmodule "mi_fifo.so"
+loadmodule "uac_registrant.so"
+
+modparam("mi_fifo", "fifo_name", "@FIFO@")
+modparam("mi_fifo", "fifo_mode", 0666)
+modparam("mi_fifo", "reply_dir", "@REPLYDIR@")
+
+modparam("uac_registrant", "hash_size", 1)
+modparam("uac_registrant", "timer_interval", 10)
+modparam("uac_registrant", "db_url", "text://@DBDIR@")
+modparam("uac_registrant", "min_expires_strict", @STRICT@)
+
+# Pure UAC: we never receive routed SIP requests here. Replies to our own
+# REGISTERs are consumed by tm and dispatched to the uac_registrant callback,
+# so the script route is never actually run - it only needs to exist.
+route {
+	drop;
+}

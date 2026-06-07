@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case A: CONFORMANT 423 (Min-Expires > requested).
+     The registrant requests expires=60. We answer 423 with Min-Expires:120,
+     which RFC 3261 10.3 permits (120 > 60). The registrant MUST retry with
+     expires=120, which we then accept. Expected final state: REGISTERED.
+     This works regardless of min_expires_strict. -->
+<scenario name="uac_registrant registrar - conformant 423 (Min-Expires &gt; requested)">
+
+  <!-- 1) initial REGISTER, must carry the requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 Interval Too Brief, Min-Expires:120 (conformant) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagA[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Min-Expires: 120
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) the retry REGISTER must now carry expires=120 (the advertised
+          Min-Expires). check_it fails the call if it does not. -->
+  <recv request="REGISTER" timeout="8000">
+    <action>
+      <ereg regexp="expires=120([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 4) accept the registration (echo the Contact, which carries expires=120) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagA[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <timewait milliseconds="1000"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case D: 423 with NO (parsable) Min-Expires header.
+     The registrant requests expires=60. We answer 423 but omit Min-Expires
+     entirely. There is no value to retry with, so the registrant MUST treat
+     this as a registrar error and MUST NOT retry - regardless of
+     min_expires_strict. Expected final state: REGISTRAR_ERROR.
+
+     SIPp verdict: as in case B, the second <recv> is expected to TIME OUT. A
+     retry would fail the call; the authoritative check is the MI state. -->
+<scenario name="uac_registrant registrar - 423 without Min-Expires (no retry)">
+
+  <!-- 1) initial REGISTER, requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 with NO Min-Expires header at all -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagD[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) we must NOT receive another REGISTER. Timing out here is the PASS path. -->
+  <recv request="REGISTER" timeout="6000" ontimeout="99">
+    <action>
+      <log message="FAIL: registrant retried a 423 that had no Min-Expires"/>
+    </action>
+  </recv>
+
+  <!-- 4) only reached if a (forbidden) retry arrived: force the call to fail -->
+  <recv request="ACK" timeout="500"/>
+
+  <!-- 99) timeout path: no retry was sent => PASS -->
+  <label id="99"/>
+  <timewait milliseconds="500"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>

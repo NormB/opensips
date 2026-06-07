@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case B: NON-CONFORMANT 423 (Min-Expires <= requested) with
+     min_expires_strict=1 (default / strict).
+     The registrant requests expires=60. We answer 423 with Min-Expires:30,
+     which is non-conformant (30 is not greater than 60). With the default
+     strict behavior the registrant MUST treat this as a registrar error and
+     MUST NOT retry (no endless REGISTER/423 loop). Expected final state:
+     REGISTRAR_ERROR.
+
+     SIPp verdict: the second <recv> is expected to TIME OUT (no retry). If a
+     retry REGISTER does arrive, we fall through to a recv that times out with
+     no ontimeout, which fails the call. The authoritative assertion is the
+     registrant state queried over MI by run.sh. -->
+<scenario name="uac_registrant registrar - non-conformant 423, strict (no retry)">
+
+  <!-- 1) initial REGISTER, requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 with a non-conformant Min-Expires:30 (<= requested 60) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagB[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Min-Expires: 30
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) we must NOT receive another REGISTER. Timing out here is the PASS
+          path (ontimeout jumps to the end). -->
+  <recv request="REGISTER" timeout="6000" ontimeout="99">
+    <action>
+      <log message="FAIL: registrant retried a non-conformant 423 under strict mode"/>
+    </action>
+  </recv>
+
+  <!-- 4) only reached if a (forbidden) retry arrived: force the call to fail -->
+  <recv request="ACK" timeout="500"/>
+
+  <!-- 99) timeout path: no retry was sent => PASS -->
+  <label id="99"/>
+  <timewait milliseconds="500"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>

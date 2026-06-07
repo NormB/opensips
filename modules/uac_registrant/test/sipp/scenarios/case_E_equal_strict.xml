@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case E: BOUNDARY 423 where Min-Expires == requested, strict (default).
+     The registrant requests expires=60. We answer 423 with Min-Expires:60,
+     i.e. exactly equal to the requested value. RFC 3261 only allows 423 when
+     the request is strictly smaller than the registrar minimum, so equal is
+     non-conformant. The code's test is a strict '>' (exp > wanted_expires), so
+     under the default strict mode this MUST be treated as a registrar error
+     with NO retry. This case exists specifically to pin that the operator is
+     '>' and not '>=' (a '>=' bug would wrongly accept Min-Expires == requested).
+     Expected final state: REGISTRAR_ERROR. -->
+<scenario name="uac_registrant registrar - boundary 423 Min-Expires == requested, strict">
+
+  <!-- 1) initial REGISTER, requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 with Min-Expires:60 (equal to requested -> non-conformant) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagE[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Min-Expires: 60
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) we must NOT receive another REGISTER (strict '>' rejects equal). -->
+  <recv request="REGISTER" timeout="6000" ontimeout="99">
+    <action>
+      <log message="FAIL: registrant retried a 423 with Min-Expires == requested under strict mode"/>
+    </action>
+  </recv>
+
+  <!-- 4) only reached if a (forbidden) retry arrived: force the call to fail -->
+  <recv request="ACK" timeout="500"/>
+
+  <!-- 99) timeout path: no retry was sent => PASS -->
+  <label id="99"/>
+  <timewait milliseconds="500"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>

@@ -557,14 +557,17 @@ modparam("uac_registrant", "reregister_expiry_percentage", 90)
 		When set to <quote>1</quote> (default), such a 423 is treated as a
 		registrar error (the registration enters the registrar-error state and
 		is retried later according to the failure back-off). When set to
-		<quote>0</quote>, the registrant tolerates the non-conformant reply and
-		retries the REGISTER using the advertised Min-Expires value anyway
-		(legacy behavior).
+		<quote>0</quote> (tolerant mode), the registrant tolerates the
+		non-conformant reply and retries the REGISTER using the advertised
+		Min-Expires value anyway.
 		</para>
 		<para>
-		Note that a 423 reply with a missing or unparsable Min-Expires header is
-		always treated as a registrar error, regardless of this parameter, since
-		there is no value to retry with.
+		Note that a 423 reply with a missing or unparsable Min-Expires header,
+		one carrying a value of <quote>0</quote> (retrying with it would send
+		Expires: 0, de-registering the contact), or one demanding an
+		implausibly large minimum (more than one day) is always treated as a
+		registrar error, regardless of this parameter, since there is no usable
+		value to retry with.
 		</para>
 		<para>
 		<emphasis>

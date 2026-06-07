@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case C: NON-CONFORMANT 423 (Min-Expires <= requested) with
+     min_expires_strict=0 (legacy / tolerant).
+     The registrant requests expires=60. We answer 423 with Min-Expires:30,
+     which is non-conformant (30 is not greater than 60). With
+     min_expires_strict=0 the registrant tolerates it and retries with the
+     advertised value (30). We then accept. Expected final state: REGISTERED. -->
+<scenario name="uac_registrant registrar - non-conformant 423, tolerant (strict=0)">
+
+  <!-- 1) initial REGISTER, requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 with a non-conformant Min-Expires:30 (<= requested 60) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagC[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Min-Expires: 30
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) with strict=0 the registrant retries with the advertised value (30) -->
+  <recv request="REGISTER" timeout="8000">
+    <action>
+      <ereg regexp="expires=30([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 4) accept -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagC[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <timewait milliseconds="1000"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>
