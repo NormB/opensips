@@ -562,6 +562,12 @@ modparam("uac_registrant", "reregister_expiry_percentage", 90)
 		Min-Expires value anyway.
 		</para>
 		<para>
+		Whenever a 423 is accepted (in either mode), the advertised Min-Expires
+		is adopted as the registrant's requested expiration and reused for every
+		subsequent re-REGISTER. The interval is therefore renegotiated only once,
+		rather than incurring a 423 round-trip on each refresh.
+		</para>
+		<para>
 		Note that a 423 reply with a missing or unparsable Min-Expires header,
 		one carrying a value of <quote>0</quote> (retrying with it would send
 		Expires: 0, de-registering the contact), or one demanding an

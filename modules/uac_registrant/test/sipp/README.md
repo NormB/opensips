@@ -51,6 +51,24 @@ The runner passes `opensips -i` to skip the module git-revision cross-check,
 which only matters in a local build tree that mixes revisions; version and
 compile-flags are still verified.
 
+## Expected output
+
+On success every case prints `PASS` and the runner exits `0`:
+
+```text
+------------------------------------------------------------
+PASS  A_conformant    sipp=ok  state=REGISTERED_STATE
+PASS  B_low_strict    sipp=ok  state=REGISTRAR_ERROR_STATE
+PASS  C_low_tolerant  sipp=ok  state=REGISTERED_STATE
+PASS  D_missing       sipp=ok  state=REGISTRAR_ERROR_STATE
+PASS  E_equal_strict  sipp=ok  state=REGISTRAR_ERROR_STATE
+------------------------------------------------------------
+result: 5 passed, 0 failed
+```
+
+A failing case instead prints `FAIL` with the offending SIPp verdict and/or MI
+state, and the runner exits non-zero.
+
 ## Files
 
 | File | Purpose |
@@ -68,3 +86,7 @@ TAP unit tests in `../test.c`, run with:
 ```sh
 make test module=uac_registrant
 ```
+
+These pin the full truth table — 20 assertions, including the strict `>`
+boundary, the `Min-Expires: 0` case, and the over-maximum case — and on success
+print `1..20` with every line reported `ok`.
