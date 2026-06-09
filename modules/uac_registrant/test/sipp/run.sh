@@ -21,6 +21,9 @@
 #   C  M=30  <= W           strict=0  -> retry@30  -> REGISTERED   (legacy/tolerant)
 #   D  no Min-Expires       strict=1  -> error, no retry -> REGISTRAR_ERROR
 #   E  M=60  == W (boundary) strict=1 -> error, no retry -> REGISTRAR_ERROR
+#   F  M=120 > W, then a forced refresh -> retry@120, accept -> REGISTERED, and
+#      the refresh re-REGISTER STILL carries 120 (Min-Expires persisted into the
+#      wanted_expires field, not the ephemeral expires; the #3659 regression).
 #
 # Usage:  ./run.sh [-v] [case ...]      (default: all cases; -v keeps logs)
 #
@@ -45,13 +48,16 @@ EXPIRY=60
 KEEP=0
 [ "${1:-}" = "-v" ] && { KEEP=1; shift; }
 
-# case table: name|scenario|strict|expected_state
+# case table: name|scenario|strict|expected_state[|refresh]
+# the optional 5th field "refresh" forces a second REGISTER once the first cycle
+# has REGISTERED, so the scenario can assert the negotiated expires persisted.
 CASES=(
   "A_conformant|case_A_conformant.xml|1|REGISTERED_STATE"
   "B_low_strict|case_B_low_strict.xml|1|REGISTRAR_ERROR_STATE"
   "C_low_tolerant|case_C_low_tolerant.xml|0|REGISTERED_STATE"
   "D_missing|case_D_missing.xml|1|REGISTRAR_ERROR_STATE"
   "E_equal_strict|case_E_equal_strict.xml|1|REGISTRAR_ERROR_STATE"
+  "F_persist|case_F_persist.xml|1|REGISTERED_STATE|refresh"
 )
 
 # --------------------------------------------------------------------------
@@ -102,6 +108,16 @@ reg_state() {
     '.result.Records[]? | select(.AOR==$aor) | .state' 2>/dev/null | head -1
 }
 
+# block until our registrant reaches REGISTERED (≈15s budget, > timer_interval)
+wait_registered() {
+  local i
+  for i in $(seq 1 75); do
+    [ "$(reg_state)" = "REGISTERED_STATE" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 # --------------------------------------------------------------------------
 # OpenSIPS lifecycle
 # --------------------------------------------------------------------------
@@ -141,8 +157,8 @@ upsert_registrant() {
 # --------------------------------------------------------------------------
 # One test case
 # --------------------------------------------------------------------------
-run_case() {  # run_case name scenario strict expected_state
-  local name="$1" scn="$2" strict="$3" want="$4"
+run_case() {  # run_case name scenario strict expected_state [refresh]
+  local name="$1" scn="$2" strict="$3" want="$4" refresh="${5:-}"
   RUN="$WORK/$name"; mkdir -p "$RUN"
 
   start_opensips "$strict"
@@ -152,7 +168,9 @@ run_case() {  # run_case name scenario strict expected_state
   fi
 
   # SIPp UAS (registrar). -m 1: one call; exit 0 iff the call matched the script.
-  timeout 40 "$SIPP" "$SIP_IP:$SIP_PORT" \
+  # 60s upper bound: a refresh case runs two register cycles, each gated by the
+  # registrant's timer_interval.
+  timeout 60 "$SIPP" "$SIP_IP:$SIP_PORT" \
       -sf "$HERE/scenarios/$scn" -i "$REG_IP" -p "$REG_PORT" -m 1 \
       -trace_err -error_file "$RUN/sipp.err" \
       -trace_screen -screen_file "$RUN/sipp.screen" \
@@ -161,6 +179,20 @@ run_case() {  # run_case name scenario strict expected_state
 
   sleep 0.5
   upsert_registrant
+
+  # Persistence cases: once the first cycle has REGISTERED, force a re-REGISTER.
+  # The scenario then asserts the refresh STILL carries the negotiated
+  # Min-Expires - i.e. it persisted into wanted_expires, not the ephemeral
+  # expires (the #3659 regression). Same Call-ID, so it stays one SIPp call.
+  if [ "$refresh" = refresh ]; then
+    if wait_registered; then
+      mi reg_force_register "$(jq -n \
+            --arg aor "$AOR" --arg c "$CONTACT" --arg r "$REGISTRAR" \
+            '{aor:$aor, contact:$c, registrar:$r}')" >/dev/null
+    else
+      echo "      (note: $name never reached REGISTERED before the forced refresh)"
+    fi
+  fi
 
   wait "$sipp_pid"; local sipp_rc=$?
 
@@ -193,12 +225,12 @@ echo "uac_registrant 423/Min-Expires SIPp integration test"
 echo "opensips=$OPENSIPS  sipp=$($SIPP -v 2>&1 | grep -oE 'v[0-9.]+' | head -1)"
 echo "------------------------------------------------------------"
 for row in "${CASES[@]}"; do
-  IFS='|' read -r name scn strict want <<<"$row"
+  IFS='|' read -r name scn strict want refresh <<<"$row"
   case "$select" in
     all) : ;;
     *) [[ " $select " == *" $name "* ]] || continue ;;
   esac
-  if run_case "$name" "$scn" "$strict" "$want"; then pass=$((pass+1)); else fail=$((fail+1)); fi
+  if run_case "$name" "$scn" "$strict" "$want" "$refresh"; then pass=$((pass+1)); else fail=$((fail+1)); fi
 done
 echo "------------------------------------------------------------"
 echo "result: $pass passed, $fail failed"

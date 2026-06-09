@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Case F: PERSISTENCE of the negotiated Min-Expires across a refresh.
+
+     Mirrors the regression bogdan-iancu described on #3910: the #3659 change
+     made the record's "expires" field ephemeral (re-seeded from wanted_expires
+     each cycle), so a 423's Min-Expires must be stored in the *persistent*
+     wanted_expires - otherwise not the immediate retry but every LATER
+     re-REGISTER reverts to the originally requested value.
+
+     The registrant requests expires=60; we answer 423 with Min-Expires:120
+     (conformant, 120 > 60). It retries at 120 and we accept. Then the harness
+     forces a re-REGISTER (refresh): that refresh MUST again carry expires=120.
+     If the negotiated value lived in the ephemeral "expires" field it would
+     revert to 60 here and this check_it would fail the call.
+
+     The REGISTERED->refresh path does not regenerate the Call-ID, so both the
+     first cycle and the refresh are one SIPp call (-m 1). Expected final state:
+     REGISTERED. Independent of min_expires_strict (this is a conformant 423). -->
+<scenario name="uac_registrant registrar - Min-Expires persistence across refresh">
+
+  <!-- 1) initial REGISTER, requested expires=60 -->
+  <recv request="REGISTER">
+    <action>
+      <ereg regexp="expires=60([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 2) reply 423 Interval Too Brief, Min-Expires:120 (conformant) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 423 Interval Too Brief
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagF[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Min-Expires: 120
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 3) the retry REGISTER must carry the advertised expires=120 -->
+  <recv request="REGISTER" timeout="8000">
+    <action>
+      <ereg regexp="expires=120([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="matched [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 4) accept the registration (Contact echoes expires=120) -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagF[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- 5) THE CRUX: after the harness forces a re-REGISTER, the refresh must
+          STILL carry expires=120. A revert to 60 (negotiated value not made
+          persistent) fails the call here. Generous timeout to span the
+          registrant's timer_interval. -->
+  <recv request="REGISTER" timeout="20000">
+    <action>
+      <ereg regexp="expires=120([^0-9]|$)" search_in="msg" check_it="true"
+            assign_to="junk"/>
+      <log message="refresh persisted [$junk]"/>
+    </action>
+  </recv>
+
+  <!-- 6) accept the refreshed registration -->
+  <send>
+    <![CDATA[
+
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTagF[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <timewait milliseconds="1000"/>
+
+  <ResponseTimeRepartition value="100, 500, 1000, 2000"/>
+</scenario>

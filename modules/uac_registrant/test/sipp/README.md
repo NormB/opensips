@@ -31,6 +31,16 @@ With requested expires `W = 60` and `M` = the `Min-Expires` we send back:
 | C | `Min-Expires: 30` (`M < W`) | 0 | retry with 30 (legacy/tolerant), accept | `REGISTERED` |
 | D | no `Min-Expires` header | 1 | registrar error, **no retry** | `REGISTRAR_ERROR` |
 | E | `Min-Expires: 60` (`M == W`, boundary) | 1 | registrar error, **no retry** (pins the strict `>`) | `REGISTRAR_ERROR` |
+| F | `Min-Expires: 120` (`M > W`), then a **forced refresh** | 1 | retry with 120, accept; the refresh re-REGISTER **still carries 120** | `REGISTERED` |
+
+Case **F** pins *persistence* — the regression bogdan-iancu described on #3910. The
+#3659 change made the record's `expires` field ephemeral (re-seeded from
+`wanted_expires` each cycle), so the negotiated `Min-Expires` has to be stored in
+the persistent `wanted_expires`; otherwise the immediate retry works but every
+later re-REGISTER reverts to the originally requested value. After the conformant
+423/retry/accept, the harness forces a re-REGISTER and the scenario asserts that
+refresh **also** carries `expires=120`. (A revert to `60` here is invisible to
+cases A–E, which each exercise a single cycle.)
 
 ## Running
 
@@ -62,8 +72,9 @@ PASS  B_low_strict    sipp=ok  state=REGISTRAR_ERROR_STATE
 PASS  C_low_tolerant  sipp=ok  state=REGISTERED_STATE
 PASS  D_missing       sipp=ok  state=REGISTRAR_ERROR_STATE
 PASS  E_equal_strict  sipp=ok  state=REGISTRAR_ERROR_STATE
+PASS  F_persist       sipp=ok  state=REGISTERED_STATE
 ------------------------------------------------------------
-result: 5 passed, 0 failed
+result: 6 passed, 0 failed
 ```
 
 A failing case instead prints `FAIL` with the offending SIPp verdict and/or MI
@@ -76,7 +87,7 @@ state, and the runner exits non-zero.
 | `run.sh` | orchestrator: per-case OpenSIPS + SIPp lifecycle, MI assertions |
 | `opensips.cfg.template` | config template (placeholders filled in per run) |
 | `db/version`, `db/registrant` | empty `db_text` seed (registrant added via MI) |
-| `scenarios/case_*.xml` | the five SIPp registrar scenarios |
+| `scenarios/case_*.xml` | the six SIPp registrar scenarios |
 
 ## Related unit tests
 
