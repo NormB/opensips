@@ -81,12 +81,49 @@ state, and the runner exits non-zero.
 ## Related unit tests
 
 The pure decision behind these flows (`min_expires_decide()`) is also covered by
-TAP unit tests in `../test.c`, run with:
+TAP unit tests in `../test.c`. The harness-native way to run them is a clean
+rebuild followed by `make test`, which guarantees every object shares one git
+revision before the assertions run:
 
 ```sh
-make test module=uac_registrant
+make clean all modules && make test module=uac_registrant
 ```
 
-These pin the full truth table — 20 assertions, including the strict `>`
-boundary, the `Min-Expires: 0` case, and the over-maximum case — and on success
-print `1..20` with every line reported `ok`.
+On a local tree that mixes object revisions — typical right after a rebase,
+amend, or branch checkout that leaves some objects built at a different commit —
+you can skip the full rebuild and run the test binary directly. `-i` bypasses the
+module git-revision cross-check (the module version string and compile flags are
+still verified):
+
+```sh
+./opensips -dd -T uac_registrant -w . -a HP_MALLOC -i
+```
+
+(optionally preceded by `make modules modules=modules/uac_registrant` to pick up
+local edits first).
+
+These pin the full truth table — 17 assertions, including the strict `>`
+boundary, the `Min-Expires: 0` case, and the over-maximum case.
+
+**Read the TAP output, not the banner.** Success is the TAP `1..N` plan line —
+here `1..17` — followed by `N` lines that all begin with `ok`, and zero `not ok`
+lines. The `-i` invocation prints exactly that and nothing else:
+
+```text
+ok 15 - zero/missing Min-Expires, tolerant: registrar error (never self-de-register)
+ok 16 - strict flips the non-conformant case
+ok 17 - strict does not affect the conformant case
+1..17
+```
+
+`make test` additionally prints a `Passed All Tests!` banner after the plan line.
+Do **not** treat that banner alone as proof: `Makefile.test` echoes it whenever
+the `opensips` process exits `0`, and the process can exit `0` without ever
+reaching the test runner. The trap is a stale **built-in** module — if a
+`CRITICAL:core:version_control ... revision mismatch` line appears (e.g. for
+`proto_udp` after a rebase), `load_static_module()` calls `exit(0)`
+(`sr_module.c`), so the binary stops before the assertions run yet `make` still
+prints the banner. (A failing assertion, a wrong plan count, or a *dynamically*
+loaded module mismatch each exit non-zero and abort `make` with `Error 1`, so
+those are caught.) If you see that mismatch line, rebuild as above or pass `-i`,
+and confirm the `1..17` plan line is actually present.
