@@ -2181,7 +2181,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			if (match_keys) {
 				int k;
 				for (k = 0; k < match_count; k++)
-					free(match_keys[k]);
+					nats_intern_release(match_keys[k]);
 				free(match_keys);
 			}
 			return -1;
@@ -2201,7 +2201,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			if (match_keys) {
 				int k;
 				for (k = 0; k < match_count; k++)
-					free(match_keys[k]);
+					nats_intern_release(match_keys[k]);
 				free(match_keys);
 				match_keys = NULL;
 			}
@@ -2224,36 +2224,22 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			if (match_keys) {
 				int k;
 				for (k = 0; k < match_count; k++)
-					free(match_keys[k]);
+					nats_intern_release(match_keys[k]);
 				free(match_keys);
 			}
 			return -1;
 		}
 		{
 			int k;
-			for (k = 0; k < e->num_keys; k++) {
-				iter_keys[k] = strdup(e->keys[k]);
-				if (!iter_keys[k]) {
-					int j;
-					LM_ERR("query: strdup for key snapshot "
-						"slot %d/%d failed (filter "
-						"'%.*s'='%.*s', key length %zu)\n",
-						k, e->num_keys,
-						it->key.name.len, it->key.name.s,
-						it->val.s.len, it->val.s.s,
-						strlen(e->keys[k]));
-					for (j = 0; j < k; j++)
-						free(iter_keys[j]);
-					free(iter_keys);
-					_idx_unlock_shard(g_idx, shard);
-					if (match_keys) {
-						for (j = 0; j < match_count; j++)
-							free(match_keys[j]);
-						free(match_keys);
-					}
-					return -1;
-				}
-			}
+			/* Snapshot the interned key pointers with a refcount bump
+			 * each -- O(1) per key, no allocation -- instead of strdup'ing
+			 * the whole match set under the shard lock.  The intern table
+			 * guarantees the pointers stay valid until we release them, so
+			 * the lock can drop immediately and the document fetches +
+			 * allocations below run unlocked.  Balanced by the matching
+			 * nats_intern_release() at every cleanup site. */
+			for (k = 0; k < e->num_keys; k++)
+				iter_keys[k] = nats_intern_retain(e->keys[k]);
 			iter_count = e->num_keys;
 		}
 		_idx_unlock_shard(g_idx, shard);
@@ -2278,47 +2264,29 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 				int k;
 				LM_ERR("intersection failed\n");
 				for (k = 0; k < iter_count; k++)
-					free(iter_keys[k]);
+					nats_intern_release(iter_keys[k]);
 				free(iter_keys);
 				for (k = 0; k < match_count; k++)
-					free(match_keys[k]);
+					nats_intern_release(match_keys[k]);
 				free(match_keys);
 				return -1;
 			}
 			{
 				int k;
-				for (k = 0; k < new_count; k++) {
-					char *dup = strdup(new_keys[k]);
-					if (!dup) {
-						int j;
-						LM_ERR("query: strdup for AND-intersect "
-							"survivor %d/%d failed (filter "
-							"'%.*s'='%.*s', key length %zu)\n",
-							k, new_count,
-							it->key.name.len, it->key.name.s,
-							it->val.s.len, it->val.s.s,
-							strlen(new_keys[k]));
-						for (j = 0; j < k; j++)
-							free(new_keys[j]);
-						free(new_keys);
-						for (j = 0; j < iter_count; j++)
-							free(iter_keys[j]);
-						free(iter_keys);
-						for (j = 0; j < match_count; j++)
-							free(match_keys[j]);
-						free(match_keys);
-						return -1;
-					}
-					new_keys[k] = dup;
-				}
+				/* Survivors alias entries in match_keys (the `a` input).
+				 * Take a fresh reference on each so it outlives the
+				 * release-all of both input sets just below; new_keys then
+				 * carries exactly one query reference per survivor. */
+				for (k = 0; k < new_count; k++)
+					nats_intern_retain(new_keys[k]);
 			}
 			{
 				int k;
 				for (k = 0; k < iter_count; k++)
-					free(iter_keys[k]);
+					nats_intern_release(iter_keys[k]);
 				free(iter_keys);
 				for (k = 0; k < match_count; k++)
-					free(match_keys[k]);
+					nats_intern_release(match_keys[k]);
 				free(match_keys);
 			}
 			match_keys = new_keys;
@@ -2331,7 +2299,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		if (match_keys) {
 			int k;
 			for (k = 0; k < match_count; k++)
-				free(match_keys[k]);
+				nats_intern_release(match_keys[k]);
 			free(match_keys);
 		}
 		return 0;
@@ -2406,7 +2374,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	{
 		int k;
 		for (k = 0; k < match_count; k++)
-			free(match_keys[k]);
+			nats_intern_release(match_keys[k]);
 	}
 	free(match_keys);
 	return 0;
@@ -2415,7 +2383,7 @@ error:
 	{
 		int k;
 		for (k = 0; k < match_count; k++)
-			free(match_keys[k]);
+			nats_intern_release(match_keys[k]);
 	}
 	free(match_keys);
 	cdb_free_rows(res);
