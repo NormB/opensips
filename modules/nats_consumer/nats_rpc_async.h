@@ -205,4 +205,8 @@ int nats_rpc_async_request_id_consume_user(char *out, int cap);
  */
 int nats_rpc_async_child_init(int rank);
 
+/* Per-call timerfd poll interval (ms), tunable via the nats_consumer
+ * "async_rpc_poll_ms" modparam.  Clamped to [1, 1000] when used. */
+extern int nats_rpc_async_poll_ms;
+
 #endif /* NATS_RPC_ASYNC_H */
