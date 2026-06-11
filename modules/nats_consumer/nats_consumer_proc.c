@@ -1782,6 +1782,41 @@ static void tear_down_retired_subs(void)
 	}
 }
 
+/*
+ * Mark retired handles that never got a subscription as torn down.
+ *
+ * tear_down_retired_subs() above only walks g_subs, so a handle that was
+ * bound and then unbound before the consumer process ever built a
+ * subscription for it has no g_subs entry -- its sub_torn_down is never
+ * set, the reaper never frees it, and its ring (allocated at bind time)
+ * leaks for the process lifetime.  Walk the registry's retire list and set
+ * sub_torn_down on any retired handle that has no live proc-sub state.
+ */
+static int mark_orphan_retired_cb(nats_handle_t *h, void *user)
+{
+	(void)user;
+	if (!h)
+		return 0;
+	/* Already torn down (or handled by the g_subs pass) -- nothing to do. */
+	if (__atomic_load_n(&h->sub_torn_down, __ATOMIC_SEQ_CST))
+		return 0;
+	/* A live proc-sub state means the g_subs teardown pass owns this
+	 * handle; only handles with NO g_subs entry were never subscribed. */
+	if (h->index < NATS_REGISTRY_MAX_HANDLES &&
+	    g_subs_by_idx[h->index] != NULL)
+		return 0;
+	__atomic_store_n(&h->sub_torn_down, 1, __ATOMIC_SEQ_CST);
+	LM_INFO("nats_consumer_proc: marking never-subscribed retired handle "
+		"id='%.*s' torn down so it can be reaped\n",
+		h->id.len, h->id.s);
+	return 0;
+}
+
+static void mark_orphan_retired_handles(void)
+{
+	nats_registry_foreach_retired(mark_orphan_retired_cb, NULL);
+}
+
 /* ── main loop ───────────────────────────────────────────────── */
 
 void nats_consumer_proc_main(int rank)
@@ -1983,6 +2018,7 @@ void nats_consumer_proc_main(int rank)
 		 *    and reap).  Both are cheap when the retire list is
 		 *    empty. */
 		tear_down_retired_subs();
+		mark_orphan_retired_handles();
 		nats_registry_reap();
 
 		if (!any_work) {

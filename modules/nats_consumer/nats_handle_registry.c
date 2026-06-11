@@ -663,3 +663,26 @@ out:
 	lock_stop_read(g_registry->global_lock);
 	return rc;
 }
+
+int nats_registry_foreach_retired(int (*cb)(nats_handle_t *h, void *user),
+                                  void *user)
+{
+	int rc = 0;
+	nats_handle_t *cur;
+
+	if (!g_registry || !cb)
+		return 0;
+
+	/* Read lock: the reaper takes the retire WRITE lock to splice/free, so
+	 * it cannot run concurrently.  cb must not bind/unbind/reap or modify
+	 * the list -- it may only inspect the handle or set atomic fields on
+	 * it (e.g. sub_torn_down). */
+	lock_start_read(g_registry->retire_lock);
+	for (cur = g_registry->retire_head; cur; cur = cur->next) {
+		rc = cb(cur, user);
+		if (rc != 0)
+			break;
+	}
+	lock_stop_read(g_registry->retire_lock);
+	return rc;
+}

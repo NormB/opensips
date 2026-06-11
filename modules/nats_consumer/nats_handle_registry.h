@@ -328,6 +328,16 @@ int nats_registry_count(void);
 int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
                           void *user);
 
+/* Iterate the retire list (handles unbound but not yet reaped), calling
+ * cb(h, user) for each; a non-zero return stops the walk and is returned.
+ * Walks under the retire read lock, so cb must NOT bind/unbind/reap or
+ * modify the list -- it may only inspect the handle or set atomic fields
+ * on it.  Used by the consumer process to mark handles that were unbound
+ * before they ever got a subscription as sub_torn_down, so the reaper can
+ * free them (otherwise their ring leaks for the process lifetime). */
+int nats_registry_foreach_retired(int (*cb)(nats_handle_t *h, void *user),
+                                  void *user);
+
 /* Free a handle whose bind failed.  Frees all str buffers and the rlock
  * if initialized, then frees the handle itself.
  * Used by parse-then-fail paths where the caller still owns the handle. */
