@@ -3467,6 +3467,15 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				LM_DBG("seed CreateString lost race or failed for '%s': %s\n",
 					target_key, nats_dl.natsStatus_GetText(s));
 				free(seed);
+				/* A timeout / connection error is not a lost race -- bail
+				 * instead of looping (the re-Get would just fail too). */
+				if (!nats_cas_should_retry(s)) {
+					LM_WARN("seed create failed for '%s' (%s); not a "
+						"conflict -- bailing\n", target_key,
+						nats_dl.natsStatus_GetText(s));
+					pkg_free(target_key);
+					return -1;
+				}
 				NATS_CDB_STATS_INC(cas_retry);
 				continue;
 			}
@@ -3553,6 +3562,19 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 				free(json_buf);
 				pkg_free(target_key);
 				return 0;
+			}
+
+			/* Write failed.  Only a CAS conflict (revision mismatch) is
+			 * worth retrying; a timeout / connection error is not and
+			 * would just burn the whole budget on a degraded broker. */
+			if (!nats_cas_should_retry(s)) {
+				LM_WARN("update CAS write failed for key '%s' (%s); not a "
+					"conflict -- bailing\n", target_key,
+					nats_dl.natsStatus_GetText(s));
+				free(new_json);
+				free(json_buf);
+				pkg_free(target_key);
+				return -1;
 			}
 
 			free(new_json);
