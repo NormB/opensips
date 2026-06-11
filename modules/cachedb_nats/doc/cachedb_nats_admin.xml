@@ -822,6 +822,34 @@ modparam("cachedb_nats", "kv_watch", "json_>")
 	</para>
 	</section>
 
+	<section id="param_map_legacy_read"
+		xreflabel="map_legacy_read">
+	<title><varname>map_legacy_read</varname> (integer)</title>
+	<para>
+		Map operations store each field under a subject composed as
+		<emphasis>enc(key) '.' enc(field)</emphasis>, both components
+		hex-escaped, so the broker lists one map with an exact
+		server-side filter (<quote>enc(key).&gt;</quote>) instead of
+		scanning every key in the bucket.  Entries written before this
+		format change use a <quote>:</quote> separator that cannot be
+		filtered server-side.
+	</para>
+	<para>
+		While this is on, <function>map_get</function> and
+		<function>map_remove</function> run an additional whole-bucket
+		scan for the legacy <quote>key:</quote> prefix so existing maps
+		keep working across the upgrade.  That pass is O(total keys);
+		after migrating with the <function>nats_map_migrate</function> MI
+		command, set this to <emphasis role="bold">0</emphasis> to drop
+		the compat scans and make map operations purely O(matches).
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>1</quote> (legacy reads enabled).
+		</emphasis>
+	</para>
+	</section>
+
 	<section id="param_cdb_drain_timeout_ms"
 		xreflabel="cdb_drain_timeout_ms">
 	<title><varname>cdb_drain_timeout_ms</varname> (integer)</title>
@@ -1708,6 +1736,38 @@ xlog("bucket info: $var(info)\n");
     "cas_exhausted": 0,
     "create_doc": 5034,
     "index_miss_kv": 3
+}
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_map_migrate" xreflabel="nats_map_migrate">
+	<title><function moreinfo="none">nats_map_migrate</function></title>
+	<para>
+		Rewrites every legacy <quote>:</quote> separated map entry into the
+		new <quote>.</quote> separated, hex-escaped format in place (read the
+		old key's value, write it under the recomposed key, delete the old
+		key).  Any key containing <quote>:</quote> is a legacy map entry, so
+		non-map keys are untouched.  The command is idempotent: a migrated key
+		carries no raw <quote>:</quote>, so re-running migrates only whatever
+		remains in the old format.
+	</para>
+	<para>
+		Name: <emphasis>nats_map_migrate</emphasis>.  No parameters.  Returns
+		<varname>scanned</varname> / <varname>migrated</varname> /
+		<varname>skipped</varname> / <varname>failed</varname> counts.  Run it
+		once after upgrading, confirm <varname>failed</varname> is 0, then set
+		<varname>map_legacy_read=0</varname> to drop the compat scans.
+	</para>
+	<example>
+	<title><function>nats_map_migrate</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_map_migrate
+{
+    "scanned": 10432,
+    "migrated": 318,
+    "skipped": 0,
+    "failed": 0
 }
 	</programlisting>
 	</example>

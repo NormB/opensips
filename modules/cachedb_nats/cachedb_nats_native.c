@@ -55,6 +55,8 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../mi/mi.h"
+#include "../../mi/item.h"
 
 /* maximum buffer sizes (reuse from dbase.h) */
 #define NATS_NATIVE_KEY_BUF   512
@@ -1850,4 +1852,118 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 	}
 
 	return 0;
+}
+
+/**
+ * mi_nats_map_migrate() — rewrite legacy ':' map keys into the new
+ * '.'-separated, hex-escaped format, in place.
+ *
+ * Any key containing ':' is a legacy map entry (validate_kv_key forbids ':'
+ * in non-map keys, and the new format hex-escapes ':' so new keys never
+ * carry a raw one).  For each, split on the FIRST ':' into map-key + field,
+ * recompose as enc(map-key).enc(field), copy the value across, and delete
+ * the old key.  Idempotent: re-running migrates only the entries still in
+ * the legacy format.  After a clean run operators can set
+ * map_legacy_read=0 to drop the O(total keys) compat scans.
+ *
+ * Returns { scanned, migrated, skipped, failed }.
+ */
+mi_response_t *mi_nats_map_migrate(const mi_params_t *params,
+		struct mi_handler *async)
+{
+	kvStore *kv;
+	kvKeysList keys;
+	natsStatus s;
+	int i;
+	unsigned long scanned = 0, migrated = 0, skipped = 0, failed = 0;
+	mi_response_t *resp;
+	mi_item_t *obj;
+
+	(void)params;
+	(void)async;
+
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
+	if (!kv)
+		return init_mi_error(503, MI_SSTR("NATS KV unavailable"));
+
+	memset(&keys, 0, sizeof(keys));
+	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
+	if (s != NATS_OK && s != NATS_NOT_FOUND)
+		return init_mi_error(500, MI_SSTR("kvStore_Keys failed"));
+
+	if (s == NATS_OK) {
+		for (i = 0; i < keys.Count; i++) {
+			const char *k = keys.Keys[i];
+			const char *colon = strchr(k, NATS_MAP_SEP_LEGACY);
+			char newkey[NATS_MAP_KEY_BUF];
+			str mkey;
+			const char *field;
+			int field_len;
+			kvEntry *e = NULL;
+			const char *val;
+			int vlen;
+			char *valbuf;
+			uint64_t rev;
+
+			scanned++;
+			if (!colon)
+				continue;             /* not a legacy map key */
+
+			mkey.s   = (char *)k;
+			mkey.len = (int)(colon - k);
+			field     = colon + 1;
+			field_len = (int)strlen(field);
+			if (mkey.len <= 0) { skipped++; continue; }
+
+			if (nats_map_compose(newkey, sizeof(newkey), &mkey,
+					field, field_len) < 0) {
+				LM_WARN("map_migrate: '%s' too long to re-encode; skipped\n", k);
+				skipped++;
+				continue;
+			}
+
+			if (nats_dl.kvStore_Get(&e, kv, k) != NATS_OK) {
+				failed++;
+				continue;
+			}
+			val  = nats_dl.kvEntry_ValueString(e);
+			vlen = nats_dl.kvEntry_ValueLen(e);
+			if (vlen < 0) vlen = 0;
+			valbuf = pkg_malloc((size_t)vlen + 1);
+			if (!valbuf) {
+				nats_dl.kvEntry_Destroy(e);
+				failed++;
+				continue;
+			}
+			if (val && vlen > 0)
+				memcpy(valbuf, val, vlen);
+			valbuf[vlen] = '\0';
+			nats_dl.kvEntry_Destroy(e);
+
+			if (nats_dl.kvStore_PutString(&rev, kv, newkey, valbuf) != NATS_OK) {
+				pkg_free(valbuf);
+				failed++;
+				continue;
+			}
+			pkg_free(valbuf);
+			(void)nats_dl.kvStore_Delete(kv, k);
+			migrated++;
+			LM_DBG("map_migrate: '%s' -> '%s'\n", k, newkey);
+		}
+		nats_dl.kvKeysList_Destroy(&keys);
+	}
+
+	resp = init_mi_result_object(&obj);
+	if (!resp)
+		return NULL;
+	if (add_mi_number(obj, MI_SSTR("scanned"),  (double)scanned)  < 0 ||
+	    add_mi_number(obj, MI_SSTR("migrated"), (double)migrated) < 0 ||
+	    add_mi_number(obj, MI_SSTR("skipped"),  (double)skipped)  < 0 ||
+	    add_mi_number(obj, MI_SSTR("failed"),   (double)failed)   < 0) {
+		free_mi_response(resp);
+		return NULL;
+	}
+	LM_INFO("map_migrate: scanned=%lu migrated=%lu skipped=%lu failed=%lu\n",
+		scanned, migrated, skipped, failed);
+	return resp;
 }
