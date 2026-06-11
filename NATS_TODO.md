@@ -7,9 +7,11 @@ Date: 2026-06-11, branch head `c1429fea4`.
 Tags: `[SEC]` security · `[PERF]` performance · `[MAINT]` maintainability · `[SURV]` survivability.
 Items merged where multiple reviews found the same root cause.
 
-**Status (2026-06-11):** P0 (1–8), P1 (9–27) and P2 (28–44) all done, plus P3
-#53/#54 (folded into the ring/fetch-bounds work). Remaining: the rest of P3
-(45–52, 55–74) — lower-severity correctness nits, hardening, docs, and tests.
+**Status (2026-06-11):** P0–P2 (1–44) and most of P3 done. The P3 security
+nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
+72, 73) are landed. Remaining P3 are pure-refactor / large items: 59 (file
+rename), 60 (split the 3k-line files), 61/63/64/66 (consolidate duplicated
+helpers), 71 (b/c sub-parts), 67/73 (sub-parts), 74 (test-coverage gaps).
 Progress is tracked in git (`feature/nats`), not just these checkboxes.
 
 ---
@@ -282,29 +284,29 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
 
 ## P3 — Lower severity (correctness nits, hardening, code health, docs, tests)
 
-- [ ] **45. [SEC] Redactor: use last `@` (`nats_redact.c:54-56`) and redact scheme-less
+- [x] **45. [SEC] Redactor: use last `@` (`nats_redact.c:54-56`) and redact scheme-less
   `user:pass@host` URLs (`:39-47`).**
-- [ ] **46. [SEC] `nats_cache_set`: add `val->len < 0` guard (`cachedb_nats_dbase.c:439-450`).**
-- [ ] **47. [SEC] kv_history JSON escaping: escape control chars, not just `"`/`\`
+- [x] **46. [SEC] `nats_cache_set`: add `val->len < 0` guard (`cachedb_nats_dbase.c:439-450`).**
+- [x] **47. [SEC] kv_history JSON escaping: escape control chars, not just `"`/`\`
   (`cachedb_nats_native.c:377-383`).**
-- [ ] **48. [SEC] `_json_escape_len`: accumulate in size_t/int64 and bound `in_len`
+- [x] **48. [SEC] `_json_escape_len`: accumulate in size_t/int64 and bound `in_len`
   (`cachedb_nats_json.c:2102-2131`); fix the `\uXXXX` 6-vs-7-byte guard (`:2006-2010`).**
-- [ ] **49. [SEC] persist rehydrate: reject/escape `;`/`=` in values (`nats_persist.c:803-834`).**
-- [ ] **50. [SEC] `batch_parse_duration_ms`: per-digit overflow clamp (`nats_fetch.c:508-512`).**
-- [ ] **51. [SEC] `nats_ring_pop`: clamp SHM-read `*_len` fields to their MAX before memcpy
+- [x] **49. [SEC] persist rehydrate: reject/escape `;`/`=` in values (`nats_persist.c:803-834`).**
+- [x] **50. [SEC] `batch_parse_duration_ms`: per-digit overflow clamp (`nats_fetch.c:508-512`).**
+- [x] **51. [SEC] `nats_ring_pop`: clamp SHM-read `*_len` fields to their MAX before memcpy
   (`nats_ring.c:415-439`).**
-- [ ] **52. [SEC] Rate-limit the per-message oversize WARN (`nats_consumer_proc.c:1448-1453`).**
+- [x] **52. [SEC] Rate-limit the per-message oversize WARN (`nats_consumer_proc.c:1448-1453`).**
 - [x] **53. [SEC] Cap `ring_capacity` (e.g. 65536) — currently up to 2^31 ≈ 18 GB per bind
   (`nats_handle_parse.c:541-543`).**
 - [x] **54. [SEC] Reject `timeout_ms <= 0` on async fetch — currently holds `pending_ops` and a
   1 ms timer forever (`nats_fetch.c:478`).**
-- [ ] **55. [SEC] Check snprintf truncation in nats_ca_dir (`nats_ca_dir.c:125,159`); explicit
+- [x] **55. [SEC] Check snprintf truncation in nats_ca_dir (`nats_ca_dir.c:125,159`); explicit
   `data_len` max reject in event_nats consumer (`nats_consumer.c:380-381`).**
-- [ ] **56. [SEC] Intern release: locate node before dereferencing freed memory on double-release
+- [x] **56. [SEC] Intern release: locate node before dereferencing freed memory on double-release
   (`cachedb_nats_intern.c:200-214`).**
-- [ ] **57. [SEC] Guard NULL `cb_h` before `&cb_h->acks` (`nats_consumer_proc.c:1511-1513`); force
+- [x] **57. [SEC] Guard NULL `cb_h` before `&cb_h->acks` (`nats_consumer_proc.c:1511-1513`); force
   `data_len=0` when libnats returns NULL data (`:1411-1413`).**
-- [ ] **58. [SEC][MAINT] Check natsStatus returns in `apply_tls_from_mgm` — silent mTLS/cipher
+- [x] **58. [SEC][MAINT] Check natsStatus returns in `apply_tls_from_mgm` — silent mTLS/cipher
   downgrade on failure (`nats_pool.c:636-661,783`).**
 - [ ] **59. [MAINT] Rename event_nats's internal `nats_consumer.c/.h` (e.g. `event_nats_sub.c`)
   and differentiate the two `"NATS consumer"` proc display names
@@ -314,7 +316,7 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   the ~400-line functions.**
 - [ ] **61. [MAINT] Factor the duplicated URL tokenizer in `nats_pool_register`
   (`nats_pool.c:489-546` vs `parse_urls` `:165-236`).**
-- [ ] **62. [MAINT] Sweep stale docs/comments: nonexistent `@param tls`, `nats_OpenWithConfig`,
+- [x] **62. [MAINT] Sweep stale docs/comments: nonexistent `@param tls`, `nats_OpenWithConfig`,
   `nats_pool_finalize` (`nats_pool.h:99,137,268`); "statically linked" comment
   (`cachedb_nats.c:466`); wrong `index_resync_on_reconnect` default claim
   (`cachedb_nats_watch.c:399`); stale "process-local index" header
@@ -324,27 +326,27 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   `nats_consumer_proc.c:423,436`).**
 - [ ] **64. [MAINT] Consolidate the four subject/name validators into lib/nats with mode flags
   (publish / stream-name / kv-key / filter-subject) — also closes gaps behind #18/#19.**
-- [ ] **65. [MAINT] Remove the `*timeout_ms = eff` write-back that contradicts its own comment
+- [x] **65. [MAINT] Remove the `*timeout_ms = eff` write-back that contradicts its own comment
   (`cachedb_nats_native.c:176-193`).**
 - [ ] **66. [MAINT] Extract `nats_publish_checked()` for the duplicated publish path
   (`event_nats.c:486-521` vs `:631-663`) and `subscribe_one()` for the duplicated subscribe
   (`modules/event_nats/nats_consumer.c:238-247` vs `:296-305`); name `NATS_MAX_SUBJECT_LEN`.**
-- [ ] **67. [MAINT] MI param boilerplate helper + named jsErrCode constants in
+- [x] **67. [MAINT] MI param boilerplate helper + named jsErrCode constants in
   `nats_jetstream.c` (10× repeated block; raw 10059/10014/10037 literals).**
-- [ ] **68. [MAINT] Reject over-long KV bucket names instead of snprintf-truncating them into a
+- [x] **68. [MAINT] Reject over-long KV bucket names instead of snprintf-truncating them into a
   permanently-missing cache slot (`nats_pool.c:137-140,948-985`); name the 128/16 constants.**
-- [ ] **69. [MAINT] lib/nats Makefile: add `-MMD -MP` dependency tracking (X-macro
+- [x] **69. [MAINT] lib/nats Makefile: add `-MMD -MP` dependency tracking (X-macro
   `nats_dl_table.def` edits currently don't rebuild), extend clean targets and .gitignore
   for test binaries.**
-- [ ] **70. [MAINT] Honor `expected_kv_no` in raw_query (`cachedb_nats_native.c:925-1016,
+- [x] **70. [MAINT] Honor `expected_kv_no` in raw_query (`cachedb_nats_native.c:925-1016,
   1061-1131`) — callers requesting more columns get OOB frees in the core's reply-free loop.**
 - [ ] **71. [MAINT] Watcher hygiene: add `\n` to LM_INFO lines (`cachedb_nats_watch.c:625-627`),
   drop the unreachable `_num_patterns==0` branch (`:799-804`), use pkg_malloc not raw
   malloc (`:605,618`).**
-- [ ] **72. [MAINT] Unify the aliased drain-timeout modparams (`nats_drain_timeout_ms` /
+- [x] **72. [MAINT] Unify the aliased drain-timeout modparams (`nats_drain_timeout_ms` /
   `cdb_drain_timeout_ms` both write one global, last-writer-wins) — take the max across
   registrants like reconnect params.**
-- [ ] **73. [MAINT] Move point-in-time review/bench artifacts (REVIEW.md,
+- [x] **73. [MAINT] Move point-in-time review/bench artifacts (REVIEW.md,
   DEDICATED_WATCHER_REVIEW.md, PERF_NOTES.md) out of the tree or mark as historical;
   generate README from doc XML per OpenSIPS convention instead of hand-written README.md.**
 - [ ] **74. [MAINT][SURV] Close test-coverage gaps for the riskiest untested surfaces:
