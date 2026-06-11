@@ -381,6 +381,11 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
+	{"nats_map_migrate", 0, 0, 0, {
+		{mi_nats_map_migrate, {0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
 	{EMPTY_MI_EXPORT}
 };
 
