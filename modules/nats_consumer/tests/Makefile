@@ -41,7 +41,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy
+                  test_slot_prefix_copy test_replay_bias
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -58,7 +58,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy
+     test_slot_prefix_copy test_replay_bias
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -179,6 +179,11 @@ SLOTCOPY_SRCS := test_slot_prefix_copy.c $(SHIM) ../nats_ring.c
 test_slot_prefix_copy: $(SLOTCOPY_SRCS) ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(SLOTCOPY_SRCS) $(LDFLAGS)
 
+# Behavioural + source-pattern: a recreated deliver_all durable biases to
+# resume past the last delivered stream_seq instead of replaying the stream.
+test_replay_bias: test_replay_bias.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 # Behavioural (ASan): the consumer reaps msg-ref slots orphaned by a
 # worker that died before acking (no leak; table doesn't wedge).
 test_msg_ref_orphan_reap: test_msg_ref_orphan_reap.c
@@ -267,6 +272,7 @@ check: all
 	./test_bind_bounds
 	./test_rpc_tunables
 	./test_slot_prefix_copy
+	./test_replay_bias
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

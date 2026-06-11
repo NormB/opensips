@@ -213,6 +213,12 @@ typedef struct proc_sub_state {
 	uint64_t              total_dropped_backpressure;
 	uint64_t              total_fetch_errors;
 
+	/* Highest stream sequence delivered so far.  Survives a rebuild (the
+	 * proc_sub_state_t is kept when the natsSubscription is recreated), so
+	 * a vanished+recreated durable can resume just past it instead of
+	 * replaying the whole stream under deliver_policy=all. */
+	uint64_t              last_stream_seq;
+
 	/* Subscription-refresh bookkeeping. */
 	int                   dirty;   /* 1 iff the subscription needs
 	                                 * rebuild (epoch bump or broker
@@ -903,6 +909,22 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME)
 		cc.OptStartTime = h->start_time_unix_ns;
 
+	/* Replay-flood guard: a durable consumer that vanished (deleted server
+	 * side / GC'd) and is being recreated with deliver_policy=all would
+	 * otherwise replay the ENTIRE stream from sequence 1 -- a flood
+	 * proportional to stream size.  If we have already delivered messages,
+	 * bias the recreate to resume just past the last one instead. */
+	if (is_rebuild && ss && ss->last_stream_seq > 0 &&
+	    h->deliver_policy == NATS_DELIVER_ALL) {
+		LM_WARN("nats_consumer_proc: recreating consumer '%.*s' with "
+			"deliver_policy=all would replay the whole stream; biasing "
+			"to resume from stream_seq %llu\n",
+			(int)h->id.len, h->id.s,
+			(unsigned long long)(ss->last_stream_seq + 1));
+		cc.DeliverPolicy = js_DeliverByStartSequence;
+		cc.OptStartSeq   = ss->last_stream_seq + 1;
+	}
+
 	/* Shaping + ephemeral options.  nats.c uses ns for InactiveThreshold. */
 	if (h->inactive_threshold_ms > 0)
 		cc.InactiveThreshold =
@@ -1482,6 +1504,10 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			pending      = md->NumPending;
 			timestamp_ns = md->Timestamp;
 			nats_dl.jsMsgMetaData_Destroy(md);
+			/* Track the high-water stream sequence so a
+			 * vanished+recreated durable can resume past it. */
+			if (stream_seq > ss->last_stream_seq)
+				ss->last_stream_seq = stream_seq;
 		}
 
 		/* Stash the natsMsg under a fresh (handle, slot, gen) token.
