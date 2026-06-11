@@ -87,6 +87,8 @@ extern int   nats_enable_search_index;
  * need to reach.  Definitions live further down for locality with
  * the related JSON-handling code. */
 static char *_kv_encode_key(const char *in, int in_len, int *out_len);
+static char *_pk_target_key(const char *val, int val_len,
+	char *stackbuf, int stackcap, int *heap);
 
 /* ------------------------------------------------------------------ */
 /*                       Global search index                          */
