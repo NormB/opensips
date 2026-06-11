@@ -468,6 +468,46 @@ static evi_reply_sock *nats_evi_parse(str socket)
 	return sock;
 }
 
+/* Max NATS subject length (including the NUL) handled on the publish hot
+ * path; a longer subject is rejected rather than truncated. */
+#define NATS_MAX_SUBJECT_LEN  512
+
+/* Validate a subject and publish (subject + payload), fast-failing if the
+ * pool is disconnected.  @ctx is a short label used in log messages.  The
+ * subject is NUL-terminated into a stack buffer (rejected if too long) and
+ * validated before publish; on a disconnected pool the `failed` counter is
+ * bumped.  Shared by nats_evi_raise() (EVI transport) and w_nats_publish()
+ * (script).  Returns 0 on publish success, -1 otherwise; the caller bumps
+ * the per-type success counter. */
+static int nats_publish_checked(const char *subj, int subj_len,
+		const char *payload, int payload_len, const char *ctx)
+{
+	char subj_buf[NATS_MAX_SUBJECT_LEN];
+
+	if (subj_len >= (int)sizeof(subj_buf)) {
+		LM_ERR("%s: NATS subject too long (%d bytes, max %d): %.*s\n",
+			ctx, subj_len, (int)sizeof(subj_buf) - 1, subj_len, subj);
+		return -1;
+	}
+	if (nats_validate_publish_subject(subj, subj_len) < 0) {
+		LM_ERR("%s: NATS subject rejected (wildcard / control char / "
+			"empty token / leading-trailing dot): %.*s\n",
+			ctx, subj_len, subj);
+		return -1;
+	}
+	if (!nats_pool_is_connected()) {
+		LM_DBG("%s: pool disconnected, dropping message\n", ctx);
+		NATS_STATS_BUMP(failed);
+		return -1;
+	}
+	memcpy(subj_buf, subj, subj_len);
+	subj_buf[subj_len] = '\0';
+
+	if (nats_jetstream)
+		return nats_js_publish_async(subj_buf, payload, payload_len);
+	return nats_publish(subj_buf, payload, payload_len);
+}
+
 /**
  * nats_evi_raise() -- Publish an EVI event to a NATS subject.
  *
@@ -491,8 +531,6 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 {
 	char *payload = NULL;
 	int payload_len;
-	char subj_buf[512];
-	int subj_len;
 	int rc = -1;
 
 	if (!sock) {
@@ -507,38 +545,8 @@ static int nats_evi_raise(struct sip_msg *msg, str *ev_name,
 	}
 	payload_len = strlen(payload);
 
-	/* null-terminate subject in a stack buffer; reject if too long */
-	subj_len = sock->address.len;
-	if (subj_len >= (int)sizeof(subj_buf)) {
-		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
-			subj_len, (int)sizeof(subj_buf) - 1,
-			sock->address.len, sock->address.s);
-		goto out;
-	}
-	if (nats_validate_publish_subject(sock->address.s, subj_len) < 0) {
-		LM_ERR("NATS subject rejected (wildcard / control char / "
-			"empty token / leading-trailing dot): %.*s\n",
-			subj_len, sock->address.s);
-		goto out;
-	}
-	/* Fast-fail if the pool is disconnected -- avoid blocking the SIP
-	 * worker on cnats's internal write buffer.  Lost events are noted
-	 * in nats_stats->failed via the publish helpers. */
-	if (!nats_pool_is_connected()) {
-		LM_DBG("nats_evi_raise: pool disconnected, dropping event\n");
-		NATS_STATS_BUMP(failed);
-		goto out;
-	}
-	memcpy(subj_buf, sock->address.s, subj_len);
-	subj_buf[subj_len] = '\0';
-
-	/* publish directly */
-	if (nats_jetstream)
-		rc = nats_js_publish_async(subj_buf, payload, payload_len);
-	else
-		rc = nats_publish(subj_buf, payload, payload_len);
-
-	/* update per-type stats on success */
+	rc = nats_publish_checked(sock->address.s, sock->address.len,
+		payload, payload_len, "nats_evi_raise");
 	if (rc == 0)
 		NATS_STATS_BUMP(evi_published);
 
@@ -637,8 +645,6 @@ static str nats_evi_print(evi_reply_sock *sock)
  */
 static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 {
-	char subj_buf[512];
-	int subj_len;
 	int rc;
 
 	if (!subject || !subject->len || !subject->s) {
@@ -650,36 +656,8 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload)
 		return -1;
 	}
 
-	/* null-terminate subject in a stack buffer; reject if too long */
-	subj_len = subject->len;
-	if (subj_len >= (int)sizeof(subj_buf)) {
-		LM_ERR("NATS subject too long (%d bytes, max %d): %.*s\n",
-			subj_len, (int)sizeof(subj_buf) - 1,
-			subject->len, subject->s);
-		return -1;
-	}
-	if (nats_validate_publish_subject(subject->s, subj_len) < 0) {
-		LM_ERR("nats_publish: subject rejected (wildcard / control "
-			"char / empty token / leading-trailing dot): %.*s\n",
-			subj_len, subject->s);
-		return -1;
-	}
-	/* Fast-fail if the pool is disconnected. */
-	if (!nats_pool_is_connected()) {
-		LM_DBG("nats_publish: pool disconnected, dropping message\n");
-		NATS_STATS_BUMP(failed);
-		return -1;
-	}
-	memcpy(subj_buf, subject->s, subj_len);
-	subj_buf[subj_len] = '\0';
-
-	/* publish directly */
-	if (nats_jetstream)
-		rc = nats_js_publish_async(subj_buf, payload->s, payload->len);
-	else
-		rc = nats_publish(subj_buf, payload->s, payload->len);
-
-	/* update per-type stats on success */
+	rc = nats_publish_checked(subject->s, subject->len,
+		payload->s, payload->len, "nats_publish");
 	if (rc == 0)
 		NATS_STATS_BUMP(script_published);
 
