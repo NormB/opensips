@@ -210,8 +210,10 @@ not a surprise.
 - Watcher (only relevant if index enabled): rank-1 only is
   fine.  Set `dedicated_watcher_proc=1` if rank-1's SIP load
   is heavy and the propagation-latency floor matters.
-- Index resync: `index_resync_on_reconnect=0` (default since
-  this branch).
+- Index resync: `index_resync_on_reconnect=1` (default — converges
+  the index after missed sibling writes). Set `=0` only for large
+  indexes that cannot afford the O(N) rebuild per reconnect, and
+  pair it with `index_resync_interval_secs`.
 - Single instance is OK.
 
 ### 100k – 1MM AoRs

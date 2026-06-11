@@ -117,16 +117,19 @@ int kv_history = 5;
 int kv_ttl = 0;
 /* Multi-instance index coordination knobs.
  *
- * index_resync_on_reconnect (default 0):
+ * index_resync_on_reconnect (default 1):
  *   On a NATS reconnect (epoch change), should the watcher rebuild
- *   the in-memory JSON index in full?  The rebuild costs O(N)
- *   round-trips against the bucket and on a 50k-AoR deployment
- *   stalls the watcher for ~5-10 s.  The stale-entry self-heal in
- *   nats_cache_query covers correctness without the bulk rebuild,
- *   so the default is OFF: stale entries are evicted lazily on the
- *   first query that hits them.  Operators with high cross-instance
- *   churn or deep historical drift after prolonged outages may set
- *   this to 1 to force the bulk reconciliation.
+ *   the in-memory JSON index in full?  The watcher subscribes with
+ *   UpdatesOnly, so writes made by sibling instances WHILE this
+ *   process was disconnected are never delivered live -- without a
+ *   rebuild the index silently diverges after any outage during which
+ *   writes occurred.  The default is therefore ON so the index always
+ *   converges on reconnect.  The rebuild costs O(N) round-trips against
+ *   the bucket (a 50k-AoR deployment stalls the watcher for ~5-10 s),
+ *   so operators with large indexes or hot-reconnect topologies may set
+ *   this to 0 and rely instead on index_resync_interval_secs (the
+ *   periodic timer) plus the query-time stale-entry self-heal in
+ *   nats_cache_query, accepting a brief window of staleness.
  *
  * index_resync_interval_secs (default 0 = off):
  *   Optional periodic full rebuild on a timer.  Belt-and-braces
@@ -134,7 +137,7 @@ int kv_ttl = 0;
  *   process-local index entry can ever be, beyond what reconnects
  *   and lazy self-heal already guarantee.
  */
-int index_resync_on_reconnect = 0;
+int index_resync_on_reconnect = 1;
 int index_resync_interval_secs = 0;
 
 /* NATS server URL(s) -- overrides cachedb_url host when set.  TLS
