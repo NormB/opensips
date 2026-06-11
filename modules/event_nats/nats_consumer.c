@@ -34,6 +34,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 #include "../../dprint.h"
 #include "../../mem/shm_mem.h"
@@ -57,11 +58,31 @@ static str evi_data_name = str_init("data");
 
 typedef struct nats_ipc_event {
 	event_id_t event_id;
-	char *subject;     /* SHM-allocated copy */
+	char *subject;     /* points INTO this struct's combined SHM block */
 	int subject_len;
-	char *data;        /* SHM-allocated copy */
+	char *data;        /* points INTO this struct's combined SHM block */
 	int data_len;
 } nats_ipc_event_t;
+
+/* Inbound-event backpressure.  A publish flood must not exhaust SHM or
+ * saturate the worker IPC queue.  NATS_EVENT_MAX_DATA caps per-message
+ * payload; NATS_EVENT_MAX_INFLIGHT caps the number of events dispatched
+ * but not yet processed. */
+#define NATS_EVENT_MAX_DATA      (1 * 1024 * 1024)   /* 1 MiB (NATS default max_payload) */
+#define NATS_EVENT_MAX_INFLIGHT  4096
+
+/* Shared (SHM) backpressure state: the cnats I/O thread (consumer process)
+ * increments `inflight` and the SIP workers decrement it after raising the
+ * event, so it must live in shared memory.  Allocated in
+ * nats_consumer_register_events() at mod_init (pre-fork) so every process
+ * inherits the pointer. */
+typedef struct nats_inbound_ctl {
+	_Atomic int            inflight;
+	_Atomic unsigned long  dropped_backpressure;
+	_Atomic unsigned long  dropped_oversize;
+} nats_inbound_ctl_t;
+
+static nats_inbound_ctl_t *g_inbound = NULL;
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -170,6 +191,16 @@ int nats_consumer_register_events(void)
 {
 	int i;
 	str event_name;
+
+	/* Allocate the shared inbound-backpressure gauge once, pre-fork. */
+	if (!g_inbound) {
+		g_inbound = shm_malloc(sizeof(*g_inbound));
+		if (!g_inbound) {
+			LM_ERR("cannot allocate inbound backpressure state\n");
+			return -1;
+		}
+		memset(g_inbound, 0, sizeof(*g_inbound));
+	}
 
 	for (i = 0; i < nats_subscription_count; i++) {
 		event_name.s = nats_subscriptions[i].event_name;
@@ -347,13 +378,42 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	const char *data;
 	int subject_len, data_len;
 
+	char  *p;
+	size_t need;
+
 	subject = nats_dl.natsMsg_GetSubject(msg);
 	data = nats_dl.natsMsg_GetData(msg);
 	data_len = nats_dl.natsMsg_GetDataLength(msg);
+	if (data_len < 0) data_len = 0;
 	subject_len = subject ? strlen(subject) : 0;
 
-	/* Allocate IPC event in shared memory */
-	evt = shm_malloc(sizeof(nats_ipc_event_t));
+	/* Reject oversized payloads: a flood of huge messages would otherwise
+	 * exhaust SHM. */
+	if (data_len > NATS_EVENT_MAX_DATA) {
+		if (g_inbound)
+			atomic_fetch_add_explicit(&g_inbound->dropped_oversize, 1,
+				memory_order_relaxed);
+		nats_dl.natsMsg_Destroy(msg);
+		return;
+	}
+
+	/* Bound in-flight events: a publish flood must not queue unbounded
+	 * SHM + IPC jobs faster than the workers drain them. */
+	if (g_inbound && atomic_load_explicit(&g_inbound->inflight,
+			memory_order_relaxed) >= NATS_EVENT_MAX_INFLIGHT) {
+		atomic_fetch_add_explicit(&g_inbound->dropped_backpressure, 1,
+			memory_order_relaxed);
+		nats_dl.natsMsg_Destroy(msg);
+		return;
+	}
+
+	/* ONE combined SHM allocation: event struct + subject + data laid out
+	 * back-to-back.  Per-field mallocs tripled the SHM allocator lock
+	 * traffic that PERF_NOTES flags as the dominant cost at high rates;
+	 * the whole event is freed with a single shm_free. */
+	need = sizeof(nats_ipc_event_t) + (size_t)subject_len + 1 +
+		(size_t)data_len + 1;
+	evt = shm_malloc(need);
 	if (!evt) {
 		nats_dl.natsMsg_Destroy(msg);
 		return;
@@ -361,42 +421,32 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	memset(evt, 0, sizeof(*evt));
 	evt->event_id = nsub->event_id;
 
-	/* Copy subject — all-or-nothing: if any required field fails to
-	 * allocate, drop the message rather than dispatching with a NULL
-	 * field that the script would silently see as undefined. */
-	if (subject_len > 0) {
-		evt->subject = shm_malloc(subject_len + 1);
-		if (!evt->subject) {
-			nats_dl.natsMsg_Destroy(msg);
-			shm_free(evt);
-			return;
-		}
+	p = (char *)evt + sizeof(nats_ipc_event_t);
+	evt->subject = p;
+	if (subject_len > 0)
 		memcpy(evt->subject, subject, subject_len);
-		evt->subject[subject_len] = '\0';
-		evt->subject_len = subject_len;
-	}
+	evt->subject[subject_len] = '\0';
+	evt->subject_len = subject_len;
 
-	/* Copy data */
-	if (data && data_len > 0) {
-		evt->data = shm_malloc(data_len + 1);
-		if (!evt->data) {
-			nats_dl.natsMsg_Destroy(msg);
-			if (evt->subject) shm_free(evt->subject);
-			shm_free(evt);
-			return;
-		}
+	p += subject_len + 1;
+	evt->data = p;
+	if (data && data_len > 0)
 		memcpy(evt->data, data, data_len);
-		evt->data[data_len] = '\0';
-		evt->data_len = data_len;
-	}
+	evt->data[data_len] = '\0';
+	evt->data_len = data_len;
 
 	nats_dl.natsMsg_Destroy(msg);
 
+	if (g_inbound)
+		atomic_fetch_add_explicit(&g_inbound->inflight, 1,
+			memory_order_relaxed);
+
 	/* Dispatch to next available SIP worker */
 	if (ipc_dispatch_rpc(nats_ipc_raise_event, evt) < 0) {
-		/* IPC dispatch failed — free SHM */
-		if (evt->subject) shm_free(evt->subject);
-		if (evt->data) shm_free(evt->data);
+		/* IPC dispatch failed — single free, undo the in-flight bump. */
+		if (g_inbound)
+			atomic_fetch_sub_explicit(&g_inbound->inflight, 1,
+				memory_order_relaxed);
 		shm_free(evt);
 	}
 }
@@ -455,9 +505,9 @@ static void nats_ipc_raise_event(int sender, void *param)
 cleanup:
 	if (evi_params)
 		evi_free_params(evi_params);
-	if (evt->subject)
-		shm_free(evt->subject);
-	if (evt->data)
-		shm_free(evt->data);
+	/* Single free: subject/data live inside evt's combined block. */
 	shm_free(evt);
+	if (g_inbound)
+		atomic_fetch_sub_explicit(&g_inbound->inflight, 1,
+			memory_order_relaxed);
 }
