@@ -204,6 +204,14 @@ void nats_pool_destroy(void);
 int nats_pool_is_connected(void);
 
 /*
+ * Returns non-zero once any module has registered the pool
+ * (nats_pool_register).  Lets a module choose to contribute a default URL
+ * only when nothing else has registered, instead of injecting a spurious
+ * server into another module's pool.
+ */
+int nats_pool_is_registered(void);
+
+/*
  * Get a human-readable list of discovered NATS server URLs.
  *
  * Intended for MI status reporting.  Returns a comma-separated string
