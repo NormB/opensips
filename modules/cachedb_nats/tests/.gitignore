@@ -27,3 +27,4 @@ test_watch_null_key_guard
 test_watcher_atomic_race
 test_map_compose
 test_raw_query_cols
+test_rebuild_thread_safe
