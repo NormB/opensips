@@ -669,8 +669,19 @@ static int apply_tls_from_mgm(natsOptions *opts)
 	/* CA: ca_list (single file) preferred; fall back to ca_directory
 	 * (concatenate all .pem in the directory).  libnats has no
 	 * directory-load API, so nats_ca_dir.c does it OpenSIPS-side. */
+	/* Every natsOptions TLS call below is checked: if libnats rejects a
+	 * cert/CA/cipher (bad path, malformed PEM, ...) we must fail closed,
+	 * not connect with TLS silently downgraded (no CA pinning / no client
+	 * cert). */
+	natsStatus ts;
 	if (dom->ca.len > 0 && dom->ca.s) {
-		nats_dl.natsOptions_LoadCATrustedCertificates(opts, dom->ca.s);
+		ts = nats_dl.natsOptions_LoadCATrustedCertificates(opts, dom->ca.s);
+		if (ts != NATS_OK) {
+			LM_ERR("nats TLS: LoadCATrustedCertificates failed: %s\n",
+			       nats_dl.natsStatus_GetText(ts));
+			_tls_api->release_domain(dom);
+			return -1;
+		}
 	} else if (dom->ca_directory) {
 		char *err = NULL;
 		char *concat = nats_load_ca_directory(dom->ca_directory, &err);
@@ -682,25 +693,51 @@ static int apply_tls_from_mgm(natsOptions *opts)
 			return -1;
 		}
 		free(err);
-		nats_dl.natsOptions_SetCATrustedCertificates(opts, concat);
+		ts = nats_dl.natsOptions_SetCATrustedCertificates(opts, concat);
 		free(concat);  /* libnats copies internally */
+		if (ts != NATS_OK) {
+			LM_ERR("nats TLS: SetCATrustedCertificates failed: %s\n",
+			       nats_dl.natsStatus_GetText(ts));
+			_tls_api->release_domain(dom);
+			return -1;
+		}
 	}
 
 	/* Client cert + key (mutual TLS).  libnats wants both or neither. */
 	if (dom->cert.len > 0 && dom->cert.s &&
 	    dom->pkey.len > 0 && dom->pkey.s) {
-		nats_dl.natsOptions_LoadCertificatesChain(opts,
+		ts = nats_dl.natsOptions_LoadCertificatesChain(opts,
 		                                          dom->cert.s,
 		                                          dom->pkey.s);
+		if (ts != NATS_OK) {
+			LM_ERR("nats TLS: LoadCertificatesChain failed (mTLS): %s\n",
+			       nats_dl.natsStatus_GetText(ts));
+			_tls_api->release_domain(dom);
+			return -1;
+		}
 	}
 
-	if (dom->ciphers_list)
-		nats_dl.natsOptions_SetCiphers(opts, dom->ciphers_list);
+	if (dom->ciphers_list) {
+		ts = nats_dl.natsOptions_SetCiphers(opts, dom->ciphers_list);
+		if (ts != NATS_OK) {
+			LM_ERR("nats TLS: SetCiphers failed: %s\n",
+			       nats_dl.natsStatus_GetText(ts));
+			_tls_api->release_domain(dom);
+			return -1;
+		}
+	}
 
 	/* tls_mgm verify_cert: 1 = verify (default), 0 = skip.
-	 * libnats SkipServerVerification is the inverse polarity. */
-	if (!dom->verify_cert)
-		nats_dl.natsOptions_SkipServerVerification(opts, true);
+	 * libnats SkipServerVerification is the inverse polarity.  A failure
+	 * here leaves verification ON (the secure default), so it is not a
+	 * downgrade -- log but do not fail the connection. */
+	if (!dom->verify_cert) {
+		ts = nats_dl.natsOptions_SkipServerVerification(opts, true);
+		if (ts != NATS_OK)
+			LM_WARN("nats TLS: SkipServerVerification failed: %s "
+			        "(verification stays enabled)\n",
+			        nats_dl.natsStatus_GetText(ts));
+	}
 
 	_tls_api->release_domain(dom);
 	return 0;
