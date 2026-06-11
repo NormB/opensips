@@ -420,6 +420,12 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	/* A negative length would wrap to a huge size_t in the stack-vs-heap
+	 * decision below and pkg_malloc(val->len + 1) would under/over-allocate. */
+	if (val->len < 0) {
+		LM_ERR("negative value length (%d)\n", val->len);
+		return -1;
+	}
 
 	ncon = (nats_cachedb_con *)con->data;
 	if (!ncon) {
