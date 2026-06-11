@@ -144,6 +144,7 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 	 * and our KV operations). */
 	if (!nats_pool_is_connected()) {
 		LM_DBG("NATS disconnected — KV operation deferred\n");
+		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}
 
@@ -159,6 +160,7 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 
 	if (!ncon->kv) {
 		LM_ERR("failed to refresh KV handle after reconnect\n");
+		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}
 
@@ -357,6 +359,7 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
+		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
 
@@ -459,6 +462,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_PutString failed for key '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
+		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
 
@@ -507,6 +511,7 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 	if (s != NATS_OK && s != NATS_NOT_FOUND) {
 		LM_ERR("kvStore_Delete failed for key '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
+		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
 
@@ -614,6 +619,7 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 		else if (s != NATS_NOT_FOUND) {
 			LM_ERR("kvStore_Get failed for counter '%s': %s\n",
 				key_buf, nats_dl.natsStatus_GetText(s));
+			NATS_CDB_STATS_INC(op_failed);
 			return -1;
 		}
 
@@ -768,6 +774,7 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for counter '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
+		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
 

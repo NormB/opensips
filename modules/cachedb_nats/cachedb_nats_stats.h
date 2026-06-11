@@ -36,6 +36,16 @@
  *   index_miss_kv    — query/update found a key in the in-memory index
  *                      but the KV store said NOT_FOUND. Flags index
  *                      staleness, typically from a sibling-instance delete.
+ *   fastfail_rejected— KV ops rejected up front because the pool was
+ *                      disconnected, or the post-reconnect handle refresh
+ *                      failed. The op never reached the broker. Previously
+ *                      visible only at LM_DBG; this surfaces broker outages.
+ *   op_failed        — KV ops that reached the broker and returned a hard
+ *                      error (NOT a NOT_FOUND miss). Distinguishes "broker
+ *                      said no" from "broker unreachable" (fastfail_rejected).
+ *   watcher_restarts — times the search-index watcher tore down and rebuilt
+ *                      its KV handle + index after a reconnect/disconnect.
+ *                      A climbing value flags a flapping broker connection.
  */
 
 #ifndef _CACHEDB_NATS_STATS_H_
@@ -58,6 +68,9 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long cas_exhausted;
 	_Atomic unsigned long create_doc;
 	_Atomic unsigned long index_miss_kv;
+	_Atomic unsigned long fastfail_rejected;
+	_Atomic unsigned long op_failed;
+	_Atomic unsigned long watcher_restarts;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */

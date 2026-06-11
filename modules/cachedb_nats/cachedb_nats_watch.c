@@ -90,6 +90,7 @@ typedef int event_id_t;
 #include "cachedb_nats_json.h"
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_dbase.h"
+#include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
 
 /* Module globals from cachedb_nats.c are declared extern in
@@ -368,6 +369,7 @@ static void _watcher_loop(void)
 	kvWatcher      *w;
 	int             last_epoch;
 	int             prefix_len;
+	int             builds = 0;   /* successful watcher (re)builds so far */
 
 	prefix_len = fts_json_prefix ? (int)strlen(fts_json_prefix) : 0;
 
@@ -433,6 +435,13 @@ static void _watcher_loop(void)
 		}
 
 		atomic_store(&_watcher, w);
+
+		/* Count every (re)build after the initial one as a restart:
+		 * the loop only re-enters here after a reconnect/disconnect tore
+		 * down the previous watcher + KV handle.  A climbing counter
+		 * flags a flapping broker connection. */
+		if (builds++ > 0)
+			NATS_CDB_STATS_INC(watcher_restarts);
 
 		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d)\n",
 			_num_patterns, last_epoch);

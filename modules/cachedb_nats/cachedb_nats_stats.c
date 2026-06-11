@@ -105,6 +105,15 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("index_miss_kv"),
 		NATS_CDB_STATS_SUM(index_miss_kv)) < 0)
 		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("fastfail_rejected"),
+		NATS_CDB_STATS_SUM(fastfail_rejected)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("op_failed"),
+		NATS_CDB_STATS_SUM(op_failed)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("watcher_restarts"),
+		NATS_CDB_STATS_SUM(watcher_restarts)) < 0)
+		goto error;
 
 	return resp;
 
