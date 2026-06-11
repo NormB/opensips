@@ -39,7 +39,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_registry_index_recycle test_ring_push_bounded_spin \
                   test_pool_self_register test_msg_ref_orphan_reap \
                   test_retired_no_sub_reap test_sub_identity_match \
-                  test_fetch_budget
+                  test_fetch_budget test_ring_wake_one
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -54,7 +54,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_registry_index_recycle test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
      test_retired_no_sub_reap test_sub_identity_match \
-     test_fetch_budget
+     test_fetch_budget test_ring_wake_one
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -195,6 +195,9 @@ test_ring_bounded_spin: $(RINGSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring
 # Producer-side analogue: #includes ../nats_ring.c to forge a
 # stalled-consumer state and a SIGALRM watchdog proves push bails (-1)
 # instead of spinning the consumer process forever.
+WAKEONE_SRCS := test_ring_wake_one.c $(SHIM) ../nats_ring.c
+test_ring_wake_one: $(WAKEONE_SRCS) test_shim.h ../nats_ring.h
+	$(CC) $(CFLAGS) -o $@ $(WAKEONE_SRCS) $(LDFLAGS)
 PUSHSPIN_SRCS := test_ring_push_bounded_spin.c $(SHIM)
 test_ring_push_bounded_spin: $(PUSHSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(PUSHSPIN_SRCS) $(LDFLAGS)
@@ -236,8 +239,10 @@ check: all
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap
 	./test_retired_no_sub_reap
-	./test_sub_identity_match test_fetch_budget
+	./test_sub_identity_match test_fetch_budget \
+	      test_ring_wake_one
 	./test_fetch_budget
+	./test_ring_wake_one
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

@@ -652,8 +652,18 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			return 0;
 		}
 
-		/* CAS conflict or key-already-exists — another writer won
-		 * the race.  Loop back to re-read and retry. */
+		/* Only an actual CAS conflict (revision mismatch / key-exists)
+		 * is worth retrying.  A timeout or connection error is not a
+		 * conflict -- retrying it just burns the whole budget on a
+		 * degraded broker, stalling the worker -- so bail immediately. */
+		if (!nats_cas_should_retry(s) || !nats_pool_is_connected()) {
+			LM_WARN("counter '%s' CAS write failed (%s); not a conflict "
+				"-- bailing instead of exhausting the retry budget\n",
+				key_buf, nats_dl.natsStatus_GetText(s));
+			return -1;
+		}
+
+		/* CAS conflict — another writer won the race.  Re-read + retry. */
 		NATS_CDB_STATS_INC(cas_retry);
 		LM_DBG("CAS retry for key '%s' (attempt %d)\n",
 			key_buf, max_retries - retries);

@@ -19,7 +19,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_sink_emit_string test_json_parse_guard test_allops_fastfail \
         test_counter_overflow test_native_key_validation \
         test_nats_request_rename test_intern_scaling \
-        test_revmap_delete
+        test_revmap_delete test_cas_retry_policy
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -171,6 +171,11 @@ test_intern_scaling: test_intern_scaling.c
 test_revmap_delete: test_revmap_delete.c
 	$(CC) -g -O0 -fsanitize=address,undefined -Wall -pthread -o $@ $<
 
+# Behavioural policy + source-pattern: CAS loops retry only on conflicts,
+# bailing on timeout/connection errors instead of burning the retry budget.
+test_cas_retry_policy: test_cas_retry_policy.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -203,6 +208,7 @@ check: all
 	./test_nats_request_rename
 	./test_intern_scaling
 	./test_revmap_delete
+	./test_cas_retry_policy
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

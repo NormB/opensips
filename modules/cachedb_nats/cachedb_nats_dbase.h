@@ -90,4 +90,21 @@ extern int   kv_ttl;
  * (cachedb_nats_native.c).  Returns 0 if valid, -1 otherwise. */
 int validate_kv_key(const str *s);
 
+/* Should a failed KV compare-and-swap write be retried?  Only an actual
+ * conflict (revision mismatch / key already exists) is retryable; a
+ * timeout or connection error is transient/fatal and just wastes the
+ * retry budget (re-attempting it on a degraded broker can stall a SIP
+ * worker for the whole budget, ~100 s).  Returns 1 to retry, 0 to bail. */
+static inline int nats_cas_should_retry(natsStatus s)
+{
+	switch (s) {
+	case NATS_TIMEOUT:
+	case NATS_CONNECTION_CLOSED:
+	case NATS_CONNECTION_DISCONNECTED:
+		return 0;
+	default:
+		return 1;   /* NATS_ERR / NATS_MISMATCH etc. -- a CAS conflict */
+	}
+}
+
 #endif /* CACHEDB_NATS_DBASE_H */

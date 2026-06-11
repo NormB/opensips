@@ -115,7 +115,13 @@ struct nats_ring {
 	 * wake_seq before a non-blocking pop and then FUTEX_WAIT against the
 	 * snapshot -- standard linux futex pattern, sub-millisecond wake-up. */
 	_Atomic uint32_t wake_seq;
-	uint32_t         _pad2;
+	/* Number of consumers currently blocked in nats_ring_wait().  The
+	 * producer wakes at most ONE waiter per published message (not every
+	 * waiter), so a single message no longer stampedes all N workers; a
+	 * burst of K messages issues K single wakes, so up to K workers run in
+	 * parallel.  The producer also skips the FUTEX_WAKE syscall entirely
+	 * when no one is waiting. */
+	_Atomic uint32_t waiters;
 
 	/* hot counters -- head is written by producers, tail by consumers;
 	 * they are placed on separate 64-bit slots so the compiler cannot
@@ -313,30 +319,23 @@ int nats_ring_push(nats_ring_t *r,
 	 * observes the fully-written slot. */
 	__atomic_store_n(&slot->ready_gen, h, __ATOMIC_RELEASE);
 
+	(void)t;
 	/*
-	 * Empty -> non-empty edge detection.  At the time we reserved our
-	 * slot (CAS committed head = h + 1), head - tail was 0 iff h == t.
-	 * Only the producer that raised head from 0 above tail signals
-	 * the eventfd; subsequent producers in the same batch skip the
-	 * write to avoid the thundering-herd.  Using the pre-push values
-	 * of h and t that we loaded is safe: tail can only move up, so
-	 * if h == t at reservation time, we are definitely at the edge
-	 * for the slot we just published.
+	 * Wake exactly ONE blocked consumer for the message we just published.
+	 *
+	 * Bump wake_seq (release ordering) so a worker that is between its
+	 * emptiness check and FUTEX_WAIT sees the change and the wait returns
+	 * EAGAIN instead of blocking.  Then, only if someone is actually
+	 * blocked, FUTEX_WAKE exactly 1 waiter: one message -> one woken
+	 * worker, so a single message no longer stampedes all N workers, and a
+	 * burst of K messages issues K single wakes (one per push) so up to K
+	 * workers drain in parallel.  When no one is waiting (workers already
+	 * busy popping) we skip the syscall entirely.  The futex word lives in
+	 * SHM so this is valid no matter which process produced the slot.
 	 */
-	if (h == t) {
-		/* Cross-process wake.  Bump wake_seq under release ordering so
-		 * any worker that observed the old value via the FUTEX_WAIT
-		 * compare-and-block path sees the published slot when it retries
-		 * the pop.  FUTEX_WAKE on INT_MAX wakes every waiter (typical
-		 * N <= num workers, so the thundering-herd cost is bounded).  We
-		 * only signal on the empty -> non-empty edge to avoid waking on
-		 * every push.  The futex word lives in SHM, so this is valid no
-		 * matter which process produced the slot -- unlike a per-process
-		 * eventfd, which is why the eventfd was removed. */
-		atomic_fetch_add_explicit(&r->wake_seq, 1, memory_order_release);
-		syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, INT_MAX,
-			NULL, NULL, 0);
-	}
+	atomic_fetch_add_explicit(&r->wake_seq, 1, memory_order_release);
+	if (atomic_load_explicit(&r->waiters, memory_order_acquire) > 0)
+		syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, 1, NULL, NULL, 0);
 
 	return 0;
 }
@@ -470,7 +469,21 @@ int nats_ring_wait(nats_ring_t *r, int timeout_ms)
 	ts.tv_sec  = timeout_ms / 1000;
 	ts.tv_nsec = (timeout_ms % 1000) * 1000000L;
 
+	/* Register as a waiter so the producer knows to issue a wake (and how
+	 * many).  Re-check emptiness AFTER incrementing: a producer that
+	 * published between the check above and the increment may already have
+	 * skipped our wake (it saw waiters==0), so we must not block on stale
+	 * emptiness.  The wake_seq snapshot still guards the block itself. */
+	atomic_fetch_add_explicit(&r->waiters, 1, memory_order_acq_rel);
+	h = atomic_load_explicit(&r->head, memory_order_acquire);
+	t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+	if (h > t) {
+		atomic_fetch_sub_explicit(&r->waiters, 1, memory_order_acq_rel);
+		return 0;
+	}
+
 	rc = syscall(SYS_futex, &r->wake_seq, FUTEX_WAIT, seq, &ts, NULL, 0);
+	atomic_fetch_sub_explicit(&r->waiters, 1, memory_order_acq_rel);
 	if (rc == 0) return 0;
 	/* EAGAIN means the value already differed -- producer raced us
 	 * but the data is in the ring already.  Treat as success. */
