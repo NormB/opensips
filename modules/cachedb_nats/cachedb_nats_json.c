@@ -1706,12 +1706,19 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	 * heap-allocated since the bucket count is now runtime-tunable.
 	 * Only this caller sees the shadow; the lock field is unused
 	 * because no other thread can reach `shadow` -- we pass it
-	 * explicitly through _index_add_into. */
+	 * explicitly through _index_add_into.
+	 *
+	 * These scratch arrays MUST be shm_malloc, not pkg_malloc: this
+	 * function runs on the watcher pthread (cachedb_nats_watch.c), and
+	 * pkg memory is per-process and NOT thread-safe -- a pkg_malloc here
+	 * races the SIP worker's main-thread pkg use and corrupts the pkg
+	 * free list (manifesting as a spurious "out of pkg memory" with the
+	 * pool nearly empty).  shm_malloc takes the shm lock and is safe. */
 	memset(&shadow, 0, sizeof(shadow));
 	buckets_bytes = sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets;
-	shadow.buckets = pkg_malloc(buckets_bytes);
+	shadow.buckets = shm_malloc(buckets_bytes);
 	if (!shadow.buckets) {
-		LM_ERR("rebuild: pkg_malloc for shadow buckets failed "
+		LM_ERR("rebuild: shm_malloc for shadow buckets failed "
 			"(%d buckets, %zu bytes)\n",
 			nats_idx_buckets, buckets_bytes);
 		return -1;
@@ -1744,11 +1751,11 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	 * shadow.buckets into it.  This avoids forcing a SHM realloc
 	 * while shards are locked. */
 	_idx_lock_all(g_idx);
-	old_buckets = pkg_malloc(buckets_bytes);
+	old_buckets = shm_malloc(buckets_bytes);   /* shm: watcher-pthread safe */
 	if (!old_buckets) {
 		_idx_unlock_all(g_idx);
-		pkg_free(shadow.buckets);
-		LM_ERR("rebuild: pkg_malloc for old-buckets snapshot "
+		shm_free(shadow.buckets);
+		LM_ERR("rebuild: shm_malloc for old-buckets snapshot "
 			"failed (%d buckets, %zu bytes)\n",
 			nats_idx_buckets, buckets_bytes);
 		return -1;
@@ -1772,8 +1779,8 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 			e = next;
 		}
 	}
-	pkg_free(old_buckets);
-	pkg_free(shadow.buckets);
+	shm_free(old_buckets);
+	shm_free(shadow.buckets);
 
 	/* The shadow rebuild populated the forward index but not the reverse
 	 * map; clear it so it can't carry stale records.  It repopulates as
