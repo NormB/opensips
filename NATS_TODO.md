@@ -9,9 +9,8 @@ Items merged where multiple reviews found the same root cause.
 
 **Status (2026-06-11):** P0–P2 (1–44) and most of P3 done. The P3 security
 nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
-72, 73) are landed. Remaining P3 are the larger/structural items: 59 (file rename), 60 (split the
-3k-line files), 63/64 (cross-module helper consolidation), 71 (b/c sub-parts),
-74 (test-coverage gaps).
+72, 73) are landed. Remaining P3: 60 (split the 3k-line files), 71 (b/c sub-parts), 74
+(test-coverage gaps).
 Progress is tracked in git (`feature/nats`), not just these checkboxes.
 
 ---
@@ -308,7 +307,7 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   `data_len=0` when libnats returns NULL data (`:1411-1413`).**
 - [x] **58. [SEC][MAINT] Check natsStatus returns in `apply_tls_from_mgm` — silent mTLS/cipher
   downgrade on failure (`nats_pool.c:636-661,783`).**
-- [ ] **59. [MAINT] Rename event_nats's internal `nats_consumer.c/.h` (e.g. `event_nats_sub.c`)
+- [x] **59. [MAINT] Rename event_nats's internal `nats_consumer.c/.h` (e.g. `event_nats_sub.c`)
   and differentiate the two `"NATS consumer"` proc display names
   (`event_nats.c:235`, `nats_consumer/nats_consumer.c:449`).**
 - [ ] **60. [MAINT] Split `cachedb_nats_json.c` (3087 lines → index / serializer / query+update
@@ -321,10 +320,10 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   (`cachedb_nats.c:466`); wrong `index_resync_on_reconnect` default claim
   (`cachedb_nats_watch.c:399`); stale "process-local index" header
   (`cachedb_nats_json.c:22-40`); unreachable spec reference (`nats_consumer.h:27-28`).**
-- [ ] **63. [MAINT] Consolidate str→cstr/dup helpers into lib/nats (4+ duplicates:
+- [x] **63. [MAINT] Consolidate str→cstr/dup helpers into lib/nats (4+ duplicates:
   `cachedb_nats_dbase.c:234`, `cachedb_nats_native.c:100,208-223,564-578,638-651`,
   `nats_consumer_proc.c:423,436`).**
-- [ ] **64. [MAINT] Consolidate the four subject/name validators into lib/nats with mode flags
+- [x] **64. [MAINT] Consolidate the four subject/name validators into lib/nats with mode flags
   (publish / stream-name / kv-key / filter-subject) — also closes gaps behind #18/#19.**
 - [x] **65. [MAINT] Remove the `*timeout_ms = eff` write-back that contradicts its own comment
   (`cachedb_nats_native.c:176-193`).**
