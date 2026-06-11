@@ -158,6 +158,12 @@ static int            _kv_cache_cnt = 0;
 /* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
 int nats_pool_drain_timeout_ms = 5000;
 
+/* See nats_pool.h — module-tunable JetStream/KV op timeout, ms.  0 keeps
+ * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
+ * like usrloc so a slow-but-connected broker can't block a SIP worker for
+ * the full default. */
+int nats_pool_kv_op_timeout_ms = 0;
+
 /* ----------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------- */
@@ -798,6 +804,12 @@ natsConnection *nats_pool_get(void)
 	 */
 	nats_dl.natsOptions_SetMaxReconnect(opts, -1);
 	nats_dl.natsOptions_SetReconnectWait(opts, pool_cfg->reconnect_wait);
+	/* Spread runtime reconnects: without jitter, all N worker processes
+	 * reconnect in lockstep after a broker restart (a thundering herd that
+	 * hammers the broker every reconnect_wait).  Jitter up to one full
+	 * reconnect_wait window (TLS uses the same). */
+	nats_dl.natsOptions_SetReconnectJitter(opts,
+		(int64_t)pool_cfg->reconnect_wait, (int64_t)pool_cfg->reconnect_wait);
 	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
 	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
@@ -836,7 +848,16 @@ natsConnection *nats_pool_get(void)
 				goto error;
 			}
 
-			nats_dl.nats_Sleep(pool_cfg->reconnect_wait);
+			/* Per-process jitter on the retry sleep so N workers that all
+			 * start (or recover) against a down broker don't retry in
+			 * lockstep.  Derived from the PID so it is stable but spread;
+			 * up to half the base wait on top of it. */
+			{
+				int base = pool_cfg->reconnect_wait;
+				int span = base / 2 + 1;
+				int jit  = (int)((unsigned)getpid() % (unsigned)span);
+				nats_dl.nats_Sleep(base + jit);
+			}
 		}
 	}
 
@@ -902,6 +923,11 @@ jsCtx *nats_pool_get_js(void)
 	 * queue blocks the worker before erroring. */
 	jsOpts.PublishAsync.MaxPending = NATS_JS_PUBLISH_ASYNC_MAX_PENDING;
 	jsOpts.PublishAsync.StallWait  = NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS;
+	/* Per-op request timeout for JetStream/KV operations.  Left at 0 cnats
+	 * uses its 5 s default, which is far above any per-REGISTER budget on
+	 * the usrloc hot path; let the operator tune it down. */
+	if (nats_pool_kv_op_timeout_ms > 0)
+		jsOpts.Wait = nats_pool_kv_op_timeout_ms;
 
 	s = nats_dl.natsConnection_JetStream(&_js, _nc, &jsOpts);
 	if (s != NATS_OK) {
