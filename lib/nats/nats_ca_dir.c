@@ -122,7 +122,11 @@ char *nats_load_ca_directory(const char *dir, char **err)
 	/* Pass 2: sum file sizes for the output allocation. */
 	for (i = 0; i < pem_cnt; i++) {
 		struct stat st;
-		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		int pn = snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		/* A truncated path would stat a different (or nonexistent) file;
+		 * skip it in both passes so the size sum and the concat agree. */
+		if (pn < 0 || pn >= (int)sizeof(path))
+			continue;
 		if (stat(path, &st) != 0) {
 			set_err(err, "stat('%s') failed", path);
 			goto fail;
@@ -156,7 +160,9 @@ char *nats_load_ca_directory(const char *dir, char **err)
 		size_t got;
 		size_t avail;     /* bytes left in `out`, excluding final NUL */
 		size_t budget;    /* max payload bytes we may read this file */
-		snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		int pn = snprintf(path, sizeof(path), "%s/%s", dir, pem_files[i]);
+		if (pn < 0 || pn >= (int)sizeof(path))
+			continue;     /* truncated path skipped in pass 2 too */
 		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
 			continue;
 		avail = (size_t)(total - (size_t)(p - out));
