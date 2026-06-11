@@ -83,8 +83,8 @@ int main(void)
 
 	/* ---- production wiring: getters defined + declared ----------- */
 	{
-		const char *c = "../nats_consumer.c";
-		const char *h = "../nats_consumer.h";
+		const char *c = "../event_nats_sub.c";
+		const char *h = "../event_nats_sub.h";
 		ASSERT(file_contains(c, "nats_inbound_dropped_oversize"),
 			"nats_consumer.c defines dropped_oversize getter");
 		ASSERT(file_contains(c, "nats_inbound_dropped_backpressure"),
@@ -98,7 +98,7 @@ int main(void)
 	/* ---- production wiring: MI surfaces the counters ------------- */
 	{
 		const char *s = "../nats_stats.c";
-		ASSERT(file_contains(s, "nats_consumer.h"),
+		ASSERT(file_contains(s, "event_nats_sub.h"),
 			"nats_stats.c includes the consumer header for the getters");
 		ASSERT(file_contains(s, "inbound_dropped_oversize"),
 			"nats_stats MI emits inbound_dropped_oversize");

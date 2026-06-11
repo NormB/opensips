@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_consumer.c — NATS subscription consumer process
+ * event_nats_sub.c — NATS subscription consumer process
  *
  * Follows the rabbitmq_consumer pattern:
  *   1. Dedicated process (proc_export_t) subscribes to NATS
@@ -42,7 +42,7 @@
 #include "../../evi/evi.h"
 #include "../../evi/evi_params.h"
 #include "../../lib/nats/nats_pool.h"
-#include "nats_consumer.h"
+#include "event_nats_sub.h"
 
 /* ── Global subscription list ────────────────────────────────────── */
 

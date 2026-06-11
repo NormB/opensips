@@ -19,7 +19,10 @@
  */
 
 /*
- * nats_consumer.h — NATS subscription consumer for event_nats
+ * event_nats_sub.h — NATS subscription consumer for event_nats
+ *
+ * (Renamed from nats_consumer.h to disambiguate from the standalone
+ *  nats_consumer module — P3-59.)
  *
  * Manages NATS subscriptions that dispatch received messages to OpenSIPS
  * event_route[E_*] handlers via the EVI subsystem.
@@ -34,8 +37,8 @@
  *   - Workers call evi_raise_event() to trigger event_route[E_*]
  */
 
-#ifndef NATS_CONSUMER_H
-#define NATS_CONSUMER_H
+#ifndef EVENT_NATS_SUB_H
+#define EVENT_NATS_SUB_H
 
 #include "../../str.h"
 #include "../../sr_module.h"   /* modparam_t */
@@ -97,4 +100,4 @@ unsigned long nats_inbound_dropped_oversize(void);
 unsigned long nats_inbound_dropped_backpressure(void);
 int nats_inbound_inflight(void);
 
-#endif /* NATS_CONSUMER_H */
+#endif /* EVENT_NATS_SUB_H */

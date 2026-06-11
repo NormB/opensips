@@ -98,7 +98,7 @@ static char *extract_func_body(const char *path, const char *funcname)
 
 int main(void)
 {
-	const char *src = "../nats_consumer.c";
+	const char *src = "../event_nats_sub.c";
 
 	ASSERT(grep_count(src, "nats_pool_get_reconnect_epoch") >= 1,
 		"consumer loop reads reconnect epoch");

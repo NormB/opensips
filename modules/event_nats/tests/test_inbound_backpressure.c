@@ -68,7 +68,7 @@ static int grep_in_function(const char *path, const char *fn_name,
 
 int main(void)
 {
-	const char *src = "../nats_consumer.c";
+	const char *src = "../event_nats_sub.c";
 
 	/* Exactly one combined allocation per message (was 3). */
 	ASSERT(grep_in_function(src, "nats_msg_handler", "shm_malloc") == 1,
