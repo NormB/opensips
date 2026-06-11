@@ -74,10 +74,10 @@ Events are published as JSON payloads to the specified NATS subject.
 | `nats_stream_create` | `name`, `subjects` [, `replicas`, `max_msgs`, `max_bytes`, `max_age`, `retention`, `storage`] | Create a stream. Subjects is comma-separated. Retention: limits/interest/workqueue. Storage: file/memory. |
 | `nats_stream_delete` | `stream` | Delete a stream |
 | `nats_stream_purge` | `stream` | Purge all messages from a stream |
-| `nats_consumer_list` | `stream` | List consumers for a stream |
-| `nats_consumer_info` | `stream`, `consumer` | Detailed consumer metadata: delivered, ack_floor, pending, config |
-| `nats_consumer_create` | `stream`, `name` [, `filter_subject`, `deliver_policy`, `ack_policy`] | Create a durable consumer. deliver_policy: all/last/new/last_per_subject. ack_policy: explicit/none/all. |
-| `nats_consumer_delete` | `stream`, `consumer` | Delete a consumer |
+| `nats_js_consumer_list` | `stream` | List consumers for a stream |
+| `nats_js_consumer_info` | `stream`, `consumer` | Detailed consumer metadata: delivered, ack_floor, pending, config |
+| `nats_js_consumer_create` | `stream`, `name` [, `filter_subject`, `deliver_policy`, `ack_policy`] | Create a durable consumer. deliver_policy: all/last/new/last_per_subject. ack_policy: explicit/none/all. |
+| `nats_js_consumer_delete` | `stream`, `consumer` | Delete a consumer |
 | `nats_msg_get` | `stream`, `seq` | Get a message by sequence number |
 | `nats_msg_delete` | `stream`, `seq` | Delete a message by sequence number |
 

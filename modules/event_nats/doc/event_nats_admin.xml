@@ -833,9 +833,9 @@ opensips-cli -x mi nats_reconnect
             </para>
         </section>
 
-        <section id="mi_nats_consumer_list">
+        <section id="mi_nats_js_consumer_list">
             <title>
-                <function moreinfo="none">nats_consumer_list(stream)</function>
+                <function moreinfo="none">nats_js_consumer_list(stream)</function>
             </title>
             <para>
                 Return a JSON array of consumer summaries (name,
@@ -845,9 +845,9 @@ opensips-cli -x mi nats_reconnect
             </para>
         </section>
 
-        <section id="mi_nats_consumer_info">
+        <section id="mi_nats_js_consumer_info">
             <title>
-                <function moreinfo="none">nats_consumer_info(stream, consumer)</function>
+                <function moreinfo="none">nats_js_consumer_info(stream, consumer)</function>
             </title>
             <para>
                 Return the full per-consumer metadata: filter subject,
@@ -857,9 +857,9 @@ opensips-cli -x mi nats_reconnect
             </para>
         </section>
 
-        <section id="mi_nats_consumer_create">
+        <section id="mi_nats_js_consumer_create">
             <title>
-                <function moreinfo="none">nats_consumer_create(stream, name, [filter_subject, deliver_policy, ack_policy])</function>
+                <function moreinfo="none">nats_js_consumer_create(stream, name, [filter_subject, deliver_policy, ack_policy])</function>
             </title>
             <para>
                 Create a durable consumer on
@@ -890,9 +890,9 @@ opensips-cli -x mi nats_reconnect
             </para>
         </section>
 
-        <section id="mi_nats_consumer_delete">
+        <section id="mi_nats_js_consumer_delete">
             <title>
-                <function moreinfo="none">nats_consumer_delete(stream, consumer)</function>
+                <function moreinfo="none">nats_js_consumer_delete(stream, consumer)</function>
             </title>
             <para>
                 Delete a durable consumer.  Pending deliveries that

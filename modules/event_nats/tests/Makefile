@@ -10,7 +10,7 @@ ASAN    := -fsanitize=address
 
 TESTS = test_partial_alloc test_seq_cast_guard \
         test_atomic_stats test_subscription_rebuild \
-        test_child_init_degrade
+        test_child_init_degrade test_mi_command_collision
 
 # Tests safe to run under ThreadSanitizer.
 # test_atomic_stats deliberately demonstrates that `volatile` is not
@@ -18,7 +18,8 @@ TESTS = test_partial_alloc test_seq_cast_guard \
 # (correctly) flags it as a data race -- that is the whole point of
 # the test, not a regression.
 TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
-                  test_subscription_rebuild test_child_init_degrade
+                  test_subscription_rebuild test_child_init_degrade \
+                  test_mi_command_collision
 
 all: $(TESTS)
 
@@ -39,12 +40,18 @@ test_subscription_rebuild: test_subscription_rebuild.c
 test_child_init_degrade: test_child_init_degrade.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Source-pattern: event_nats's JetStream-admin MI commands are renamed
+# nats_js_consumer_* so they don't collide with nats_consumer's commands.
+test_mi_command_collision: test_mi_command_collision.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_partial_alloc
 	./test_seq_cast_guard
 	./test_atomic_stats
 	./test_subscription_rebuild
 	./test_child_init_degrade
+	./test_mi_command_collision
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

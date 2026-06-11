@@ -279,6 +279,16 @@ int nats_consumer_fetch_timeout_ms = 1000;
  * the worker's outbound buffer. */
 char *nats_request_id_header = "X-Request-Id";
 
+/* NATS connection parameters.  nats_consumer registers its own pool so it
+ * works when loaded WITHOUT event_nats / cachedb_nats; the lib/nats pool
+ * merges registrations when several NATS modules are loaded.  When nats_url
+ * is unset the default localhost is registered only if no other module
+ * already registered (see mod_init), to avoid injecting a spurious server
+ * into a co-loaded module's pool. */
+static char *nats_url = NULL;
+static int   nats_reconnect_wait_ms = 0;   /* 0 = lib/nats default */
+static int   nats_max_reconnect     = 0;   /* 0 = lib/nats default */
+
 /*
  * USE_FUNC_PARAM setter for `allow_sync_anywhere`.
  *
@@ -406,6 +416,9 @@ static int nats_request_allow_sync_setter(modparam_t type, void *val)
 }
 
 static const param_export_t params[] = {
+	{ "nats_url",          STR_PARAM, &nats_url },
+	{ "reconnect_wait_ms", INT_PARAM, &nats_reconnect_wait_ms },
+	{ "max_reconnect",     INT_PARAM, &nats_max_reconnect },
 	{ "persist_handles",   INT_PARAM, &persist_handles },
 	{ "persist_path",      STR_PARAM, &persist_path    },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
@@ -498,10 +511,8 @@ static int mod_init(void)
 	 * connect time if tls_mgm isn't bound or the "nats" domain
 	 * isn't defined.
 	 *
-	 * nats_consumer doesn't call nats_pool_register itself -- it
-	 * inherits whatever pool event_nats / cachedb_nats already
-	 * registered -- but it still binds tls_mgm so the call ordering
-	 * is robust if nats_consumer happens to load before the others. */
+	 * Bind tls_mgm before registering the pool so the "nats" client
+	 * domain is available to the connect path for tls:// URLs. */
 	if (find_export("load_tls_mgm", 0)) {
 		if (load_tls_mgm_api(&tls_api) == 0) {
 			nats_pool_set_tls_api(&tls_api);
@@ -509,6 +520,29 @@ static int mod_init(void)
 		} else {
 			LM_WARN("nats_consumer: tls_mgm exports load_tls_mgm but "
 			        "the bind failed; tls:// URLs may not work\n");
+		}
+	}
+
+	/* Register our own pool so nats_consumer works when loaded WITHOUT
+	 * event_nats / cachedb_nats (those previously had to register first;
+	 * loaded alone the consumer process aborted at nats_pool_get()).  The
+	 * lib/nats pool merges registrations, so this is safe alongside them.
+	 * When nats_url is unset, contribute the localhost default only if no
+	 * other module has already registered, to avoid injecting a spurious
+	 * server into a co-loaded module's pool. */
+	if (nats_url) {
+		if (nats_pool_register(nats_url, "nats_consumer",
+				nats_reconnect_wait_ms, nats_max_reconnect) < 0) {
+			LM_ERR("nats_consumer: NATS pool registration failed\n");
+			return -1;
+		}
+	} else if (!nats_pool_is_registered()) {
+		LM_WARN("nats_consumer: no nats_url set and no other NATS module "
+			"registered a pool; defaulting to nats://localhost:4222\n");
+		if (nats_pool_register("nats://localhost:4222", "nats_consumer",
+				nats_reconnect_wait_ms, nats_max_reconnect) < 0) {
+			LM_ERR("nats_consumer: NATS pool registration failed\n");
+			return -1;
 		}
 	}
 

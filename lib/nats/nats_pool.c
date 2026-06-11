@@ -1184,3 +1184,11 @@ int nats_pool_get_reconnect_epoch(void)
 {
 	return atomic_load(&_reconnect_epoch);
 }
+
+/* True once any module has called nats_pool_register().  Lets a module
+ * decide whether to contribute a default URL (standalone) or inherit a
+ * pool another NATS module already registered. */
+int nats_pool_is_registered(void)
+{
+	return pool_cfg != NULL;
+}

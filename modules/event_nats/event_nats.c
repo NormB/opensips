@@ -182,17 +182,21 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	{ "nats_consumer_list", 0, 0, 0, {
+	/* JetStream consumer-admin commands.  Named nats_js_consumer_* (not
+	 * nats_consumer_*) so they do not collide with the nats_consumer
+	 * module's own nats_consumer_* handle-management commands when both
+	 * modules are loaded; mirrors this module's nats_stream_* family. */
+	{ "nats_js_consumer_list", 0, 0, 0, {
 		{mi_nats_consumer_list, {"stream", 0}},
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	{ "nats_consumer_info", 0, 0, 0, {
+	{ "nats_js_consumer_info", 0, 0, 0, {
 		{mi_nats_consumer_info, {"stream", "consumer", 0}},
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	{ "nats_consumer_create", 0, 0, 0, {
+	{ "nats_js_consumer_create", 0, 0, 0, {
 		{mi_nats_consumer_create, {"stream", "name", 0}},
 		{mi_nats_consumer_create, {"stream", "name", "filter_subject", 0}},
 		{mi_nats_consumer_create, {"stream", "name", "filter_subject",
@@ -200,7 +204,7 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	{ "nats_consumer_delete", 0, 0, 0, {
+	{ "nats_js_consumer_delete", 0, 0, 0, {
 		{mi_nats_consumer_delete, {"stream", "consumer", 0}},
 		{EMPTY_MI_RECIPE}},
 		{0}
