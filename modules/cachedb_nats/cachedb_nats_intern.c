@@ -243,17 +243,18 @@ void nats_intern_release(char *p)
 
 	lock_set_get(g_t->locks, shard);
 
-	if (--n->refcount > 0) {
-		lock_set_release(g_t->locks, shard);
-		return;
-	}
-
-	/* Refcount reached zero -- unlink and free.  Walk the chain
-	 * to find our prev pointer; chains are short (1024 buckets,
-	 * uniform hash, ~100k entries -> ~100 nodes per bucket worst
-	 * case but typical 1-2). */
+	/* Locate the node in its bucket chain BEFORE touching its refcount.
+	 * On a double-release the first release already unlinked and freed the
+	 * node, so it is no longer in the chain; decrementing n->refcount (a
+	 * write into freed SHM) or freeing it again would corrupt the heap.
+	 * Walking first turns a double-free into a logged no-op.  Chains are
+	 * short (uniform hash, typically 1-2 nodes). */
 	for (prev = &g_t->buckets[bucket]; *prev; prev = &(*prev)->next) {
 		if (*prev == n) {
+			if (--n->refcount > 0) {
+				lock_set_release(g_t->locks, shard);
+				return;
+			}
 			*prev = n->next;
 			g_t->size--;
 			lock_set_release(g_t->locks, shard);
@@ -262,11 +263,8 @@ void nats_intern_release(char *p)
 		}
 	}
 
-	/* Not found in chain -- this is a logic bug.  Either a
-	 * double-release or the string was never interned.  We've
-	 * already decremented refcount to a negative; can't safely
-	 * roll that back without another walk.  Log and move on;
-	 * the orphan node will leak but the system stays up. */
+	/* Not found in chain -- a double-release or a non-interned pointer.
+	 * We have NOT touched n->refcount, so no UAF write and no double-free. */
 	LM_ERR("intern: release: node %p not found in bucket %u "
 		"(double-release or non-interned pointer?)\n",
 		(void *)n, bucket);
