@@ -57,8 +57,9 @@
 				<varname>enable_search_index = 0</varname>.
 			</para></listitem>
 			<listitem><para>
-				<emphasis role="bold">nats_request()</emphasis> —
-				synchronous NATS request/reply (RPC) callable from routing scripts.
+				<emphasis role="bold">nats_cdb_request()</emphasis> —
+				synchronous NATS request/reply (RPC), callable only off the SIP
+				request path (it blocks the worker for the full RTT/timeout).
 			</para></listitem>
 			<listitem><para>
 				<emphasis role="bold">nats_kv_history()</emphasis> —
@@ -487,13 +488,13 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 	<title><varname>nats_request_max_reply</varname> (integer)</title>
 	<para>
 		Maximum number of bytes accepted in a NATS request/reply
-		response from <function>nats_request()</function>.  Caps the
+		response from <function>nats_cdb_request()</function>.  Caps the
 		per-call <function>pkg_malloc()</function> in the worker so a
 		malicious or misbehaving responder cannot exhaust the
 		per-worker package memory pool by returning an oversized
 		reply.  Replies whose declared length exceeds this bound are
 		rejected with an <emphasis>LM_ERR</emphasis> and
-		<function>nats_request()</function> returns <emphasis>-1</emphasis>.
+		<function>nats_cdb_request()</function> returns <emphasis>-1</emphasis>.
 	</para>
 	<para>
 		<emphasis>
@@ -513,7 +514,7 @@ modparam("cachedb_nats", "nats_request_max_reply", 262144)
 	<title><varname>nats_request_default_timeout_ms</varname> (integer)</title>
 	<para>
 		Default timeout (milliseconds) used by
-		<function>nats_request()</function> when the script call
+		<function>nats_cdb_request()</function> when the script call
 		passes <emphasis>0</emphasis> or a negative value as the
 		timeout argument.  Any positive caller-supplied timeout is
 		clamped to the range
