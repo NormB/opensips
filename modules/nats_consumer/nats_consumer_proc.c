@@ -160,6 +160,32 @@ static inline int eff_fetch_timeout_ms(const nats_handle_t *h)
 	return v;
 }
 
+/* Floor on the per-fetch idle wait so we still actually block (and don't
+ * busy-spin) when many handles share the budget. */
+#define NATS_FETCH_MIN_BUDGET_MS  5
+
+/*
+ * Per-fetch timeout budget for one pass of the fetch sweep.  With one
+ * handle, use the full configured timeout (an efficient idle wait).  With
+ * N handles, divide it so the WHOLE sweep stays bounded at ~the configured
+ * timeout instead of N * timeout -- otherwise a sweep over many idle
+ * handles starves acks and async RPCs for num_handles * fetch_timeout
+ * (head-of-line blocking).  Returns 0 ("no cap") for the single-handle
+ * case so pull_one_batch uses the handle's own configured timeout.
+ */
+static int fetch_budget_ms(int configured, int num_subs)
+{
+	int b;
+	if (num_subs <= 1)
+		return 0;                 /* no cap: full per-handle timeout */
+	b = configured / num_subs;
+	if (b < NATS_FETCH_MIN_BUDGET_MS)
+		b = NATS_FETCH_MIN_BUDGET_MS;
+	if (b > configured)
+		b = configured;
+	return b;
+}
+
 /* Idle cycle: blocking select() on (ack_fd, retry_timerfd) instead of
  * a usleep spin.  The retry timerfd gives us a bounded upper wait so
  * a stalled subscription (e.g. broker TCP stall) does not keep us
@@ -427,7 +453,7 @@ typedef struct drain_ack_ctx drain_ack_ctx_t;
 
 static int  reconcile_subs_cb(nats_handle_t *h, void *user);
 static int  ensure_subscription_for_handle(nats_handle_t *h);
-static int  pull_one_batch(proc_sub_state_t *ss);
+static int  pull_one_batch(proc_sub_state_t *ss, int budget_ms);
 static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
 static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
 static proc_sub_state_t *find_sub_by_index(uint16_t index);
@@ -1264,7 +1290,7 @@ done_vals:
 
 /* ── fetch loop ──────────────────────────────────────────────── */
 
-static int pull_one_batch(proc_sub_state_t *ss)
+static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 {
 	natsMsgList  list;
 	natsStatus   s;
@@ -1313,11 +1339,17 @@ static int pull_one_batch(proc_sub_state_t *ss)
 		if (eff_fb < 1)
 			eff_fb = 1;
 
+		int tmo = eff_fetch_timeout_ms(ss->h_ref);
+		/* Cap the per-fetch wait to the caller's budget so a sweep over
+		 * many idle handles cannot block acks / async RPCs for
+		 * num_handles * fetch_timeout (head-of-line blocking). */
+		if (budget_ms > 0 && budget_ms < tmo)
+			tmo = budget_ms;
+
 		memset(&list, 0, sizeof(list));
 		hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
 		s = nats_dl.natsSubscription_Fetch(&list, ss->sub,
-		        eff_fb,
-		        eff_fetch_timeout_ms(ss->h_ref), NULL);
+		        eff_fb, tmo, NULL);
 	}
 
 	/* Fast path on idle: timeout is the steady-state condition when
@@ -1954,11 +1986,29 @@ void nats_consumer_proc_main(int rank)
 
 		/* 2. Fetch + push for every live subscription.  A ring-full
 		 *    handle contributes 0 to any_work so the idle sleep
-		 *    applies and we don't burn CPU spinning on it. */
-		for (ss = g_subs; ss; ss = ss->next) {
-			int pushed = pull_one_batch(ss);
-			if (pushed > 0)
-				any_work = 1;
+		 *    applies and we don't burn CPU spinning on it.
+		 *
+		 *    The per-fetch wait is budgeted by the number of handles so
+		 *    the whole sweep stays bounded at ~one fetch_timeout instead
+		 *    of num_handles * fetch_timeout, and the latency-sensitive
+		 *    async-RPC publish IPC is drained between fetches so an RPC
+		 *    isn't stuck behind a sweep of idle handles. */
+		{
+			int num_subs = 0, budget;
+			for (ss = g_subs; ss; ss = ss->next)
+				num_subs++;
+			budget = fetch_budget_ms(nats_consumer_fetch_timeout_ms,
+				num_subs);
+			for (ss = g_subs; ss; ss = ss->next) {
+				int pushed = pull_one_batch(ss, budget);
+				if (pushed > 0)
+					any_work = 1;
+				if (num_subs > 1) {
+					int rpcs = nats_rpc_consumer_drain_ipc();
+					if (rpcs > 0)
+						any_work = 1;
+				}
+			}
 		}
 
 		/* 3. Service pending ack requests.  Drain the eventfd
@@ -1999,7 +2049,10 @@ void nats_consumer_proc_main(int rank)
 			 * is the fallback for the missing +NXT payload API. */
 			for (ss = g_subs; ss; ss = ss->next) {
 				if (next_bits_test(&ctx, ss->handle_idx)) {
-					int pushed = pull_one_batch(ss);
+					/* ack-and-pull hint: the next message is likely
+					 * already waiting, so use the full timeout (0 = no
+					 * cap) -- this is not part of the idle sweep. */
+					int pushed = pull_one_batch(ss, 0);
 					if (pushed > 0)
 						any_work = 1;
 				}
