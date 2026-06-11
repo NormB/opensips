@@ -576,7 +576,7 @@ static int mod_init(void)
 		 * _entry_add_key path; allocate it BEFORE the index
 		 * itself.  Skipped when the index is disabled
 		 * (nothing calls intern_acquire then). */
-		if (nats_intern_init() < 0) {
+		if (nats_intern_init(nats_idx_buckets) < 0) {
 			LM_ERR("failed to initialise doc-key intern table\n");
 			return -1;
 		}

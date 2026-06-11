@@ -18,7 +18,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_kv_history_bounds test_request_payload_guard \
         test_sink_emit_string test_json_parse_guard test_allops_fastfail \
         test_counter_overflow test_native_key_validation \
-        test_nats_request_rename
+        test_nats_request_rename test_intern_scaling
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -159,6 +159,11 @@ test_native_key_validation: test_native_key_validation.c
 test_nats_request_rename: test_nats_request_rename.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Source-pattern: the intern table sizes its buckets from index_buckets
+# and caches each node's hash (no fixed 1024, no re-hash on release).
+test_intern_scaling: test_intern_scaling.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -189,6 +194,7 @@ check: all
 	./test_counter_overflow
 	./test_native_key_validation
 	./test_nats_request_rename
+	./test_intern_scaling
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

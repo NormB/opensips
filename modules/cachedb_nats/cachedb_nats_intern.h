@@ -55,11 +55,13 @@
  * supported.
  */
 
-/* Initialise the global intern table in SHM.  Call once from
- * mod_init pre-fork so every worker (and the dedicated watcher
- * proc) maps the same table.  Returns 0 on success, -1 on SHM
- * exhaustion. */
-int  nats_intern_init(void);
+/* Initialise the global intern table in SHM.  Call once from mod_init
+ * pre-fork so every worker (and the dedicated watcher proc) maps the same
+ * table.  @num_buckets sizes the bucket array (rounded up to a power of
+ * two; <= 0 selects the default) -- pass the index_buckets modparam so the
+ * intern chains scale with the deployment instead of being fixed at 1024.
+ * Returns 0 on success, -1 on SHM exhaustion. */
+int  nats_intern_init(int num_buckets);
 
 /* Tear down the intern table.  Call once from mod_destroy.
  * Frees all entries and the table itself; safe to call when
