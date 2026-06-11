@@ -93,6 +93,12 @@
 #define NATS_POOL_DEFAULT_RECONNECT_WAIT 2000
 #define NATS_POOL_DEFAULT_MAX_RECONNECT  60
 
+/* Max in-flight JetStream async publishes per process before
+ * js_PublishAsync errors (bounds per-worker memory under a slow-acking
+ * broker), and how long a full queue may stall the worker before it does. */
+#define NATS_JS_PUBLISH_ASYNC_MAX_PENDING    4096
+#define NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS  50
+
 /**
  * Pool configuration structure, allocated in shared memory.
  * Set during mod_init (pre-fork) and read-only after fork.
@@ -879,6 +885,15 @@ jsCtx *nats_pool_get_js(void)
 	/* Initialize JetStream options with async publish ack handler */
 	nats_dl.jsOptions_Init(&jsOpts);
 	jsOpts.PublishAsync.AckHandler = _js_pub_ack_handler;
+	/* Cap in-flight async publishes.  Left at 0 (cnats default = unlimited)
+	 * a degraded-but-connected JetStream would let every event queue inside
+	 * cnats in each SIP worker until OOM, with no fast-fail (the connection
+	 * is still up).  With a cap, js_PublishAsync returns an error once the
+	 * queue is full — counted as a drop by the producer's `failed` stat —
+	 * instead of growing memory.  A small StallWait bounds how long a full
+	 * queue blocks the worker before erroring. */
+	jsOpts.PublishAsync.MaxPending = NATS_JS_PUBLISH_ASYNC_MAX_PENDING;
+	jsOpts.PublishAsync.StallWait  = NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS;
 
 	s = nats_dl.natsConnection_JetStream(&_js, _nc, &jsOpts);
 	if (s != NATS_OK) {
