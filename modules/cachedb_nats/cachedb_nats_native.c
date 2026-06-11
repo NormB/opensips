@@ -1009,6 +1009,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 	natsStatus s;
 	cdb_raw_entry **rows;
 	int i, key_count;
+	int ncols_per_row;
 
 	memset(&keys, 0, sizeof(keys));
 	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
@@ -1033,6 +1034,14 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 		return 0;
 	}
 
+	/* The cachedb core frees expected_kv_no columns per row, so each row
+	 * MUST have at least that many cdb_raw_entry slots -- allocating only
+	 * the single column we fill leaves the core's free loop reading past
+	 * the row (OOB free) when the caller asked for more columns.  The
+	 * extra slots are zero-initialised (type 0, NULL val), so the core
+	 * frees them harmlessly. */
+	ncols_per_row = (expected_kv_no >= 1) ? expected_kv_no : 1;
+
 	/* Allocate the cdb_raw_entry reply array.  The cachedb core expects
 	 * a two-level allocation: an array of row pointers (rows[]), where
 	 * each row is a separately allocated array of cdb_raw_entry structs
@@ -1050,7 +1059,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 	 * the NATS client library.  We must copy each key before calling
 	 * nats_dl.kvKeysList_Destroy() which frees the underlying storage. */
 	for (i = 0; i < key_count; i++) {
-		rows[i] = pkg_malloc(sizeof(cdb_raw_entry));
+		rows[i] = pkg_malloc(ncols_per_row * sizeof(cdb_raw_entry));
 		if (!rows[i]) {
 			LM_ERR("no more pkg memory for key entry %d\n", i);
 			/* free what we allocated so far */
@@ -1061,7 +1070,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 			nats_dl.kvKeysList_Destroy(&keys);
 			return -1;
 		}
-		memset(rows[i], 0, sizeof(cdb_raw_entry));
+		memset(rows[i], 0, ncols_per_row * sizeof(cdb_raw_entry));
 
 		rows[i][0].type = CDB_STR;
 		int klen = strlen(keys.Keys[i]);

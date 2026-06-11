@@ -1043,6 +1043,15 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		LM_ERR("NATS pool: empty KV bucket name\n");
 		return NULL;
 	}
+	/* Reject a name that would not fit the cache key buffer rather than
+	 * snprintf-truncating it below: two distinct buckets sharing a long
+	 * prefix would otherwise collide on the truncated key and the cache
+	 * would hand back the wrong kvStore handle. */
+	if (strlen(bucket) >= sizeof(_kv_cache[0].bucket)) {
+		LM_ERR("NATS pool: KV bucket name too long (max %zu): '%s'\n",
+			sizeof(_kv_cache[0].bucket) - 1, bucket);
+		return NULL;
+	}
 
 	/* Ensure we have a JetStream context */
 	if (!_js && !nats_pool_get_js())
