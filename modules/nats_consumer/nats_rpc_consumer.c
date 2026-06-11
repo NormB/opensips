@@ -291,6 +291,16 @@ void nats_rpc_consumer_unsubscribe(void)
 	}
 }
 
+/* Whether the reply inbox subscription is currently live.  Read by the
+ * consumer main loop (to decide whether to retry the subscribe) and by
+ * publish_cb (to fail a request fast instead of publishing to a deaf
+ * inbox).  Both run in the single consumer process, so a plain read of the
+ * process-local g_inbox_sub is sufficient. */
+int nats_rpc_consumer_inbox_ready(void)
+{
+	return g_inbox_sub != NULL;
+}
+
 /* ── IPC drain ───────────────────────────────────────────────── */
 
 /*
@@ -334,6 +344,22 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 		LM_DBG("nats_rpc_consumer: skipping stale IPC publish for slot "
 			"%u gen %u (slot re-claimed or abandoned)\n",
 			(unsigned)msg->slot_idx, (unsigned)msg->generation);
+		return;
+	}
+
+	/* Dead-inbox fast-fail.  If our reply inbox subscription is down, a
+	 * reply to this request can never route back to us -- publishing would
+	 * only guarantee the worker blocks until its full timeout.  Abandon the
+	 * slot now (CAS INFLIGHT -> ABANDONED, gen-safe against a re-claim) so
+	 * the caller fails fast; the main loop keeps retrying the subscribe. */
+	if (!nats_rpc_consumer_inbox_ready()) {
+		int expected = NATS_RPC_SLOT_INFLIGHT;
+		(void)atomic_compare_exchange_strong_explicit(
+			&s->state, &expected, NATS_RPC_SLOT_ABANDONED,
+			memory_order_release, memory_order_relaxed);
+		LM_WARN("nats_rpc_consumer: reply inbox down; abandoning RPC "
+			"slot %u instead of publishing to a deaf inbox\n",
+			(unsigned)s->slot_idx);
 		return;
 	}
 

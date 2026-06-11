@@ -47,6 +47,12 @@ void nats_consumer_proc_main(int rank);
 extern int nats_consumer_fetch_batch;
 extern int nats_consumer_fetch_timeout_ms;
 
+/* Consumer-side poison-message cap (modparam `poison_max_deliver`, default
+ * 0 = off).  When > 0, a delivered message whose NumDelivered exceeds it is
+ * Termed by the consumer instead of being pushed to the worker ring, so a
+ * permanently-failing message under max_deliver=0 cannot redeliver forever. */
+extern int nats_consumer_poison_max_deliver;
+
 /*
  * SHM-allocated heartbeat block.  The consumer process bumps tick
  * once per loop iteration and writes the current monotonic time

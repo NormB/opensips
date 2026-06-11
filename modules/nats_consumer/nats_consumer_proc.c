@@ -1512,6 +1512,28 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 				ss->last_stream_seq = stream_seq;
 		}
 
+		/* Poison-message backstop.  With max_deliver=0 the broker
+		 * redelivers a permanently-failing message forever with no
+		 * dead-letter.  When poison_max_deliver is configured and this
+		 * message has already been delivered more than that many times,
+		 * Term it (stop redelivery) instead of handing it to a worker
+		 * that will only fail and redeliver it again.  Counts as both a
+		 * Term and a poison drop. */
+		if (nats_consumer_poison_max_deliver > 0 &&
+				delivered > (uint64_t)nats_consumer_poison_max_deliver) {
+			LM_WARN("nats_consumer_proc: poison message on id='%.*s' "
+				"(delivered=%llu > poison_max_deliver=%d); terminating\n",
+				ss->id.len, ss->id.s,
+				(unsigned long long)delivered,
+				nats_consumer_poison_max_deliver);
+			(void)nats_dl.natsMsg_Term(m, NULL);
+			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
+			hstat_add(ss->h_ref, &ss->h_ref->poisoned, 1);
+			nats_dl.natsMsg_Destroy(m);
+			list.Msgs[i] = NULL;
+			continue;
+		}
+
 		/* Stash the natsMsg under a fresh (handle, slot, gen) token.
 		 * On ref-table exhaustion we leave the broker to redeliver --
 		 * not acking this message means it comes back after
@@ -2009,6 +2031,18 @@ void nats_consumer_proc_main(int rank)
 				ss->dirty = 1;
 			}
 			baseline_epoch = cur_epoch;
+		}
+
+		/* 0b. Async-RPC inbox retry.  The one-shot subscribe before the
+		 *     loop may have failed transiently (pool not yet connected,
+		 *     etc.); without a retry every async nats_request for the
+		 *     rest of this process's life would publish to a deaf inbox.
+		 *     Idempotent and cheap (a pointer check) once the inbox is
+		 *     up; only attempts a real Subscribe while it is down. */
+		if (!nats_rpc_consumer_inbox_ready()) {
+			if (nats_rpc_consumer_subscribe() == 0)
+				LM_INFO("nats_consumer_proc: async inbox subscription "
+					"recovered\n");
 		}
 
 		/* 1. Reconcile subscriptions with the registry.  New binds

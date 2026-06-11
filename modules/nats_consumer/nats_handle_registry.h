@@ -157,6 +157,9 @@ typedef struct nats_handle {
 	uint64_t naks;
 	uint64_t terms;
 	uint64_t redeliveries;
+	/* Messages auto-Termed by the consumer-side poison cap because their
+	 * NumDelivered exceeded poison_max_deliver (a subset of `terms`). */
+	uint64_t poisoned;
 	/* Back-pressure / error telemetry.  Bumped by the consumer process
 	 * (sole producer) with relaxed atomics; read by the attendant's MI
 	 * handlers (nats_consumer_list / nats_consumer_stats).  Kept distinct

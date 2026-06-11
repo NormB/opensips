@@ -430,6 +430,45 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
             </example>
         </section>
 
+        <!-- poison_max_deliver -->
+        <section id="param_poison_max_deliver">
+            <title><varname>poison_max_deliver</varname> (integer)</title>
+            <para>
+                Consumer-side poison-message cap.  With the JetStream
+                default <varname>max_deliver=0</varname> the broker
+                redelivers a message that always fails processing
+                forever, broker-paced, with no dead-letter -- a single
+                poison message can wedge a handle indefinitely.  When
+                this is greater than <varname>0</varname>, the dedicated
+                consumer process terminates
+                (<function>natsMsg_Term</function>) any message whose
+                <varname>NumDelivered</varname> exceeds the cap, instead
+                of pushing it to the worker ring, and bumps the
+                per-handle <varname>poisoned</varname> counter (visible
+                in <varname>nats_consumer_list</varname> and
+                <varname>nats_consumer_stats</varname>).
+            </para>
+            <para>
+                This is a global backstop independent of any per-handle
+                <varname>max_deliver=</varname> bind key: where a handle
+                sets its own <varname>max_deliver</varname> the broker
+                terminates first and the cap never fires.  It exists
+                mainly to bound redelivery for handles left at the
+                unlimited default.
+            </para>
+            <para>
+                <emphasis>Default value:</emphasis>
+                <varname>0</varname> (disabled -- unlimited
+                broker-paced redelivery, unchanged from prior releases)
+            </para>
+            <example>
+                <title>Dead-letter a message after 20 failed deliveries</title>
+                <programlisting format="linespecific">
+modparam("nats_consumer", "poison_max_deliver", 20)
+                </programlisting>
+            </example>
+        </section>
+
         <!-- allow_sync_anywhere -->
         <section id="param_allow_sync_anywhere">
             <title>

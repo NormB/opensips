@@ -64,6 +64,13 @@ int nats_rpc_consumer_subscribe(void);
 void nats_rpc_consumer_unsubscribe(void);
 
 /*
+ * Whether the reply inbox subscription is currently live.  The consumer
+ * main loop retries nats_rpc_consumer_subscribe() while this is 0, and the
+ * IPC publish path abandons requests (rather than publishing to a deaf
+ * inbox) while this is 0. */
+int nats_rpc_consumer_inbox_ready(void);
+
+/*
  * Drain the worker -> consumer publish IPC queue.  Called from
  * the consumer's main loop alongside the ack-IPC drain.
  * Returns the number of publishes processed.  Each entry reads
