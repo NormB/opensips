@@ -106,14 +106,18 @@ int main(void)
 	ASSERT(grep_count(src, "natsSubscription_IsValid") >= 1,
 		"consumer loop checks subscription validity post-reconnect");
 
-	int subs = grep_count(src, "natsConnection_Subscribe");
-	int qsubs = grep_count(src, "natsConnection_QueueSubscribe");
-	ASSERT(subs >= 2,
-		"consumer has both initial subscribe and resubscribe-on-reconnect "
-		"call sites for natsConnection_Subscribe");
-	ASSERT(qsubs >= 2,
-		"consumer has both initial and resubscribe call sites for "
-		"natsConnection_QueueSubscribe");
+	/* The initial subscribe loop and the reconnect resubscribe loop both go
+	 * through the shared subscribe_one() helper (P3-66 consolidation), so
+	 * the raw Subscribe/QueueSubscribe calls live once inside the helper and
+	 * subscribe_one() is invoked from both paths. */
+	ASSERT(grep_count(src, "natsConnection_Subscribe") >= 1,
+		"consumer subscribes via natsConnection_Subscribe (in subscribe_one)");
+	ASSERT(grep_count(src, "natsConnection_QueueSubscribe") >= 1,
+		"consumer queue-subscribes via natsConnection_QueueSubscribe "
+		"(in subscribe_one)");
+	ASSERT(grep_count(src, "subscribe_one(") >= 3,
+		"subscribe_one() defined once and called from both the initial and "
+		"resubscribe-on-reconnect paths");
 
 	/* old loop slept 60 s; the fix should poll faster */
 	ASSERT(grep_count(src, "sleep(60)") == 0,

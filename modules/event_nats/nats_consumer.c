@@ -112,6 +112,19 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	natsMsg *msg, void *closure);
 static void nats_ipc_raise_event(int sender, void *param);
 
+/* Create the natsSubscription for one configured subscription, wiring
+ * nats_msg_handler.  Queue-subscribes when a queue group is set (load-
+ * balanced across members), plain-subscribes otherwise.  Returns the
+ * natsStatus; the handle lands in sub->sub. */
+static natsStatus subscribe_one(nats_subscription_t *sub, natsConnection *nc)
+{
+	if (sub->queue_group[0])
+		return nats_dl.natsConnection_QueueSubscribe(&sub->sub, nc,
+			sub->subject, sub->queue_group, nats_msg_handler, sub);
+	return nats_dl.natsConnection_Subscribe(&sub->sub, nc,
+		sub->subject, nats_msg_handler, sub);
+}
+
 /* ── Modparam parser ─────────────────────────────────────────────── */
 
 int nats_consumer_parse_subscribe(modparam_t type, void *val)
@@ -288,16 +301,7 @@ void nats_consumer_process(int rank)
 	for (i = 0; i < nats_subscription_count; i++) {
 		nats_subscription_t *sub = &nats_subscriptions[i];
 
-		if (sub->queue_group[0]) {
-			/* Queue subscribe — load-balanced across group members */
-			s = nats_dl.natsConnection_QueueSubscribe(&sub->sub, nc,
-				sub->subject, sub->queue_group,
-				nats_msg_handler, sub);
-		} else {
-			/* Regular subscribe */
-			s = nats_dl.natsConnection_Subscribe(&sub->sub, nc,
-				sub->subject, nats_msg_handler, sub);
-		}
+		s = subscribe_one(sub, nc);
 
 		if (s != NATS_OK) {
 			LM_ERR("subscribe to '%s' failed: %s\n",
@@ -346,16 +350,7 @@ void nats_consumer_process(int rank)
 						nats_dl.natsSubscription_Destroy(sub->sub);
 						sub->sub = NULL;
 					}
-					if (sub->queue_group[0]) {
-						s = nats_dl.natsConnection_QueueSubscribe(
-							&sub->sub, nc, sub->subject,
-							sub->queue_group,
-							nats_msg_handler, sub);
-					} else {
-						s = nats_dl.natsConnection_Subscribe(
-							&sub->sub, nc, sub->subject,
-							nats_msg_handler, sub);
-					}
+					s = subscribe_one(sub, nc);
 					if (s == NATS_OK) {
 						LM_INFO("NATS consumer: "
 							"re-subscribed to '%s'\n",

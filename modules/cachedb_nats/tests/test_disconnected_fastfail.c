@@ -84,19 +84,29 @@ int main(void)
 	ASSERT(n >= 1,
 		"w_nats_request checks nats_pool_is_connected before request");
 
+	/* P3-66: nats_evi_raise and w_nats_publish share the publish path via
+	 * nats_publish_checked(), which does the connection fast-fail.  Assert
+	 * the check lives in the helper and that both callers route through it. */
+	n = grep_in_function(
+		"../../event_nats/event_nats.c",
+		"nats_publish_checked",
+		"nats_pool_is_connected");
+	ASSERT(n >= 1,
+		"nats_publish_checked checks nats_pool_is_connected before publish");
+
 	n = grep_in_function(
 		"../../event_nats/event_nats.c",
 		"nats_evi_raise",
-		"nats_pool_is_connected");
+		"nats_publish_checked");
 	ASSERT(n >= 1,
-		"nats_evi_raise checks nats_pool_is_connected before publish");
+		"nats_evi_raise publishes via the checked helper");
 
 	n = grep_in_function(
 		"../../event_nats/event_nats.c",
 		"w_nats_publish",
-		"nats_pool_is_connected");
+		"nats_publish_checked");
 	ASSERT(n >= 1,
-		"w_nats_publish checks nats_pool_is_connected before publish");
+		"w_nats_publish publishes via the checked helper");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);
