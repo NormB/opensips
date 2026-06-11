@@ -95,8 +95,23 @@ char *nats_intern_acquire(const char *s, int len);
  * container_of conversion needs the original head pointer. */
 void nats_intern_release(char *p);
 
+/* Bump the refcount of a pointer ALREADY obtained from acquire,
+ * without re-hashing by content.  Used to take an extra reference on
+ * an interned key the caller already holds (e.g. snapshotting an index
+ * entry's key set under the index lock before releasing it), so the
+ * string stays alive after the lock is dropped.  Balanced by a later
+ * nats_intern_release().  Returns p for call-site convenience; NULL-safe.
+ *
+ * Same pointer-arithmetic restriction as nats_intern_release(): p must be
+ * the exact value returned by acquire. */
+char *nats_intern_retain(char *p);
+
 /* Diagnostic: number of unique entries currently held in the
  * table.  Used by structural tests; not on the hot path. */
 int  nats_intern_size(void);
+
+/* Diagnostic: current refcount of an interned pointer (0 if NULL/uninit).
+ * Used by tests to assert refcount balance; not on the hot path. */
+int  nats_intern_refcount(const char *p);
 
 #endif /* CACHEDB_NATS_INTERN_H */

@@ -273,6 +273,49 @@ void nats_intern_release(char *p)
 	lock_set_release(g_t->locks, shard);
 }
 
+char *nats_intern_retain(char *p)
+{
+	nats_intern_node_t *n;
+	unsigned int        hash, bucket;
+	int                 shard;
+
+	if (!p || !g_t)
+		return p;
+
+	/* Recover the node header the same way release does -- the cached
+	 * hash means no FNV recompute over the key. */
+	n      = (nats_intern_node_t *)(p - offsetof(nats_intern_node_t, str));
+	hash   = n->hash;
+	bucket = _bucket_of(hash);
+	shard  = _shard_of(bucket);
+
+	lock_set_get(g_t->locks, shard);
+	n->refcount++;
+	lock_set_release(g_t->locks, shard);
+	return p;
+}
+
+int nats_intern_refcount(const char *p)
+{
+	const nats_intern_node_t *n;
+	unsigned int              hash, bucket;
+	int                       shard, rc;
+
+	if (!p || !g_t)
+		return 0;
+
+	n      = (const nats_intern_node_t *)
+		(p - offsetof(nats_intern_node_t, str));
+	hash   = n->hash;
+	bucket = _bucket_of(hash);
+	shard  = _shard_of(bucket);
+
+	lock_set_get(g_t->locks, shard);
+	rc = n->refcount;
+	lock_set_release(g_t->locks, shard);
+	return rc;
+}
+
 int nats_intern_size(void)
 {
 	return g_t ? g_t->size : 0;
