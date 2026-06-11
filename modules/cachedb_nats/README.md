@@ -114,11 +114,15 @@ the KV bucket and on each put/delete/purge event:
 1. Updates the SHM-backed search index that every worker reads
 2. Raises an `E_NATS_KV_CHANGE` EVI event (if compiled with `HAVE_EVI`)
 
-By default (`index_resync_on_reconnect=0`) the watcher does not bulk-rebuild
-the index on reconnect; the lazy self-heal path in `nats_cache_query`
-evicts stale entries on first hit. Set `index_resync_on_reconnect=1` only
-for deployments that prefer eager bulk reconciliation over per-query
-self-heal.
+By default (`index_resync_on_reconnect=1`) the watcher rebuilds the index in
+full on every reconnect. This is required for correctness: the watcher
+subscribes with `UpdatesOnly`, so writes made by sibling instances while this
+process was disconnected are never delivered live, and the lazy self-heal path
+in `nats_cache_query` only *evicts* stale entries it already has — it cannot
+discover a key it never indexed. Set `index_resync_on_reconnect=0` only for
+large-index / hot-reconnect deployments that cannot afford the O(N) rebuild,
+and rely instead on `index_resync_interval_secs` (the periodic resync timer)
+to bound how long a missed write can stay invisible.
 
 ## Cluster Configuration
 

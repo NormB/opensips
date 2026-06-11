@@ -762,27 +762,34 @@ modparam("cachedb_nats", "kv_watch", "json_>")
 	<title><varname>index_resync_on_reconnect</varname>
 	(integer)</title>
 	<para>
-		Whether the KV watcher rebuilds the in-memory search
-		index in full after each reconnect to NATS.  The
-		stale-entry self-heal in
-		<function>nats_cache_query</function> evicts stale
-		entries lazily on the first query that hits them, so
-		the default is off: a brief broker hiccup no longer
-		stalls the watcher for an O(N) bulk rebuild.
-	</para>
+			Whether the KV watcher rebuilds the in-memory search
+			index in full after each reconnect to NATS.  The
+			watcher subscribes with <varname>UpdatesOnly</varname>,
+			so writes made by sibling instances while this process
+			was disconnected are never delivered live.  The
+			stale-entry self-heal in
+			<function>nats_cache_query</function> only evicts index
+			entries the KV store reports as gone; it cannot
+			discover a key that was never indexed locally.  The
+			default is therefore on, so the index always converges
+			after an outage.
+		</para>
 	<para>
-		Set to <emphasis role="bold">1</emphasis> in
-		deployments with high cross-instance churn or after
-		long outages where bulk reconciliation is preferable
-		to lazy per-query self-heal.
-	</para>
+			Set to <emphasis role="bold">0</emphasis> only in
+			large-index or hot-reconnect deployments that cannot
+			afford the O(N) bulk rebuild on every reconnect; bound
+			the staleness window with
+			<varname>index_resync_interval_secs</varname> (the
+			periodic resync timer) instead, since per-query
+			self-heal does not recover missed inserts.
+		</para>
 	<para>
 		Ignored when
 		<varname>enable_search_index = 0</varname>.
 	</para>
 	<para>
 		<emphasis>
-			Default value is <quote>0</quote>.
+			Default value is <quote>1</quote>.
 		</emphasis>
 	</para>
 	</section>

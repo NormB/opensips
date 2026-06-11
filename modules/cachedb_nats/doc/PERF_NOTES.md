@@ -28,10 +28,16 @@ For production cachedb_nats deployments backing usrloc in
 3. **If the index is enabled**, tune `index_buckets` to keep
    average chain length ≤ ~5: 4096 (default) at ≤ 20k AoRs,
    16384 at 100k, 65536 at 1MM.  Power-of-two-rounded at init.
-4. **Set `index_resync_on_reconnect=0`** (the new default since
-   commit 05a695f8c).  The stale-entry self-heal makes the bulk
-   rebuild redundant for correctness, and saves a 5-10 s stall on
-   every brief broker hiccup.
+4. **`index_resync_on_reconnect` defaults to 1** (a full rebuild on
+   every reconnect).  This is required for correctness: the watcher
+   uses `UpdatesOnly`, so sibling-instance writes made during an outage
+   are never delivered live, and the stale-entry self-heal only evicts
+   index entries it already has — it cannot recover a missed insert.
+   Setting it to `0` saves the 5-10 s rebuild stall on every broker
+   hiccup but reopens that gap, so pair `=0` with a non-zero
+   `index_resync_interval_secs` to bound the staleness window.
+   (Reverses the `1→0` flip in 05a695f8c, which assumed self-heal
+   covered correctness — see TODO #29.)
 5. **Monitor `nats_cdb_stats`** counters via MI; alert on
    `cas_exhausted > 0` (lost writes) and watch `index_miss_kv`
    for a churn-rate signal across multi-instance deployments.
@@ -164,6 +170,12 @@ mapping.
 0.**  The stale-entry self-heal in `nats_cache_query` makes the
 bulk rebuild redundant for correctness; the lazy convergence
 avoids a 5-10 s watcher stall on every brief broker hiccup.
+**Later reverted (TODO #29):** the self-heal premise is wrong —
+it only *evicts* stale entries, so a sibling-instance write made
+while this process was disconnected (`UpdatesOnly` skips it live)
+is never recovered.  The default is back to `1`; `=0` is now an
+explicit perf opt-out that must be paired with
+`index_resync_interval_secs`.
 
 **`5c6095a8f` — tunable shutdown drain timeout.**  `lib/nats/
 nats_pool_finalize` had a hardcoded 5 s `kvStore_DrainTimeout`.

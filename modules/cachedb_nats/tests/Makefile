@@ -20,7 +20,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_counter_overflow test_native_key_validation \
         test_nats_request_rename test_intern_scaling \
         test_revmap_delete test_cas_retry_policy \
-        test_pk_stack_key test_resync_timer test_op_stats
+        test_pk_stack_key test_resync_timer test_op_stats test_index_converge
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -190,6 +190,9 @@ test_resync_timer: test_resync_timer.c
 test_op_stats: test_op_stats.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_index_converge: test_index_converge.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -226,6 +229,7 @@ check: all
 	./test_pk_stack_key
 	./test_resync_timer
 	./test_op_stats
+	./test_index_converge
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

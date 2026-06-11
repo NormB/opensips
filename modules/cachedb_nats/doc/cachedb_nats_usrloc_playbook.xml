@@ -158,9 +158,10 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 			value &le; the longest tolerable staleness window so
 			the periodic timer pulls the new state.  The lazy
 			self-heal in <function>nats_cache_query</function>
-			will also converge the index naturally as queries
-			arrive, but explicit reconciliation is faster on a
-			large restore.
+			only evicts stale entries it already holds; it does
+			not add keys introduced by the restore, so an explicit
+			rebuild (or the periodic timer) is required, not merely
+			faster.
 		</para>
 	</section>
 
@@ -434,18 +435,18 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		<variablelist>
 			<varlistentry>
 				<term><varname>index_resync_on_reconnect</varname>
-				(int, default 0)</term>
+				(int, default 1)</term>
 				<listitem><para>
 					Whether the KV watcher rebuilds the in-memory
-					index in full after each reconnect.  Stale-entry
-					self-heal in the query path evicts stale entries
-					lazily on the first query that hits them, so the
-					default is off: a single brief broker hiccup no
-					longer stalls the watcher for an O(N) bulk rebuild.
-					Set to 1 in deployments with high cross-
-					instance churn or after long outages where the
-					bulk reconciliation is preferable to lazy
-					per-query self-heal.
+					index in full after each reconnect.  The watcher
+					uses <varname>UpdatesOnly</varname>, so writes made
+					by sibling instances during an outage are never
+					delivered live; the query-path self-heal only evicts
+					stale entries it already holds and cannot recover a
+					missed insert, so the default is on for correctness.
+					Set to 0 only for large indexes that cannot afford
+					the O(N) rebuild per reconnect, paired with
+					<varname>index_resync_interval_secs</varname>.
 				</para></listitem>
 			</varlistentry>
 			<varlistentry>
