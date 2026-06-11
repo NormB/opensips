@@ -34,7 +34,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
                   test_ring_xproc_wakeup test_rpc_ipc_generation \
                   test_rpc_inbox_auth test_registry_lookup_ref \
-                  test_consumer_proc_boot_retry
+                  test_consumer_proc_boot_retry test_rpc_subject_validation
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -45,7 +45,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_msg_ref_teardown test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_inbox_auth test_registry_lookup_ref \
-     test_consumer_proc_boot_retry
+     test_consumer_proc_boot_retry test_rpc_subject_validation
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -120,6 +120,11 @@ test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.
 test_consumer_proc_boot_retry: test_consumer_proc_boot_retry.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# Source-pattern: the RPC request/reply paths validate the subject
+# (CR/LF/whitespace/wildcard) before it reaches the NATS wire.
+test_rpc_subject_validation: test_rpc_subject_validation.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 # Async-fetch wake mechanism: behavioural timerfd-fires check + source
 # assertions that the async paths use a worker-private timerfd, not the
 # fork-inherited ring eventfd.  Self-contained; reads ../nats_fetch.c.
@@ -179,6 +184,7 @@ check: all
 	./test_rpc_inbox_auth
 	./test_registry_lookup_ref
 	./test_consumer_proc_boot_retry
+	./test_rpc_subject_validation
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -194,7 +200,8 @@ clean:
 	      test_msg_ref_teardown test_ring_bounded_spin \
 	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
 	      test_rpc_ipc_generation test_rpc_inbox_auth \
-	      test_registry_lookup_ref test_consumer_proc_boot_retry
+	      test_registry_lookup_ref test_consumer_proc_boot_retry \
+	      test_rpc_subject_validation
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c

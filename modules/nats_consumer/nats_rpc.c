@@ -640,6 +640,16 @@ int w_nats_reply(struct sip_msg *msg, str *payload)
 		return -3;
 	}
 
+	/* The reply-to came from the inbound (broker-supplied) message; reject
+	 * CR/LF, whitespace and wildcards before publishing onto the wire. */
+	if (nats_validate_publish_subject(cur->slot.reply_to,
+			(int)cur->slot.reply_to_len) < 0) {
+		LM_ERR("nats_reply: invalid reply-to subject (control/whitespace/"
+			"wildcard rejected)\n");
+		nats_rpc_staged_clear();
+		return -4;
+	}
+
 	data_s   = (payload && payload->s)   ? payload->s   : "";
 	data_len = (payload && payload->len > 0) ? payload->len : 0;
 
@@ -888,6 +898,14 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	if (subject->len > NATS_RING_SUBJECT_MAX) {
 		LM_ERR("nats_request: subject too long (%d > %d)\n",
 			subject->len, NATS_RING_SUBJECT_MAX);
+		nats_rpc_staged_clear();
+		return -4;
+	}
+	/* Reject CR/LF, whitespace and wildcards before the subject reaches
+	 * the line-oriented NATS wire (protocol-injection guard). */
+	if (nats_validate_publish_subject(subject->s, subject->len) < 0) {
+		LM_ERR("nats_request: invalid subject '%.*s' (control/whitespace/"
+			"wildcard rejected)\n", subject->len, subject->s);
 		nats_rpc_staged_clear();
 		return -4;
 	}

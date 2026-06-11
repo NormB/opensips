@@ -302,6 +302,8 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	/* Fast-fail when the broker is down (see the other w_nats_kv_* ops). */
 	if (!nats_pool_is_connected()) {
@@ -439,6 +441,8 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
@@ -568,6 +572,8 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
@@ -649,6 +655,8 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
@@ -729,6 +737,8 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
@@ -786,6 +796,8 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
@@ -1076,6 +1088,17 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 static int raw_kv_purge(kvStore *kv, const char *key)
 {
 	natsStatus s;
+	str key_s;
+
+	/* Reject wildcards ('*'/'>') and other illegal tokens before Purge: a
+	 * wildcard key would purge EVERY matching entry (a mass delete). */
+	key_s.s = (char *)key;
+	key_s.len = key ? (int)strlen(key) : 0;
+	if (validate_kv_key(&key_s) < 0) {
+		LM_ERR("KV PURGE: refusing invalid/wildcard key '%s'\n",
+			key ? key : "(null)");
+		return -1;
+	}
 
 	s = nats_dl.kvStore_Purge(kv, key, NULL);
 	if (s == NATS_NOT_FOUND) {
@@ -1204,10 +1227,20 @@ static int build_map_key(char *buf, size_t buf_size,
 		return -1;
 	}
 
+	/* Validate key (and subkey below): rejecting ':' here prevents a
+	 * SIP-derived key/subkey from injecting the map separator and
+	 * aliasing another logical map's fields, and also blocks wildcard /
+	 * control-char injection. */
+	if (validate_kv_key(key) < 0)
+		return -1;
+
 	if (!subkey || !subkey->s || subkey->len <= 0) {
 		/* no subkey — just the key */
 		return native_str_to_buf(key, buf, buf_size);
 	}
+
+	if (validate_kv_key(subkey) < 0)
+		return -1;
 
 	total = key->len + 1 + subkey->len; /* key:subkey (without NUL) */
 	/* need total + 1 bytes for the NUL terminator */
@@ -1266,6 +1299,11 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 	}
 
 	cdb_res_init(res);
+
+	/* Reject ':' / wildcards / control chars in the key before composing
+	 * the "key:" prefix (a key carrying ':' would scan a different map). */
+	if (validate_kv_key(key) < 0)
+		return -1;
 
 	/* build the prefix "key:" for client-side filtering */
 	if (key->len <= 0 || (size_t)key->len >= sizeof(prefix) - 2) {

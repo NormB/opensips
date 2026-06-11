@@ -84,4 +84,10 @@ extern int   kv_ttl;
  * operation returns -1. */
 #define NATS_CAS_RETRIES    3
 
+/* Reject keys NATS KV cannot represent as a subject token: control
+ * chars, whitespace, wildcards ('*'/'>') and the ':' map separator.
+ * Shared by the scalar dbase ops and the native/map/raw paths
+ * (cachedb_nats_native.c).  Returns 0 if valid, -1 otherwise. */
+int validate_kv_key(const str *s);
+
 #endif /* CACHEDB_NATS_DBASE_H */

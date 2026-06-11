@@ -349,6 +349,11 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 
 	len = snprintf(buf, sizeof(buf),
 		"NATS pool: reconnected to %s\n", redacted);
+	/* Clamp the snprintf return to the buffer before logging (see the
+	 * matching note in _js_pub_ack_handler): a long redacted URL would
+	 * otherwise make write() over-read the stack buffer. */
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
 	if (len > 0)
 		nats_pool_unsafe_log(buf, (size_t)len);
 }
@@ -392,6 +397,12 @@ static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
 		int len = snprintf(buf, sizeof(buf),
 			"NATS JetStream async publish error: %s\n",
 			pae->ErrText);
+		/* snprintf returns the length it WOULD have written; a
+		 * broker-controlled ErrText longer than buf makes len exceed
+		 * sizeof(buf), so the write() below would read past the stack
+		 * buffer and leak adjacent stack.  Clamp to the buffer. */
+		if (len >= (int)sizeof(buf))
+			len = (int)sizeof(buf) - 1;
 		if (len > 0)
 			nats_pool_unsafe_log(buf, (size_t)len);
 	}
@@ -1122,14 +1133,23 @@ int nats_pool_is_connected(void)
 const char *nats_pool_get_server_info(void)
 {
 	static char _server_info_buf[512];
+	char raw[512];
 
 	if (!_nc)
 		return "not connected";
 
-	if (nats_dl.natsConnection_GetConnectedUrl(_nc, _server_info_buf,
-	    sizeof(_server_info_buf)) != NATS_OK)
+	/* Init defensively: on a non-OK status GetConnectedUrl may leave the
+	 * buffer unterminated, and nats_redact_url() would then read
+	 * uninitialised stack. */
+	raw[0] = '\0';
+	if (nats_dl.natsConnection_GetConnectedUrl(_nc, raw,
+	    sizeof(raw)) != NATS_OK)
 		return "not connected";
 
+	/* Redact any user:pass@ credentials before returning — this value is
+	 * surfaced to MI clients (mi_nats_status) and must not leak the
+	 * broker password. */
+	nats_redact_url(raw, _server_info_buf, sizeof(_server_info_buf));
 	return _server_info_buf;
 }
 
