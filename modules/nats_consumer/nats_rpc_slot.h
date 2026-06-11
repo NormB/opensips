@@ -78,6 +78,10 @@
 #define NATS_RPC_SLOT_COUNT 64
 #endif
 
+/* Runtime slot-pool size, defaulting to NATS_RPC_SLOT_COUNT and tunable
+ * via the nats_consumer "async_rpc_slots" modparam (read at slot init). */
+extern int nats_rpc_slot_count;
+
 /* Slot states.  Encoded as plain ints + atomic accesses so we can
  * CAS without an external mutex. */
 enum {

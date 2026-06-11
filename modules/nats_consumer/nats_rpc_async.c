@@ -1104,10 +1104,22 @@ typedef struct nats_rpc_call_wrap {
 	int64_t          deadline_us;   /* CLOCK_MONOTONIC, microseconds */
 } nats_rpc_call_wrap_t;
 
-/* Tick interval for the timerfd poll.  1 ms gives sub-ms p50
- * with a measurable CPU cost (1000 wakes/sec per in-flight
- * call).  Tunable via a future modparam; for now hard-coded. */
+/* Default tick interval for the timerfd poll.  1 ms gives sub-ms p50 with
+ * a measurable CPU cost (1000 wakes/sec per in-flight call). */
 #define NATS_RPC_ASYNC_POLL_NS 1000000L   /* 1 ms */
+
+/* Runtime poll interval in ms (modparam "async_rpc_poll_ms"); a larger
+ * value trades reply latency for fewer timer wakeups under load.  Clamped
+ * to [1, 1000] when first used. */
+int nats_rpc_async_poll_ms = 1;
+
+static long _async_poll_ns(void)
+{
+	int ms = nats_rpc_async_poll_ms;
+	if (ms < 1)    ms = 1;
+	if (ms > 1000) ms = 1000;
+	return (long)ms * 1000000L;
+}
 
 static int64_t now_us_monotonic(void)
 {
@@ -1393,10 +1405,13 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 	memset(&its, 0, sizeof(its));
-	its.it_value.tv_sec     = 0;
-	its.it_value.tv_nsec    = NATS_RPC_ASYNC_POLL_NS;
-	its.it_interval.tv_sec  = 0;
-	its.it_interval.tv_nsec = NATS_RPC_ASYNC_POLL_NS;
+	{
+		long poll_ns = _async_poll_ns();
+		its.it_value.tv_sec     = 0;
+		its.it_value.tv_nsec    = poll_ns;
+		its.it_interval.tv_sec  = 0;
+		its.it_interval.tv_nsec = poll_ns;
+	}
 	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
 		LM_ERR("nats_request[async]: timerfd_settime: %s\n",
 			strerror(errno));

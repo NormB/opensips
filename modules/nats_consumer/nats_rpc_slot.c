@@ -56,6 +56,12 @@
 static nats_rpc_slot_t *g_slots;
 static uint32_t         g_slot_total;
 
+/* Runtime slot-pool size (modparam "async_rpc_slots"); defaults to the
+ * compile-time NATS_RPC_SLOT_COUNT.  Caps system-wide in-flight async
+ * nats_request calls -- raise it (with RLIMIT_NOFILE headroom) for higher
+ * async-RPC throughput. */
+int nats_rpc_slot_count = NATS_RPC_SLOT_COUNT;
+
 /* Round-robin allocation hint.  Atomic to keep claim contention
  * low under bursts -- producers start their scan at different
  * offsets so they tend to claim disjoint slots on the first
@@ -77,7 +83,13 @@ int nats_rpc_slot_init(void)
 		return 0;
 	}
 
-	bytes = (size_t)NATS_RPC_SLOT_COUNT * sizeof(nats_rpc_slot_t);
+	/* Clamp the (modparam-tunable) slot count to a sane range. */
+	if (nats_rpc_slot_count < 1)
+		nats_rpc_slot_count = 1;
+	if (nats_rpc_slot_count > 65536)
+		nats_rpc_slot_count = 65536;
+
+	bytes = (size_t)nats_rpc_slot_count * sizeof(nats_rpc_slot_t);
 	g_slots = (nats_rpc_slot_t *)shm_malloc(bytes);
 	if (!g_slots) {
 		LM_ERR("nats_rpc_slot_init: shm_malloc(%zu bytes) failed\n",
@@ -86,21 +98,21 @@ int nats_rpc_slot_init(void)
 	}
 	memset(g_slots, 0, bytes);
 
-	for (i = 0; i < NATS_RPC_SLOT_COUNT; i++) {
+	for (i = 0; i < (uint32_t)nats_rpc_slot_count; i++) {
 		nats_rpc_slot_t *s = &g_slots[i];
 		s->slot_idx = i;
 		atomic_store_explicit(&s->state, NATS_RPC_SLOT_FREE,
 			memory_order_relaxed);
 	}
 
-	g_slot_total = NATS_RPC_SLOT_COUNT;
+	g_slot_total = (uint32_t)nats_rpc_slot_count;
 	atomic_store_explicit(&g_alloc_hint, 0, memory_order_relaxed);
 	atomic_store_explicit(&g_inflight_count, 0, memory_order_relaxed);
 
 	LM_INFO("nats_rpc_slot: %u slots allocated (%zu KB SHM); "
 		"wake mechanism is per-call worker-private timerfd "
 		"polling\n",
-		(unsigned)NATS_RPC_SLOT_COUNT,
+		(unsigned)nats_rpc_slot_count,
 		bytes / 1024);
 	return 0;
 }

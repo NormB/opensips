@@ -430,6 +430,8 @@ static const param_export_t params[] = {
 	      INT_PARAM | USE_FUNC_PARAM,
 	      (void *)nats_request_allow_sync_setter },
 	{ "request_id_header", STR_PARAM, &nats_request_id_header },
+	{ "async_rpc_slots",   INT_PARAM, &nats_rpc_slot_count },
+	{ "async_rpc_poll_ms", INT_PARAM, &nats_rpc_async_poll_ms },
 	{ 0, 0, 0 }
 };
 
