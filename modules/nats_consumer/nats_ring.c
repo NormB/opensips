@@ -39,7 +39,8 @@
  *   4. Copy payload into slots[h & mask].
  *   5. Release-store slot->ready_gen = h.  This publishes the slot.
  *   6. If the pre-push head equaled tail (i.e. the ring was empty),
- *      write 1 to the eventfd.  This is the empty -> non-empty edge.
+ *      bump wake_seq and FUTEX_WAKE waiters.  This is the empty ->
+ *      non-empty edge.
  *
  * Pop (consumer):
  *   1. Load tail, head.  If tail >= head the ring is empty.
@@ -52,12 +53,13 @@
  *   5. Store slot->consumed_gen = t.  This releases the slot for the
  *      next producer generation.
  *
- * The eventfd is level-sensitive at the kernel layer (see eventfd(2))
- * but we treat it as edge-triggered: the producer only writes on the
- * empty -> non-empty transition, and the consumer is expected to
+ * Wakeup is futex-only: the producer bumps wake_seq and FUTEX_WAKEs on
+ * the empty -> non-empty transition, and the consumer is expected to
  * drain everything available after wake-up.  Spurious wakes are
- * harmless -- a subsequent pop just returns -1 and the worker
- * re-arms the reactor.
+ * harmless -- a subsequent pop just returns -1 and the worker re-arms
+ * its wait.  There is no eventfd: a per-process fd stored in SHM would
+ * be written/closed by processes other than its creator, where the
+ * integer maps to an unrelated descriptor.
  *
  * Memory model: all shared indices use C11 _Atomic with explicit
  * memory_order annotations.  The release/acquire pair on ready_gen
@@ -79,7 +81,6 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/eventfd.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include <time.h>
@@ -103,19 +104,16 @@
 struct nats_ring {
 	uint32_t         capacity;   /* power of 2 */
 	uint32_t         mask;       /* capacity - 1 */
-	int              evfd;       /* eventfd(2) fd; legacy, see wake_seq */
-	int              _pad;       /* explicit padding for alignment */
 
-	/* Cross-process wakeup primitive.  The eventfd above is created in
-	 * whichever process happens to call nats_ring_create (typically a
-	 * worker via the MI bind handler, post-fork) and is therefore not
-	 * visible in other processes' fd tables.  We retain the fd field
-	 * for source-compat with old call sites but the producer also
-	 * bumps wake_seq + FUTEX_WAKEs on the address, which IS visible
-	 * across processes because the address lives in SHM.  Workers
-	 * snapshot wake_seq before a non-blocking pop and then call
-	 * FUTEX_WAIT against the snapshot -- standard linux futex pattern,
-	 * sub-millisecond wake-up vs. the historical 5 ms usleep tick. */
+	/* Cross-process wakeup primitive.  There is deliberately NO eventfd
+	 * here: a per-process fd stored in SHM would be written/closed by
+	 * processes other than its creator (push runs in the consumer proc,
+	 * destroy may run elsewhere), where the integer maps to an unrelated
+	 * descriptor -- cross-process fd corruption.  Instead the producer
+	 * bumps wake_seq + FUTEX_WAKEs on its address, which IS valid across
+	 * processes because the address lives in SHM.  Workers snapshot
+	 * wake_seq before a non-blocking pop and then FUTEX_WAIT against the
+	 * snapshot -- standard linux futex pattern, sub-millisecond wake-up. */
 	_Atomic uint32_t wake_seq;
 	uint32_t         _pad2;
 
@@ -142,7 +140,6 @@ nats_ring_t *nats_ring_create(uint32_t capacity)
 {
 	nats_ring_t *r;
 	size_t bytes;
-	int fd;
 
 	if (!nats_ring_valid_capacity(capacity)) {
 		LM_ERR("nats_ring: invalid capacity %u (must be pow2 >= 2)\n",
@@ -177,14 +174,6 @@ nats_ring_t *nats_ring_create(uint32_t capacity)
 		r->slots[i].consumed_gen = UINT64_MAX;
 	}
 
-	fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-	if (fd < 0) {
-		LM_ERR("nats_ring: eventfd() failed: %d\n", errno);
-		shm_free(r);
-		return NULL;
-	}
-	r->evfd = fd;
-
 	return r;
 }
 
@@ -192,10 +181,7 @@ void nats_ring_destroy(nats_ring_t *r)
 {
 	if (!r)
 		return;
-	if (r->evfd >= 0) {
-		close(r->evfd);
-		r->evfd = -1;
-	}
+	/* No fd to close: wakeup is futex-only (see struct nats_ring). */
 	shm_free(r);
 }
 
@@ -310,27 +296,15 @@ int nats_ring_push(nats_ring_t *r,
 	 * for the slot we just published.
 	 */
 	if (h == t) {
-		/* Legacy eventfd path -- kept for source-compat with old
-		 * consumers (lib/nats, async fetch reactor).  Workers that
-		 * forked before this ring was bound cannot see this fd; they
-		 * use the futex path below. */
-		uint64_t one = 1;
-		ssize_t w;
-		do {
-			w = write(r->evfd, &one, sizeof(one));
-		} while (w < 0 && errno == EINTR);
-		/* EAGAIN means the counter is already saturated at U64_MAX-1;
-		 * no additional wake is needed because the fd is already
-		 * readable.  Any other error is ignored here -- we do not
-		 * want to fail a committed push on a wake-up glitch. */
-
-		/* Cross-process wake.  Bump wake_seq under release ordering
-		 * so any worker that observed the old value via the FUTEX_WAIT
-		 * compare-and-block path sees the published slot when it
-		 * retries the pop.  FUTEX_WAKE on INT_MAX wakes every waiter
-		 * (typical N <= num workers, so the thundering-herd cost is
-		 * bounded).  Like the eventfd, we only signal on the empty
-		 * -> non-empty edge to avoid waking on every push. */
+		/* Cross-process wake.  Bump wake_seq under release ordering so
+		 * any worker that observed the old value via the FUTEX_WAIT
+		 * compare-and-block path sees the published slot when it retries
+		 * the pop.  FUTEX_WAKE on INT_MAX wakes every waiter (typical
+		 * N <= num workers, so the thundering-herd cost is bounded).  We
+		 * only signal on the empty -> non-empty edge to avoid waking on
+		 * every push.  The futex word lives in SHM, so this is valid no
+		 * matter which process produced the slot -- unlike a per-process
+		 * eventfd, which is why the eventfd was removed. */
 		atomic_fetch_add_explicit(&r->wake_seq, 1, memory_order_release);
 		syscall(SYS_futex, &r->wake_seq, FUTEX_WAKE, INT_MAX,
 			NULL, NULL, 0);
@@ -476,7 +450,12 @@ int nats_ring_wait(nats_ring_t *r, int timeout_ms)
 
 int nats_ring_eventfd(const nats_ring_t *r)
 {
-	return r ? r->evfd : -1;
+	/* Compatibility stub.  The ring no longer owns an eventfd (it was a
+	 * cross-process fd-corruption hazard; see struct nats_ring).  Always
+	 * returns -1 so legacy callers that fetch and discard it keep
+	 * compiling.  Cross-process wakeup is via nats_ring_wait(). */
+	(void)r;
+	return -1;
 }
 
 uint32_t nats_ring_depth(const nats_ring_t *r)

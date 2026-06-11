@@ -9,7 +9,8 @@ ASAN    := -fsanitize=address
 .PHONY: all check check-tsan clean
 
 TESTS = test_partial_alloc test_seq_cast_guard \
-        test_atomic_stats test_subscription_rebuild
+        test_atomic_stats test_subscription_rebuild \
+        test_child_init_degrade
 
 # Tests safe to run under ThreadSanitizer.
 # test_atomic_stats deliberately demonstrates that `volatile` is not
@@ -17,7 +18,7 @@ TESTS = test_partial_alloc test_seq_cast_guard \
 # (correctly) flags it as a data race -- that is the whole point of
 # the test, not a regression.
 TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
-                  test_subscription_rebuild
+                  test_subscription_rebuild test_child_init_degrade
 
 all: $(TESTS)
 
@@ -33,11 +34,17 @@ test_atomic_stats: test_atomic_stats.c
 test_subscription_rebuild: test_subscription_rebuild.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Source-pattern test: child_init degrades (return 0 + WARN) instead of
+# aborting the instance (return -1) when the broker is down at boot.
+test_child_init_degrade: test_child_init_degrade.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_partial_alloc
 	./test_seq_cast_guard
 	./test_atomic_stats
 	./test_subscription_rebuild
+	./test_child_init_degrade
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

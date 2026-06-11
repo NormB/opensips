@@ -30,8 +30,6 @@
 #include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <sys/select.h>
-#include <sys/eventfd.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <errno.h>
@@ -61,7 +59,9 @@ static void test_roundtrip_cap2(void)
 	CHECK(r != NULL);
 	CHECK(nats_ring_capacity(r) == 2);
 	CHECK(nats_ring_depth(r) == 0);
-	CHECK(nats_ring_eventfd(r) >= 0);
+	/* The ring no longer owns a process-local eventfd (it was a
+	 * cross-process fd-corruption hazard); the stub returns -1. */
+	CHECK(nats_ring_eventfd(r) < 0);
 
 	rc = nats_ring_push(r,
 		"orders.new", 10,
@@ -373,72 +373,47 @@ static void test_mp_mc_stress(void)
 	free(seen);
 }
 
-/* ── case 5: eventfd wake semantics ───────────────────────────── */
+/* ── case 5: futex wait/wake semantics (no eventfd) ───────────────
+ *
+ * The ring's wakeup is futex-only.  nats_ring_wait() returns 0 when the
+ * ring is non-empty (no wait needed) and times out (-1) when it is
+ * empty.  The cross-thread wake itself is exercised in the dedicated
+ * test_ring_xproc_wakeup.c; here we pin the single-threaded contract and
+ * confirm no process-local fd is exposed. */
 
-static int wait_readable(int fd, int msec)
-{
-	fd_set rset;
-	struct timeval tv;
-	FD_ZERO(&rset);
-	FD_SET(fd, &rset);
-	tv.tv_sec  = msec / 1000;
-	tv.tv_usec = (msec % 1000) * 1000;
-	return select(fd + 1, &rset, NULL, NULL, &tv);
-}
-
-static void test_eventfd_edge(void)
+static void test_wait_semantics(void)
 {
 	nats_ring_t *r = nats_ring_create(8);
 	nats_ring_slot_t out;
-	int fd, rc;
-	uint64_t v;
 
 	CHECK(r != NULL);
-	fd = nats_ring_eventfd(r);
-	CHECK(fd >= 0);
+	/* No fd to leak/corrupt across processes. */
+	CHECK(nats_ring_eventfd(r) < 0);
 
-	/* Empty ring -- select must time out. */
-	rc = wait_readable(fd, 100);
-	CHECK(rc == 0);
+	/* Empty ring: a short wait must time out (return -1). */
+	CHECK(nats_ring_wait(r, 50) == -1);
 
-	/* Push one -- edge should have fired. */
+	/* Push one -- ring is now non-empty, so wait returns 0 at once. */
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
 		0, 0, 0, 0, 0, 1, NULL, 0, NULL, 0, 0) == 0);
+	CHECK(nats_ring_wait(r, 1000) == 0);
 
-	rc = wait_readable(fd, 500);
-	CHECK(rc == 1);
-
-	/* Drain the counter. */
-	ssize_t rd = read(fd, &v, sizeof(v));
-	CHECK(rd == (ssize_t)sizeof(v));
-	CHECK(v == 1);
-
-	/* Pop the slot. */
+	/* Pop the slot; ring empty again -> wait times out. */
 	CHECK(nats_ring_pop(r, &out) == 0);
+	CHECK(nats_ring_wait(r, 50) == -1);
 
-	/* Ring empty again; fd should not be readable now. */
-	rc = wait_readable(fd, 100);
-	CHECK(rc == 0);
-
-	/* Push two more (consecutive) -- only the first should have
-	 * signalled but both are waiting in the ring. */
+	/* Two consecutive pushes: ring stays non-empty across both, so a
+	 * wait still returns 0 immediately. */
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
 		0, 0, 0, 0, 0, 2, NULL, 0, NULL, 0, 0) == 0);
 	CHECK(nats_ring_push(r, "s", 1, "x", 1,
 		0, 0, 0, 0, 0, 3, NULL, 0, NULL, 0, 0) == 0);
-
-	rc = wait_readable(fd, 500);
-	CHECK(rc == 1);
-	rd = read(fd, &v, sizeof(v));
-	CHECK(rd == (ssize_t)sizeof(v));
-	/* Only the first push incremented the counter. */
-	CHECK(v == 1);
+	CHECK(nats_ring_wait(r, 1000) == 0);
 
 	/* Drain both slots and return to empty. */
 	CHECK(nats_ring_pop(r, &out) == 0);
 	CHECK(nats_ring_pop(r, &out) == 0);
-	rc = wait_readable(fd, 100);
-	CHECK(rc == 0);
+	CHECK(nats_ring_wait(r, 50) == -1);
 
 	nats_ring_destroy(r);
 }
@@ -489,11 +464,8 @@ static void test_destroy_nonempty(void)
 {
 	nats_ring_t *r = nats_ring_create(4);
 	int i;
-	int fd_before;
 
 	CHECK(r != NULL);
-	fd_before = nats_ring_eventfd(r);
-	CHECK(fd_before >= 0);
 
 	for (i = 0; i < 3; i++)
 		CHECK(nats_ring_push(r, "s", 1, "x", 1,
@@ -501,15 +473,9 @@ static void test_destroy_nonempty(void)
 
 	CHECK(nats_ring_depth(r) == 3);
 
-	/* Destroy should not deadlock or crash; the design spec
-	 * documents that any pending slots are discarded. */
+	/* Destroy should not deadlock or crash; the design spec documents
+	 * that any pending slots are discarded.  There is no fd to close. */
 	nats_ring_destroy(r);
-
-	/* After destroy, the eventfd is closed; attempt to write to it
-	 * (without using the freed ring) should fail with EBADF. */
-	uint64_t one = 1;
-	ssize_t w = write(fd_before, &one, sizeof(one));
-	CHECK(w < 0 && errno == EBADF);
 }
 
 /* ── invalid capacity ─────────────────────────────────────────── */
@@ -619,7 +585,7 @@ int main(void)
 	test_full_capacity();
 	test_sp_sc_100k();
 	test_mp_mc_stress();
-	test_eventfd_edge();
+	test_wait_semantics();
 	test_size_limits();
 	test_destroy_nonempty();
 	test_invalid_capacity();

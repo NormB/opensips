@@ -359,7 +359,15 @@ static int mod_init(void)
  * see that function's documentation for the admission set.
  *
  * @param rank  OpenSIPS process rank (1-based for SIP workers).
- * @return      0 on success, -1 on error (kills the child process).
+ * @return      Always 0.  A NATS connection that cannot be established at
+ *              boot (broker down) must NOT abort the worker: returning -1
+ *              here is fatal to the whole OpenSIPS instance, turning an
+ *              eventing-sidecar outage into a total call-processing
+ *              outage.  We degrade instead -- the producer's publish path
+ *              fails cleanly on a NULL connection (nats_producer.c's `!_nc`
+ *              guard bumps the `failed` stat and returns -1), so the SIP
+ *              server boots and routes calls while NATS publishing is
+ *              unavailable.
  */
 static int child_init(int rank)
 {
@@ -375,16 +383,20 @@ static int child_init(int rank)
 		rank, getpid());
 	nc = nats_pool_get();
 	if (!nc) {
-		LM_ERR("cannot get NATS connection from pool\n");
-		return -1;
+		LM_WARN("cannot get NATS connection from pool (broker down?) — "
+			"event_nats starting degraded; publishes will fail until "
+			"the broker is reachable\n");
+		return 0;
 	}
 	nats_producer_set_connection(nc);
 
 	if (nats_jetstream) {
 		js = nats_pool_get_js();
 		if (!js) {
-			LM_ERR("cannot get JetStream context from pool\n");
-			return -1;
+			LM_WARN("cannot get JetStream context from pool — "
+				"event_nats starting degraded; JetStream publishes "
+				"will fail until it is available\n");
+			return 0;
 		}
 		nats_producer_set_js(js);
 	}

@@ -303,6 +303,12 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		return -1;
 	}
 
+	/* Fast-fail when the broker is down (see the other w_nats_kv_* ops). */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — kv_history deferred (fast-fail)\n");
+		return -1;
+	}
+
 	/* get KV store from the shared pool */
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
 		(int64_t)kv_ttl);
@@ -439,6 +445,13 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -577,6 +590,13 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		val_ptr[0] = '\0';
 	}
 
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -651,6 +671,13 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		val_ptr[0] = '\0';
 	}
 
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -708,6 +735,13 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -758,6 +792,13 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -847,8 +888,15 @@ int nats_cache_raw_query_impl(cachedb_con *con, str *attr,
 	}
 
 	ncon = (nats_cachedb_con *)con->data;
-	if (!ncon || !ncon->kv) {
-		LM_ERR("null NATS connection or KV store\n");
+	if (!ncon) {
+		LM_ERR("null NATS connection\n");
+		return -1;
+	}
+	/* Fast-fail on a down broker and refresh the KV handle after a
+	 * reconnect; otherwise this op blocks the worker during an outage and
+	 * can reuse a destroyed handle after reconnect (see nats_con_refresh_kv). */
+	if (nats_con_refresh_kv(ncon) < 0 || !ncon->kv) {
+		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
 
@@ -1205,8 +1253,15 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 	}
 
 	ncon = (nats_cachedb_con *)con->data;
-	if (!ncon || !ncon->kv) {
-		LM_ERR("null NATS connection or KV store\n");
+	if (!ncon) {
+		LM_ERR("null NATS connection\n");
+		return -1;
+	}
+	/* Fast-fail on a down broker and refresh the KV handle after a
+	 * reconnect; otherwise this op blocks the worker during an outage and
+	 * can reuse a destroyed handle after reconnect (see nats_con_refresh_kv). */
+	if (nats_con_refresh_kv(ncon) < 0 || !ncon->kv) {
+		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
 
@@ -1355,8 +1410,15 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 	}
 
 	ncon = (nats_cachedb_con *)con->data;
-	if (!ncon || !ncon->kv) {
-		LM_ERR("null NATS connection or KV store\n");
+	if (!ncon) {
+		LM_ERR("null NATS connection\n");
+		return -1;
+	}
+	/* Fast-fail on a down broker and refresh the KV handle after a
+	 * reconnect; otherwise this op blocks the worker during an outage and
+	 * can reuse a destroyed handle after reconnect (see nats_con_refresh_kv). */
+	if (nats_con_refresh_kv(ncon) < 0 || !ncon->kv) {
+		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
 
@@ -1482,8 +1544,15 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 	}
 
 	ncon = (nats_cachedb_con *)con->data;
-	if (!ncon || !ncon->kv) {
-		LM_ERR("null NATS connection or KV store\n");
+	if (!ncon) {
+		LM_ERR("null NATS connection\n");
+		return -1;
+	}
+	/* Fast-fail on a down broker and refresh the KV handle after a
+	 * reconnect; otherwise this op blocks the worker during an outage and
+	 * can reuse a destroyed handle after reconnect (see nats_con_refresh_kv). */
+	if (nats_con_refresh_kv(ncon) < 0 || !ncon->kv) {
+		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
 

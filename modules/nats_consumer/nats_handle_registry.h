@@ -297,8 +297,26 @@ nats_handle_t *nats_registry_lookup_weak(const str *id);
 void nats_registry_reap(void);
 
 /* Borrowed lookup.  Returns NULL if not found.
- * Caller must not free.  Handle content is stable until unbind. */
+ * Caller must not free.  Handle content is stable until unbind.
+ *
+ * WARNING: this drops the bucket lock before returning, so the handle can
+ * be retired and reaped between the return and the caller's first
+ * dereference / nats_handle_pending_inc().  Prefer nats_registry_lookup_ref()
+ * on any path that will dereference the handle. */
 nats_handle_t *nats_registry_lookup(const str *id);
+
+/* Borrowed lookup that atomically takes a pending_ops reference while the
+ * bucket read lock is still held.  Returns NULL if not found; otherwise
+ * the returned handle is guaranteed not to be freed by the reaper until
+ * the caller releases the reference with nats_handle_pending_dec().
+ *
+ * This closes the TOCTOU in lookup()+pending_inc(): retire() needs the
+ * bucket WRITE lock to unlink a handle, so it cannot run while we hold the
+ * read lock; once the reference is taken the reaper (which only frees at
+ * pending_ops==0) cannot free the handle even after it is later retired.
+ * The caller should still check h->retire and stop issuing new work on it,
+ * but every dereference is safe until the matching pending_dec(). */
+nats_handle_t *nats_registry_lookup_ref(const str *id);
 
 /* Snapshot count.  Non-blocking read (atomic). */
 int nats_registry_count(void);

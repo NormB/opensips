@@ -3,18 +3,26 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Tier-2 #7 perf test: nats_validate_publish_subject caches its last
- * (pointer, length, result) tuple per thread to avoid re-scanning
- * identical script-supplied subject literals on every publish.
+ * nats_validate_publish_subject() contract test.
  *
- * This test asserts the cache does not regress correctness:
- *   - repeated validation of the same valid subject still returns 0
- *   - repeated validation of the same invalid subject still returns -1
- *   - alternating between two distinct subjects yields each correct result
- *   - the cache does not falsely persist results for different lengths
- *     of the same buffer (subject prefixes vs. full)
- *   - NULL input always rejects (cache must not produce a stale pass
- *     when a NULL is passed after a valid hit)
+ * History: the validator briefly carried a per-thread (pointer, length,
+ * result) cache to skip re-scanning identical script-supplied subject
+ * literals.  That cache was a security hole: OpenSIPS reuses pkg and
+ * static str buffers at the same address across script invocations, so a
+ * buffer that once held a valid subject could be refilled with
+ * same-length attacker-influenced SIP data containing CRLF / wildcards /
+ * spaces and be served a stale "valid" verdict — letting control bytes
+ * reach the line-oriented NATS wire protocol (protocol injection via
+ * "PUB <subject>\r\n").  The cache was removed; this test pins the
+ * contract so it cannot come back.
+ *
+ * BDD contract asserted here:
+ *   GIVEN any buffer, WHEN its contents change between calls — even at
+ *   the same address with the same length — THEN the validator returns
+ *   the verdict for the *current bytes*, never a remembered one.
+ *
+ * Plus the original correctness assertions: repeated validation,
+ * alternation between subjects, prefix lengths, and NULL/zero-length.
  *
  * Build:
  *   gcc -g -O0 -fsanitize=address -Wall -I.. \
@@ -49,17 +57,17 @@ int main(void)
 	/* Repeated validation of valid subject must always return 0. */
 	for (i = 0; i < 5; i++) {
 		got = nats_validate_publish_subject(good, (int)strlen(good));
-		EXPECT(0, "valid subject hit (cache or fresh)");
+		EXPECT(0, "valid subject repeated");
 	}
 
 	/* Repeated validation of invalid subject must always return -1. */
 	for (i = 0; i < 5; i++) {
 		got = nats_validate_publish_subject(bad, (int)strlen(bad));
-		EXPECT(-1, "invalid subject hit (cache or fresh)");
+		EXPECT(-1, "invalid subject repeated");
 	}
 
-	/* Alternating between two subjects: cache miss on each switch
-	 * must produce the correct result for the new input. */
+	/* Alternating between two subjects must produce the correct result
+	 * for the new input each time. */
 	for (i = 0; i < 3; i++) {
 		got = nats_validate_publish_subject(good, (int)strlen(good));
 		EXPECT(0, "alternation: valid arm");
@@ -67,15 +75,14 @@ int main(void)
 		EXPECT(-1, "alternation: invalid arm");
 	}
 
-	/* Same buffer pointer, different length: cache must miss because
-	 * len differs, and the prefix may have a different validation
-	 * outcome. */
+	/* Same buffer pointer, different length: the prefix has a different
+	 * validation outcome and must be evaluated on its own. */
 	got = nats_validate_publish_subject(good, (int)strlen(good));
 	EXPECT(0, "full-length good baseline");
 	got = nats_validate_publish_subject(good, 4); /* "call" — valid token */
-	EXPECT(0, "prefix 'call' (len=4) revalidates as valid");
+	EXPECT(0, "prefix 'call' (len=4) validates as valid");
 	got = nats_validate_publish_subject(good, 5); /* "call." — invalid */
-	EXPECT(-1, "prefix 'call.' (len=5) revalidates as trailing-dot");
+	EXPECT(-1, "prefix 'call.' (len=5) validates as trailing-dot");
 
 	/* NULL after a valid hit must not produce a stale pass. */
 	got = nats_validate_publish_subject(good, (int)strlen(good));
@@ -86,6 +93,46 @@ int main(void)
 	/* Zero-length after a valid hit. */
 	got = nats_validate_publish_subject("ignored", 0);
 	EXPECT(-1, "len<=0 after valid hit rejects");
+
+	/*
+	 * SECURITY — the core regression this file guards.
+	 *
+	 * GIVEN a single stack buffer (one stable address),
+	 * WHEN its contents are rewritten in place with the same length,
+	 * THEN every call must reflect the *current* bytes.
+	 *
+	 * A pointer-identity cache would answer from the first verdict and
+	 * wave a CRLF-injection subject straight onto the wire.
+	 */
+	{
+		char reuse[16];
+
+		/* Benign content, same length (13) as the payloads below. */
+		memcpy(reuse, "call.ok.evttt", 13);
+		got = nats_validate_publish_subject(reuse, 13);
+		EXPECT(0, "in-place buffer: benign content validates");
+
+		/* Refill the SAME address with same-length CRLF-injection bytes. */
+		memcpy(reuse, "x\r\nPUB inj 0\r", 13);
+		got = nats_validate_publish_subject(reuse, 13);
+		EXPECT(-1, "in-place buffer: CRLF injection re-scanned and rejected");
+
+		/* Whitespace-injection (tab + space) at the same address. */
+		memcpy(reuse, "ok\tbad subj42", 13);
+		got = nats_validate_publish_subject(reuse, 13);
+		EXPECT(-1, "in-place buffer: whitespace payload rejected");
+
+		/* Wildcard-injection at the same address. */
+		memcpy(reuse, "subj.>.inject", 13);
+		got = nats_validate_publish_subject(reuse, 13);
+		EXPECT(-1, "in-place buffer: wildcard payload rejected");
+
+		/* Benign again at the same address must pass — proves the prior
+		 * rejection was not itself cached into a stale -1. */
+		memcpy(reuse, "good.clean.ev", 13);
+		got = nats_validate_publish_subject(reuse, 13);
+		EXPECT(0, "in-place buffer: benign after malicious validates");
+	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

@@ -59,14 +59,16 @@
 #define NATS_RPC_IPC_QUEUE_DEPTH 4096
 
 /*
- * On-wire message format.  Just one field for now; struct kept so
- * the ABI is forward-compatible if we ever need to carry per-call
- * flags (TLS hint, priority, etc.) without breaking the queue
- * layout.
+ * On-wire message format.  Carries the slot index plus the slot's
+ * per-claim generation at enqueue time.  The consumer's publish_cb
+ * revalidates the generation against the slot's current claim before
+ * publishing: if the worker timed out and the slot was re-claimed by a
+ * different request, the stale entry's generation no longer matches and
+ * it is skipped, preventing a double-publish of the new claim.
  */
 typedef struct nats_rpc_ipc_msg {
 	uint32_t slot_idx;       /* index into the nats_rpc_slot pool */
-	uint32_t _reserved;      /* keep struct 8-byte aligned for the SHM ring */
+	uint32_t generation;     /* slot generation captured at enqueue */
 } nats_rpc_ipc_msg_t;
 
 /* Allocate the SHM-backed queue + eventfd + spinlock.  Called

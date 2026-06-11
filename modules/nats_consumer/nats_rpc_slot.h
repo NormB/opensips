@@ -205,6 +205,32 @@ void nats_rpc_slot_free(nats_rpc_slot_t *s);
  * (defensive against a late reply arriving after free). */
 nats_rpc_slot_t *nats_rpc_slot_lookup(uint32_t slot_idx);
 
+/*
+ * Is an outbound IPC publish entry tagged with @gen still the current
+ * claim of slot @s?  True only when the slot is INFLIGHT *and* its
+ * generation matches @gen.
+ *
+ * The worker->consumer IPC entry carries (slot_idx, generation).  A
+ * generation mismatch means the slot was freed and re-claimed since the
+ * entry was enqueued -- e.g. the original worker timed out (abandon +
+ * free) and a new request reused the slot.  Such a stale entry must be
+ * skipped: publishing it would send the *new* claim's request a second
+ * time (the new claim is also INFLIGHT, so a state-only check cannot tell
+ * the two apart).  Used by publish_cb on the IPC drain path.
+ */
+static inline int nats_rpc_slot_entry_is_current(const nats_rpc_slot_t *s,
+		uint32_t gen)
+{
+	if (!s)
+		return 0;
+	if (atomic_load_explicit(&s->state, memory_order_acquire)
+			!= NATS_RPC_SLOT_INFLIGHT)
+		return 0;
+	if (atomic_load_explicit(&s->generation, memory_order_relaxed) != gen)
+		return 0;
+	return 1;
+}
+
 /* Advisory snapshots (atomic load of state counter; no lock). */
 uint32_t nats_rpc_slot_inflight_count(void);
 uint32_t nats_rpc_slot_total_count(void);

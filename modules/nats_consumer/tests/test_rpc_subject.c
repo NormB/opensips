@@ -44,43 +44,84 @@ static int g_fails;
 static void test_subject_grammar(void)
 {
 	char     buf[128];
+	char     corr[40];
 	uint32_t slot, gen;
 	int      n;
+	const char *uuid = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 
-	/* round-trip */
+	/* round-trip including the corr_id token */
 	n = nats_rpc_subject_build(buf, sizeof(buf),
-		"_INBOX.opensips.12345", 5, 7);
+		"_INBOX.opensips.12345", 5, 7, uuid, (int)strlen(uuid));
 	ASSERT(n > 0, "build returns length");
-	ASSERT(strcmp(buf, "_INBOX.opensips.12345.5.7") == 0,
-		"build emits <prefix>.<slot>.<gen>");
-	ASSERT(nats_rpc_subject_parse(buf, (int)strlen(buf), &slot, &gen) == 0,
+	ASSERT(strcmp(buf, "_INBOX.opensips.12345.5.7."
+		"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b") == 0,
+		"build emits <prefix>.<slot>.<gen>.<corr_id>");
+	ASSERT(nats_rpc_subject_parse(buf, (int)strlen(buf), &slot, &gen,
+		corr, sizeof(corr)) == 0,
 		"parse accepts a well-formed subject");
 	ASSERT(slot == 5 && gen == 7, "parse recovers slot and gen");
+	ASSERT(strcmp(corr, uuid) == 0, "parse recovers the corr_id token");
 
 	/* large values */
 	n = nats_rpc_subject_build(buf, sizeof(buf), "p", 2147483647u,
-		4294967295u);
+		4294967295u, uuid, (int)strlen(uuid));
 	ASSERT(n > 0 &&
-		nats_rpc_subject_parse(buf, (int)strlen(buf), &slot, &gen) == 0 &&
-		slot == 2147483647u && gen == 4294967295u,
-		"parse handles INT32_MAX slot and UINT32_MAX gen");
+		nats_rpc_subject_parse(buf, (int)strlen(buf), &slot, &gen,
+			corr, sizeof(corr)) == 0 &&
+		slot == 2147483647u && gen == 4294967295u &&
+		strcmp(corr, uuid) == 0,
+		"parse handles INT32_MAX slot and UINT32_MAX gen with corr_id");
 
 	/* malformed inputs are rejected */
-	ASSERT(nats_rpc_subject_parse("noslots", 7, &slot, &gen) < 0,
+	ASSERT(nats_rpc_subject_parse("noslots", 7, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects subject with no dots");
-	ASSERT(nats_rpc_subject_parse("_INBOX.5", 8, &slot, &gen) < 0,
+	ASSERT(nats_rpc_subject_parse("_INBOX.5", 8, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects subject with only one dot");
-	ASSERT(nats_rpc_subject_parse("a.b.7", 5, &slot, &gen) < 0,
+	/* now-3-segment subjects (old grammar) lack the corr_id token */
+	ASSERT(nats_rpc_subject_parse("p.5.7", 5, &slot, &gen,
+		corr, sizeof(corr)) < 0,
+		"parse rejects old 3-segment subject (no corr_id)");
+	ASSERT(nats_rpc_subject_parse("p.b.7.uuid", 10, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects non-numeric slot");
-	ASSERT(nats_rpc_subject_parse("a.5.x", 5, &slot, &gen) < 0,
+	ASSERT(nats_rpc_subject_parse("p.5.x.uuid", 10, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects non-numeric gen");
-	ASSERT(nats_rpc_subject_parse("a.5.", 4, &slot, &gen) < 0,
+	ASSERT(nats_rpc_subject_parse("p.5.7.", 6, &slot, &gen,
+		corr, sizeof(corr)) < 0,
+		"parse rejects empty corr_id segment");
+	ASSERT(nats_rpc_subject_parse("p.5..uuid", 9, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects empty gen segment");
-	ASSERT(nats_rpc_subject_parse("a..7", 4, &slot, &gen) < 0,
+	ASSERT(nats_rpc_subject_parse("p..7.uuid", 9, &slot, &gen,
+		corr, sizeof(corr)) < 0,
 		"parse rejects empty slot segment");
 
+	/* corr_id that does not fit the output buffer is rejected */
+	ASSERT(nats_rpc_subject_parse("p.5.7.toolongcorr", 17, &slot, &gen,
+		corr, 4) < 0,
+		"parse rejects corr_id that overflows corr_out");
+
+	/* build validation of the corr_id token */
+	ASSERT(nats_rpc_subject_build(buf, sizeof(buf), "p", 1, 1, NULL, 0) < 0,
+		"build rejects missing corr_id");
+	ASSERT(nats_rpc_subject_build(buf, sizeof(buf), "p", 1, 1, "", 0) < 0,
+		"build rejects empty corr_id");
+	ASSERT(nats_rpc_subject_build(buf, sizeof(buf), "p", 1, 1,
+		"has.dot", 7) < 0,
+		"build rejects corr_id containing a dot");
+	ASSERT(nats_rpc_subject_build(buf, sizeof(buf), "p", 1, 1,
+		"has space", 9) < 0,
+		"build rejects corr_id containing whitespace");
+	ASSERT(nats_rpc_subject_build(buf, sizeof(buf), "p", 1, 1,
+		"wild>card", 9) < 0,
+		"build rejects corr_id containing a wildcard");
+
 	/* build overflow */
-	ASSERT(nats_rpc_subject_build(buf, 4, "longprefix", 1, 1) < 0,
+	ASSERT(nats_rpc_subject_build(buf, 4, "longprefix", 1, 1,
+		uuid, (int)strlen(uuid)) < 0,
 		"build rejects buffer overflow");
 }
 
@@ -102,7 +143,9 @@ static nats_rpc_slot_t *reclaim_idx(uint32_t want)
 static void test_generation_guard(void)
 {
 	const char *prefix = "_INBOX.opensips.12345";
+	const char *uuid   = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 	char subj_old[128], subj_new[128];
+	char corr[40];
 	uint32_t idx, gen_old, gen_new, pslot, pgen;
 	nats_rpc_slot_t *a, *b;
 
@@ -117,7 +160,8 @@ static void test_generation_guard(void)
 
 	/* the consumer would publish request #1 with this reply subject */
 	ASSERT(nats_rpc_subject_build(subj_old, sizeof(subj_old),
-		prefix, idx, gen_old) > 0, "build reply subject for claim A");
+		prefix, idx, gen_old, uuid, (int)strlen(uuid)) > 0,
+		"build reply subject for claim A");
 
 	/* request #1 times out -> worker frees the slot */
 	nats_rpc_slot_free(a);
@@ -133,7 +177,8 @@ static void test_generation_guard(void)
 
 	/* (1) the LATE reply for request #1 arrives carrying subj_old */
 	ASSERT(nats_rpc_subject_parse(subj_old, (int)strlen(subj_old),
-		&pslot, &pgen) == 0, "parse late reply subject");
+		&pslot, &pgen, corr, sizeof(corr)) == 0,
+		"parse late reply subject");
 	ASSERT(pslot == idx, "late reply maps to the same slot index");
 	ASSERT(pgen == gen_old, "late reply carries request #1's generation");
 	ASSERT(atomic_load_explicit(&b->generation, memory_order_relaxed) != pgen,
@@ -141,9 +186,11 @@ static void test_generation_guard(void)
 
 	/* (2) the genuine reply for request #2 carries the current gen */
 	ASSERT(nats_rpc_subject_build(subj_new, sizeof(subj_new),
-		prefix, idx, gen_new) > 0, "build reply subject for claim B");
+		prefix, idx, gen_new, uuid, (int)strlen(uuid)) > 0,
+		"build reply subject for claim B");
 	ASSERT(nats_rpc_subject_parse(subj_new, (int)strlen(subj_new),
-		&pslot, &pgen) == 0, "parse genuine reply subject");
+		&pslot, &pgen, corr, sizeof(corr)) == 0,
+		"parse genuine reply subject");
 	ASSERT(atomic_load_explicit(&b->generation, memory_order_relaxed) == pgen,
 		"FRESH reply accepted: slot generation == reply generation");
 
