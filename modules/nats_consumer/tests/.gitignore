@@ -25,3 +25,4 @@ test_persist_cross_process
 test_serialize_headers_no_header
 test_slurp_file_cap
 test_subs_by_idx
+test_ensure_backoff

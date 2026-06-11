@@ -42,7 +42,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc
+                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -59,7 +59,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -207,6 +207,9 @@ test_poison_term: test_poison_term.c
 test_dead_inbox_retry: test_dead_inbox_retry.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+test_ensure_backoff: test_ensure_backoff.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 # Concurrency: the lock-free bounded MPSC queue (nats_mpsc) that replaces
 # the per-queue gen_lock_t.  Message-conservation stress test (4 producer
 # threads + 1 consumer); race-safe, so it runs under check-tsan too.
@@ -306,6 +309,7 @@ check: all
 	./test_consumer_stats_mi
 	./test_poison_term
 	./test_dead_inbox_retry
+	./test_ensure_backoff
 	./test_mpsc
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.

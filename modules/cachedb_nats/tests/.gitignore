@@ -25,3 +25,5 @@ test_update_creates_doc
 test_update_nested_dict
 test_watch_null_key_guard
 test_watcher_atomic_race
+test_map_compose
+test_raw_query_cols
