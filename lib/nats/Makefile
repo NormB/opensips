@@ -41,7 +41,12 @@ $(NAME): $(OBJS)
 	$(CC) -shared -Wl,-soname,$(SONAME) $(OBJS) $(LIBS) -o $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(DEFS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEFS) -MMD -MP -c $< -o $@
+
+# Pull in the auto-generated header dependencies so that editing a header
+# (e.g. nats_dl_table.def, #included by nats_dl.c/.h) rebuilds the affected
+# objects.  `clean` already removes the *.d files.
+-include $(OBJS:.o=.d)
 
 # Install next to the module .so files.  Modules will find this via
 # $ORIGIN rpath at load time.

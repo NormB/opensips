@@ -95,8 +95,9 @@
  * superset of server URLs and warns on conflicting TLS settings.
  *
  * @param url             Comma-separated NATS server URLs
- *                        (e.g., "tls://h1:4222,tls://h2:4223").
- * @param tls             TLS options, or NULL for plaintext connections.
+ *                        (e.g., "tls://h1:4222,tls://h2:4223").  TLS
+ *                        material comes from tls_mgm via
+ *                        nats_pool_set_tls_api(), not a parameter here.
  * @param module          Module name string, used in log messages
  *                        (e.g., "event_nats" or "cachedb_nats").
  * @param reconnect_wait  Milliseconds to wait between reconnect attempts.
@@ -134,7 +135,7 @@ void nats_pool_set_tls_api(void *binds);
  *
  * On the first call (from child_init), creates the connection using the
  * merged configuration from all nats_pool_register() calls.  Subsequent
- * calls return the cached handle.  Internally guards nats_OpenWithConfig()
+ * calls return the cached handle.  Internally guards nats_Open()
  * to run only once per process.
  *
  * @return  natsConnection pointer on success, NULL on error.
@@ -284,7 +285,8 @@ int nats_pool_get_reconnect_epoch(void);
 int nats_pool_should_init(int rank);
 
 /*
- * Drain timeout for nats_pool_finalize, in milliseconds.
+ * Drain timeout for the shutdown drain in nats_pool_destroy(), in
+ * milliseconds.
  *
  * Each module loaded against lib/nats may override this from its own
  * mod_init (e.g. via a modparam) to tune how long shutdown waits for
@@ -298,6 +300,13 @@ int nats_pool_should_init(int rank);
  * threaded), so no synchronization is required.
  */
 extern int nats_pool_drain_timeout_ms;
+
+/* Shared modparam setter for the drain timeout: both event_nats and
+ * cachedb_nats register it (INT_PARAM|USE_FUNC_PARAM) so the value is merged
+ * by MAX across modules instead of last-writer-wins.  `type` is modparam_t
+ * (== unsigned int); spelled out here so this header stays free of the heavy
+ * sr_module.h include that the standalone lib unit-tests cannot satisfy. */
+int nats_pool_drain_timeout_setter(unsigned int type, void *val);
 
 /*
  * Module-tunable per-operation timeout (ms) for JetStream / KV requests,

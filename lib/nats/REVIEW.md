@@ -1,5 +1,11 @@
 # feature/nats — static + semantic review (2026-05-22)
 
+> **Historical artifact.** A point-in-time review/benchmark snapshot kept
+> for context -- NOT a living document. Commit hashes and line numbers
+> are as-of the snapshot date and the code may have moved on. The current
+> contract lives in the docbook (`doc/*.xml`) and the source comments.
+
+
 Independent code-review pass over the four NATS components on
 `feature/nats`:
 

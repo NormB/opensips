@@ -164,6 +164,24 @@ static int            _kv_cache_cnt = 0;
 /* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
 int nats_pool_drain_timeout_ms = 5000;
 
+/* Drain-timeout modparam setter shared by event_nats (nats_drain_timeout_ms)
+ * and cachedb_nats (cdb_drain_timeout_ms), which both target this one global.
+ * Take the MAX across registrants so the longest-configured shutdown grace
+ * wins regardless of module load order (mirrors the reconnect-param merge in
+ * nats_pool_register), instead of last-writer-wins. */
+int nats_pool_drain_timeout_setter(modparam_t type, void *val)
+{
+	int v;
+	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
+		LM_ERR("nats drain_timeout: must be an integer\n");
+		return -1;
+	}
+	v = (int)(long)val;
+	if (v > nats_pool_drain_timeout_ms)
+		nats_pool_drain_timeout_ms = v;
+	return 0;
+}
+
 /* See nats_pool.h — module-tunable JetStream/KV op timeout, ms.  0 keeps
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
  * like usrloc so a slow-but-connected broker can't block a SIP worker for
