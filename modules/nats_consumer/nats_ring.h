@@ -195,6 +195,17 @@ int nats_ring_push(nats_ring_t *r,
 int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out);
 
 /*
+ * Copy only the USED prefix of a slot (header fields + the actual
+ * subject/data/reply_to/headers bytes) instead of the full ~17.9 KB of
+ * fixed-size max buffers.  The variable-length fields are clamped to their
+ * MAX before the memcpy, so a corrupted SHM length cannot overflow @dst.
+ * Used by the pop path and the fetch select path (which otherwise paid a
+ * whole-struct assignment 2-3x per message).
+ */
+void nats_ring_slot_copy_used(nats_ring_slot_t *dst,
+		const nats_ring_slot_t *src);
+
+/*
  * Compatibility stub: always returns -1.
  *
  * The ring formerly exposed an eventfd here, but a per-process fd stored

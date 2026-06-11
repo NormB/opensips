@@ -357,6 +357,46 @@ int nats_ring_push(nats_ring_t *r,
  */
 #define NATS_RING_POP_SPIN_MAX  4096u
 
+void nats_ring_slot_copy_used(nats_ring_slot_t *dst,
+		const nats_ring_slot_t *src)
+{
+	uint32_t n;
+
+	dst->ready_gen    = src->ready_gen;
+	dst->consumed_gen = src->consumed_gen;
+
+	n = src->subject_len;
+	if (n > NATS_RING_SUBJECT_MAX) n = NATS_RING_SUBJECT_MAX;
+	dst->subject_len = n;
+	if (n) memcpy(dst->subject, src->subject, n);
+
+	n = src->data_len;
+	if (n > NATS_RING_PAYLOAD_MAX) n = NATS_RING_PAYLOAD_MAX;
+	dst->data_len = n;
+	if (n) memcpy(dst->data, src->data, n);
+
+	dst->stream_seq   = src->stream_seq;
+	dst->consumer_seq = src->consumer_seq;
+	dst->delivered    = src->delivered;
+	dst->pending      = src->pending;
+	dst->timestamp_ns = src->timestamp_ns;
+	dst->ack_token    = src->ack_token;
+
+	dst->has_reply    = src->has_reply;
+	n = src->reply_to_len;
+	if (n > NATS_RING_SUBJECT_MAX) n = NATS_RING_SUBJECT_MAX;
+	dst->reply_to_len = n;
+	if (n) memcpy(dst->reply_to, src->reply_to, n);
+
+	dst->headers_len       = src->headers_len;
+	if (dst->headers_len > NATS_RING_HEADERS_MAX)
+		dst->headers_len = NATS_RING_HEADERS_MAX;
+	dst->headers_truncated = src->headers_truncated;
+	dst->_hdr_pad          = 0;
+	if (dst->headers_len)
+		memcpy(dst->headers, src->headers, dst->headers_len);
+}
+
 int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 {
 	uint64_t t, h, ready;
@@ -409,37 +449,9 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 		/* CAS lost: another consumer took this tail; retry. */
 	}
 
-	/* Copy fields into caller's buffer.  We only copy the used prefix
-	 * of subject/data/reply_to to avoid touching 17 KB of SHM per
-	 * pop. */
-	out->ready_gen    = slot->ready_gen;
-	out->consumed_gen = slot->consumed_gen;
-
-	out->subject_len = slot->subject_len;
-	if (out->subject_len)
-		memcpy(out->subject, slot->subject, out->subject_len);
-
-	out->data_len = slot->data_len;
-	if (out->data_len)
-		memcpy(out->data, slot->data, out->data_len);
-
-	out->stream_seq   = slot->stream_seq;
-	out->consumer_seq = slot->consumer_seq;
-	out->delivered    = slot->delivered;
-	out->pending      = slot->pending;
-	out->timestamp_ns = slot->timestamp_ns;
-	out->ack_token    = slot->ack_token;
-
-	out->has_reply    = slot->has_reply;
-	out->reply_to_len = slot->reply_to_len;
-	if (out->reply_to_len)
-		memcpy(out->reply_to, slot->reply_to, out->reply_to_len);
-
-	out->headers_len       = slot->headers_len;
-	out->headers_truncated = slot->headers_truncated;
-	out->_hdr_pad          = 0;
-	if (out->headers_len)
-		memcpy(out->headers, slot->headers, out->headers_len);
+	/* Copy only the used prefix of subject/data/reply_to/headers into the
+	 * caller's buffer to avoid touching ~17.9 KB of SHM per pop. */
+	nats_ring_slot_copy_used(out, slot);
 
 	/* Mark the slot consumed at generation t so the matching
 	 * producer (generation t + capacity) may reuse it. */

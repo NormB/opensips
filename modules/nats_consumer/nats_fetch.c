@@ -197,7 +197,8 @@ static int cur_set_from_slot(uint16_t handle_idx, const nats_ring_slot_t *slot)
 	g_cur.has_message = 1;
 	g_cur.handle_idx  = handle_idx;
 	g_cur.ack_token   = slot->ack_token;
-	g_cur.slot        = *slot;
+	/* Prefix-copy: only the used bytes, not the full ~17.9 KB slot. */
+	nats_ring_slot_copy_used(&g_cur.slot, slot);
 	return 1;
 }
 
@@ -625,7 +626,8 @@ static int batch_push_slot(uint16_t handle_idx, const nats_ring_slot_t *slot)
 	g_batch.msgs[g_batch.count].has_message = 1;
 	g_batch.msgs[g_batch.count].handle_idx  = handle_idx;
 	g_batch.msgs[g_batch.count].ack_token   = slot->ack_token;
-	g_batch.msgs[g_batch.count].slot        = *slot;
+	/* Prefix-copy: only the used bytes, not the full ~17.9 KB slot. */
+	nats_ring_slot_copy_used(&g_batch.msgs[g_batch.count].slot, slot);
 	g_batch.count++;
 	g_batch.handle_idx = handle_idx;
 	return 0;
