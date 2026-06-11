@@ -149,6 +149,52 @@ index size pushes cache pressure.
   which makes the watcher a no-op.
 - **At 10MM**: hopeless under the current architecture.
 
+## Connection fan-out (threads and broker connections)
+
+NATS connection state (`_nc`, `_js`, `_kv_cache`) is **process-local**: it
+is created lazily, post-fork, the first time a process calls into the pool
+(`nats_pool_get()` / `nats_pool_get_kv()`).  There is intentionally no
+shared connection across processes — a libnats `natsConnection` owns
+background I/O threads that must not be shared across a `fork()`.
+
+The practical consequence is a **fan-out**: every OpenSIPS process that
+touches NATS opens its own broker connection, and each connection spins up
+roughly **6 libnats threads** (read/write/reconnect/ping/callback/flush).
+So the per-instance footprint scales with the number of NATS-touching
+processes, not with the number of NATS-touching call sites:
+
+| `udp_workers` (+ timer/watcher) | Broker connections | libnats threads (~6 each) |
+|--------------------------------:|-------------------:|--------------------------:|
+| 4   | ~5  | ~30  |
+| 16  | ~17 | ~100 |
+| 32  | ~33 | ~200 |
+| 64  | ~65 | ~390 |
+
+Notes and levers:
+
+- **Which ranks connect.**  A process only opens a connection when it
+  actually calls the pool.  SIP worker ranks that run `nats_cache_*` or
+  publish events connect; ranks that never touch NATS do not.  The timer
+  process connects once the periodic resync runs (see the resync fix);
+  with `dedicated_watcher_proc=1` the watcher process holds one more.
+- **Broker-side cost.**  Each connection is a TCP socket plus the
+  JetStream/KV state the broker tracks per client.  At 32+ workers across
+  several instances this is hundreds of connections per broker — well
+  within nats-server's comfort zone, but worth accounting for in broker
+  sizing and `max_connections`.
+- **Thread cost.**  ~200 libnats threads at `udp_workers=32` is mostly
+  idle (epoll-blocked), but it shows up in `ps -eLf` thread counts and in
+  RLIMIT_NPROC budgeting.  It is not a leak.
+- **When it matters.**  Below ~32 workers this is a non-issue.  It becomes
+  worth a deliberate look when stacking many high-`udp_workers` instances
+  on one host (cumulative connections/threads per broker and per host) —
+  there, prefer fewer, larger instances, or split SIP and cachedb roles so
+  only the ranks that need NATS open connections.
+
+This fan-out is inherent to the "no shared connection across fork" design
+and is the safe default; it is documented here so it is a sizing input,
+not a surprise.
+
 ## Architectural recommendations
 
 ### Up to 100k AoRs
