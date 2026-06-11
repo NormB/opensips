@@ -300,6 +300,13 @@ int nats_pool_should_init(int rank);
 extern int nats_pool_drain_timeout_ms;
 
 /*
+ * Module-tunable per-operation timeout (ms) for JetStream / KV requests,
+ * plumbed into jsOptions.Wait.  0 keeps cnats's 5 s default; set a smaller
+ * value (e.g. cachedb_nats "kv_op_timeout_ms") on hot paths.
+ */
+extern int nats_pool_kv_op_timeout_ms;
+
+/*
  * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
  *
  * Replaces every "user[:pass]@" segment that appears in the authority

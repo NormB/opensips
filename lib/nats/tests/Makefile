@@ -10,7 +10,8 @@ ASAN    := -fsanitize=address
 TESTS = test_redact_url test_validate_publish_subject \
         test_validate_subject_cache test_nats_dl test_nats_ca_dir \
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
-        test_js_pending_cap test_pool_refcount
+        test_js_pending_cap test_pool_refcount \
+        test_kv_op_timeout test_reconnect_jitter
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -75,6 +76,14 @@ test_js_pending_cap: test_js_pending_cap.c
 test_pool_refcount: test_pool_refcount.c
 	$(CC) $(CFLAGS) -o $@ test_pool_refcount.c
 
+# Source-pattern: jsOpts.Wait is set from a configurable kv_op_timeout_ms.
+test_kv_op_timeout: test_kv_op_timeout.c
+	$(CC) $(CFLAGS) -o $@ test_kv_op_timeout.c
+
+# Source-pattern: reconnect jitter (cnats option + per-process retry sleep).
+test_reconnect_jitter: test_reconnect_jitter.c
+	$(CC) $(CFLAGS) -o $@ test_reconnect_jitter.c
+
 # LD_LIBRARY_PATH covers the case where libnats was installed to
 # /usr/local/lib (the upstream `cmake --install` default), which
 # isn't on the default ld.so search path on most distros.  Production
@@ -95,6 +104,8 @@ check: all
 	./test_server_info_redact
 	./test_js_pending_cap
 	./test_pool_refcount
+	./test_kv_op_timeout
+	./test_reconnect_jitter
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the

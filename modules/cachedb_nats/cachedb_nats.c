@@ -290,6 +290,7 @@ static const param_export_t params[] = {
 	 * lib/nats/nats_pool.h for the contract; last-writer wins
 	 * across modules. */
 	{"cdb_drain_timeout_ms",        INT_PARAM,    &nats_pool_drain_timeout_ms},
+	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
