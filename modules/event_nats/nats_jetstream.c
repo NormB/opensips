@@ -98,36 +98,19 @@ static jsStorageType _parse_storage(const char *s, int len)
 /* Hard cap for user-facing subject listing. Must match subj_ptrs capacity below. */
 #define NATS_STREAM_SUBJECT_CAP 32
 
-/* Validate a NATS identifier (stream or consumer name). NATS forbids dots (they are
- * subject-token separators), wildcards ('*' and '>'), whitespace and control chars.
- * Return 0 if valid, -1 otherwise. Name must be non-empty. */
+/* Validate a NATS identifier (stream or consumer name): single token, no
+ * dots/wildcards/path chars/whitespace/control.  Thin wrapper over the shared
+ * lib/nats validator (P3-64). */
 static int _valid_nats_name(const char *s, int len)
 {
-	int i;
-	if (!s || len <= 0) return -1;
-	for (i = 0; i < len; i++) {
-		unsigned char c = (unsigned char)s[i];
-		if (c < 0x20 || c == 0x7f) return -1;   /* control / DEL */
-		if (c == ' ' || c == '\t') return -1;   /* whitespace */
-		if (c == '.' || c == '*' || c == '>') return -1; /* reserved */
-		if (c == '/' || c == '\\') return -1;    /* path-ish */
-	}
-	return 0;
+	return nats_validate(s, len, NATS_VALIDATE_STREAM_NAME);
 }
 
-/* Validate each comma-separated subject token. Dots are allowed (they separate
- * subject hierarchy); wildcards are allowed ('*' = single token, '>' = tail).
- * Control chars, whitespace, empty tokens are rejected. */
+/* Validate a NATS subscribe-filter subject: dots and wildcards ('*','>')
+ * allowed; control/whitespace/empty rejected.  Thin wrapper (P3-64). */
 static int _valid_nats_subject(const char *s, int len)
 {
-	int i;
-	if (!s || len <= 0) return -1;
-	for (i = 0; i < len; i++) {
-		unsigned char c = (unsigned char)s[i];
-		if (c < 0x20 || c == 0x7f) return -1;
-		if (c == ' ' || c == '\t') return -1;
-	}
-	return 0;
+	return nats_validate(s, len, NATS_VALIDATE_FILTER_SUBJECT);
 }
 
 /* ── nats_account_info ──────────────────────────────────────── */

@@ -235,31 +235,16 @@ void nats_cachedb_destroy(cachedb_con *con)
  */
 int validate_kv_key(const str *s)
 {
-	int i;
-	unsigned char c;
+	/* The rules (no control/whitespace/wildcards, ':' reserved) live in the
+	 * shared lib/nats validator (P3-64); keep the cachedb-context log here. */
 	if (!s || !s->s || s->len <= 0) {
 		LM_ERR("KV key empty or NULL\n");
 		return -1;
 	}
-	for (i = 0; i < s->len; i++) {
-		c = (unsigned char)s->s[i];
-		if (c < 0x20 || c == 0x7f) {
-			LM_ERR("KV key contains control char 0x%02x at offset %d\n",
-				c, i);
-			return -1;
-		}
-		if (c == ' ' || c == '\t') {
-			LM_ERR("KV key contains whitespace at offset %d\n", i);
-			return -1;
-		}
-		if (c == '*' || c == '>') {
-			LM_ERR("KV key contains wildcard '%c' at offset %d\n", c, i);
-			return -1;
-		}
-		if (c == ':') {
-			LM_ERR("KV key contains ':' at offset %d (reserved)\n", i);
-			return -1;
-		}
+	if (nats_validate(s->s, s->len, NATS_VALIDATE_KV_KEY) < 0) {
+		LM_ERR("invalid KV key (control/whitespace/wildcard/':' "
+			"reserved): '%.*s'\n", s->len, s->s);
+		return -1;
 	}
 	return 0;
 }

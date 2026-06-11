@@ -7,7 +7,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_redact_url test_validate_publish_subject \
+TESTS = test_redact_url test_validate_publish_subject test_validate_modes \
         test_validate_subject_cache test_nats_dl test_nats_ca_dir \
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
         test_js_pending_cap test_pool_refcount \
@@ -28,6 +28,9 @@ test_redact_url: test_redact_url.c ../nats_redact.o
 # nats_validate_publish_subject() lives in nats_validate.c.
 test_validate_publish_subject: test_validate_publish_subject.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_publish_subject.c ../nats_validate.o
+
+test_validate_modes: test_validate_modes.c ../nats_validate.o
+	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_modes.c ../nats_validate.o
 
 test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_subject_cache.c ../nats_validate.o
@@ -102,6 +105,7 @@ NATS_TEST_ENV = LD_LIBRARY_PATH=/usr/local/lib:$$LD_LIBRARY_PATH
 check: all
 	./test_redact_url
 	./test_validate_publish_subject
+	./test_validate_modes
 	./test_validate_subject_cache
 	$(NATS_TEST_ENV) ./test_nats_dl
 	./test_nats_ca_dir
