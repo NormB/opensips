@@ -10,7 +10,8 @@ ASAN    := -fsanitize=address
 
 TESTS = test_partial_alloc test_seq_cast_guard \
         test_atomic_stats test_subscription_rebuild \
-        test_child_init_degrade test_mi_command_collision
+        test_child_init_degrade test_mi_command_collision \
+        test_inbound_backpressure
 
 # Tests safe to run under ThreadSanitizer.
 # test_atomic_stats deliberately demonstrates that `volatile` is not
@@ -19,7 +20,7 @@ TESTS = test_partial_alloc test_seq_cast_guard \
 # the test, not a regression.
 TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
                   test_subscription_rebuild test_child_init_degrade \
-                  test_mi_command_collision
+                  test_mi_command_collision test_inbound_backpressure
 
 all: $(TESTS)
 
@@ -45,6 +46,11 @@ test_child_init_degrade: test_child_init_degrade.c
 test_mi_command_collision: test_mi_command_collision.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Source-pattern: the inbound callback does one combined shm_malloc and
+# bounds payload size + in-flight events (publish-flood backpressure).
+test_inbound_backpressure: test_inbound_backpressure.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_partial_alloc
 	./test_seq_cast_guard
@@ -52,6 +58,7 @@ check: all
 	./test_subscription_rebuild
 	./test_child_init_degrade
 	./test_mi_command_collision
+	./test_inbound_backpressure
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
