@@ -157,6 +157,26 @@ typedef struct nats_handle {
 	uint64_t naks;
 	uint64_t terms;
 	uint64_t redeliveries;
+	/* Back-pressure / error telemetry.  Bumped by the consumer process
+	 * (sole producer) with relaxed atomics; read by the attendant's MI
+	 * handlers (nats_consumer_list / nats_consumer_stats).  Kept distinct
+	 * because they describe different operator-visible conditions:
+	 *
+	 *   fetch_skips_full   -- the ring was already full so the Fetch was
+	 *                         skipped entirely.  NO message was touched;
+	 *                         the broker still owns the un-fetched messages
+	 *                         and redelivers them cleanly.  Pure flow
+	 *                         control, NOT data loss.
+	 *   backpressure_drops -- a message WAS fetched but could not be handed
+	 *                         to the worker ring (msg-ref table exhausted or
+	 *                         ring full on push).  It is not acked, so the
+	 *                         broker redelivers after ack_wait.
+	 *   fetch_errors       -- a natsSubscription_Fetch returned a hard error
+	 *                         (vanished consumer, transient broker error).
+	 */
+	uint64_t fetch_skips_full;
+	uint64_t backpressure_drops;
+	uint64_t fetch_errors;
 	int last_error_code;
 	str last_error_msg;
 

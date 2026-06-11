@@ -37,6 +37,10 @@
 #include "nats_mi.h"
 #include "nats_persist.h"
 #include "nats_consumer_proc.h"
+#include "nats_ring.h"
+#include "nats_ack_ipc.h"
+#include "nats_rpc_ipc.h"
+#include "nats_rpc_slot.h"
 
 #include <stdatomic.h>
 #include <time.h>
@@ -198,6 +202,11 @@ static int list_cb(nats_handle_t *h, void *user)
 	ADD_N("naks",            h->naks);
 	ADD_N("terms",           h->terms);
 	ADD_N("redeliveries",    h->redeliveries);
+	ADD_N("fetch_skips_full",   h->fetch_skips_full);
+	ADD_N("backpressure_drops", h->backpressure_drops);
+	ADD_N("fetch_errors",       h->fetch_errors);
+	if (h->ring)
+		ADD_N("ring_depth",  nats_ring_depth(h->ring));
 	lock_stop_read(h->rlock);
 
 	/* Backoff state for ensure_subscription_for_handle() retries.
@@ -247,6 +256,129 @@ mi_response_t *mi_consumer_list(const mi_params_t *params,
 	}
 
 	return resp;
+}
+
+/* ── consumer_stats ───────────────────────────────────────────── */
+
+/* Aggregate of the per-handle SHM counters, summed across the registry.
+ * Read under the same per-handle read lock as list_cb (writer side is the
+ * consumer process via relaxed atomics; a torn read is acceptable for
+ * telemetry). */
+struct stats_ctx {
+	unsigned long handles;
+	unsigned long ring_depth;
+	unsigned long ring_capacity;
+	unsigned long pulls_requested;
+	unsigned long msgs_delivered;
+	unsigned long acks;
+	unsigned long naks;
+	unsigned long terms;
+	unsigned long redeliveries;
+	unsigned long fetch_skips_full;
+	unsigned long backpressure_drops;
+	unsigned long fetch_errors;
+};
+
+static int stats_cb(nats_handle_t *h, void *user)
+{
+	struct stats_ctx *c = (struct stats_ctx *)user;
+
+	c->handles++;
+	if (h->ring) {
+		c->ring_depth    += nats_ring_depth(h->ring);
+		c->ring_capacity += nats_ring_capacity(h->ring);
+	}
+
+	lock_start_read(h->rlock);
+	c->pulls_requested    += h->pulls_requested;
+	c->msgs_delivered     += h->msgs_delivered;
+	c->acks               += h->acks;
+	c->naks               += h->naks;
+	c->terms              += h->terms;
+	c->redeliveries       += h->redeliveries;
+	c->fetch_skips_full   += h->fetch_skips_full;
+	c->backpressure_drops += h->backpressure_drops;
+	c->fetch_errors       += h->fetch_errors;
+	lock_stop_read(h->rlock);
+	return 0;
+}
+
+/*
+ * nats_consumer_stats -- one flat object aggregating the observability
+ * counters an operator needs to spot back-pressure and IPC saturation:
+ *
+ *   handles, ring_depth/ring_capacity (summed across handles)
+ *   msgs_delivered, pulls_requested, acks, naks, terms, redeliveries
+ *   fetch_skips_full   -- Fetches skipped because the ring was full (flow
+ *                         control; no data loss)
+ *   backpressure_drops -- messages fetched but deferred (broker redelivers)
+ *   fetch_errors       -- Fetch calls that returned a hard error
+ *   ack_ipc_*          -- worker->consumer ack queue: depth + lifetime
+ *                         enqueued/drained/dropped
+ *   rpc_ipc_*          -- worker->consumer async-RPC queue (same fields)
+ *   rpc_slots_inflight / rpc_slots_total -- async-RPC slot-pool occupancy
+ *
+ * Safe to call from the attendant/MI process: the per-handle counters and
+ * ring live in SHM, and the ack/RPC IPC queues + slot pool are allocated
+ * pre-fork (mod_init) so their getters return shared state in any process.
+ */
+mi_response_t *mi_consumer_stats(const mi_params_t *params,
+		struct mi_handler *async)
+{
+	mi_response_t *resp;
+	mi_item_t *obj;
+	struct stats_ctx s;
+	(void)params;
+	(void)async;
+
+	memset(&s, 0, sizeof(s));
+
+	resp = init_mi_result_object(&obj);
+	if (!resp)
+		return NULL;
+
+	nats_registry_foreach(stats_cb, &s);
+
+	#define SN(name, v) do { \
+		if (add_mi_number(obj, MI_SSTR(name), (double)(v)) < 0) \
+			goto err; \
+	} while (0)
+
+	SN("handles",            s.handles);
+	SN("ring_depth",         s.ring_depth);
+	SN("ring_capacity",      s.ring_capacity);
+	SN("msgs_delivered",     s.msgs_delivered);
+	SN("pulls_requested",    s.pulls_requested);
+	SN("acks",               s.acks);
+	SN("naks",               s.naks);
+	SN("terms",              s.terms);
+	SN("redeliveries",       s.redeliveries);
+	SN("fetch_skips_full",   s.fetch_skips_full);
+	SN("backpressure_drops", s.backpressure_drops);
+	SN("fetch_errors",       s.fetch_errors);
+
+	/* worker -> consumer ack IPC */
+	SN("ack_ipc_depth",      nats_ack_ipc_depth());
+	SN("ack_ipc_enqueued",   nats_ack_ipc_enqueued_total());
+	SN("ack_ipc_drained",    nats_ack_ipc_drained_total());
+	SN("ack_ipc_dropped",    nats_ack_ipc_dropped_total());
+
+	/* worker -> consumer async-RPC IPC */
+	SN("rpc_ipc_depth",      nats_rpc_ipc_depth());
+	SN("rpc_ipc_enqueued",   nats_rpc_ipc_enqueued_total());
+	SN("rpc_ipc_drained",    nats_rpc_ipc_drained_total());
+	SN("rpc_ipc_dropped",    nats_rpc_ipc_dropped_total());
+
+	/* async-RPC slot pool */
+	SN("rpc_slots_inflight", nats_rpc_slot_inflight_count());
+	SN("rpc_slots_total",    nats_rpc_slot_total_count());
+
+	#undef SN
+	return resp;
+
+err:
+	free_mi_response(resp);
+	return NULL;
 }
 
 /* ── handle_reload ────────────────────────────────────────────── */
@@ -369,6 +501,12 @@ const mi_export_t nats_consumer_mi_cmds[] = {
 	{ "nats_consumer_list",
 	  "list all registered handles", 0, 0, {
 		{ mi_consumer_list, {0} },
+		{ EMPTY_MI_RECIPE }
+	  }, { 0 }
+	},
+	{ "nats_consumer_stats",
+	  "aggregate ring/IPC/slot counters for back-pressure monitoring", 0, 0, {
+		{ mi_consumer_stats, {0} },
 		{ EMPTY_MI_RECIPE }
 	  }, { 0 }
 	},
