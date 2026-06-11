@@ -297,10 +297,10 @@ static const param_export_t params[] = {
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
 	{"map_legacy_read",             INT_PARAM,    &nats_map_legacy_read},
-	/* Shared lib/nats shutdown drain timeout, ms.  See
-	 * lib/nats/nats_pool.h for the contract; last-writer wins
-	 * across modules. */
-	{"cdb_drain_timeout_ms",        INT_PARAM,    &nats_pool_drain_timeout_ms},
+	/* Shared lib/nats shutdown drain timeout, ms.  Merged by MAX across
+	 * modules (see nats_pool_drain_timeout_setter), not last-writer-wins. */
+	{"cdb_drain_timeout_ms",        INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_drain_timeout_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
@@ -487,8 +487,10 @@ static int mod_init(void)
 	/*
 	 * Register with the NATS connection pool.
 	 *
-	 * Since lib/nats is statically linked, each module has its own pool.
-	 * cachedb_nats needs its own nats_url and TLS params to connect.
+	 * lib/nats is a shared .so, so all NATS modules share ONE pool; each
+	 * module registers its config (URLs / reconnect) and the pool merges
+	 * them.  cachedb_nats still needs its own nats_url and TLS params so a
+	 * cachedb-only deployment can connect without another NATS module.
 	 *
 	 * If nats_url is set, use it directly. Otherwise, extract server
 	 * addresses from the cachedb_url (format: nats:group://host:port,.../)

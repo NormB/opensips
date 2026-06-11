@@ -1,5 +1,11 @@
 # cachedb_nats / NATS-modules performance notes
 
+> **Historical artifact.** A point-in-time review/benchmark snapshot kept
+> for context -- NOT a living document. Commit hashes and line numbers
+> are as-of the snapshot date and the code may have moved on. The current
+> contract lives in the docbook (`doc/*.xml`) and the source comments.
+
+
 This file consolidates the perf series shipped on `feature/nats`
 between `7232b5e18` (master merge) and the latest scale-tuning
 group (PK fast path, runtime-tunable bucket count, optional index

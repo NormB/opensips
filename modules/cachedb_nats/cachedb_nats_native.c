@@ -186,21 +186,18 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	 *
 	 * Use a local variable for the effective timeout so we don't
 	 * mutate the caller's pvar in-place (which the old code did). */
-	{
-		int eff = *timeout_ms;
-		if (eff <= 0) eff = nats_request_default_timeout_ms;
-		if (eff < NATS_REQUEST_MIN_TIMEOUT_MS)
-			eff = NATS_REQUEST_MIN_TIMEOUT_MS;
-		if (eff > NATS_REQUEST_MAX_TIMEOUT_MS) {
-			static int warned = 0;
-			if (!warned) {
-				LM_WARN("nats_request timeout %d ms clamped to %d ms\n",
-					eff, NATS_REQUEST_MAX_TIMEOUT_MS);
-				warned = 1;
-			}
-			eff = NATS_REQUEST_MAX_TIMEOUT_MS;
+	int eff = *timeout_ms;
+	if (eff <= 0) eff = nats_request_default_timeout_ms;
+	if (eff < NATS_REQUEST_MIN_TIMEOUT_MS)
+		eff = NATS_REQUEST_MIN_TIMEOUT_MS;
+	if (eff > NATS_REQUEST_MAX_TIMEOUT_MS) {
+		static int warned = 0;
+		if (!warned) {
+			LM_WARN("nats_request timeout %d ms clamped to %d ms\n",
+				eff, NATS_REQUEST_MAX_TIMEOUT_MS);
+			warned = 1;
 		}
-		*timeout_ms = eff;
+		eff = NATS_REQUEST_MAX_TIMEOUT_MS;
 	}
 
 	/* null-terminate subject */
@@ -234,14 +231,14 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	}
 
 	s = nats_dl.natsConnection_RequestString(&reply, nc, subj_buf,
-		pay_ptr, *timeout_ms);
+		pay_ptr, eff);
 
 	if (pay_heap)
 		pkg_free(pay_ptr);
 
 	if (s == NATS_TIMEOUT) {
 		LM_DBG("nats_request to '%s' timed out (%dms)\n",
-			subj_buf, *timeout_ms);
+			subj_buf, eff);
 		return -2;
 	}
 	if (s != NATS_OK) {
