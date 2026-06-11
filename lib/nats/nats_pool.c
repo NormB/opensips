@@ -195,27 +195,25 @@ int nats_pool_kv_op_timeout_ms = 0;
 /* shm_strdup provided by ../../ut.h — no local copy needed */
 
 /**
- * Parse comma-separated URL string into pool_cfg->servers[].
+ * Tokenize a comma-separated URL string and append each unique server (one
+ * not already in pool_cfg->servers[]) to the config, trimming surrounding
+ * whitespace/commas and detecting "tls://".  Shared by the initial parse and
+ * the subsequent-registration merge so the tokenizer lives in one place.
  *
- * Each token is trimmed of surrounding whitespace and commas, then
- * shm-allocated.  Sets pool_cfg->use_tls if any URL starts with "tls://".
- *
- * @param url  Comma-separated URL string (e.g. "nats://h1:4222,nats://h2:4222").
- * @return     0 on success, -1 on error (empty string, too many servers, OOM).
+ * @param url            Comma-separated URL string.
+ * @param hard_overflow  If non-zero, exceeding NATS_POOL_MAX_SERVERS is a
+ *                       hard error (-1); otherwise the extra URL is
+ *                       warn-skipped (merge semantics).
+ * @return  number of servers added, or -1 on OOM / hard overflow.  On -1 the
+ *          caller owns any partial additions.
  *
  * Thread safety: Called only during mod_init (single-threaded, pre-fork).
  */
-static int parse_urls(const char *url)
+static int _append_server_urls(const char *url, int hard_overflow)
 {
-	const char *p, *tok;
-	int len;
+	const char *p = url, *tok;
+	int len, i, added = 0;
 
-	if (!url || !*url) {
-		LM_ERR("empty URL string\n");
-		return -1;
-	}
-
-	p = url;
 	while (*p) {
 		/* skip leading whitespace and commas */
 		while (*p == ',' || *p == ' ' || *p == '\t')
@@ -231,31 +229,65 @@ static int parse_urls(const char *url)
 		/* trim trailing whitespace */
 		while (len > 0 && (tok[len - 1] == ' ' || tok[len - 1] == '\t'))
 			len--;
-
 		if (len <= 0)
 			continue;
 
+		/* skip a URL already in the list (a duplicate within this string
+		 * or one a previous registration already added) */
+		for (i = 0; i < pool_cfg->server_cnt; i++)
+			if ((int)strlen(pool_cfg->servers[i]) == len &&
+			    strncmp(pool_cfg->servers[i], tok, len) == 0)
+				break;
+		if (i < pool_cfg->server_cnt)
+			continue;
+
 		if (pool_cfg->server_cnt >= NATS_POOL_MAX_SERVERS) {
-			LM_ERR("too many NATS servers (max %d)\n",
-				NATS_POOL_MAX_SERVERS);
-			goto err_free_partial;
+			if (hard_overflow) {
+				LM_ERR("too many NATS servers (max %d)\n",
+					NATS_POOL_MAX_SERVERS);
+				return -1;
+			}
+			LM_WARN("NATS pool: max servers reached, ignoring "
+				"additional URL\n");
+			continue;
 		}
 
 		pool_cfg->servers[pool_cfg->server_cnt] = shm_malloc(len + 1);
 		if (!pool_cfg->servers[pool_cfg->server_cnt]) {
 			LM_ERR("shm_malloc for server URL failed\n");
-			goto err_free_partial;
+			return -1;
 		}
 		memcpy(pool_cfg->servers[pool_cfg->server_cnt], tok, len);
 		pool_cfg->servers[pool_cfg->server_cnt][len] = '\0';
 
-		/* detect TLS */
 		if (len >= 6 &&
 		    strncmp(pool_cfg->servers[pool_cfg->server_cnt], "tls://", 6) == 0)
 			pool_cfg->use_tls = 1;
 
 		pool_cfg->server_cnt++;
+		added++;
 	}
+	return added;
+}
+
+/*
+ * Parse comma-separated URL string into pool_cfg->servers[] (initial
+ * registration).  Sets pool_cfg->use_tls if any URL starts with "tls://".
+ *
+ * @param url  Comma-separated URL string (e.g. "nats://h1:4222,nats://h2:4222").
+ * @return     0 on success, -1 on error (empty string, too many servers, OOM).
+ *
+ * Thread safety: Called only during mod_init (single-threaded, pre-fork).
+ */
+static int parse_urls(const char *url)
+{
+	if (!url || !*url) {
+		LM_ERR("empty URL string\n");
+		return -1;
+	}
+
+	if (_append_server_urls(url, 1 /* hard overflow */) < 0)
+		goto err_free_partial;
 
 	if (pool_cfg->server_cnt == 0) {
 		char redacted[256];
@@ -539,65 +571,19 @@ int nats_pool_register(const char *url, const char *module,
 			pool_cfg->reconnect_wait,
 			pool_cfg->max_reconnect);
 	} else {
-		/* Subsequent registration — merge servers (add any new ones) */
-		const char *p, *tok;
-		int len, i, found;
+		/* Subsequent registration — merge in any new servers (soft
+		 * overflow: extra URLs past the cap are warn-skipped). */
+		int added;
 
 		LM_INFO("NATS pool: additional registration by '%s'\n",
 			module ? module : "?");
 
-		p = url;
-		while (*p) {
-			while (*p == ',' || *p == ' ' || *p == '\t')
-				p++;
-			if (!*p)
-				break;
-
-			tok = p;
-			while (*p && *p != ',')
-				p++;
-
-			len = (int)(p - tok);
-			while (len > 0 && (tok[len - 1] == ' ' || tok[len - 1] == '\t'))
-				len--;
-
-			if (len <= 0)
-				continue;
-
-			/* check if this server is already known */
-			found = 0;
-			for (i = 0; i < pool_cfg->server_cnt; i++) {
-				if ((int)strlen(pool_cfg->servers[i]) == len &&
-				    strncmp(pool_cfg->servers[i], tok, len) == 0) {
-					found = 1;
-					break;
-				}
-			}
-
-			if (!found) {
-				if (pool_cfg->server_cnt >= NATS_POOL_MAX_SERVERS) {
-					LM_WARN("NATS pool: max servers reached, "
-						"ignoring additional URL\n");
-					continue;
-				}
-				pool_cfg->servers[pool_cfg->server_cnt] = shm_malloc(len + 1);
-				if (!pool_cfg->servers[pool_cfg->server_cnt]) {
-					LM_ERR("shm_malloc for server URL failed\n");
-					return -1;
-				}
-				memcpy(pool_cfg->servers[pool_cfg->server_cnt], tok, len);
-				pool_cfg->servers[pool_cfg->server_cnt][len] = '\0';
-
-				if (len >= 6 && strncmp(
-				    pool_cfg->servers[pool_cfg->server_cnt],
-				    "tls://", 6) == 0)
-					pool_cfg->use_tls = 1;
-
-				pool_cfg->server_cnt++;
-				LM_INFO("NATS pool: added server from '%s'\n",
-					module ? module : "?");
-			}
-		}
+		added = _append_server_urls(url, 0 /* soft overflow */);
+		if (added < 0)
+			return -1;
+		if (added > 0)
+			LM_INFO("NATS pool: merged %d new server(s) from '%s'\n",
+				added, module ? module : "?");
 
 		/* TLS config conflicts no longer possible: every NATS
 		 * module reads from the same tls_mgm "nats" domain, so
