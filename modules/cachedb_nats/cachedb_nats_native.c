@@ -55,6 +55,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_str.h"
 #include "../../mi/mi.h"
 #include "../../mi/item.h"
 
@@ -101,32 +102,8 @@ extern int nats_request_default_timeout_ms;
  * caller's perspective. */
 #define NATS_REQUEST_MAX_TIMEOUT_MS  30000
 
-/*
- * native_str_to_buf() — Null-terminate an OpenSIPS str into a fixed buffer.
- *
- * Copies s->len bytes from s->s into buf and appends '\0'.  Returns 0 on
- * success, -1 if the string does not fit or has a negative length.  When
- * s is NULL, empty, or zero-length, buf is set to an empty string.
- */
-static inline int native_str_to_buf(const str *s, char *buf, size_t buf_size)
-{
-	/* guard against corrupted str descriptors with negative length */
-	if (s && s->len < 0) {
-		LM_ERR("negative string length (%d)\n", s->len);
-		return -1;
-	}
-	if (!s || !s->s || s->len <= 0) {
-		buf[0] = '\0';
-		return 0;
-	}
-	if ((size_t)s->len >= buf_size) {
-		LM_ERR("string too long (%d >= %zu)\n", s->len, buf_size);
-		return -1;
-	}
-	memcpy(buf, s->s, s->len);
-	buf[s->len] = '\0';
-	return 0;
-}
+/* nats_str_to_buf() was consolidated into lib/nats/nats_str.h as
+ * nats_str_to_buf() -- see P3-63. */
 
 /* ================================================================== */
 /*               Script function: nats_request                        */
@@ -201,7 +178,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	}
 
 	/* null-terminate subject */
-	if (native_str_to_buf(subject, subj_buf, sizeof(subj_buf)) < 0)
+	if (nats_str_to_buf(subject, subj_buf, sizeof(subj_buf)) < 0)
 		return -1;
 
 	/* null-terminate payload (use heap for large payloads).
@@ -327,7 +304,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		return -1;
 	}
 
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	memset(&list, 0, sizeof(list));
@@ -464,9 +441,9 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	if (validate_kv_key(key) < 0)
 		return -1;
 
-	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
+	if (nats_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
@@ -595,9 +572,9 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 	if (validate_kv_key(key) < 0)
 		return -1;
 
-	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
+	if (nats_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* null-terminate value, heap-alloc if too large for stack buf */
@@ -678,9 +655,9 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	if (validate_kv_key(key) < 0)
 		return -1;
 
-	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
+	if (nats_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* null-terminate value */
@@ -760,9 +737,9 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 	if (validate_kv_key(key) < 0)
 		return -1;
 
-	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
+	if (nats_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
@@ -819,9 +796,9 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	if (validate_kv_key(key) < 0)
 		return -1;
 
-	if (native_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
+	if (nats_str_to_buf(bucket, bucket_buf, sizeof(bucket_buf)) < 0)
 		return -1;
-	if (native_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
@@ -932,7 +909,7 @@ int nats_cache_raw_query_impl(cachedb_con *con, str *attr,
 		return -1;
 	}
 
-	if (native_str_to_buf(attr, cmd_buf, sizeof(cmd_buf)) < 0)
+	if (nats_str_to_buf(attr, cmd_buf, sizeof(cmd_buf)) < 0)
 		return -1;
 
 	/* Tokenize the command string using strtok_r (reentrant).  We parse
@@ -1364,7 +1341,7 @@ static int nats_map_compose(char *out, int out_size, const str *key,
  * key->len + 1 + subkey->len + 1 bytes (content + separator + NUL).
  *
  * If subkey is NULL or empty, the function falls back to copying just the
- * key via native_str_to_buf().
+ * key via nats_str_to_buf().
  *
  * Returns: 0 on success, -1 if inputs are invalid or the buffer is too small.
  */
@@ -1398,7 +1375,7 @@ static int build_map_key_legacy(char *buf, size_t buf_size,
 	if (!key || !key->s || key->len <= 0)
 		return -1;
 	if (!subkey || !subkey->s || subkey->len <= 0)
-		return native_str_to_buf(key, buf, buf_size);
+		return nats_str_to_buf(key, buf, buf_size);
 
 	total = key->len + 1 + subkey->len;
 	if ((size_t)(total + 1) > buf_size)
@@ -1667,7 +1644,7 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 
 			/* convert value to string */
 			if (pair->val.type == CDB_STR) {
-				if (native_str_to_buf(&pair->val.val.st, val_buf,
+				if (nats_str_to_buf(&pair->val.val.st, val_buf,
 						sizeof(val_buf)) < 0)
 					return -1;
 			} else if (pair->val.type == CDB_INT32) {
@@ -1704,7 +1681,7 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 
 			/* convert value to string */
 			if (pair->val.type == CDB_STR) {
-				if (native_str_to_buf(&pair->val.val.st, val_buf,
+				if (nats_str_to_buf(&pair->val.val.st, val_buf,
 						sizeof(val_buf)) < 0)
 					return -1;
 			} else if (pair->val.type == CDB_INT32) {

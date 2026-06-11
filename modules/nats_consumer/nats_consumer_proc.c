@@ -80,6 +80,7 @@
 #include "../../dprint.h"
 #include "../../mem/shm_mem.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_str.h"
 
 #include "nats_handle_registry.h"
 #include "nats_ring.h"
@@ -508,25 +509,11 @@ static jsReplayPolicy map_replay_policy(nats_replay_policy_e p)
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
-/* Return NULL-terminated const char * from a str, or NULL if the str
- * is empty.  nats.c expects NUL-terminated C strings in its config
- * structs; registry str buffers are not guaranteed to be NUL-terminated,
- * so we allocate a process-local copy for each subscription we set up.
- * Since subscriptions are long-lived (one per handle for the life of
- * the process), pointers are kept alive on the proc_sub_state_t and
- * freed by the retire/reap teardown path. */
-static char *str_to_cstr(const str *s)
-{
-	char *out;
-	if (!s || s->len <= 0 || !s->s)
-		return NULL;
-	out = (char *)malloc((size_t)s->len + 1);
-	if (!out)
-		return NULL;
-	memcpy(out, s->s, s->len);
-	out[s->len] = '\0';
-	return out;
-}
+/* nats_str_to_cstr() was consolidated into lib/nats/nats_str.h as
+ * nats_str_to_cstr() -- see P3-63.  It mallocs a process-local NUL-terminated
+ * copy (nats.c wants C strings; registry str buffers are not NUL-terminated);
+ * subscriptions are long-lived so the copies are kept on the proc_sub_state_t
+ * and freed by the retire/reap teardown path. */
 
 static int dup_str_local(str *dst, const str *src)
 {
@@ -839,11 +826,11 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	/* Build jsConsumerConfig with the full handle-config matrix. */
 	nats_dl.jsConsumerConfig_Init(&cc);
 
-	durable_c    = str_to_cstr(&h->durable);
-	filter_c     = str_to_cstr(&h->filter);
-	stream_c     = str_to_cstr(&h->stream);
-	domain_c     = str_to_cstr(&h->js_domain);
-	api_prefix_c = str_to_cstr(&h->api_prefix);
+	durable_c    = nats_str_to_cstr(&h->durable);
+	filter_c     = nats_str_to_cstr(&h->filter);
+	stream_c     = nats_str_to_cstr(&h->stream);
+	domain_c     = nats_str_to_cstr(&h->js_domain);
+	api_prefix_c = nats_str_to_cstr(&h->api_prefix);
 
 	/* Render sample_freq as a string -- nats.c expects a C string here,
 	 * e.g. "25" for 25% sampling.  Only set when the script supplied

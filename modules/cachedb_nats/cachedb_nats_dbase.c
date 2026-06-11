@@ -61,6 +61,7 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_str.h"
 
 extern int nats_cas_retries;   /* defined in cachedb_nats.c */
 
@@ -219,41 +220,8 @@ void nats_cachedb_destroy(cachedb_con *con)
 	cachedb_do_close(con, nats_free_connection);
 }
 
-/* ------------- helper: null-terminate an OpenSIPS str ------------- */
-
-/**
- * str_to_buf() — convert an OpenSIPS str to a null-terminated C string.
- *
- * OpenSIPS str fields carry a pointer and a length but are NOT
- * null-terminated.  Most NATS C API functions expect standard C strings,
- * so this helper copies up to buf_size-1 bytes from s->s into buf and
- * appends a '\0'.
- *
- * @param s         Source OpenSIPS str (may be NULL or empty).
- * @param buf       Destination buffer (must be at least 1 byte).
- * @param buf_size  Total size of buf including space for the terminator.
- * @return  0 on success (including empty/NULL input → empty string),
- *         -1 if s->len is negative (corrupt str) or exceeds buf_size.
- */
-static inline int str_to_buf(const str *s, char *buf, size_t buf_size)
-{
-	/* Guard against corrupt str: s->len is int, but the (size_t) cast
-	 * below would turn a negative value into a very large positive number,
-	 * silently passing the size check and causing a massive memcpy. */
-	if (s && s->len < 0)
-		return -1;
-	if (!s || !s->s || s->len == 0) {
-		buf[0] = '\0';
-		return 0;
-	}
-	if ((size_t)s->len >= buf_size) {
-		LM_ERR("string too long (%d >= %zu)\n", s->len, buf_size);
-		return -1;
-	}
-	memcpy(buf, s->s, s->len);
-	buf[s->len] = '\0';
-	return 0;
-}
+/* The str→C-string helpers now live in lib/nats/nats_str.h
+ * (nats_str_to_buf) -- see P3-63. */
 
 /**
  * validate_kv_key() — reject keys NATS KV cannot represent as a subject token.
@@ -341,7 +309,7 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 
 	if (validate_kv_key(attr) < 0)
 		return -1;
-	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* kvEntry lifecycle: kvStore_Get allocates an entry that we must
@@ -439,7 +407,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 
 	if (validate_kv_key(attr) < 0)
 		return -1;
-	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	if (expires > 0)
@@ -510,7 +478,7 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 
 	if (validate_kv_key(attr) < 0)
 		return -1;
-	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	s = nats_dl.kvStore_Delete(ncon->kv, key_buf);
@@ -579,7 +547,7 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 
 	if (validate_kv_key(attr) < 0)
 		return -1;
-	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	if (expires > 0)
@@ -765,7 +733,7 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 
 	if (validate_kv_key(attr) < 0)
 		return -1;
-	if (str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
+	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
 	/* kvEntry lifecycle: Get allocates, we read, then Destroy. */
