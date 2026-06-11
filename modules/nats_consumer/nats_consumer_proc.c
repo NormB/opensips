@@ -207,11 +207,10 @@ typedef struct proc_sub_state {
 	                                        *  accounting). */
 	time_t                last_fetch;
 
-	/* counters -- local to this process, included in mi_info */
-	uint64_t              total_pulled;
-	uint64_t              total_pushed;
-	uint64_t              total_dropped_backpressure;
-	uint64_t              total_fetch_errors;
+	/* Per-handle pull/push/defer/error counters live in the SHM handle
+	 * (nats_handle_t: pulls_requested, msgs_delivered, fetch_skips_full,
+	 * backpressure_drops, fetch_errors, ...) so the attendant's MI
+	 * handlers can read them.  Bumped here via hstat_add(). */
 
 	/* Highest stream sequence delivered so far.  Survives a rebuild (the
 	 * proc_sub_state_t is kept when the natsSubscription is recreated), so
@@ -1354,7 +1353,11 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		int      eff_fb;
 
 		if (free_sl <= 1) {
-			ss->total_dropped_backpressure++;
+			/* Ring full: skip the Fetch entirely.  No message is
+			 * touched -- the broker keeps the un-fetched messages and
+			 * redelivers them next pull.  This is flow control, not a
+			 * drop, so it has its own counter. */
+			hstat_add(ss->h_ref, &ss->h_ref->fetch_skips_full, 1);
 			goto out;
 		}
 		eff_fb = (max_fb < free_sl) ? max_fb : (free_sl - 1);
@@ -1407,20 +1410,19 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			ss->sub = NULL;
 		}
 		ss->dirty = 1;
-		ss->total_fetch_errors++;
+		hstat_add(ss->h_ref, &ss->h_ref->fetch_errors, 1);
 		goto out;
 	}
 
 	if (s != NATS_OK && list.Count == 0) {
 		/* Non-fatal per-sub error; log at DBG to avoid flooding logs
 		 * when e.g. max_ack_pending gates us out. */
-		ss->total_fetch_errors++;
+		hstat_add(ss->h_ref, &ss->h_ref->fetch_errors, 1);
 		LM_DBG("nats_consumer_proc: fetch id='%.*s': %s\n",
 			ss->id.len, ss->id.s, nats_dl.natsStatus_GetText(s));
 		goto out;
 	}
 
-	ss->total_pulled += (uint64_t)list.Count;
 	ss->last_fetch = time(NULL);
 
 	for (i = 0; i < list.Count; i++) {
@@ -1518,7 +1520,10 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		ack_token = store_msg_ref(ss->handle_idx,
 			nats_ring_capacity(ss->ring), m, &ref_ok);
 		if (!ref_ok) {
-			ss->total_dropped_backpressure++;
+			/* msg-ref table exhausted: the message was fetched but
+			 * can't be tracked for ack, so leave it un-acked and let
+			 * the broker redeliver after ack_wait. */
+			hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
 			nats_dl.natsMsg_Destroy(m);
 			list.Msgs[i] = NULL;
 			continue;
@@ -1536,7 +1541,6 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 
 		if (rc == 0) {
 			pushed++;
-			ss->total_pushed++;
 			hstat_add(ss->h_ref, &ss->h_ref->msgs_delivered, 1);
 			if (delivered > 1)
 				hstat_add(ss->h_ref, &ss->h_ref->redeliveries, 1);
@@ -1547,7 +1551,7 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			/* Ring full: release the ref slot and do NOT ack.
 			 * Broker redelivers after ack_wait. */
 			(void)release_msg_ref(ack_token);
-			ss->total_dropped_backpressure++;
+			hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
 			LM_DBG("nats_consumer_proc: ring full id='%.*s', "
 				"deferring message\n",
 				ss->id.len, ss->id.s);
@@ -1560,7 +1564,9 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			 * doesn't redeliver forever.  Release the ref slot
 			 * first so we don't leak it on retry. */
 			(void)release_msg_ref(ack_token);
-			ss->total_dropped_backpressure++;
+			/* This is a permanent Term, not back-pressure -- it is
+			 * counted via the per-handle `terms` counter below, so do
+			 * not also fold it into backpressure_drops. */
 			LM_WARN("nats_consumer_proc: oversize message on "
 				"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
 				"terminating\n",

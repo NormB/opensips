@@ -34,6 +34,8 @@ mi_response_t *mi_consumer_unbind(const mi_params_t *params,
 		struct mi_handler *async);
 mi_response_t *mi_consumer_list(const mi_params_t *params,
 		struct mi_handler *async);
+mi_response_t *mi_consumer_stats(const mi_params_t *params,
+		struct mi_handler *async);
 mi_response_t *mi_handle_reload(const mi_params_t *params,
 		struct mi_handler *async);
 mi_response_t *mi_consumer_health(const mi_params_t *params,
