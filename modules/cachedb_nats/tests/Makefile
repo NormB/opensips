@@ -21,7 +21,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_nats_request_rename test_intern_scaling \
         test_revmap_delete test_cas_retry_policy \
         test_pk_stack_key test_resync_timer test_op_stats test_index_converge \
-        test_query_keyset_refcount
+        test_query_keyset_refcount test_watcher_leak_stat
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -200,6 +200,11 @@ test_index_converge: test_index_converge.c
 test_query_keyset_refcount: test_query_keyset_refcount.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+# Source-pattern + model: the disconnected-teardown watcher-handle leak is
+# counted (watcher_handle_leaks) so the per-flap leak is observable.
+test_watcher_leak_stat: test_watcher_leak_stat.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -238,6 +243,7 @@ check: all
 	./test_op_stats
 	./test_index_converge
 	./test_query_keyset_refcount
+	./test_watcher_leak_stat
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

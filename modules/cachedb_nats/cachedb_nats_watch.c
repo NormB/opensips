@@ -556,10 +556,18 @@ static void _watcher_loop(void)
 				/* Only destroy if still connected.  During
 				 * disconnect, nats.c's I/O thread may be cleaning
 				 * up the same internal structures -- destroying
-				 * here causes double-free.  The handle is tiny;
-				 * leak is bounded. */
+				 * here causes double-free.  We therefore skip the
+				 * destroy and leak this (tiny) handle; under a
+				 * flapping broker the leak accumulates one handle
+				 * per cycle.  Safe reclaim needs live-broker
+				 * validation of the teardown timing and stays
+				 * deferred -- but count the skip so the leak rate
+				 * is visible in nats_cdb_stats and can be alerted
+				 * on. */
 				if (nats_pool_is_connected())
 					nats_dl.kvWatcher_Destroy(w_claim);
+				else
+					NATS_CDB_STATS_INC(watcher_handle_leaks);
 			}
 		}
 
