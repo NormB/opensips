@@ -15,3 +15,4 @@ test_tls_downgrade_policy
 test_unsafe_log_clamp
 test_validate_publish_subject
 test_validate_subject_cache
+test_validate_modes

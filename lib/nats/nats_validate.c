@@ -39,30 +39,55 @@
  * served the stale "valid" verdict.  The scan is O(len) on short
  * subjects — cheap — so there is no cache.
  */
-int nats_validate_publish_subject(const char *s, int len)
+int nats_validate(const char *s, int len, nats_validate_mode_t mode)
 {
 	int i;
-	int last_was_dot;
+	int last_was_dot = 0;
 
 	if (!s || len <= 0)
 		return -1;
 
-	if (s[0] == '.' || s[len - 1] == '.')
+	/* Publish subjects must not start or end with a token separator. */
+	if (mode == NATS_VALIDATE_PUBLISH_SUBJECT &&
+			(s[0] == '.' || s[len - 1] == '.'))
 		return -1;
 
-	last_was_dot = 0;
 	for (i = 0; i < len; i++) {
 		unsigned char c = (unsigned char)s[i];
+
+		/* common: no NUL / control / whitespace in any mode */
 		if (c == '\0')             return -1;
 		if (c < 0x20 || c == 0x7f) return -1;
 		if (c == ' ' || c == '\t') return -1;
-		if (c == '*' || c == '>')  return -1;
+
+		/* wildcards are a subject token only for subscribe filters */
+		if ((c == '*' || c == '>') &&
+				mode != NATS_VALIDATE_FILTER_SUBJECT)
+			return -1;
+
+		/* ':' is reserved as the legacy map-key separator */
+		if (c == ':' && mode == NATS_VALIDATE_KV_KEY)
+			return -1;
+
+		/* stream/consumer names are a single token: no separators */
+		if (mode == NATS_VALIDATE_STREAM_NAME &&
+				(c == '.' || c == '/' || c == '\\'))
+			return -1;
+
+		/* empty tokens (consecutive dots) are illegal in a publish subject */
 		if (c == '.') {
-			if (last_was_dot) return -1;
-			last_was_dot = 1;
+			if (mode == NATS_VALIDATE_PUBLISH_SUBJECT) {
+				if (last_was_dot) return -1;
+				last_was_dot = 1;
+			}
 		} else {
 			last_was_dot = 0;
 		}
 	}
 	return 0;
+}
+
+int nats_validate_publish_subject(const char *s, int len)
+{
+	return nats_validate(s, len, NATS_VALIDATE_PUBLISH_SUBJECT);
 }

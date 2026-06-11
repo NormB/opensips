@@ -359,6 +359,31 @@ void nats_redact_url(const char *url, char *out, size_t out_sz);
 int nats_validate_publish_subject(const char *s, int len);
 
 /*
+ * Unified validator for the NATS subject/key/name strings used across the
+ * modules.  All modes reject an empty/NULL string, an embedded NUL, control
+ * chars (< 0x20, 0x7f) and whitespace.  Mode-specific rules:
+ *
+ *   NATS_VALIDATE_PUBLISH_SUBJECT  concrete publish target: no wildcards;
+ *                                  no leading/trailing/consecutive dots.
+ *   NATS_VALIDATE_FILTER_SUBJECT   subscribe filter: dots AND wildcards
+ *                                  ('*','>') allowed.
+ *   NATS_VALIDATE_STREAM_NAME      single token: no '.', '*', '>', '/', '\'.
+ *   NATS_VALIDATE_KV_KEY           dots allowed; ':' rejected (reserved as
+ *                                  the legacy map separator); no wildcards.
+ *
+ * Pure function, content-only (re-scans every call -- see the security note
+ * on nats_validate_publish_subject).  Returns 0 if valid, -1 otherwise.
+ */
+typedef enum {
+	NATS_VALIDATE_PUBLISH_SUBJECT = 0,
+	NATS_VALIDATE_FILTER_SUBJECT,
+	NATS_VALIDATE_STREAM_NAME,
+	NATS_VALIDATE_KV_KEY,
+} nats_validate_mode_t;
+
+int nats_validate(const char *s, int len, nats_validate_mode_t mode);
+
+/*
  * Register a callback for JetStream publish-ack outcomes.
  *
  * The cnats library invokes the AckHandler from a library-internal
