@@ -790,6 +790,233 @@ static int _round_up_pow2(int v, int min)
 	return r;
 }
 
+/* ------------------------------------------------------------------ */
+/*        doc-key -> field:value reverse map (fast delete)            */
+/* ------------------------------------------------------------------ */
+/*
+ * The watcher's delete-by-key path only has the KV key (the document's
+ * JSON is already gone), so it used nats_json_index_remove(), which walks
+ * EVERY bucket/entry under all shard locks -- O(buckets x entries) on each
+ * expiry/unregister.  This reverse map records, per doc-key, the list of
+ * "field:value" strings the document was indexed under, so a delete can
+ * remove the key from only those entries (O(fields)).
+ *
+ * Design notes:
+ *   - It stores the fv STRINGS, not nats_idx_entry pointers, so there is
+ *     no dangling-pointer hazard: the delete re-looks-up each entry by
+ *     string under its own forward-index shard lock, exactly like
+ *     nats_json_index_remove_fields().
+ *   - The reverse-map lock and the forward-index shard locks are NEVER
+ *     held at the same time: the delete snapshots the fv list under the
+ *     reverse lock, releases it, then takes forward shard locks.  With a
+ *     SEPARATE lock set there is no lock-order relationship to deadlock on.
+ *   - A reverse-map miss is always safe: the caller falls back to the full
+ *     nats_json_index_remove() walk (correct, just slower).  This makes
+ *     the map best-effort -- the index stays the source of truth.
+ */
+typedef struct nats_rev_node {
+	struct nats_rev_node *next;
+	unsigned int          hash;
+	int                   key_len;
+	int                   n_fv;     /* number of fv strings in blob */
+	int                   blob_len; /* bytes (each fv is NUL-terminated) */
+	char                 *fv_blob;  /* SHM: n_fv NUL-terminated fv strings */
+	char                  key[];    /* NUL-terminated doc key */
+} nats_rev_node;
+
+typedef struct nats_rev_map {
+	nats_rev_node **buckets;        /* nats_idx_buckets heads */
+	gen_lock_set_t *locks;          /* OWN lock set, NATS_IDX_SHARDS */
+} nats_rev_map;
+
+static nats_rev_map *g_rev = NULL;
+
+static int nats_rev_init(void)
+{
+	nats_rev_map *r;
+
+	if (g_rev)
+		return 0;
+
+	r = shm_malloc(sizeof(*r));
+	if (!r) {
+		LM_ERR("rev map: no SHM for header\n");
+		return -1;
+	}
+	memset(r, 0, sizeof(*r));
+
+	r->buckets = shm_malloc(sizeof(nats_rev_node *) * (size_t)nats_idx_buckets);
+	if (!r->buckets) {
+		LM_ERR("rev map: no SHM for %d bucket heads\n", nats_idx_buckets);
+		shm_free(r);
+		return -1;
+	}
+	memset(r->buckets, 0, sizeof(nats_rev_node *) * (size_t)nats_idx_buckets);
+
+	r->locks = lock_set_alloc(NATS_IDX_SHARDS);
+	if (!r->locks || !lock_set_init(r->locks)) {
+		LM_ERR("rev map: lock_set_alloc/init(%d) failed\n", NATS_IDX_SHARDS);
+		if (r->locks) lock_set_dealloc(r->locks);
+		shm_free(r->buckets);
+		shm_free(r);
+		return -1;
+	}
+
+	g_rev = r;
+	return 0;
+}
+
+static void _rev_free_node(nats_rev_node *n)
+{
+	if (!n) return;
+	if (n->fv_blob) shm_free(n->fv_blob);
+	shm_free(n);
+}
+
+static void nats_rev_destroy(void)
+{
+	int i;
+	nats_rev_node *n, *next;
+
+	if (!g_rev) return;
+
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		lock_set_get(g_rev->locks, i);
+
+	for (i = 0; i < nats_idx_buckets; i++) {
+		for (n = g_rev->buckets[i]; n; n = next) {
+			next = n->next;
+			_rev_free_node(n);
+		}
+		g_rev->buckets[i] = NULL;
+	}
+
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		lock_set_release(g_rev->locks, i);
+
+	lock_set_destroy(g_rev->locks);
+	lock_set_dealloc(g_rev->locks);
+	shm_free(g_rev->buckets);
+	shm_free(g_rev);
+	g_rev = NULL;
+}
+
+/* Insert-or-replace the fv blob recorded for @key.  @blob is n_fv
+ * NUL-terminated "field:value" strings totalling @blob_len bytes. */
+static void nats_rev_put(const char *key, int key_len,
+	const char *blob, int blob_len, int n_fv)
+{
+	unsigned int hash, bucket;
+	int shard;
+	nats_rev_node *n, **pp;
+	char *blob_copy;
+
+	if (!g_rev || !key || key_len <= 0 || n_fv <= 0 || blob_len <= 0)
+		return;
+
+	blob_copy = shm_malloc((size_t)blob_len);
+	if (!blob_copy) {
+		LM_ERR("rev map: no SHM for fv blob (%d bytes)\n", blob_len);
+		return;   /* best-effort: a miss just falls back to the full walk */
+	}
+	memcpy(blob_copy, blob, (size_t)blob_len);
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			/* replace */
+			if (n->fv_blob) shm_free(n->fv_blob);
+			n->fv_blob  = blob_copy;
+			n->blob_len = blob_len;
+			n->n_fv     = n_fv;
+			lock_set_release(g_rev->locks, shard);
+			return;
+		}
+	}
+
+	n = shm_malloc(sizeof(*n) + (size_t)key_len + 1);
+	if (!n) {
+		LM_ERR("rev map: no SHM for node (key_len=%d)\n", key_len);
+		shm_free(blob_copy);
+		lock_set_release(g_rev->locks, shard);
+		return;
+	}
+	n->hash     = hash;
+	n->key_len  = key_len;
+	n->n_fv     = n_fv;
+	n->blob_len = blob_len;
+	n->fv_blob  = blob_copy;
+	memcpy(n->key, key, (size_t)key_len);
+	n->key[key_len] = '\0';
+	n->next = g_rev->buckets[bucket];
+	g_rev->buckets[bucket] = n;
+
+	lock_set_release(g_rev->locks, shard);
+}
+
+/* Drop the reverse-map record for @key (if any). */
+static void nats_rev_remove(const char *key)
+{
+	unsigned int hash, bucket;
+	int shard, key_len;
+	nats_rev_node *n, **pp;
+
+	if (!g_rev || !key)
+		return;
+	key_len = (int)strlen(key);
+	if (key_len <= 0)
+		return;
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			*pp = n->next;
+			lock_set_release(g_rev->locks, shard);
+			_rev_free_node(n);
+			return;
+		}
+	}
+	lock_set_release(g_rev->locks, shard);
+}
+
+/* Drop every reverse-map record (used on a full index rebuild; the map
+ * repopulates as documents are re-added). */
+static void nats_rev_clear(void)
+{
+	int i;
+	nats_rev_node *n, *next;
+
+	if (!g_rev) return;
+
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		lock_set_get(g_rev->locks, i);
+	for (i = 0; i < nats_idx_buckets; i++) {
+		for (n = g_rev->buckets[i]; n; n = next) {
+			next = n->next;
+			_rev_free_node(n);
+		}
+		g_rev->buckets[i] = NULL;
+	}
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		lock_set_release(g_rev->locks, i);
+}
+
+/* nats_json_index_remove_by_revmap() is defined after the forward-index
+ * shard-lock helpers below (it uses them). */
+
 int nats_json_index_init(void)
 {
 	if (g_idx) {
@@ -857,6 +1084,12 @@ int nats_json_index_init(void)
 		return -1;
 	}
 
+	/* Allocate the delete-by-key reverse map.  Best-effort: on failure
+	 * the watcher's delete path just falls back to the full-walk remove. */
+	if (nats_rev_init() < 0)
+		LM_WARN("search index: reverse map init failed; deletes will use "
+			"the slower full-index walk\n");
+
 	LM_DBG("search index initialized in SHM (%d buckets, %d shards)\n",
 		nats_idx_buckets, NATS_IDX_SHARDS);
 	return 0;
@@ -884,6 +1117,85 @@ static inline void _idx_unlock_all(nats_search_idx *idx)
 	int i;
 	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
 		lock_set_release(idx->shard_locks, i);
+}
+
+/*
+ * Fast delete-by-key for the watcher: if the reverse map has a record for
+ * @key, remove the key from only the entries it was indexed under
+ * (O(fields)) instead of walking every bucket.  Returns 0 on a hit (key
+ * removed), -1 on a miss -- the caller MUST fall back to
+ * nats_json_index_remove() on -1.
+ *
+ * The fv blob is copied + the rev node unlinked under the reverse shard
+ * lock, which is released BEFORE any forward-index shard lock is taken, so
+ * the two (separate) lock sets are never held simultaneously.
+ */
+int nats_json_index_remove_by_revmap(const char *key)
+{
+	unsigned int hash, bucket;
+	int shard, key_len, i;
+	nats_rev_node *n, **pp;
+	char *blob = NULL;
+	int blob_len = 0, n_fv = 0, off;
+	const char *p;
+
+	if (!g_idx || !g_rev || !key)
+		return -1;
+	key_len = (int)strlen(key);
+	if (key_len <= 0)
+		return -1;
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			blob = malloc((size_t)n->blob_len);
+			if (blob) {
+				memcpy(blob, n->fv_blob, (size_t)n->blob_len);
+				blob_len = n->blob_len;
+				n_fv     = n->n_fv;
+			}
+			*pp = n->next;
+			lock_set_release(g_rev->locks, shard);
+			_rev_free_node(n);
+			goto have_blob;
+		}
+	}
+	lock_set_release(g_rev->locks, shard);
+	return -1;   /* miss -> caller falls back to the full walk */
+
+have_blob:
+	if (!blob)
+		return -1;   /* OOM copying -> fall back to the full walk */
+
+	p   = blob;
+	off = 0;
+	for (i = 0; i < n_fv && off < blob_len; i++) {
+		int flen = (int)strlen(p);
+		unsigned int fb = _hash(p, flen);
+		int fs = NATS_IDX_SHARD_OF(fb);
+		nats_idx_entry *e;
+
+		_idx_lock_shard(g_idx, fs);
+		e = _find_entry_in(g_idx, p, flen);
+		if (e)
+			_entry_remove_key(e, key);
+		_idx_unlock_shard(g_idx, fs);
+
+		off += flen + 1;
+		p   += flen + 1;
+	}
+	free(blob);
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+	LM_DBG("removed key '%s' via revmap (%d field entries)\n", key, n_fv);
+	return 0;
 }
 
 /* Per-entry callback type used by _drain_kv_snapshot.  Return 0 to
@@ -1141,6 +1453,15 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 	 * deadlock against a whole-index op (lock_all) — when lock_all
 	 * is contending, our per-field lock waits behind it for that
 	 * shard, then proceeds. */
+	/* Accumulate the document's fv strings into a blob for the reverse
+	 * map, so a later delete-by-key can target only these entries instead
+	 * of walking the whole index.  Best-effort: on OOM we just skip the
+	 * rev record (the delete falls back to the full walk). */
+	char  rev_stack[1024];
+	char *rev_blob = rev_stack;
+	int   rev_cap  = (int)sizeof(rev_stack);
+	int   rev_len  = 0, rev_nfv = 0, rev_oom = 0;
+
 	for (i = 0; i < list.n; i++) {
 		char fv_buf[1024];
 		int  fv_len;
@@ -1160,6 +1481,31 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		memcpy(fv_buf + p->flen + 1, p->val, p->vlen);
 		fv_buf[fv_len] = '\0';
 
+		/* append "field:value\0" to the rev blob */
+		if (!rev_oom) {
+			int need = rev_len + fv_len + 1;
+			if (need > rev_cap) {
+				int newcap = rev_cap * 2;
+				char *nb;
+				while (newcap < need) newcap *= 2;
+				nb = (rev_blob == rev_stack) ? malloc(newcap)
+				                             : realloc(rev_blob, newcap);
+				if (!nb) {
+					rev_oom = 1;
+				} else {
+					if (rev_blob == rev_stack)
+						memcpy(nb, rev_blob, rev_len);
+					rev_blob = nb;
+					rev_cap  = newcap;
+				}
+			}
+			if (!rev_oom) {
+				memcpy(rev_blob + rev_len, fv_buf, fv_len + 1);
+				rev_len += fv_len + 1;
+				rev_nfv++;
+			}
+		}
+
 		bucket = _hash(fv_buf, fv_len);
 		shard  = NATS_IDX_SHARD_OF(bucket);
 
@@ -1172,6 +1518,12 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 
 	atomic_fetch_add_explicit(&g_idx->num_documents, 1,
 		memory_order_relaxed);
+
+	/* Record (or replace) the doc's fv set for fast delete-by-key. */
+	if (!rev_oom && rev_nfv > 0)
+		nats_rev_put(key, (int)strlen(key), rev_blob, rev_len, rev_nfv);
+	if (rev_blob != rev_stack)
+		free(rev_blob);
 
 	_idx_fv_free(&list);
 
@@ -1228,6 +1580,9 @@ int nats_json_index_remove(const char *key)
 
 	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
 		memory_order_relaxed);
+
+	/* Drop any reverse-map record so it can't go stale. */
+	nats_rev_remove(key);
 
 	LM_DBG("removed key '%s' from index\n", key);
 	return 0;
@@ -1286,6 +1641,11 @@ int nats_json_index_remove_fields(const char *key,
 
 	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
 		memory_order_relaxed);
+
+	/* The doc's fv set is changing (this is the remove half of an
+	 * update); drop the old reverse-map record -- the add half re-puts
+	 * the new one. */
+	nats_rev_remove(key);
 
 	LM_DBG("removed key '%s' (%d field entries) from index\n",
 		key, rc);
@@ -1413,6 +1773,12 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	pkg_free(old_buckets);
 	pkg_free(shadow.buckets);
 
+	/* The shadow rebuild populated the forward index but not the reverse
+	 * map; clear it so it can't carry stale records.  It repopulates as
+	 * documents are re-added (deletes of not-yet-readded docs fall back to
+	 * the full-walk remove until then). */
+	nats_rev_clear();
+
 	LM_INFO("search index rebuilt: %d docs (was %d)\n", count, old_num);
 	return count;
 }
@@ -1458,6 +1824,9 @@ void nats_json_index_destroy(void)
 		shm_free(g_idx->buckets);
 	shm_free(g_idx);
 	g_idx = NULL;
+
+	/* Tear down the delete-by-key reverse map. */
+	nats_rev_destroy();
 
 	LM_DBG("search index destroyed\n");
 }

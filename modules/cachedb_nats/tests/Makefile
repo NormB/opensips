@@ -18,7 +18,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_kv_history_bounds test_request_payload_guard \
         test_sink_emit_string test_json_parse_guard test_allops_fastfail \
         test_counter_overflow test_native_key_validation \
-        test_nats_request_rename test_intern_scaling
+        test_nats_request_rename test_intern_scaling \
+        test_revmap_delete
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -164,6 +165,12 @@ test_nats_request_rename: test_nats_request_rename.c
 test_intern_scaling: test_intern_scaling.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Behavioural (ASan+UBSan, threaded) + source-pattern: the doc-key reverse
+# map gives O(fields) delete-by-key, the reverse and forward lock sets are
+# never held together, and the watcher uses it with a full-walk fallback.
+test_revmap_delete: test_revmap_delete.c
+	$(CC) -g -O0 -fsanitize=address,undefined -Wall -pthread -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -195,6 +202,7 @@ check: all
 	./test_native_key_validation
 	./test_nats_request_rename
 	./test_intern_scaling
+	./test_revmap_delete
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
