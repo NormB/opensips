@@ -24,8 +24,8 @@
  * Module: modules/nats_consumer -- script-controlled JetStream pull
  * consumer with SHM handle registry and per-worker async yield.
  *
- * See docs/superpowers/specs/2026-04-16-nats-consumer-design.md on branch
- * feature/nats-consumer-spec for the full design.
+ * See doc/nats_consumer_admin.xml and the per-section design notes in
+ * nats_consumer_proc.c for the full design.
  */
 
 #ifndef NATS_CONSUMER_H

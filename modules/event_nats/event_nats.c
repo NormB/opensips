@@ -108,10 +108,11 @@ static const param_export_t mod_params[] = {
 	{"jetstream",           INT_PARAM, &nats_jetstream},
 	{"reconnect_wait",      INT_PARAM, &nats_reconnect_wait},
 	{"max_reconnect",       INT_PARAM, &nats_max_reconnect},
-	/* Tunable shutdown drain timeout, ms.  Sets the shared
-	 * lib/nats nats_pool_drain_timeout_ms global; later modules
-	 * loading the same lib see the same value (last writer wins). */
-	{"nats_drain_timeout_ms", INT_PARAM, &nats_pool_drain_timeout_ms},
+	/* Tunable shutdown drain timeout, ms.  Merged by MAX with
+	 * cachedb_nats's cdb_drain_timeout_ms (see nats_pool_drain_timeout_setter)
+	 * so the longest grace wins regardless of module load order. */
+	{"nats_drain_timeout_ms", INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_drain_timeout_setter},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
 	{0,0,0}
