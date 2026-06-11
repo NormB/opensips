@@ -99,6 +99,12 @@
 #define NATS_JS_PUBLISH_ASYNC_MAX_PENDING    4096
 #define NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS  50
 
+/* Connection liveness probing so a black-holed broker is declared dead in
+ * ~20 s (vs cnats's ~4-minute default) -- shrinks the window where inline
+ * publishes block/buffer in SIP workers before the fast-fail trips. */
+#define NATS_POOL_PING_INTERVAL_MS  10000
+#define NATS_POOL_MAX_PINGS_OUT     2
+
 /**
  * Pool configuration structure, allocated in shared memory.
  * Set during mod_init (pre-fork) and read-only after fork.
@@ -810,6 +816,14 @@ natsConnection *nats_pool_get(void)
 	 * reconnect_wait window (TLS uses the same). */
 	nats_dl.natsOptions_SetReconnectJitter(opts,
 		(int64_t)pool_cfg->reconnect_wait, (int64_t)pool_cfg->reconnect_wait);
+	/* Liveness probing.  Publishes run inline in SIP workers; a black-holed
+	 * broker (network drop with no RST) leaves the socket writable until
+	 * cnats's ping mechanism declares the connection DISCONNECTED.  The
+	 * default 2-minute ping interval x 2 missed pings means ~4 minutes of
+	 * workers blocking/buffering before fast-fail trips.  Shorten it: a
+	 * 10 s ping with 2 missed pings detects the dead link in ~20 s. */
+	nats_dl.natsOptions_SetPingInterval(opts, (int64_t)NATS_POOL_PING_INTERVAL_MS);
+	nats_dl.natsOptions_SetMaxPingsOut(opts, NATS_POOL_MAX_PINGS_OUT);
 	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
 	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
