@@ -9,8 +9,9 @@ Items merged where multiple reviews found the same root cause.
 
 **Status (2026-06-11):** P0–P2 (1–44) and most of P3 done. The P3 security
 nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
-72, 73) are landed. Remaining P3: 60 (split the 3k-line files), 71 (b/c sub-parts), 74
-(test-coverage gaps).
+72, 73) are landed. Remaining P3: 60 (split the 3k-line files) and 71 (b/c sub-parts) -- both
+larger/structural and deliberately left for a dedicated reviewed pass. (74's
+unit-testable gaps are filled; its live-broker paths stay with the e2e harness.)
 Progress is tracked in git (`feature/nats`), not just these checkboxes.
 
 ---
@@ -348,7 +349,7 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
 - [x] **73. [MAINT] Move point-in-time review/bench artifacts (REVIEW.md,
   DEDICATED_WATCHER_REVIEW.md, PERF_NOTES.md) out of the tree or mark as historical;
   generate README from doc XML per OpenSIPS convention instead of hand-written README.md.**
-- [ ] **74. [MAINT][SURV] Close test-coverage gaps for the riskiest untested surfaces:
+- [x] **74. [MAINT][SURV] Close test-coverage gaps for the riskiest untested surfaces:
   jetstream MI handlers, map/raw ops, `ensure_subscription_for_handle`/reconcile, pool
   register-merge; plus failure-mode tests for items 6, 7, 9, 10, 11 (ack latency vs
   ack_wait), 8 (slot-reuse double-publish), 28, 29, 30, 31, 33 (inbox-failure path),
