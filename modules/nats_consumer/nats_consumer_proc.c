@@ -430,7 +430,7 @@ static int  ensure_subscription_for_handle(nats_handle_t *h);
 static int  pull_one_batch(proc_sub_state_t *ss);
 static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
 static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
-static proc_sub_state_t *find_sub_by_id(const str *id);
+static proc_sub_state_t *find_sub_by_index(uint16_t index);
 
 /* ── enum mapping helpers ────────────────────────────────────── */
 
@@ -498,12 +498,15 @@ static int dup_str_local(str *dst, const str *src)
 	return 0;
 }
 
-static proc_sub_state_t *find_sub_by_id(const str *id)
+/* Match a proc-sub state by handle IDENTITY (the unique per-claim index),
+ * NOT by id string.  Ids are reused on unbind+rebind, so an id match could
+ * return a different (old or new) handle's sub; the index is unique among
+ * live + retired-not-yet-reaped handles. */
+static proc_sub_state_t *find_sub_by_index(uint16_t index)
 {
 	proc_sub_state_t *s;
 	for (s = g_subs; s; s = s->next) {
-		if (s->id.len == id->len &&
-		    memcmp(s->id.s, id->s, id->len) == 0)
+		if (s->handle_idx == index)
 			return s;
 	}
 	return NULL;
@@ -727,7 +730,7 @@ static int ensure_subscription_for_handle(nats_handle_t *h)
 	 * on the epoch bump or on a fetch-time "consumer vanished" error,
 	 * and we now rebuild the natsSubscription while keeping the
 	 * proc_sub_state_t (and its counters) intact. */
-	ss = find_sub_by_id(&h->id);
+	ss = find_sub_by_index(h->index);
 	if (ss) {
 		if (!ss->dirty)
 			return 0;   /* clean + already subscribed */
@@ -1693,13 +1696,19 @@ static void tear_down_retired_subs(void)
 
 	while (*pp) {
 		proc_sub_state_t *ss = *pp;
-		nats_handle_t *h = nats_registry_lookup_weak(&ss->id);
+		/* Resolve the handle by IDENTITY (the pointer stashed at ss
+		 * creation), not by id string.  An id-keyed weak lookup would
+		 * return a freshly-rebound handle of the same id (retire==0) and
+		 * we'd never tear down the old retired one it actually belongs
+		 * to.  ss->h_ref is safe to deref here: while ss is on g_subs its
+		 * handle has not been reaped (reap requires sub_torn_down, which
+		 * only this teardown sets — and it then removes ss). */
+		nats_handle_t *h = ss->h_ref;
 
 		int should_tear_down = 0;
 		if (!h) {
-			/* Handle already freed (bind-unbind-reap cycle completed
-			 * without us participating, or TEST_SHIM path).  Tear
-			 * down the proc-local state only. */
+			/* Defensive: no handle reference (should not happen for a
+			 * created ss).  Tear down the proc-local state only. */
 			should_tear_down = 1;
 		} else if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 			should_tear_down = 1;
