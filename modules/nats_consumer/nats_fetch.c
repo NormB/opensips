@@ -524,7 +524,12 @@ static int batch_parse_duration_ms(const char *s, int len, int *out)
 	long long mult;
 
 	while (i < len && s[i] >= '0' && s[i] <= '9') {
-		v = v * 10 + (s[i] - '0');
+		/* Once the accumulator passes INT_MAX the value is already out of
+		 * range; keep consuming digits (so the suffix still parses) but
+		 * stop growing v, so a pathologically long digit string cannot
+		 * overflow the long long (signed-overflow UB). */
+		if (v <= 0x7FFFFFFFLL)
+			v = v * 10 + (s[i] - '0');
 		digits++;
 		i++;
 	}

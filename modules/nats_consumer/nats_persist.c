@@ -813,15 +813,19 @@ static char *build_config_from_json(cJSON *obj)
 			 * serialiser never emits these.  Wildcards '*' and
 			 * '>' are NOT rejected because the `filter` /
 			 * `filters` fields legitimately contain them per the
-			 * NATS subject grammar. */
+			 * NATS subject grammar.  ';' and '=' ARE rejected: this
+			 * value is about to be spliced into the "key=value;key=value"
+			 * bind-config string, so an injected ';' or '=' from a
+			 * tampered persist file would forge extra config fields. */
 			{
 				size_t i;
 				int rejected = 0;
 				for (i = 0; i < vlen; i++) {
 					unsigned char b = (unsigned char)v[i];
-					if (b < 0x20 || b == 0x7F) {
+					if (b < 0x20 || b == 0x7F ||
+							b == ';' || b == '=') {
 						LM_WARN("nats_persist: rejecting "
-							"field '%s' with control "
+							"field '%s' with illegal "
 							"byte 0x%02x at offset %zu\n",
 							c->string ? c->string : "?",
 							b, i);
