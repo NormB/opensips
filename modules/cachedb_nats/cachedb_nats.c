@@ -816,15 +816,17 @@ static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
 
 	(void)ticks; (void)param;
 
-	if (!nats_pool_is_connected()) {
-		LM_DBG("periodic resync: NATS disconnected; skipping tick\n");
-		return;
-	}
-
+	/* Do NOT gate on the pool's process-local "connected" flag: this
+	 * handler runs in the OpenSIPS timer process, which never calls
+	 * nats_pool_get() on its own, so that flag is permanently 0 and every
+	 * tick used to be skipped (the periodic rebuild never ran).
+	 * nats_pool_get_kv() lazily establishes the connection on first use;
+	 * if the broker is genuinely down it returns NULL and we skip just
+	 * this tick, retrying on the next. */
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
 		(int64_t)kv_ttl);
 	if (!kv) {
-		LM_WARN("periodic resync: failed to get KV handle; "
+		LM_DBG("periodic resync: no KV handle (broker down?); "
 			"skipping tick\n");
 		return;
 	}
