@@ -1468,6 +1468,10 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		reply       = nats_dl.natsMsg_GetReply(m);
 		subject_len = subject ? strlen(subject) : 0;
 		reply_len   = reply   ? strlen(reply)   : 0;
+		/* Keep data/data_len consistent: a NULL payload pointer with a
+		 * non-zero length would feed a bogus span to the ring push. */
+		if (!data || data_len < 0)
+			data_len = 0;
 
 		/* JetStream pull-delivered messages have nats_dl.natsMsg_GetReply()
 		 * set to the per-delivery $JS.ACK.<...> subject for ack
@@ -1672,7 +1676,7 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 	switch ((nats_ack_action_e)m->action) {
 		case NATS_ACK_ACTION_ACK:
 			s = nats_dl.natsMsg_Ack(nmsg, NULL);
-			if (s == NATS_OK)
+			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->acks, 1);
 			break;
 		case NATS_ACK_ACTION_ACK_NEXT:
@@ -1688,25 +1692,25 @@ static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
 			 * (finish the current message and immediately hand me the
 			 * next one) without depending on library internals. */
 			s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
-			if (s == NATS_OK)
+			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->acks, 1);
 			if (ctx)
 				next_bits_set(ctx, h_idx);
 			break;
 		case NATS_ACK_ACTION_NAK:
 			s = nats_dl.natsMsg_Nak(nmsg, NULL);
-			if (s == NATS_OK)
+			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_NAK_DELAY:
 			s = nats_dl.natsMsg_NakWithDelay(nmsg,
 				(int64_t)m->delay_ms * 1000000LL, NULL);
-			if (s == NATS_OK)
+			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_TERM:
 			s = nats_dl.natsMsg_Term(nmsg, NULL);
-			if (s == NATS_OK)
+			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->terms, 1);
 			break;
 		case NATS_ACK_ACTION_IN_PROGRESS:
