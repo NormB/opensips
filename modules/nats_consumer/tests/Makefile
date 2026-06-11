@@ -19,6 +19,7 @@ IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
 IDXRECYCLE_SRCS := test_registry_index_recycle.c $(SHIM) ../nats_handle_registry.c
+MPSC_SRCS    := test_mpsc.c $(SHIM) ../nats_mpsc.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
@@ -41,7 +42,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry
+                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -58,7 +59,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -206,6 +207,12 @@ test_poison_term: test_poison_term.c
 test_dead_inbox_retry: test_dead_inbox_retry.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# Concurrency: the lock-free bounded MPSC queue (nats_mpsc) that replaces
+# the per-queue gen_lock_t.  Message-conservation stress test (4 producer
+# threads + 1 consumer); race-safe, so it runs under check-tsan too.
+test_mpsc: $(MPSC_SRCS) test_shim.h ../nats_mpsc.h
+	$(CC) $(CFLAGS) -pthread -o $@ $(MPSC_SRCS) $(LDFLAGS)
+
 # Behavioural (ASan): the consumer reaps msg-ref slots orphaned by a
 # worker that died before acking (no leak; table doesn't wedge).
 test_msg_ref_orphan_reap: test_msg_ref_orphan_reap.c
@@ -299,6 +306,7 @@ check: all
 	./test_consumer_stats_mi
 	./test_poison_term
 	./test_dead_inbox_retry
+	./test_mpsc
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
