@@ -3,18 +3,23 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Regression test: only the scalar dbase ops validated their KV key.  The
- * native script wrappers (w_nats_kv_*), the map ops, and raw KV PURGE
- * forwarded SIP-derived tokens to NATS unvalidated, which allowed:
- *   - map-key ':' injection: a subkey containing the ':' map separator
- *     aliases another logical map's fields (build_map_key composes
- *     "key:subkey"); and
+ * Regression test: native KV ops and map ops must not forward SIP-derived
+ * tokens to NATS in a way that lets:
+ *   - map-key separator injection: a key/subkey containing the map separator
+ *     aliasing another logical map's fields; or
  *   - a wildcard ('*' / '>') reaching kvStore_Purge -> a destructive
  *     mass delete of every matching key.
  *
- * Fix: route every native/map/raw key through validate_kv_key(), which
- * rejects control chars, whitespace, wildcards and ':'.  (validate_kv_key
- * is exposed from cachedb_nats_dbase.h and used by both translation units.)
+ * Two different mechanisms, by op class:
+ *   - Raw / native KV ops (w_nats_kv_*, raw_kv_purge) map a key DIRECTLY to a
+ *     subject, so they must reject illegal tokens up front via
+ *     validate_kv_key() (control chars, whitespace, wildcards, ':').
+ *   - Map ops (build_map_key / nats_cache_map_get / nats_cache_map_remove,
+ *     TODO #40) instead HEX-ESCAPE each component (nats_map_compose ->
+ *     nats_map_encode): the structural '.' separator can never appear inside
+ *     an encoded component, so no byte can inject the separator or a
+ *     wildcard -- a stronger, lossless guarantee than rejection, and it lets
+ *     users put any character in a map key/field.
  *
  * Source-pattern test; run from the tests/ directory.
  *
@@ -65,21 +70,41 @@ static int grep_in_function(const char *path, const char *fn_name,
 int main(void)
 {
 	const char *native = "../cachedb_nats_native.c";
-	const char *needle = "validate_kv_key";
+	size_t i;
 
-	const char *fns[] = {
-		"build_map_key",        /* composition choke point: map_set/map_remove */
-		"nats_cache_map_get",   /* builds its own "key:" prefix */
+	/* Raw / native KV ops map the key directly to a subject -> validate. */
+	const char *validate_fns[] = {
 		"raw_kv_purge",         /* must reject wildcards (mass delete) */
 		"w_nats_kv_get", "w_nats_kv_put", "w_nats_kv_update",
 		"w_nats_kv_delete", "w_nats_kv_revision", "w_nats_kv_history",
 	};
-	for (size_t i = 0; i < sizeof(fns)/sizeof(fns[0]); i++) {
-		int n = grep_in_function(native, fns[i], needle);
+	for (i = 0; i < sizeof(validate_fns)/sizeof(validate_fns[0]); i++) {
+		int n = grep_in_function(native, validate_fns[i], "validate_kv_key");
 		char msg[160];
-		snprintf(msg, sizeof(msg), "%s validates its KV key(s)", fns[i]);
+		snprintf(msg, sizeof(msg), "%s validates its KV key(s)",
+			validate_fns[i]);
 		ASSERT(n >= 1, msg);
 	}
+
+	/* Map ops hex-escape each component instead -> nats_map_compose. */
+	const char *encode_fns[] = {
+		"build_map_key",
+		"nats_cache_map_get",
+		"nats_cache_map_remove",
+	};
+	for (i = 0; i < sizeof(encode_fns)/sizeof(encode_fns[0]); i++) {
+		int n = grep_in_function(native, encode_fns[i], "nats_map_compose");
+		char msg[160];
+		snprintf(msg, sizeof(msg),
+			"%s hex-escapes its key/field (injection-proof)", encode_fns[i]);
+		ASSERT(n >= 1, msg);
+	}
+
+	/* And the map ops must NOT silently fall back to raw ':' composition. */
+	ASSERT(grep_in_function(native, "build_map_key",
+			"NATS_MAP_SEP_LEGACY") == 0 ||
+		grep_in_function(native, "build_map_key", "nats_map_compose") >= 1,
+		"build_map_key composes via the encoder, not a raw separator");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

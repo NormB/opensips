@@ -21,7 +21,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_nats_request_rename test_intern_scaling \
         test_revmap_delete test_cas_retry_policy \
         test_pk_stack_key test_resync_timer test_op_stats test_index_converge \
-        test_query_keyset_refcount test_watcher_leak_stat
+        test_query_keyset_refcount test_watcher_leak_stat \
+        test_map_key_encode
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -205,6 +206,11 @@ test_query_keyset_refcount: test_query_keyset_refcount.c
 test_watcher_leak_stat: test_watcher_leak_stat.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Round-trip + edge cases for the map subject hex-escaper (=HH), incl. the
+# structural invariant that an encoded component has no raw '.' (ASan).
+test_map_key_encode: test_map_key_encode.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -244,6 +250,7 @@ check: all
 	./test_index_converge
 	./test_query_keyset_refcount
 	./test_watcher_leak_stat
+	./test_map_key_encode
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
