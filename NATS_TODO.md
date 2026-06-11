@@ -9,9 +9,9 @@ Items merged where multiple reviews found the same root cause.
 
 **Status (2026-06-11):** P0–P2 (1–44) and most of P3 done. The P3 security
 nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
-72, 73) are landed. Remaining P3 are pure-refactor / large items: 59 (file
-rename), 60 (split the 3k-line files), 61/63/64/66 (consolidate duplicated
-helpers), 71 (b/c sub-parts), 67/73 (sub-parts), 74 (test-coverage gaps).
+72, 73) are landed. Remaining P3 are the larger/structural items: 59 (file rename), 60 (split the
+3k-line files), 63/64 (cross-module helper consolidation), 71 (b/c sub-parts),
+74 (test-coverage gaps).
 Progress is tracked in git (`feature/nats`), not just these checkboxes.
 
 ---
@@ -314,7 +314,7 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
 - [ ] **60. [MAINT] Split `cachedb_nats_json.c` (3087 lines → index / serializer / query+update
   TUs) and `nats_consumer_proc.c` (1960 lines → msg_ref, sub_config, proc loop); decompose
   the ~400-line functions.**
-- [ ] **61. [MAINT] Factor the duplicated URL tokenizer in `nats_pool_register`
+- [x] **61. [MAINT] Factor the duplicated URL tokenizer in `nats_pool_register`
   (`nats_pool.c:489-546` vs `parse_urls` `:165-236`).**
 - [x] **62. [MAINT] Sweep stale docs/comments: nonexistent `@param tls`, `nats_OpenWithConfig`,
   `nats_pool_finalize` (`nats_pool.h:99,137,268`); "statically linked" comment
@@ -328,7 +328,7 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   (publish / stream-name / kv-key / filter-subject) — also closes gaps behind #18/#19.**
 - [x] **65. [MAINT] Remove the `*timeout_ms = eff` write-back that contradicts its own comment
   (`cachedb_nats_native.c:176-193`).**
-- [ ] **66. [MAINT] Extract `nats_publish_checked()` for the duplicated publish path
+- [x] **66. [MAINT] Extract `nats_publish_checked()` for the duplicated publish path
   (`event_nats.c:486-521` vs `:631-663`) and `subscribe_one()` for the duplicated subscribe
   (`modules/event_nats/nats_consumer.c:238-247` vs `:296-305`); name `NATS_MAX_SUBJECT_LEN`.**
 - [x] **67. [MAINT] MI param boilerplate helper + named jsErrCode constants in
