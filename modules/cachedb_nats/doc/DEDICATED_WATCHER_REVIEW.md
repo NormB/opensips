@@ -1,5 +1,11 @@
 # Dedicated KV-watcher process: review
 
+> **Historical artifact.** A point-in-time review/benchmark snapshot kept
+> for context -- NOT a living document. Commit hashes and line numbers
+> are as-of the snapshot date and the code may have moved on. The current
+> contract lives in the docbook (`doc/*.xml`) and the source comments.
+
+
 **Branch:** `feature/nats`
 **Worktree:** `/tmp/feature-nats`
 **Status at write time:** uncommitted on `feature/nats`; all tests

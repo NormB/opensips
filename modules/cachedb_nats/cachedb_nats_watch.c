@@ -643,9 +643,9 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
 	}
 
 	if (num_patterns > 0) {
-		LM_INFO("NATS KV watcher started (%d pattern(s):", num_patterns);
+		LM_INFO("NATS KV watcher started (%d pattern(s)):\n", num_patterns);
 		for (i = 0; i < num_patterns; i++)
-			LM_INFO("  kv_watch[%d]: %s", i, patterns[i]);
+			LM_INFO("  kv_watch[%d]: %s\n", i, patterns[i]);
 	} else {
 		LM_INFO("NATS KV watcher started (all keys)\n");
 	}
