@@ -9,7 +9,7 @@ ASAN    := -fsanitize=address
 
 TESTS = test_redact_url test_validate_publish_subject \
         test_validate_subject_cache test_nats_dl test_nats_ca_dir \
-        test_nats_pool_fixes
+        test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -52,6 +52,17 @@ test_nats_ca_dir: test_nats_ca_dir.c ../nats_ca_dir.c
 test_nats_pool_fixes: test_nats_pool_fixes.c
 	$(CC) $(CFLAGS) -o $@ test_nats_pool_fixes.c
 
+# Behavioural (ASan): the cnats-thread loggers clamp the snprintf return
+# to the stack buffer before write(), so a long broker string cannot
+# over-read the buffer.
+test_unsafe_log_clamp: test_unsafe_log_clamp.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ test_unsafe_log_clamp.c
+
+# Source-pattern: nats_pool_get_server_info() redacts the URL before
+# returning it (it is exposed to MI clients).
+test_server_info_redact: test_server_info_redact.c
+	$(CC) $(CFLAGS) -o $@ test_server_info_redact.c
+
 # LD_LIBRARY_PATH covers the case where libnats was installed to
 # /usr/local/lib (the upstream `cmake --install` default), which
 # isn't on the default ld.so search path on most distros.  Production
@@ -68,6 +79,8 @@ check: all
 	$(NATS_TEST_ENV) ./test_nats_dl
 	./test_nats_ca_dir
 	./test_nats_pool_fixes
+	./test_unsafe_log_clamp
+	./test_server_info_redact
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the

@@ -1269,6 +1269,16 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		async_status = ASYNC_NO_IO;
 		return -4;
 	}
+	/* Reject CR/LF, whitespace and wildcards before the subject reaches
+	 * the line-oriented NATS wire (protocol-injection guard). */
+	if (nats_validate_publish_subject(subject->s, subject->len) < 0) {
+		LM_ERR("nats_request[async]: invalid subject '%.*s' "
+			"(control/whitespace/wildcard rejected)\n",
+			subject->len, subject->s);
+		nats_rpc_staged_clear();
+		async_status = ASYNC_NO_IO;
+		return -4;
+	}
 	if (payload && payload->len > NATS_RING_PAYLOAD_MAX) {
 		LM_ERR("nats_request[async]: payload too long (%d > %d)\n",
 			payload->len, NATS_RING_PAYLOAD_MAX);

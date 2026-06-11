@@ -50,6 +50,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
+#include <errno.h>
 
 #include "../../dprint.h"
 #include "../../mem/mem.h"
@@ -261,7 +263,7 @@ static inline int str_to_buf(const str *s, char *buf, size_t buf_size)
  *
  * Returns 0 if key is valid, -1 otherwise.
  */
-static inline int validate_kv_key(const str *s)
+int validate_kv_key(const str *s)
 {
 	int i;
 	unsigned char c;
@@ -593,18 +595,42 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			/* kvEntry lifecycle: extract value + revision, then
 			 * destroy immediately — we don't need it after this. */
 			const char *vs = nats_dl.kvEntry_ValueString(entry);
-			current = vs ? strtoll(vs, NULL, 10) : 0;
+			long long parsed;
+			errno = 0;
+			parsed = vs ? strtoll(vs, NULL, 10) : 0;
 			last_rev = nats_dl.kvEntry_Revision(entry);
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
-		} else if (s != NATS_NOT_FOUND) {
+			/* Counters are 32-bit from the script API; a broker value
+			 * outside that range is corrupt or hostile and would
+			 * overflow/truncate below.  Reject rather than wrap. */
+			if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
+				LM_ERR("counter '%s' stored value out of 32-bit range "
+					"('%s'); refusing op\n", key_buf, vs ? vs : "(null)");
+				return -1;
+			}
+			current = parsed;
+		}
+		else if (s != NATS_NOT_FOUND) {
 			LM_ERR("kvStore_Get failed for counter '%s': %s\n",
 				key_buf, nats_dl.natsStatus_GetText(s));
 			return -1;
 		}
 
-		/* Step 2: compute new value and serialise to string. */
-		current += delta;
+		/* Step 2: compute the new value in int64 (current and delta both
+		 * fit in int range, so the sum cannot overflow int64) and reject
+		 * — rather than silently wrap — a result that leaves the 32-bit
+		 * range, which could otherwise bypass a throttle/admission limit. */
+		{
+			int64_t next = current + (int64_t)delta;
+			if (next < INT_MIN || next > INT_MAX) {
+				LM_ERR("counter '%s' increment by %d would overflow "
+					"32-bit range (current %lld); op rejected\n",
+					key_buf, delta, (long long)current);
+				return -1;
+			}
+			current = next;
+		}
 		snprintf(buf, sizeof(buf), "%lld", (long long)current);
 
 		/* Step 3: conditional write.  UpdateString checks that the
@@ -736,10 +762,21 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 	}
 
 	/* Parse the string value as an integer; kvEntry_ValueString returns
-	 * a pointer valid only while entry is alive. */
+	 * a pointer valid only while entry is alive.  Range-check before the
+	 * 32-bit store so a broker value beyond INT range is rejected rather
+	 * than silently truncated. */
 	{
 		const char *val_str = nats_dl.kvEntry_ValueString(entry);
-		*val = val_str ? (int)strtol(val_str, NULL, 10) : 0;
+		long long parsed;
+		errno = 0;
+		parsed = val_str ? strtoll(val_str, NULL, 10) : 0;
+		if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
+			LM_ERR("counter '%s' value out of 32-bit range ('%s')\n",
+				key_buf, val_str ? val_str : "(null)");
+			nats_dl.kvEntry_Destroy(entry);
+			return -1;
+		}
+		*val = (int)parsed;
 	}
 	nats_dl.kvEntry_Destroy(entry);
 
