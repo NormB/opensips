@@ -520,7 +520,11 @@ static void _watcher_loop(void)
 					nats_json_index_add(key, val, val_len);
 				}
 			} else if (op == kvOp_Delete || op == kvOp_Purge) {
-				nats_json_index_remove(key);
+				/* Fast path: remove only the entries this doc was
+				 * indexed under (O(fields)).  On a reverse-map miss
+				 * fall back to the full-index walk. */
+				if (nats_json_index_remove_by_revmap(key) < 0)
+					nats_json_index_remove(key);
 			}
 
 			/* Raise EVI event for downstream script consumers */

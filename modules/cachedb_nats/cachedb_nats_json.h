@@ -248,6 +248,18 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
 int nats_json_index_remove(const char *key);
 
 /*
+ * Fast delete-by-key using the doc-key -> field:value reverse map: removes
+ * the key from only the entries it was indexed under (O(fields)) instead
+ * of walking every bucket.  Returns 0 on a hit (key removed), -1 on a miss
+ * -- on -1 the caller MUST fall back to nats_json_index_remove(key).  Used
+ * by the KV watcher's delete/expiry path.
+ *
+ * Thread safety: takes the reverse-map shard lock, then forward-index
+ * shard locks (never simultaneously); safe from the watcher thread.
+ */
+int nats_json_index_remove_by_revmap(const char *key);
+
+/*
  * Targeted variant of index_remove that takes the document's old
  * JSON content and visits ONLY the (field:value) entries the key
  * appears in, rather than walking every bucket.
