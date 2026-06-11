@@ -18,7 +18,7 @@ with an in-process JSON full-text search index and live KV change watching.
 - Atomic counter operations using CAS (compare-and-swap) with configurable retry
 - JSON document storage with in-process full-text search index
 - Live index updates via KV watcher thread (no polling)
-- `nats_request()` — synchronous NATS request/reply (RPC pattern)
+- `nats_cdb_request()` — synchronous NATS request/reply (RPC pattern)
 - `nats_kv_history()` — retrieve key version history as JSON array
 - Raw query commands: `KV KEYS`, `KV PURGE <key>`, `KV BUCKET INFO`
 - Map operations: get/set/remove with composite `key:subkey` addressing
@@ -44,15 +44,16 @@ full string.  Long defaults split across `<br>` breaks.
 
 ## Script Functions
 
-### `nats_request(subject, payload, timeout_ms, result_pvar)`
+### `nats_cdb_request(subject, payload, timeout_ms, result_pvar)`
 
 Synchronous NATS request/reply. Sends `payload` to `subject`, waits up to `timeout_ms`
-for a reply, stores it in `result_pvar`.
+for a reply, stores it in `result_pvar`.  It blocks the worker for the full RTT/timeout,
+so it is callable only off the SIP request path (onreply/local/startup/timer/event routes).
 
 Returns: 1 (success), -1 (error), -2 (timeout)
 
 ```
-nats_request("auth.check", "$var(json)", 2000, $var(reply));
+nats_cdb_request("auth.check", "$var(json)", 2000, $var(reply));
 if ($retcode == 1) {
     xlog("reply: $var(reply)\n");
 }

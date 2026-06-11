@@ -305,13 +305,20 @@ static const param_export_t params[] = {
 };
 
 static const cmd_export_t cmds[] = {
-	{"nats_request", (cmd_function)w_nats_request_wrap, {
+	/* Synchronous NATS request/reply.  Named nats_cdb_request (not
+	 * nats_request) to avoid colliding with the nats_consumer module's own
+	 * nats_request, and restricted to routes OFF the SIP request path:
+	 * this call blocks the worker for the full RTT/timeout, so it must not
+	 * run from request/failure/branch routes.  (Mirrors nats_consumer's
+	 * sync-RPC route policy.) */
+	{"nats_cdb_request", (cmd_function)w_nats_request_wrap, {
 		{CMD_PARAM_STR, 0, 0},   /* subject */
 		{CMD_PARAM_STR, 0, 0},   /* payload */
 		{CMD_PARAM_INT, 0, 0},   /* timeout */
 		{CMD_PARAM_VAR, 0, 0},   /* result pvar */
 		{0, 0, 0}},
-	ALL_ROUTES},
+	ONREPLY_ROUTE | LOCAL_ROUTE | STARTUP_ROUTE |
+	TIMER_ROUTE | EVENT_ROUTE},
 	{"nats_kv_history", (cmd_function)w_nats_kv_history_wrap, {
 		{CMD_PARAM_STR, 0, 0},   /* key */
 		{CMD_PARAM_VAR, 0, 0},   /* result pvar */
