@@ -22,20 +22,24 @@
 
 #include "cachedb_nats_intern.h"
 
-#define NATS_INTERN_BUCKETS  1024     /* power of two -- bitmask hash */
-#define NATS_INTERN_SHARDS   32       /* lock-set size */
-#define NATS_INTERN_BMASK    (NATS_INTERN_BUCKETS - 1)
+#define NATS_INTERN_DEFAULT_BUCKETS 1024  /* fallback when caller passes <= 0 */
+#define NATS_INTERN_SHARDS   32           /* lock-set size */
 
 typedef struct nats_intern_node {
 	struct nats_intern_node *next;
+	unsigned int             hash;    /* cached FNV-1a; avoids re-hash on
+	                                   * release and gives a 4-byte
+	                                   * pre-compare before memcmp */
 	int                      refcount;
 	int                      len;
 	char                     str[];   /* flexible array, NUL-terminated */
 } nats_intern_node_t;
 
 struct nats_intern_table {
-	nats_intern_node_t **buckets;     /* SHM array of NATS_INTERN_BUCKETS */
+	nats_intern_node_t **buckets;     /* SHM array of num_buckets heads */
 	gen_lock_set_t      *locks;        /* SHM lock set, NATS_INTERN_SHARDS */
+	int                  num_buckets;  /* power of two, sized at init */
+	unsigned int         bmask;        /* num_buckets - 1 */
 	int                  size;         /* live entry count, advisory */
 };
 
@@ -59,7 +63,7 @@ static inline unsigned int _fnv1a(const char *s, int len)
 
 static inline unsigned int _bucket_of(unsigned int hash)
 {
-	return hash & NATS_INTERN_BMASK;
+	return hash & g_t->bmask;
 }
 
 static inline int _shard_of(unsigned int bucket)
@@ -67,14 +71,32 @@ static inline int _shard_of(unsigned int bucket)
 	return (int)(bucket % NATS_INTERN_SHARDS);
 }
 
-int nats_intern_init(void)
+/* Round @v up to the next power of two (>= 2). */
+static int _round_pow2(int v)
+{
+	int p = 2;
+	if (v <= 2)
+		return 2;
+	while (p < v && p < (1 << 30))
+		p <<= 1;
+	return p;
+}
+
+int nats_intern_init(int num_buckets)
 {
 	struct nats_intern_table *t;
+	int nb;
 
 	if (g_t) {
 		LM_WARN("intern: already initialised\n");
 		return 0;
 	}
+
+	/* Size the bucket table from the caller (the index_buckets modparam),
+	 * so the chain length scales with the deployment instead of being
+	 * pinned at 1024.  Fall back to the default when unset. */
+	nb = _round_pow2(num_buckets > 0 ? num_buckets
+	                                 : NATS_INTERN_DEFAULT_BUCKETS);
 
 	t = shm_malloc(sizeof(*t));
 	if (!t) {
@@ -82,17 +104,16 @@ int nats_intern_init(void)
 		return -1;
 	}
 	memset(t, 0, sizeof(*t));
+	t->num_buckets = nb;
+	t->bmask       = (unsigned int)(nb - 1);
 
-	t->buckets = shm_malloc(sizeof(nats_intern_node_t *) *
-		NATS_INTERN_BUCKETS);
+	t->buckets = shm_malloc(sizeof(nats_intern_node_t *) * nb);
 	if (!t->buckets) {
-		LM_ERR("intern: no SHM for %d bucket heads\n",
-			NATS_INTERN_BUCKETS);
+		LM_ERR("intern: no SHM for %d bucket heads\n", nb);
 		shm_free(t);
 		return -1;
 	}
-	memset(t->buckets, 0,
-		sizeof(nats_intern_node_t *) * NATS_INTERN_BUCKETS);
+	memset(t->buckets, 0, sizeof(nats_intern_node_t *) * nb);
 
 	t->locks = lock_set_alloc(NATS_INTERN_SHARDS);
 	if (!t->locks) {
@@ -113,7 +134,7 @@ int nats_intern_init(void)
 
 	g_t = t;
 	LM_DBG("intern: initialised (%d buckets, %d shards)\n",
-		NATS_INTERN_BUCKETS, NATS_INTERN_SHARDS);
+		nb, NATS_INTERN_SHARDS);
 	return 0;
 }
 
@@ -131,7 +152,7 @@ void nats_intern_destroy(void)
 	for (i = 0; i < NATS_INTERN_SHARDS; i++)
 		lock_set_get(g_t->locks, i);
 
-	for (i = 0; i < NATS_INTERN_BUCKETS; i++) {
+	for (i = 0; i < g_t->num_buckets; i++) {
 		for (n = g_t->buckets[i]; n; n = next) {
 			next = n->next;
 			shm_free(n);
@@ -165,7 +186,10 @@ char *nats_intern_acquire(const char *s, int len)
 	lock_set_get(g_t->locks, shard);
 
 	for (n = g_t->buckets[bucket]; n; n = n->next) {
-		if (n->len == len && memcmp(n->str, s, (size_t)len) == 0) {
+		/* Cheap 4-byte hash pre-compare before the memcmp -- on a chain
+		 * of mismatched keys this skips almost every memcmp. */
+		if (n->hash == hash && n->len == len &&
+		    memcmp(n->str, s, (size_t)len) == 0) {
 			n->refcount++;
 			lock_set_release(g_t->locks, shard);
 			return n->str;
@@ -181,6 +205,7 @@ char *nats_intern_acquire(const char *s, int len)
 		lock_set_release(g_t->locks, shard);
 		return NULL;
 	}
+	n->hash     = hash;
 	n->refcount = 1;
 	n->len      = len;
 	memcpy(n->str, s, (size_t)len);
@@ -211,7 +236,8 @@ void nats_intern_release(char *p)
 	 * undefined behaviour. */
 	n = (nats_intern_node_t *)(p - offsetof(nats_intern_node_t, str));
 
-	hash   = _fnv1a(n->str, n->len);
+	/* Use the cached hash -- no need to re-run FNV-1a over the whole key. */
+	hash   = n->hash;
 	bucket = _bucket_of(hash);
 	shard  = _shard_of(bucket);
 
