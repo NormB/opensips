@@ -459,6 +459,16 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	}
 
 	tmo = timeout_ms ? *timeout_ms : 0;
+	/* Reject a 0 / negative timeout on the ASYNC form: it would set no
+	 * deadline, so the resume param would hold the handle's pending_ops
+	 * reference and tick a 1 ms timerfd forever if no message ever
+	 * arrives.  (The sync fetch tolerates 0 = non-blocking.) */
+	if (tmo <= 0) {
+		LM_ERR("nats_fetch_async: timeout must be > 0 (got %d)\n", tmo);
+		nats_handle_pending_dec(h);
+		async_status = ASYNC_NO_IO;
+		return -4;
+	}
 
 	/* Worker-private timerfd, created post-fork so the reactor can
 	 * register it (unlike the ring's fork-inherited eventfd). */

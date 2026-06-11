@@ -71,6 +71,9 @@
 #define ERR_OOM             "out of memory"
 #define ERR_SAMPLE_RANGE    "sample_freq out of range 0..100"
 #define ERR_RING_POW2       "ring_capacity must be power of two >= 2"
+#define ERR_RING_TOO_BIG    "ring_capacity exceeds the maximum (65536)"
+/* ~17.7 KB per ring slot -> 65536 slots is already ~1.2 GB of SHM. */
+#define NATS_RING_CAPACITY_MAX  65536u
 #define ERR_FETCH_BATCH     "fetch_batch out of range 1..4096"
 #define ERR_FETCH_TMO       "fetch_timeout_ms out of range 1..60000"
 
@@ -541,6 +544,11 @@ nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 			if (h->ring_capacity < 2 ||
 			    (h->ring_capacity & (h->ring_capacity - 1)) != 0)
 				FAIL(ERR_RING_POW2);
+			/* Cap the capacity: each slot is ~17.7 KB of SHM, so an
+			 * unbounded power-of-two (up to 2^31) would let one MI bind
+			 * request tens of GB.  65536 slots is already ~1.2 GB. */
+			if (h->ring_capacity > NATS_RING_CAPACITY_MAX)
+				FAIL(ERR_RING_TOO_BIG);
 		} else if (ieq(key, keylen, "fetch_batch")) {
 			SETFLAG(F_FETCH_BATCH);
 			if (parse_uint32(val, vallen, &h->fetch_batch) < 0)
