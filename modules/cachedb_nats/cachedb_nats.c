@@ -796,6 +796,9 @@ static void destroy(void)
 	 * _free_entry calls nats_intern_release on every key. */
 	nats_intern_destroy();
 	cachedb_end_connections(&cache_mod_name);
+	/* Drop our pool reference (pool tears down on the last module's
+	 * unregister) -- after the watcher/index that used it are gone. */
+	nats_pool_unregister();
 	nats_cdb_stats_destroy();
 }
 

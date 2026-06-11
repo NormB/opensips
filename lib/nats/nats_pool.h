@@ -194,6 +194,18 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 void nats_pool_destroy(void);
 
 /*
+ * Drop one registration reference (the counterpart to
+ * nats_pool_register).  The pool is torn down only on the last unregister,
+ * so the shared connection survives while any loaded NATS module still
+ * uses it.  Each module should call this once from its mod_destroy if its
+ * nats_pool_register() succeeded.  Prefer this over calling
+ * nats_pool_destroy() directly.
+ *
+ * Thread safety: NOT thread-safe.  Call only from mod_destroy.
+ */
+void nats_pool_unregister(void);
+
+/*
  * Check whether the pool's NATS connection is currently active.
  *
  * @return  1 if connected, 0 if disconnected or not yet initialized.

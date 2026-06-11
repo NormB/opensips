@@ -416,8 +416,13 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	LM_NOTICE("destroying event_nats module ...\n");
+	/* Stop the cnats ack callback from reaching our stats table, then
+	 * drop our pool reference (the pool tears down on the last module's
+	 * unregister), and only THEN free the stats -- otherwise a late ack
+	 * on the cnats thread could bump freed stats memory. */
+	nats_pool_set_pub_ack_cb(NULL);
+	nats_pool_unregister();
 	nats_stats_destroy();
-	nats_pool_destroy();
 }
 
 /**
