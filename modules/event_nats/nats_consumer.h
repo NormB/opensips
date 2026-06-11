@@ -38,6 +38,7 @@
 #define NATS_CONSUMER_H
 
 #include "../../str.h"
+#include "../../sr_module.h"   /* modparam_t */
 #include "../../evi/evi.h"
 #include <nats/nats.h>
 
@@ -84,5 +85,16 @@ int nats_consumer_register_events(void);
  * @param rank  OpenSIPS process rank (not used).
  */
 void nats_consumer_process(int rank);
+
+/*
+ * Inbound backpressure observability.  The consumer callback drops
+ * oversized payloads and caps in-flight events to protect SHM under a
+ * publish flood; these expose the resulting counters (and the live
+ * in-flight gauge) for the nats_stats MI command.  All return 0 before
+ * the SHM control block is allocated.
+ */
+unsigned long nats_inbound_dropped_oversize(void);
+unsigned long nats_inbound_dropped_backpressure(void);
+int nats_inbound_inflight(void);
 
 #endif /* NATS_CONSUMER_H */
