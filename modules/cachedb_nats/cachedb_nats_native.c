@@ -388,17 +388,29 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		HIST_ADVANCE("{\"rev\":%llu,\"value\":\"",
 			(unsigned long long)nats_dl.kvEntry_Revision(e));
 
-		/* Simple JSON string escape: replace '"' and '\' with their
-		 * backslash-escaped forms.  The direct buf[pos++] writes bypass
-		 * snprintf bounds checking, so we use a conservative limit:
-		 * room for escape char + char + closing '"}' + NUL = 4 bytes. */
+		/* JSON string escape.  '"' and '\' get a backslash; control chars
+		 * (< 0x20) are NOT legal raw in a JSON string and would produce
+		 * malformed output, so escape them as \u00xx.  The direct
+		 * buf[pos++] writes bypass snprintf bounds checking; a \u00xx
+		 * escape needs 6 bytes plus the closing '"}' + NUL, so keep 9
+		 * bytes of headroom. */
 		int j;
-		for (j = 0; eval && j < eval_len && pos < buf_size - 4; j++) {
-			if (eval[j] == '"' || eval[j] == '\\') {
-				if (pos >= buf_size - 4) break;
+		static const char _hex[] = "0123456789abcdef";
+		for (j = 0; eval && j < eval_len && pos < buf_size - 9; j++) {
+			unsigned char vc = (unsigned char)eval[j];
+			if (vc == '"' || vc == '\\') {
 				buf[pos++] = '\\';
+				buf[pos++] = (char)vc;
+			} else if (vc < 0x20) {
+				buf[pos++] = '\\';
+				buf[pos++] = 'u';
+				buf[pos++] = '0';
+				buf[pos++] = '0';
+				buf[pos++] = _hex[vc >> 4];
+				buf[pos++] = _hex[vc & 0x0f];
+			} else {
+				buf[pos++] = (char)vc;
 			}
-			buf[pos++] = eval[j];
 		}
 
 		HIST_ADVANCE("\"}");

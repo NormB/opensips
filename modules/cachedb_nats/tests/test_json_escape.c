@@ -48,7 +48,8 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 		case '\t': esc = "\\t";  break;
 		default:
 			if (c < 0x20) {
-				if (w + 6 > out_sz) return -1;
+				/* needs 6 chars + NUL -> out_sz - w >= 7 (>= not >) */
+				if (w + 6 >= out_sz) return -1;
 				w += snprintf(out + w, out_sz - w,
 					"\\u%04x", c);
 				continue;
@@ -166,6 +167,28 @@ int main(void)
 			g_fails++;
 		} else {
 			fprintf(stderr, "  ok: overflow returns -1\n");
+		}
+	}
+
+	/* #48: \u00xx escape at the exact buffer boundary must reject, not
+	 * truncate-and-corrupt.  "" is 6 chars; with out_sz == 6 it
+	 * needs the NUL too, so out_sz must be >= 7 to succeed. */
+	{
+		const char in[] = {0x01, 0};
+		char b6[6], b7[7];
+		int n6 = _json_escape(in, 1, b6, sizeof(b6));   /* 6: NUL needs 7, too small */
+		int n7 = _json_escape(in, 1, b7, sizeof(b7));   /* 7: exact fit */
+		if (n6 != -1) {
+			fprintf(stderr, "FAIL: \\u escape did not reject at out_sz=6 (n=%d)\n", n6);
+			g_fails++;
+		} else {
+			fprintf(stderr, "  ok: \\u escape rejects too-small out_sz=6\n");
+		}
+		if (n7 != 6 || strcmp(b7, "\\u0001") != 0) {
+			fprintf(stderr, "FAIL: \\u escape at out_sz=7 (n=%d, \"%s\")\n", n7, b7);
+			g_fails++;
+		} else {
+			fprintf(stderr, "  ok: \\u escape exact-fits out_sz=7 -> \"%s\"\n", b7);
 		}
 	}
 

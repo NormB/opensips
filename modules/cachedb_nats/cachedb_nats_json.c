@@ -2425,7 +2425,9 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 		case '\t': esc = "\\t";  break;
 		default:
 			if (c < 0x20) {
-				if (w + 6 > out_sz) return -1;
+				/* "\u00xx" is 6 chars; snprintf also needs 1 byte for
+				 * the NUL, so require out_sz - w >= 7 (>= not >). */
+				if (w + 6 >= out_sz) return -1;
 				w += snprintf(out + w, out_sz - w,
 					"\\u%04x", c);
 				continue;
@@ -2522,7 +2524,10 @@ static int _sink_putc(json_sink_t *s, char c)
  */
 static int _json_escape_len(const char *in, int in_len)
 {
-	int i, out = 0;
+	int i;
+	long long out = 0;          /* int64 so the 6x worst case can't overflow */
+	if (in_len < 0)
+		return -1;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
 		switch (c) {
@@ -2535,7 +2540,10 @@ static int _json_escape_len(const char *in, int in_len)
 			out += (c < 0x20) ? 6 : 1;
 		}
 	}
-	return out;
+	/* The escaped string must still be addressable with an int length. */
+	if (out > 0x7FFFFFFFLL)
+		return -1;
+	return (int)out;
 }
 
 static int _sink_emit_string(json_sink_t *s, const char *p, int n)
@@ -2548,6 +2556,7 @@ static int _sink_emit_string(json_sink_t *s, const char *p, int n)
 	 * escapes), which on a multi-MB doc with many string fields
 	 * eliminates a substantial fraction of grow / memcpy churn. */
 	esc_len = _json_escape_len(p, n);
+	if (esc_len < 0) { s->oom = 1; return -1; }  /* bad length / overflow */
 	needed  = esc_len + 2; /* + 2 quotes */
 	if (_sink_grow(s, needed + 1) < 0) return -1;
 	s->buf[s->len++] = '"';
