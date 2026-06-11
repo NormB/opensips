@@ -20,7 +20,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_counter_overflow test_native_key_validation \
         test_nats_request_rename test_intern_scaling \
         test_revmap_delete test_cas_retry_policy \
-        test_pk_stack_key
+        test_pk_stack_key test_resync_timer
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -182,6 +182,11 @@ test_cas_retry_policy: test_cas_retry_policy.c
 test_pk_stack_key: test_pk_stack_key.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+# Source-pattern: the periodic resync handler no longer dead-gates on the
+# process-local connected flag (it lazily connects).
+test_resync_timer: test_resync_timer.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -216,6 +221,7 @@ check: all
 	./test_revmap_delete
 	./test_cas_retry_policy
 	./test_pk_stack_key
+	./test_resync_timer
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
