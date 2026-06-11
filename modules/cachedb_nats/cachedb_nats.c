@@ -138,6 +138,13 @@ int kv_ttl = 0;
  *   and lazy self-heal already guarantee.
  */
 int index_resync_on_reconnect = 1;
+
+/* map_legacy_read (default 1): keep serving and cleaning up map entries
+ * written in the legacy ':' separated format (a full-bucket scan).  The new
+ * '.' separated, hex-escaped format is read with an exact server-side
+ * filter.  After running the nats_map_migrate MI command, operators set this
+ * to 0 so map_get / map_remove become pure O(matches) operations. */
+int nats_map_legacy_read = 1;
 int index_resync_interval_secs = 0;
 
 /* NATS server URL(s) -- overrides cachedb_url host when set.  TLS
@@ -289,6 +296,7 @@ static const param_export_t params[] = {
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
+	{"map_legacy_read",             INT_PARAM,    &nats_map_legacy_read},
 	/* Shared lib/nats shutdown drain timeout, ms.  See
 	 * lib/nats/nats_pool.h for the contract; last-writer wins
 	 * across modules. */
