@@ -38,7 +38,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
                   test_registry_index_recycle test_ring_push_bounded_spin \
                   test_pool_self_register test_msg_ref_orphan_reap \
-                  test_retired_no_sub_reap
+                  test_retired_no_sub_reap test_sub_identity_match
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -52,7 +52,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
      test_registry_index_recycle test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
-     test_retired_no_sub_reap
+     test_retired_no_sub_reap test_sub_identity_match
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -132,6 +132,11 @@ test_registry_index_recycle: $(IDXRECYCLE_SRCS) test_shim.h ../nats_handle_regis
 RETIREDNOSUB_SRCS := test_retired_no_sub_reap.c $(SHIM) ../nats_handle_registry.c
 test_retired_no_sub_reap: $(RETIREDNOSUB_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(RETIREDNOSUB_SRCS) $(LDFLAGS)
+
+# Source-pattern: proc-sub state is matched by handle identity (index /
+# h_ref), not id string, so unbind+rebind of one id can't wedge delivery.
+test_sub_identity_match: test_sub_identity_match.c
+	$(CC) -g -O0 -Wall -o $@ $<
 
 # Source-pattern test: the consumer process retries instead of exiting
 # (an instance-fatal bail) when the broker is down at boot.
@@ -224,6 +229,7 @@ check: all
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap
 	./test_retired_no_sub_reap
+	./test_sub_identity_match
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -242,7 +248,8 @@ clean:
 	      test_registry_lookup_ref test_consumer_proc_boot_retry \
 	      test_rpc_subject_validation test_registry_index_recycle \
 	      test_ring_push_bounded_spin test_pool_self_register \
-	      test_msg_ref_orphan_reap test_retired_no_sub_reap
+	      test_msg_ref_orphan_reap test_retired_no_sub_reap \
+	      test_sub_identity_match
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
