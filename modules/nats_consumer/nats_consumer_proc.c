@@ -212,6 +212,11 @@ typedef struct proc_sub_state {
 	 * backpressure_drops, fetch_errors, ...) so the attendant's MI
 	 * handlers can read them.  Bumped here via hstat_add(). */
 
+	/* Monotonic-us timestamp of the last oversize-message WARN, so a flood
+	 * of oversized messages logs at most once per interval (the per-handle
+	 * `terms` counter still increments on every one). */
+	long long             last_oversize_warn_us;
+
 	/* Highest stream sequence delivered so far.  Survives a rebuild (the
 	 * proc_sub_state_t is kept when the natsSubscription is recreated), so
 	 * a vanished+recreated durable can resume just past it instead of
@@ -303,6 +308,10 @@ typedef struct msg_ref_slot {
 #define NATS_MSG_REF_ORPHAN_TTL_US   (120LL * 1000000LL)
 /* How often the main loop scans for orphans (cheap, but no need every tick). */
 #define NATS_MSG_REF_REAP_INTERVAL_US (30LL * 1000000LL)
+
+/* Minimum interval between oversize-message WARN lines per subscription, so
+ * a flood of oversized messages cannot flood the log. */
+#define NATS_OVERSIZE_WARN_INTERVAL_US (5LL * 1000000LL)
 
 /* Count of orphaned msg-ref slots reclaimed (telemetry). */
 static unsigned long g_msg_ref_orphans_reaped;
@@ -1589,11 +1598,21 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			/* This is a permanent Term, not back-pressure -- it is
 			 * counted via the per-handle `terms` counter below, so do
 			 * not also fold it into backpressure_drops. */
-			LM_WARN("nats_consumer_proc: oversize message on "
-				"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
-				"terminating\n",
-				ss->id.len, ss->id.s,
-				subject_len, data_len, rc);
+			{
+				/* Rate-limit: a stream of oversize messages must not
+				 * flood the log (the `terms` counter below still records
+				 * every one). */
+				long long now = _now_monotonic_us();
+				if (now - ss->last_oversize_warn_us >=
+						NATS_OVERSIZE_WARN_INTERVAL_US) {
+					LM_WARN("nats_consumer_proc: oversize message on "
+						"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
+						"terminating (rate-limited)\n",
+						ss->id.len, ss->id.s,
+						subject_len, data_len, rc);
+					ss->last_oversize_warn_us = now;
+				}
+			}
 			(void)nats_dl.natsMsg_Term(m, NULL);
 			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
 			nats_dl.natsMsg_Destroy(m);
