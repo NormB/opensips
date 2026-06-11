@@ -69,7 +69,7 @@
 #include "event_nats.h"
 #include "nats_producer.h"
 #include "nats_stats.h"
-#include "nats_consumer.h"
+#include "event_nats_sub.h"
 #include "nats_jetstream.h"
 #include "../../lib/nats/nats_pool.h"
 #include "../tls_mgm/api.h"
@@ -237,7 +237,9 @@ static const cmd_export_t cmds[] = {
  * nats_consumer_process()).  We don't mutate `no` here because the
  * proc_export_t table is consumed before mod_init runs. */
 static const proc_export_t procs[] = {
-	{"NATS consumer", 0, 0, nats_consumer_process, 1, 0},
+	/* "event consumer" to disambiguate from the standalone nats_consumer
+	 * module's "NATS consumer" proc when both are loaded. */
+	{"NATS event consumer", 0, 0, nats_consumer_process, 1, 0},
 	{0, 0, 0, 0, 0, 0}
 };
 

@@ -40,7 +40,7 @@
 #include "../../dprint.h"
 #include "../../mi/mi.h"
 #include "nats_stats.h"
-#include "nats_consumer.h"
+#include "event_nats_sub.h"
 #include "../../lib/nats/nats_pool.h"
 
 /* module parameters (defined in event_nats.c) */
