@@ -84,6 +84,28 @@ typedef struct nats_inbound_ctl {
 
 static nats_inbound_ctl_t *g_inbound = NULL;
 
+/* Observability getters for the inbound backpressure counters.  g_inbound
+ * is a single SHM struct allocated pre-fork, so these are safe to call from
+ * the attendant/MI process (which never touches the I/O-thread writers).
+ * Return 0 before the block is allocated. */
+unsigned long nats_inbound_dropped_oversize(void)
+{
+	return g_inbound ? atomic_load_explicit(&g_inbound->dropped_oversize,
+		memory_order_relaxed) : 0;
+}
+
+unsigned long nats_inbound_dropped_backpressure(void)
+{
+	return g_inbound ? atomic_load_explicit(&g_inbound->dropped_backpressure,
+		memory_order_relaxed) : 0;
+}
+
+int nats_inbound_inflight(void)
+{
+	return g_inbound ? atomic_load_explicit(&g_inbound->inflight,
+		memory_order_relaxed) : 0;
+}
+
 /* ── Forward declarations ────────────────────────────────────────── */
 
 static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,

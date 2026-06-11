@@ -40,6 +40,7 @@
 #include "../../dprint.h"
 #include "../../mi/mi.h"
 #include "nats_stats.h"
+#include "nats_consumer.h"
 #include "../../lib/nats/nats_pool.h"
 
 /* module parameters (defined in event_nats.c) */
@@ -199,6 +200,19 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("js_ack_failed"),
             NATS_STATS_SUM(js_ack_failed)) < 0)
+        goto error;
+
+    /* Inbound (subscribe-side) backpressure: events shed under a publish
+     * flood, plus the live in-flight gauge.  Counters live in the consumer
+     * module's SHM control block (read via getters). */
+    if (add_mi_number(resp_obj, MI_SSTR("inbound_dropped_oversize"),
+            nats_inbound_dropped_oversize()) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("inbound_dropped_backpressure"),
+            nats_inbound_dropped_backpressure()) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("inbound_inflight"),
+            (unsigned long)nats_inbound_inflight()) < 0)
         goto error;
 
     return resp;
