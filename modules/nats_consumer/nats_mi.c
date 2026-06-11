@@ -202,6 +202,7 @@ static int list_cb(nats_handle_t *h, void *user)
 	ADD_N("naks",            h->naks);
 	ADD_N("terms",           h->terms);
 	ADD_N("redeliveries",    h->redeliveries);
+	ADD_N("poisoned",        h->poisoned);
 	ADD_N("fetch_skips_full",   h->fetch_skips_full);
 	ADD_N("backpressure_drops", h->backpressure_drops);
 	ADD_N("fetch_errors",       h->fetch_errors);
@@ -274,6 +275,7 @@ struct stats_ctx {
 	unsigned long naks;
 	unsigned long terms;
 	unsigned long redeliveries;
+	unsigned long poisoned;
 	unsigned long fetch_skips_full;
 	unsigned long backpressure_drops;
 	unsigned long fetch_errors;
@@ -296,6 +298,7 @@ static int stats_cb(nats_handle_t *h, void *user)
 	c->naks               += h->naks;
 	c->terms              += h->terms;
 	c->redeliveries       += h->redeliveries;
+	c->poisoned           += h->poisoned;
 	c->fetch_skips_full   += h->fetch_skips_full;
 	c->backpressure_drops += h->backpressure_drops;
 	c->fetch_errors       += h->fetch_errors;
@@ -353,6 +356,7 @@ mi_response_t *mi_consumer_stats(const mi_params_t *params,
 	SN("naks",               s.naks);
 	SN("terms",              s.terms);
 	SN("redeliveries",       s.redeliveries);
+	SN("poisoned",           s.poisoned);
 	SN("fetch_skips_full",   s.fetch_skips_full);
 	SN("backpressure_drops", s.backpressure_drops);
 	SN("fetch_errors",       s.fetch_errors);

@@ -265,6 +265,14 @@ static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
 int nats_consumer_fetch_batch      = 10;
 int nats_consumer_fetch_timeout_ms = 1000;
 
+/* Consumer-side poison-message cap.  With max_deliver=0 (the JetStream
+ * default) the broker redelivers a message that always fails processing
+ * forever, with no dead-letter -- one poison message can wedge a handle.
+ * When this is > 0 the consumer Terms any message whose NumDelivered
+ * exceeds it (a dead-letter backstop) and bumps the per-handle `poisoned`
+ * counter.  Default 0 = off (unchanged unlimited-redelivery behaviour). */
+int nats_consumer_poison_max_deliver = 0;
+
 /* Outbound header name used to carry the per-call UUIDv7
  * correlation id auto-minted by both the sync and async
  * `nats_request` start paths.  Default `X-Request-Id`, following
@@ -426,6 +434,7 @@ static const param_export_t params[] = {
 	{ "persist_path",      STR_PARAM, &persist_path    },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
 	{ "fetch_timeout_ms",  INT_PARAM, &nats_consumer_fetch_timeout_ms  },
+	{ "poison_max_deliver",INT_PARAM, &nats_consumer_poison_max_deliver },
 	{ "allow_sync_anywhere",
 	      INT_PARAM | USE_FUNC_PARAM,
 	      (void *)nats_request_allow_sync_setter },
