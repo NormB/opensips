@@ -256,11 +256,25 @@ static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
  * object so any per-handle capacity is honoured.
  */
 typedef struct msg_ref_slot {
-	natsMsg  *msg;
-	uint16_t  generation;
-	uint16_t  in_use;       /* 1 iff msg != NULL and ack pending */
-	uint32_t  _pad;
+	natsMsg   *msg;
+	uint16_t   generation;
+	uint16_t   in_use;       /* 1 iff msg != NULL and ack pending */
+	uint32_t   _pad;
+	long long  claimed_at_us; /* CLOCK_MONOTONIC us at store; for orphan reap */
 } msg_ref_slot_t;
+
+/* Reclaim a msg-ref slot if it has been outstanding longer than this: a
+ * worker that died after popping a message but before acking would
+ * otherwise leak its slot forever.  Generously larger than any reasonable
+ * JetStream ack_wait (default 30s) so a slow-but-live worker still within
+ * its ack_wait is never reaped; the broker has long since redelivered an
+ * orphan this old, so its original ack would be rejected anyway. */
+#define NATS_MSG_REF_ORPHAN_TTL_US   (120LL * 1000000LL)
+/* How often the main loop scans for orphans (cheap, but no need every tick). */
+#define NATS_MSG_REF_REAP_INTERVAL_US (30LL * 1000000LL)
+
+/* Count of orphaned msg-ref slots reclaimed (telemetry). */
+static unsigned long g_msg_ref_orphans_reaped;
 
 typedef struct msg_ref_row {
 	uint32_t         capacity;     /* 0 == row not allocated yet */
@@ -315,10 +329,11 @@ static uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
 		uint32_t idx = (start + i) % row->capacity;
 		slot = &row->slots[idx];
 		if (!slot->in_use) {
-			slot->msg        = m;
-			slot->in_use     = 1;
-			slot->generation = (uint16_t)(slot->generation + 1);
-			row->next_slot   = (idx + 1) % row->capacity;
+			slot->msg           = m;
+			slot->in_use        = 1;
+			slot->generation    = (uint16_t)(slot->generation + 1);
+			slot->claimed_at_us = _now_monotonic_us();
+			row->next_slot      = (idx + 1) % row->capacity;
 			*ok = 1;
 			return nats_ack_token_pack(handle_idx, idx, slot->generation);
 		}
@@ -364,6 +379,46 @@ static natsMsg *release_msg_ref(uint64_t token)
 	slot->in_use = 0;
 	/* keep generation; next use bumps it again. */
 	return m;
+}
+
+/*
+ * Reclaim msg-ref slots that have been outstanding longer than
+ * NATS_MSG_REF_ORPHAN_TTL_US -- the worker that owned them died before
+ * acking.  Destroys the leaked natsMsg, frees the slot (bumping the
+ * generation so a late ack is rejected), and counts it.  Runs in the
+ * consumer process's single-threaded main loop, so no locking is needed.
+ * Returns the number of slots reaped.
+ */
+static int reap_orphan_msg_refs(void)
+{
+	long long now = _now_monotonic_us();
+	int reaped = 0;
+	uint32_t h, i;
+
+	for (h = 0; h < NATS_REGISTRY_MAX_HANDLES; h++) {
+		msg_ref_row_t *row = &g_msg_refs[h];
+		if (!row->slots)
+			continue;
+		for (i = 0; i < row->capacity; i++) {
+			msg_ref_slot_t *slot = &row->slots[i];
+			if (!slot->in_use)
+				continue;
+			if (now - slot->claimed_at_us <= NATS_MSG_REF_ORPHAN_TTL_US)
+				continue;
+			if (slot->msg)
+				nats_dl.natsMsg_Destroy(slot->msg);
+			slot->msg        = NULL;
+			slot->in_use     = 0;
+			slot->generation = (uint16_t)(slot->generation + 1);
+			g_msg_ref_orphans_reaped++;
+			reaped++;
+		}
+	}
+	if (reaped > 0)
+		LM_WARN("nats_consumer_proc: reaped %d orphaned msg-ref slot(s) "
+			"(worker died mid-processing?); total reaped=%lu\n",
+			reaped, g_msg_ref_orphans_reaped);
+	return reaped;
 }
 
 /* ── forward declarations ────────────────────────────────────── */
@@ -1804,11 +1859,24 @@ void nats_consumer_proc_main(int rank)
 		nats_consumer_hb_tick();
 	}
 
+	long long last_reap_us = _now_monotonic_us();
+
 	for (;;) {
 		nats_consumer_hb_tick();
 		proc_sub_state_t *ss;
 		int any_work = 0;
 		int cur_epoch;
+
+		/* Periodically reclaim msg-ref slots orphaned by workers that
+		 * died after popping a message but before acking (otherwise the
+		 * per-handle table fills and delivery stalls). */
+		{
+			long long now = _now_monotonic_us();
+			if (now - last_reap_us >= NATS_MSG_REF_REAP_INTERVAL_US) {
+				reap_orphan_msg_refs();
+				last_reap_us = now;
+			}
+		}
 
 		/* 0. Reconnect-epoch check.  The nats.c library bumps
 		 *    the epoch from its reconnect callback (on a library
