@@ -2086,62 +2086,32 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	 * enable_search_index modparam below). */
 	if (filter && !filter->next && filter->key.is_pk &&
 	    filter->val.is_str && filter->op == CDB_OP_EQ) {
-		char *target_key = NULL;
-		int enc_len = 0;
+		char  key_stack[512];
+		char *target_key;
+		int   key_heap = 0;
 		const char *data;
 		int data_len;
-		char *enc;
 
-		enc = _kv_encode_key(filter->val.s.s, filter->val.s.len,
-			&enc_len);
-		if (!enc) {
-			LM_ERR("PK query: malloc for KV-key encode buffer "
-				"failed (filter '%.*s'='%.*s', encode budget "
-				"%d bytes)\n",
+		/* Build the target key on the stack (heap only for rare long
+		 * keys) -- saves two allocs per usrloc read on the PK fast path. */
+		target_key = _pk_target_key(filter->val.s.s, filter->val.s.len,
+			key_stack, sizeof(key_stack), &key_heap);
+		if (!target_key) {
+			LM_ERR("PK query: target-key build failed (filter '%.*s'='%.*s')\n",
 				filter->key.name.len, filter->key.name.s,
-				filter->val.s.len, filter->val.s.s,
-				filter->val.s.len * 3 + 1);
+				filter->val.s.len, filter->val.s.s);
 			return -1;
 		}
-		if (fts_json_prefix && *fts_json_prefix) {
-			int plen = strlen(fts_json_prefix);
-			target_key = pkg_malloc(plen + enc_len + 1);
-			if (!target_key) {
-				free(enc);
-				LM_ERR("PK query: pkg_malloc for target_key "
-					"failed (prefix '%s' + %d-byte encoded "
-					"value, total %d bytes)\n",
-					fts_json_prefix, enc_len,
-					plen + enc_len + 1);
-				return -1;
-			}
-			memcpy(target_key, fts_json_prefix, plen);
-			memcpy(target_key + plen, enc, enc_len);
-			target_key[plen + enc_len] = '\0';
-		} else {
-			target_key = pkg_malloc(enc_len + 1);
-			if (!target_key) {
-				free(enc);
-				LM_ERR("PK query: pkg_malloc for target_key "
-					"failed (no prefix, %d-byte encoded "
-					"value, total %d bytes)\n",
-					enc_len, enc_len + 1);
-				return -1;
-			}
-			memcpy(target_key, enc, enc_len);
-			target_key[enc_len] = '\0';
-		}
-		free(enc);
 
 		s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 		if (s == NATS_NOT_FOUND) {
-			pkg_free(target_key);
+			if (key_heap) free(target_key);
 			return 0;   /* empty result, not an error */
 		}
 		if (s != NATS_OK) {
 			LM_WARN("PK kvStore_Get failed for '%s': %s\n",
 				target_key, nats_dl.natsStatus_GetText(s));
-			pkg_free(target_key);
+			if (key_heap) free(target_key);
 			return -1;
 		}
 		data = nats_dl.kvEntry_ValueString(entry);
@@ -2151,7 +2121,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 			if (!row) {
 				LM_ERR("no pkg memory for cdb_row_t\n");
 				nats_dl.kvEntry_Destroy(entry);
-				pkg_free(target_key);
+				if (key_heap) free(target_key);
 				return -1;
 			}
 			if (_safe_json_to_dict(data, data_len, &row->dict) != 0) {
@@ -2159,14 +2129,14 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 					"'%s'\n", target_key);
 				pkg_free(row);
 				nats_dl.kvEntry_Destroy(entry);
-				pkg_free(target_key);
+				if (key_heap) free(target_key);
 				return -1;
 			}
 			res->count++;
 			list_add_tail(&row->list, &res->rows);
 		}
 		nats_dl.kvEntry_Destroy(entry);
-		pkg_free(target_key);
+		if (key_heap) free(target_key);
 		return 0;
 	}
 
@@ -2797,6 +2767,51 @@ static char *_kv_encode_key(const char *in, int in_len, int *out_len)
 	out[w] = '\0';
 	if (out_len) *out_len = w;
 	return out;
+}
+
+/*
+ * Build the PK target key ("<fts_json_prefix>" + percent-encoded value)
+ * into @stackbuf if it fits, otherwise into a heap buffer.  Avoids the two
+ * mallocs the PK fast path otherwise pays per usrloc read/write for
+ * typically <100-byte keys.  Returns the key pointer (stackbuf or heap) and
+ * sets *heap to 1 when heap-allocated, or NULL on OOM.  Free with:
+ *   if (heap) free(ptr);
+ */
+static char *_pk_target_key(const char *val, int val_len,
+	char *stackbuf, int stackcap, int *heap)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	int plen = (fts_json_prefix && *fts_json_prefix)
+		? (int)strlen(fts_json_prefix) : 0;
+	int max_total = plen + val_len * 3 + 1;   /* worst-case encode */
+	char *buf;
+	int i, w;
+
+	*heap = 0;
+	if (max_total <= stackcap) {
+		buf = stackbuf;
+	} else {
+		buf = malloc(max_total);
+		if (!buf)
+			return NULL;
+		*heap = 1;
+	}
+
+	if (plen)
+		memcpy(buf, fts_json_prefix, plen);
+	w = plen;
+	for (i = 0; i < val_len; i++) {
+		unsigned char c = (unsigned char)val[i];
+		if (c != '=' && _kv_char_safe(c)) {
+			buf[w++] = (char)c;
+		} else {
+			buf[w++] = '=';
+			buf[w++] = hex[(c >> 4) & 0xF];
+			buf[w++] = hex[c & 0xF];
+		}
+	}
+	buf[w] = '\0';
+	return buf;
 }
 
 /* Build a malloc'd seed JSON document {"<field>":"<val>"} for the
