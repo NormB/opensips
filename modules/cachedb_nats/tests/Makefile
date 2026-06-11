@@ -19,7 +19,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_sink_emit_string test_json_parse_guard test_allops_fastfail \
         test_counter_overflow test_native_key_validation \
         test_nats_request_rename test_intern_scaling \
-        test_revmap_delete test_cas_retry_policy
+        test_revmap_delete test_cas_retry_policy \
+        test_pk_stack_key
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -176,6 +177,11 @@ test_revmap_delete: test_revmap_delete.c
 test_cas_retry_policy: test_cas_retry_policy.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Behavioural (ASan) + source-pattern: the PK fast path builds the target
+# key in a stack buffer (heap only for rare long keys).
+test_pk_stack_key: test_pk_stack_key.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -209,6 +215,7 @@ check: all
 	./test_intern_scaling
 	./test_revmap_delete
 	./test_cas_retry_policy
+	./test_pk_stack_key
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
