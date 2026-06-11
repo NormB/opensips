@@ -124,6 +124,13 @@ static nats_pool_cfg *pool_cfg = NULL;
 static int              _lib_initialized = 0;   /* nats_Open called? */
 static natsConnection  *_nc = NULL;              /* NATS connection handle */
 static jsCtx           *_js = NULL;              /* JetStream context */
+
+/* Registration refcount.  Each module that calls nats_pool_register()
+ * increments this; nats_pool_unregister() decrements it and tears the pool
+ * down only on the last unregister, so the connection survives while any
+ * module still uses it and is always destroyed once the last one is gone.
+ * Single-threaded (mod_init / mod_destroy run before fork / at shutdown). */
+static int              _register_count = 0;
 static atomic_int       _connected = 0;          /* 1 if connected */
 static atomic_int       _reconnect_epoch = 0;    /* bumped on each reconnect */
 
@@ -575,6 +582,7 @@ int nats_pool_register(const char *url, const char *module,
 			pool_cfg->max_reconnect = max_reconnect;
 	}
 
+	_register_count++;
 	return 0;
 }
 
@@ -1056,9 +1064,35 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
  * Thread safety: Must only be called from OpenSIPS process context
  * during shutdown (mod_destroy).
  */
+/*
+ * Drop one registration reference.  The pool is actually torn down only on
+ * the LAST unregister, so the shared connection survives while any loaded
+ * NATS module still uses it, and is always destroyed when the last module
+ * is unloaded (even when event_nats -- the historical sole caller of
+ * nats_pool_destroy -- is not loaded).  Call once per module from
+ * mod_destroy, matching the module's successful nats_pool_register().
+ */
+void nats_pool_unregister(void)
+{
+	if (_register_count > 0)
+		_register_count--;
+	if (_register_count > 0) {
+		LM_DBG("NATS pool: unregister (%d registration(s) remain)\n",
+			_register_count);
+		return;
+	}
+	nats_pool_destroy();
+}
+
 void nats_pool_destroy(void)
 {
 	int i;
+
+	/* Idempotent: tolerate a direct call or a repeated last-unregister. */
+	if (!pool_cfg && !_nc && !_js) {
+		_register_count = 0;
+		return;
+	}
 
 	LM_INFO("NATS pool: destroying\n");
 
@@ -1071,8 +1105,17 @@ void nats_pool_destroy(void)
 	}
 	_kv_cache_cnt = 0;
 
-	/* Step 2: Destroy JetStream context (depends on _nc) */
+	/* Step 2: Destroy JetStream context (depends on _nc).  First wait
+	 * (bounded) for outstanding async publishes to be acked, so events
+	 * published just before shutdown are not silently abandoned when the
+	 * JS context is torn down. */
 	if (_js) {
+		jsPubOptions po;
+		int budget_ms = nats_pool_drain_timeout_ms > 0
+			? nats_pool_drain_timeout_ms : 5000;
+		nats_dl.jsPubOptions_Init(&po);
+		po.MaxWait = budget_ms;
+		(void)nats_dl.js_PublishAsyncComplete(_js, &po);
 		nats_dl.jsCtx_Destroy(_js);
 		_js = NULL;
 	}
@@ -1114,6 +1157,8 @@ void nats_pool_destroy(void)
 		shm_free(pool_cfg);
 		pool_cfg = NULL;
 	}
+
+	_register_count = 0;
 }
 
 /**

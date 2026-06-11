@@ -10,7 +10,7 @@ ASAN    := -fsanitize=address
 TESTS = test_redact_url test_validate_publish_subject \
         test_validate_subject_cache test_nats_dl test_nats_ca_dir \
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
-        test_js_pending_cap
+        test_js_pending_cap test_pool_refcount
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -69,6 +69,12 @@ test_server_info_redact: test_server_info_redact.c
 test_js_pending_cap: test_js_pending_cap.c
 	$(CC) $(CFLAGS) -o $@ test_js_pending_cap.c
 
+# Behavioural refcount model + source-pattern: the pool is torn down only
+# on the last unregister, waits for async publishes before jsCtx_Destroy,
+# and event_nats frees stats after the pool.
+test_pool_refcount: test_pool_refcount.c
+	$(CC) $(CFLAGS) -o $@ test_pool_refcount.c
+
 # LD_LIBRARY_PATH covers the case where libnats was installed to
 # /usr/local/lib (the upstream `cmake --install` default), which
 # isn't on the default ld.so search path on most distros.  Production
@@ -88,6 +94,7 @@ check: all
 	./test_unsafe_log_clamp
 	./test_server_info_redact
 	./test_js_pending_cap
+	./test_pool_refcount
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the

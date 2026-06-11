@@ -288,6 +288,9 @@ char *nats_request_id_header = "X-Request-Id";
 static char *nats_url = NULL;
 static int   nats_reconnect_wait_ms = 0;   /* 0 = lib/nats default */
 static int   nats_max_reconnect     = 0;   /* 0 = lib/nats default */
+/* Set iff this module's own nats_pool_register() succeeded, so mod_destroy
+ * unregisters exactly once (registration is conditional). */
+static int   _pool_registered = 0;
 
 /*
  * USE_FUNC_PARAM setter for `allow_sync_anywhere`.
@@ -536,6 +539,7 @@ static int mod_init(void)
 			LM_ERR("nats_consumer: NATS pool registration failed\n");
 			return -1;
 		}
+		_pool_registered = 1;
 	} else if (!nats_pool_is_registered()) {
 		LM_WARN("nats_consumer: no nats_url set and no other NATS module "
 			"registered a pool; defaulting to nats://localhost:4222\n");
@@ -544,6 +548,7 @@ static int mod_init(void)
 			LM_ERR("nats_consumer: NATS pool registration failed\n");
 			return -1;
 		}
+		_pool_registered = 1;
 	}
 
 	if (nats_registry_init(NATS_CONSUMER_REGISTRY_BUCKETS) < 0) {
@@ -641,4 +646,9 @@ static void mod_destroy(void)
 	nats_rpc_slot_destroy();
 	nats_consumer_hb_destroy();
 	nats_registry_destroy();
+	/* Drop our pool reference iff we registered one (registration is
+	 * conditional -- when another NATS module owns the pool we inherit
+	 * it and must not unregister it). */
+	if (_pool_registered)
+		nats_pool_unregister();
 }
