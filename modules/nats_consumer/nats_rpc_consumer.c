@@ -89,6 +89,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	int         reply_len = 0;
 	uint32_t    slot_idx = 0;
 	uint32_t    gen = 0;
+	char        corr[40];
 	nats_rpc_slot_t *s;
 
 	(void)nc; (void)sub; (void)closure;
@@ -102,7 +103,8 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	reply_to = nats_dl.natsMsg_GetReply(msg);
 	if (reply_to) reply_len = (int)strlen(reply_to);
 
-	if (nats_rpc_subject_parse(subject, subj_len, &slot_idx, &gen) < 0) {
+	if (nats_rpc_subject_parse(subject, subj_len, &slot_idx, &gen,
+			corr, sizeof(corr)) < 0) {
 		/* malformed reply subject -- drop quietly.  Could be
 		 * an unrelated message that matched our wildcard or a
 		 * malicious peer; either way, no slot to deliver to. */
@@ -130,6 +132,24 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	if (atomic_load_explicit(&s->generation, memory_order_relaxed) != gen) {
 		nats_dl.natsMsg_Destroy(msg);
 		return;
+	}
+
+	/* Authenticate the reply by its correlation id.  The reply subject
+	 * lives under a shared "<prefix>.>" wildcard that any broker peer can
+	 * publish to; slot_idx and generation are small and guessable, so a
+	 * peer could forge a reply for an in-flight slot.  The corr_id is the
+	 * per-call UUIDv7 (74 bits of entropy) the worker stored on the slot;
+	 * a reply whose corr_id token does not match it is a forgery (or a
+	 * stale reply from a recycled slot whose generation happened to
+	 * collide) and is dropped. */
+	{
+		size_t clen = strlen(corr);
+		if (s->corr_id_len == 0 ||
+		    clen != (size_t)s->corr_id_len ||
+		    memcmp(corr, s->corr_id, clen) != 0) {
+			nats_dl.natsMsg_Destroy(msg);
+			return;
+		}
 	}
 
 	/* Refuse to overwrite if the worker already ABANDONED or
@@ -189,9 +209,25 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	 * reply_* writes above on its next timerfd tick. */
 	{
 		int expected = NATS_RPC_SLOT_INFLIGHT;
-		(void)atomic_compare_exchange_strong_explicit(
-			&s->state, &expected, NATS_RPC_SLOT_DELIVERED,
-			memory_order_release, memory_order_relaxed);
+		if (atomic_compare_exchange_strong_explicit(
+				&s->state, &expected, NATS_RPC_SLOT_DELIVERED,
+				memory_order_release, memory_order_relaxed)) {
+			/* Re-verify the generation did not advance between the
+			 * guard above and this CAS.  If the slot was freed and
+			 * re-claimed in that window, we just attached this (old)
+			 * reply to a different request that happens to also be
+			 * INFLIGHT.  Roll the state back to ABANDONED so the new
+			 * claimant times out cleanly instead of reading another
+			 * request's reply payload. */
+			if (atomic_load_explicit(&s->generation,
+					memory_order_relaxed) != gen) {
+				int d = NATS_RPC_SLOT_DELIVERED;
+				(void)atomic_compare_exchange_strong_explicit(
+					&s->state, &d, NATS_RPC_SLOT_ABANDONED,
+					memory_order_release,
+					memory_order_relaxed);
+			}
+		}
 	}
 
 	nats_dl.natsMsg_Destroy(msg);
@@ -288,25 +324,32 @@ static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
 		return;
 	}
 
-	/* Defensive: only proceed if the slot is INFLIGHT.  A worker
-	 * that ABANDONED before the consumer drained the IPC
-	 * (e.g. on a tight timeout race) should not get its publish
-	 * sent. */
-	{
-		int cur = atomic_load_explicit(&s->state, memory_order_acquire);
-		if (cur != NATS_RPC_SLOT_INFLIGHT)
-			return;
+	/* Only proceed if the slot is still the SAME claim that enqueued
+	 * this entry: INFLIGHT *and* matching generation.  A worker that
+	 * ABANDONED before the drain (state no longer INFLIGHT) or a slot
+	 * that was freed and re-claimed by a different request (generation
+	 * advanced) must be skipped -- otherwise this stale entry would
+	 * publish the new claim's request a second time. */
+	if (!nats_rpc_slot_entry_is_current(s, msg->generation)) {
+		LM_DBG("nats_rpc_consumer: skipping stale IPC publish for slot "
+			"%u gen %u (slot re-claimed or abandoned)\n",
+			(unsigned)msg->slot_idx, (unsigned)msg->generation);
+		return;
 	}
 
 	/* Format the reply-to inbox subject pointing back at us, including
-	 * the slot's current generation so a stale reply for a recycled
-	 * slot is rejected (see nats_rpc_subject.h). */
+	 * the slot's current generation (rejects a stale reply for a recycled
+	 * slot) and the per-call corr_id (authenticates the reply against a
+	 * forged one -- see nats_rpc_subject.h).  A slot with no corr_id
+	 * (UUID mint failed at request time) cannot be authenticated, so
+	 * build returns -1 and the call is abandoned fail-closed below. */
 	n = nats_rpc_subject_build(reply_subject, sizeof(reply_subject),
 		g_inbox_prefix, s->slot_idx,
-		atomic_load_explicit(&s->generation, memory_order_relaxed));
+		atomic_load_explicit(&s->generation, memory_order_relaxed),
+		s->corr_id, (int)s->corr_id_len);
 	if (n < 0) {
-		LM_ERR("nats_rpc_consumer: reply-subject overflow for slot %u\n",
-			(unsigned)s->slot_idx);
+		LM_ERR("nats_rpc_consumer: reply-subject build failed for slot %u "
+			"(overflow or missing corr_id)\n", (unsigned)s->slot_idx);
 		{
 			/* CAS INFLIGHT -> ABANDONED.  The worker may have
 			 * already timed out, freed the slot, and another

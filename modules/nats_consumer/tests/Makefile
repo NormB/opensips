@@ -10,10 +10,14 @@ SHIM    := test_shim.c
 REG_SRCS    := test_registry.c $(SHIM) ../nats_handle_registry.c
 PARSER_SRCS := test_parser.c   $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
 RING_SRCS   := test_ring.c     $(SHIM) ../nats_ring.c
+XPROC_SRCS  := test_ring_xproc_wakeup.c $(SHIM) ../nats_ring.c
 ACKTOK_SRCS := test_ack_token.c
 PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
                ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
 SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
+IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
+INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
+LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
@@ -27,7 +31,10 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_header_propagation test_start_time_roundtrip \
                   test_rpc_subject test_fetch_async_timerfd \
                   test_persist_cross_process test_msg_ref_teardown \
-                  test_ring_bounded_spin test_registry_ring_ref_safety
+                  test_ring_bounded_spin test_registry_ring_ref_safety \
+                  test_ring_xproc_wakeup test_rpc_ipc_generation \
+                  test_rpc_inbox_auth test_registry_lookup_ref \
+                  test_consumer_proc_boot_retry
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -36,7 +43,9 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_header_propagation test_start_time_roundtrip \
      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
      test_msg_ref_teardown test_ring_bounded_spin \
-     test_registry_ring_ref_safety
+     test_registry_ring_ref_safety test_ring_xproc_wakeup \
+     test_rpc_ipc_generation test_rpc_inbox_auth test_registry_lookup_ref \
+     test_consumer_proc_boot_retry
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -46,6 +55,12 @@ test_parser: $(PARSER_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle
 
 test_ring: $(RING_SRCS) test_shim.h ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(RING_SRCS) $(LDFLAGS)
+
+# Cross-process wakeup contract: the ring exposes no process-local fd
+# (the eventfd that was written/closed by foreign processes is gone) and
+# a waiter is woken across threads via the SHM futex.  Threaded, race-safe.
+test_ring_xproc_wakeup: $(XPROC_SRCS) test_shim.h ../nats_ring.h
+	$(CC) $(CFLAGS) -o $@ $(XPROC_SRCS) $(LDFLAGS)
 
 test_ack_token: $(ACKTOK_SRCS) ../nats_ack.h
 	$(CC) $(CFLAGS) -o $@ $(ACKTOK_SRCS) $(LDFLAGS)
@@ -83,6 +98,27 @@ test_async_request_inflight: $(ASYNC_SRCS) test_shim.h ../nats_rpc_async.h
 # Links the pure subject grammar + the SHM slot allocator under the shim.
 test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_slot.h
 	$(CC) $(CFLAGS) -o $@ $(SUBJECT_SRCS) $(LDFLAGS)
+
+# Generation guard on the worker->consumer IPC publish path: a stale IPC
+# entry from a freed+re-claimed slot must not double-publish the new
+# claim's request.  Built with a 1-slot pool to force the reuse.
+test_rpc_ipc_generation: $(IPCGEN_SRCS) test_shim.h ../nats_rpc_slot.h ../nats_rpc_ipc.h
+	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(IPCGEN_SRCS) $(LDFLAGS)
+
+# Reply-inbox authentication: a forged reply that guesses slot+gen but
+# not the per-call corr_id must be rejected by on_inbox_reply's check.
+test_rpc_inbox_auth: $(INBOXAUTH_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_slot.h
+	$(CC) $(CFLAGS) -o $@ $(INBOXAUTH_SRCS) $(LDFLAGS)
+
+# Registry lookup TOCTOU: a borrowed handle taken via lookup_ref survives
+# a concurrent retire+reap until its pending_ops reference is released.
+test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.h
+	$(CC) $(CFLAGS) -o $@ $(LOOKUPREF_SRCS) $(LDFLAGS)
+
+# Source-pattern test: the consumer process retries instead of exiting
+# (an instance-fatal bail) when the broker is down at boot.
+test_consumer_proc_boot_retry: test_consumer_proc_boot_retry.c
+	$(CC) -g -O0 -Wall -o $@ $<
 
 # Async-fetch wake mechanism: behavioural timerfd-fires check + source
 # assertions that the async paths use a worker-private timerfd, not the
@@ -138,6 +174,11 @@ check: all
 	./test_msg_ref_teardown
 	./test_ring_bounded_spin
 	./test_registry_ring_ref_safety
+	./test_ring_xproc_wakeup
+	./test_rpc_ipc_generation
+	./test_rpc_inbox_auth
+	./test_registry_lookup_ref
+	./test_consumer_proc_boot_retry
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -151,7 +192,9 @@ clean:
 	      test_header_propagation test_start_time_roundtrip \
 	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
 	      test_msg_ref_teardown test_ring_bounded_spin \
-	      test_registry_ring_ref_safety
+	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
+	      test_rpc_ipc_generation test_rpc_inbox_auth \
+	      test_registry_lookup_ref test_consumer_proc_boot_retry
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c

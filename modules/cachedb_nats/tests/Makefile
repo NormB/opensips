@@ -16,7 +16,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_json_name_passthrough test_entry_add_key_oom \
         test_watcher_atomic_race test_watch_null_key_guard \
         test_kv_history_bounds test_request_payload_guard \
-        test_sink_emit_string
+        test_sink_emit_string test_json_parse_guard test_allops_fastfail
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -30,7 +30,8 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_enable_search_index test_dedicated_watcher_proc \
                   test_intern_wiring test_intern_unit test_entry_blob_combine \
                   test_watcher_atomic_race test_watch_null_key_guard \
-                  test_sink_emit_string
+                  test_sink_emit_string test_json_parse_guard \
+                  test_allops_fastfail
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -131,6 +132,16 @@ test_sink_emit_string: test_sink_emit_string.c
 test_request_payload_guard: test_request_payload_guard.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+# Behavioural: broker JSON is depth/size/NUL-guarded before it reaches
+# the recursive cJSON_Parse, preventing a stack-exhaustion crash.  ASan'd.
+test_json_parse_guard: test_json_parse_guard.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
+# Source-pattern test: every con->data op refreshes the KV handle and
+# every w_nats_kv_* wrapper gates on connectivity (fast-fail on outage).
+test_allops_fastfail: test_allops_fastfail.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -156,6 +167,8 @@ check: all
 	./test_kv_history_bounds
 	./test_request_payload_guard
 	./test_sink_emit_string
+	./test_json_parse_guard
+	./test_allops_fastfail
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

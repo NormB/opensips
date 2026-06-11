@@ -217,18 +217,14 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 	nats_fetch_clear();
 	clear_last_error();
 
-	/* Look up first.  Note: nats_registry_lookup() takes the bucket
-	 * read lock for the chain walk and releases it before returning;
-	 * we hold no protection against the handle being retired and
-	 * reaped by the consumer process between the lookup and the
-	 * dereferences below.  Take a pending_ops reference here so the
-	 * reaper (nats_registry_reap()) defers free until we're done. */
-	h = nats_registry_lookup(id);
+	/* Look up and take a pending_ops reference atomically under the
+	 * bucket lock, so the reaper (nats_registry_reap()) cannot free the
+	 * handle out from under the dereferences below.  Released at out:. */
+	h = nats_registry_lookup_ref(id);
 	if (!h) {
 		LM_DBG("nats_fetch: unknown handle '%.*s'\n", id->len, id->s);
 		return -3;
 	}
-	nats_handle_pending_inc(h);
 
 	/* A retired handle still lives on the retire list; the
 	 * bucket-chain lookup we just did misses it so a concurrent unbind
@@ -412,7 +408,12 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	nats_fetch_clear();
 	clear_last_error();
 
-	h = nats_registry_lookup(id);
+	/* Take the pending_ops reference atomically under the bucket lock
+	 * (lookup_ref) so the dereferences below are safe against a
+	 * concurrent unbind + reap.  The reference is held across the reactor
+	 * round-trip on the success path and released by resume_nats_fetch
+	 * via p->h_ref; every early return below releases it explicitly. */
+	h = nats_registry_lookup_ref(id);
 	if (!h) {
 		LM_DBG("nats_fetch_async: unknown handle '%.*s'\n",
 			id->len, id->s);
@@ -422,12 +423,14 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 		LM_DBG("nats_fetch_async: handle '%.*s' retiring\n",
 			id->len, id->s);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -3;
 	}
 	if (!h->ring) {
 		LM_DBG("nats_fetch_async: handle '%.*s' has no ring\n",
 			id->len, id->s);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -3;
 	}
@@ -439,6 +442,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	rc = nats_ring_pop(h->ring, &slot);
 	if (rc == 0) {
 		cur_set_from_slot(h->index, &slot);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_SYNC;
 		return 1;
 	}
@@ -449,6 +453,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	 * messages to wake on. */
 	if (!nats_pool_is_connected()) {
 		set_last_error("connection lost");
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -2;
 	}
@@ -461,6 +466,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	if (tfd < 0) {
 		LM_ERR("nats_fetch_async: timerfd setup failed: %s\n",
 			strerror(errno));
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -6;
 	}
@@ -469,6 +475,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	if (!p) {
 		LM_ERR("nats_fetch_async: oom for resume param\n");
 		close(tfd);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -6;     /* internal: shm oom */
 	}
@@ -476,8 +483,8 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 	p->ring        = h->ring;
 	p->h_ref       = h;
 	p->deadline_us = (tmo > 0) ? fetch_now_us() + (int64_t)tmo * 1000 : 0;
-	/* Hold the handle across the reactor round-trip so unbind defers. */
-	nats_handle_pending_inc(h);
+	/* The lookup_ref reference is handed to the resume param (p->h_ref)
+	 * and released by resume_nats_fetch -- do not dec here. */
 
 	ctx->resume_f     = resume_nats_fetch;
 	ctx->resume_param = p;
@@ -631,17 +638,22 @@ int w_nats_fetch_batch(struct sip_msg *msg, str *id, str *opts)
 	nats_fetch_clear_batch();
 	clear_last_error();
 
-	h = nats_registry_lookup(id);
-	if (!h || !h->ring) {
-		LM_DBG("nats_fetch_batch: unknown / no-ring handle '%.*s'\n",
+	/* Take the pending_ops reference atomically under the bucket lock so
+	 * a concurrent unbind + reap cannot free the handle (and destroy
+	 * h->ring) while we call nats_ring_pop / nats_ring_wait below.
+	 * Released at out:. */
+	h = nats_registry_lookup_ref(id);
+	if (!h) {
+		LM_DBG("nats_fetch_batch: unknown handle '%.*s'\n",
 			id->len, id->s);
 		return -3;
 	}
-	/* Hold a pending_ops reference for the duration of the batch
-	 * fetch.  Without this, a concurrent unbind + reap can free the
-	 * handle (and destroy h->ring) while we're still calling
-	 * nats_ring_pop / nats_ring_wait below -- use-after-free. */
-	nats_handle_pending_inc(h);
+	if (!h->ring) {
+		LM_DBG("nats_fetch_batch: no-ring handle '%.*s'\n",
+			id->len, id->s);
+		rc = -3;
+		goto out;
+	}
 
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 		LM_DBG("nats_fetch_batch: handle '%.*s' retiring\n",
@@ -815,21 +827,34 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	nats_fetch_clear_batch();
 	clear_last_error();
 
-	h = nats_registry_lookup(id);
-	if (!h || !h->ring) {
+	/* Take the pending_ops reference atomically under the bucket lock
+	 * (lookup_ref).  Held across the reactor round-trip on success and
+	 * released by resume_nats_fetch_batch via p->h_ref; every early
+	 * return below releases it explicitly. */
+	h = nats_registry_lookup_ref(id);
+	if (!h) {
 		LM_DBG("nats_fetch_batch_async: unknown handle '%.*s'\n",
 			id->len, id->s);
+		async_status = ASYNC_NO_IO;
+		return -3;
+	}
+	if (!h->ring) {
+		LM_DBG("nats_fetch_batch_async: no-ring handle '%.*s'\n",
+			id->len, id->s);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -3;
 	}
 	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST)) {
 		LM_DBG("nats_fetch_batch_async: handle '%.*s' retiring\n",
 			id->len, id->s);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -3;
 	}
 
 	if (batch_parse_opts(opts, &bo) < 0) {
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -4;     /* bad opts (parse error) */
 	}
@@ -845,12 +870,15 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 		if (g_batch.count == 0) {
 			if (!nats_pool_is_connected()) {
 				set_last_error("connection lost");
+				nats_handle_pending_dec(h);
 				async_status = ASYNC_NO_IO;
 				return -2;
 			}
+			nats_handle_pending_dec(h);
 			async_status = ASYNC_SYNC;
 			return -1;  /* no msgs available, pool healthy */
 		}
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_SYNC;
 		return g_batch.count;
 	}
@@ -858,6 +886,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	/* Blocking path: abort early on dead pool.  See w_nats_fetch_async. */
 	if (!nats_pool_is_connected()) {
 		set_last_error("connection lost");
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -2;
 	}
@@ -868,6 +897,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	if (tfd < 0) {
 		LM_ERR("nats_fetch_batch_async: timerfd setup failed: %s\n",
 			strerror(errno));
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -6;
 	}
@@ -875,6 +905,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	p = (nats_batch_async_param_t *)shm_malloc(sizeof(*p));
 	if (!p) {
 		close(tfd);
+		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
 		return -6;     /* internal: shm oom */
 	}
@@ -884,7 +915,8 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 	p->h_ref       = h;
 	p->deadline_us = (bo.expires_ms > 0)
 		? fetch_now_us() + (int64_t)bo.expires_ms * 1000 : 0;
-	nats_handle_pending_inc(h);
+	/* The lookup_ref reference is handed to the resume param (p->h_ref)
+	 * and released by resume_nats_fetch_batch -- do not dec here. */
 
 	ctx->resume_f     = resume_nats_fetch_batch;
 	ctx->resume_param = p;

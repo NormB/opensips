@@ -558,6 +558,36 @@ nats_handle_t *nats_registry_lookup(const str *id)
 	return found;
 }
 
+nats_handle_t *nats_registry_lookup_ref(const str *id)
+{
+	int idx;
+	nats_bucket_t *b;
+	nats_handle_t *cur, *found = NULL;
+
+	if (!g_registry || !id || id->len <= 0)
+		return NULL;
+
+	idx = bucket_index(id);
+	b = &g_registry->buckets[idx];
+
+	lock_start_read(b->lock);
+	for (cur = b->head; cur; cur = cur->next) {
+		if (str_eq(&cur->id, id)) {
+			/* Take the reference WHILE still holding the bucket read
+			 * lock.  retire() needs the bucket WRITE lock to unlink,
+			 * so it cannot run concurrently; once pending_ops is
+			 * bumped the reaper cannot free the handle even after a
+			 * later retire.  This closes the lookup->inc TOCTOU. */
+			nats_handle_pending_inc(cur);
+			found = cur;
+			break;
+		}
+	}
+	lock_stop_read(b->lock);
+
+	return found;
+}
+
 int nats_registry_count(void)
 {
 	if (!g_registry)

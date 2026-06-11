@@ -1352,8 +1352,13 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 
 	memset(&ipc_msg, 0, sizeof(ipc_msg));
 	ipc_msg.slot_idx = slot->slot_idx;
-	LM_DBG("nats_request[async]: about to enqueue IPC slot_idx=%u\n",
-		ipc_msg.slot_idx);
+	/* Tag the entry with the slot's current claim generation so the
+	 * consumer can reject this entry if the slot is freed and re-claimed
+	 * before the drain (prevents a double-publish -- see publish_cb). */
+	ipc_msg.generation = atomic_load_explicit(&slot->generation,
+		memory_order_relaxed);
+	LM_DBG("nats_request[async]: about to enqueue IPC slot_idx=%u gen=%u\n",
+		ipc_msg.slot_idx, ipc_msg.generation);
 	if (nats_rpc_ipc_enqueue(&ipc_msg) < 0) {
 		LM_WARN("nats_request[async]: IPC full -- dropping (slot %u)\n",
 			slot->slot_idx);

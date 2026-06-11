@@ -1738,17 +1738,35 @@ void nats_consumer_proc_main(int rank)
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
 
-	g_nc = nats_pool_get();
-	if (!g_nc) {
-		LM_ERR("nats_consumer_proc: no NATS connection in "
-			"consumer process\n");
-		return;
-	}
-	g_js = nats_pool_get_js();
-	if (!g_js) {
-		LM_ERR("nats_consumer_proc: no JetStream context in "
-			"consumer process\n");
-		return;
+	/* Acquire the NATS connection + JetStream context.  Do NOT return on
+	 * failure: an unexpected exit of this dedicated process is fatal to
+	 * the whole OpenSIPS instance, so a broker that is merely down at boot
+	 * would otherwise take the entire SIP server down with it.  Retry
+	 * until the broker is reachable instead.  nats_pool_get() re-attempts
+	 * its bounded internal connect on each call while the connection is
+	 * unset, so repeated calls are safe; the sleep is interrupted by
+	 * SIGTERM so shutdown remains prompt. */
+	{
+		int attempt = 0;
+		const int boot_retry_s = 2;
+		for (;;) {
+			g_nc = nats_pool_get();
+			if (g_nc) {
+				g_js = nats_pool_get_js();
+				if (g_js)
+					break;
+				LM_WARN("nats_consumer_proc: NATS connected but no "
+					"JetStream context (attempt %d); retrying in "
+					"%ds instead of exiting\n",
+					++attempt, boot_retry_s);
+			} else {
+				LM_WARN("nats_consumer_proc: no NATS connection "
+					"(broker down?, attempt %d); retrying in %ds "
+					"instead of exiting (an exit would abort the "
+					"instance)\n", ++attempt, boot_retry_s);
+			}
+			sleep(boot_retry_s);
+		}
 	}
 
 	ack_fd = nats_ack_ipc_fd();

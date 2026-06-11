@@ -26,9 +26,12 @@
  * processes (consumer side).  Producers and consumers live in separate
  * OS processes; the ring and its metadata are therefore allocated from
  * OpenSIPS shared memory and all synchronization is done with plain C11
- * atomics.  An eventfd -- inherited across fork(2) -- is signaled on the
- * empty -> non-empty edge so that a worker blocked on the OpenSIPS async
- * reactor is woken up exactly once per batch.
+ * atomics.  A SHM-resident futex word (wake_seq) is bumped on the empty
+ * -> non-empty edge so that a worker blocked in nats_ring_wait() is woken
+ * up exactly once per batch.  There is deliberately no eventfd: a
+ * per-process fd stored in SHM would be written/closed by processes other
+ * than its creator (the producer runs in the consumer process), where the
+ * integer maps to an unrelated descriptor.
  *
  * The ring stores messages by value (fixed-size slots); there are no
  * SHM allocations on the hot path.
@@ -127,16 +130,15 @@ typedef struct nats_ring nats_ring_t;
  * Allocate a ring in SHM with `capacity` slots.  `capacity` must be a
  * power of two and at least 2; other values are rejected.
  *
- * The eventfd is created with EFD_NONBLOCK | EFD_CLOEXEC and stored in
- * the ring struct; fork(2)'d child processes inherit it automatically.
+ * Wakeup is via a SHM-resident futex word; no fd is allocated.
  *
  * @return  pointer to the new ring, or NULL on invalid capacity or
- *          allocation / eventfd failure.
+ *          allocation failure.
  */
 nats_ring_t *nats_ring_create(uint32_t capacity);
 
 /*
- * Tear down a ring.  Closes the eventfd and frees the SHM block.
+ * Tear down a ring.  Frees the SHM block (there is no fd to close).
  *
  * The ring is destroyed unconditionally -- any slots still in-flight are
  * discarded.  Callers that need a graceful drain must do so before
@@ -149,16 +151,15 @@ void nats_ring_destroy(nats_ring_t *r);
  * Producer: copy a message into the next free slot.
  *
  * Return codes:
- *     0   success (message committed; eventfd possibly signaled).
+ *     0   success (message committed; waiters possibly woken).
  *    -1   ring full -- caller should back off and retry.
  *    -2   `data_len`    exceeds NATS_RING_PAYLOAD_MAX.
  *    -3   `subject_len` exceeds NATS_RING_SUBJECT_MAX, or reply_to_len
  *         exceeds NATS_RING_SUBJECT_MAX.
  *
- * On the empty -> non-empty edge, a single uint64_t 1 is written to the
- * eventfd so that one waiter wakes up.  The ring does NOT write the
- * eventfd on every push; the waiter is expected to drain everything
- * available after a wake.
+ * On the empty -> non-empty edge, the futex word is bumped and waiters
+ * are FUTEX_WAKE'd.  The ring does NOT signal on every push; the waiter
+ * is expected to drain everything available after a wake.
  *
  * `reply_to` may be NULL (and `reply_to_len` 0) for messages with no
  * reply subject; `has_reply` is set accordingly inside the slot.
@@ -189,23 +190,19 @@ int nats_ring_push(nats_ring_t *r,
  *          the transient case where the producer reserved a slot but
  *          has not yet released it).
  *
- * This function does NOT read() the eventfd.  A worker that blocked on
- * the eventfd must drain the 8-byte counter itself after wake-up to
- * rearm the reactor.
+ * Cross-process waiters block in nats_ring_wait() (futex), not on any fd.
  */
 int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out);
 
 /*
- * Return the read-only eventfd.  The fd becomes readable when the ring
- * transitions from empty to non-empty.  Ownership stays with the ring;
- * callers must NOT close(2) it.
+ * Compatibility stub: always returns -1.
  *
- * Caveat: the eventfd is created in whichever process called
- * nats_ring_create -- typically a worker via the MI bind handler,
- * post-fork.  Other processes (other workers, the consumer process)
- * do not have this fd in their file-descriptor table and poll(2)/
- * select(2) on it is undefined.  Cross-process waiters should use
- * nats_ring_wait() instead.
+ * The ring formerly exposed an eventfd here, but a per-process fd stored
+ * in SHM is written/closed by processes other than its creator (the
+ * producer runs in the consumer process), where the integer maps to an
+ * unrelated descriptor -- cross-process fd corruption.  The eventfd was
+ * removed; cross-process wakeup is via nats_ring_wait().  The symbol is
+ * retained so legacy callers that fetch and discard it keep compiling.
  */
 int nats_ring_eventfd(const nats_ring_t *r);
 
