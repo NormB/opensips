@@ -32,28 +32,29 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 	const char *at;
 	const char *next_slash;
 	const char *url_end;
+	const char *scan;
 
 	url_end = strchr(url, ',');
 	if (!url_end) url_end = url + strlen(url);
 
+	/* The authority begins after "scheme://" when present, otherwise at
+	 * the start of the token: a NATS URL string is always a URL, so a
+	 * scheme-less "user:pass@host" still carries credentials to scrub. */
 	scheme_end = strstr(url, "://");
-	if (!scheme_end || scheme_end >= url_end) {
-		/* No scheme found within this URL — copy verbatim */
-		size_t n = (size_t)(url_end - url);
-		if (n > *rem) n = *rem;
-		memcpy(*dst, url, n);
-		*dst += n;
-		*rem -= n;
-		return url_end;
-	}
+	if (scheme_end && scheme_end < url_end)
+		authority = scheme_end + 3;
+	else
+		authority = url;
 
-	authority = scheme_end + 3;
-	next_slash = strchr(authority, '/');
-	if (!next_slash || next_slash > url_end) next_slash = url_end;
+	next_slash = memchr(authority, '/', (size_t)(url_end - authority));
+	if (!next_slash) next_slash = url_end;
 
-	/* '@' must be in authority section, before any path '/'.
-	 * For URLs without a path, that's "before url_end". */
-	at = memchr(authority, '@', (size_t)(next_slash - authority));
+	/* '@' separates userinfo from host and must be in the authority
+	 * section (before any path '/').  A password may itself contain '@',
+	 * so the boundary is the LAST '@' in the authority, not the first. */
+	at = NULL;
+	for (scan = authority; scan < next_slash; scan++)
+		if (*scan == '@') at = scan;
 
 	if (!at) {
 		/* No userinfo — copy verbatim */
