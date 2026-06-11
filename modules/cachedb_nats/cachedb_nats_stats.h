@@ -46,6 +46,13 @@
  *   watcher_restarts — times the search-index watcher tore down and rebuilt
  *                      its KV handle + index after a reconnect/disconnect.
  *                      A climbing value flags a flapping broker connection.
+ *   watcher_handle_leaks — kvWatcher handles intentionally NOT destroyed on
+ *                      the disconnected teardown path (destroying while
+ *                      nats.c's I/O thread tears down the same internal
+ *                      state double-frees). Bounded reclaim needs live-broker
+ *                      teardown-timing validation and stays deferred; this
+ *                      counter makes the per-flap leak observable so it can
+ *                      be alerted on.
  */
 
 #ifndef _CACHEDB_NATS_STATS_H_
@@ -71,6 +78,7 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long fastfail_rejected;
 	_Atomic unsigned long op_failed;
 	_Atomic unsigned long watcher_restarts;
+	_Atomic unsigned long watcher_handle_leaks;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */

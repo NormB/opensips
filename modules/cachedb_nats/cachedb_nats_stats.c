@@ -114,6 +114,9 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("watcher_restarts"),
 		NATS_CDB_STATS_SUM(watcher_restarts)) < 0)
 		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("watcher_handle_leaks"),
+		NATS_CDB_STATS_SUM(watcher_handle_leaks)) < 0)
+		goto error;
 
 	return resp;
 
