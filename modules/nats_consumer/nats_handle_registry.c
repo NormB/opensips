@@ -62,7 +62,14 @@ typedef struct nats_registry {
 	int bucket_count;
 	nats_bucket_t *buckets;
 	int handle_count;           /* accessed with __atomic_* builtins */
-	int next_index;             /* monotonic; used to assign h->index */
+
+	/* Per-handle index allocator.  index_used[i] != 0 means index i is
+	 * assigned to a live handle.  Allocated only after a bind passes the
+	 * duplicate check and released on reap, so duplicate/failed binds do
+	 * NOT consume an index (an earlier monotonic counter did, which let
+	 * MI churn permanently exhaust the space).  Lock-free: alloc CAS-es a
+	 * byte 0->1, free stores 0. */
+	unsigned char index_used[NATS_REGISTRY_MAX_HANDLES];
 
 	/* Retire list.  Handles removed from their bucket by
 	 * nats_registry_unbind() are parked here until nats_registry_reap()
@@ -190,9 +197,34 @@ int nats_registry_init(int bucket_count)
 	r->retire_head = NULL;
 
 	r->handle_count = 0;
-	r->next_index   = 0;
+	memset(r->index_used, 0, sizeof(r->index_used));
 	g_registry = r;
 	return 0;
+}
+
+/* Allocate a free per-handle index, or -1 if all are in use.  Lock-free:
+ * CAS the first 0 byte to 1.  Callers hold the bucket write lock when
+ * binding, but the allocator is global, so the atomic CAS (not the bucket
+ * lock) is what makes concurrent binds to different buckets race-safe. */
+static int registry_index_alloc(void)
+{
+	int i;
+	for (i = 0; i < NATS_REGISTRY_MAX_HANDLES; i++) {
+		unsigned char expected = 0;
+		if (__atomic_compare_exchange_n(&g_registry->index_used[i],
+				&expected, (unsigned char)1, 0,
+				__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+			return i;
+	}
+	return -1;
+}
+
+/* Return an index to the free pool (called when a handle is reaped). */
+static void registry_index_free(uint16_t index)
+{
+	if (index < NATS_REGISTRY_MAX_HANDLES)
+		__atomic_store_n(&g_registry->index_used[index], 0,
+			__ATOMIC_SEQ_CST);
 }
 
 void nats_registry_destroy(void)
@@ -296,20 +328,12 @@ int nats_registry_bind(nats_handle_t *h)
 	if (h->id.len <= 0 || !h->id.s)
 		return -2;
 
-	/* Assign monotonic bind-order index BEFORE dropping into the bucket.
-	 * If we exceed the cap, refuse to bind -- the consumer process's
-	 * ref table would not have a slot for us.  Return the distinct
-	 * -3 code so callers can surface a specific MI / script error
-	 * ("handle count limit reached") instead of the generic -2. */
-	assigned_index = __atomic_fetch_add(&g_registry->next_index, 1,
-		__ATOMIC_SEQ_CST);
-	if (assigned_index < 0 || assigned_index >= NATS_REGISTRY_MAX_HANDLES) {
-		LM_ERR("nats_registry: handle index %d exceeds cap %d "
-			"(NATS_REGISTRY_MAX_HANDLES)\n",
-			assigned_index, NATS_REGISTRY_MAX_HANDLES);
-		return -3;
-	}
-	h->index = (uint16_t)assigned_index;
+	/* The per-handle index is allocated below, AFTER the duplicate check,
+	 * so a rejected duplicate (or a later failure) does not consume one.
+	 * An earlier monotonic counter allocated here unconditionally, which
+	 * let repeated duplicate/failed binds (reachable via MI) permanently
+	 * exhaust the index space. */
+	assigned_index = -1;
 
 	idx = bucket_index(&h->id);
 	b = &g_registry->buckets[idx];
@@ -355,11 +379,23 @@ int nats_registry_bind(nats_handle_t *h)
 	for (cur = b->head; cur; cur = cur->next) {
 		if (str_eq(&cur->id, &h->id)) {
 			lock_stop_write(b->lock);
-			/* caller still owns h on duplicate -- free the rlock
-			 * we just created so nats_handle_free() is idempotent */
+			/* caller still owns h on duplicate -- no index was
+			 * consumed, and nats_handle_free() frees the rlock/ring */
 			return -1;
 		}
 	}
+
+	/* Not a duplicate: claim a recyclable index now.  Refuse with the
+	 * distinct -3 code if the index space is genuinely full (cap reached),
+	 * so callers can surface a specific "handle count limit" error. */
+	assigned_index = registry_index_alloc();
+	if (assigned_index < 0) {
+		lock_stop_write(b->lock);
+		LM_ERR("nats_registry: no free handle index (cap %d reached)\n",
+			NATS_REGISTRY_MAX_HANDLES);
+		return -3;
+	}
+	h->index = (uint16_t)assigned_index;
 
 	h->next = b->head;
 	b->head = h;
@@ -529,6 +565,10 @@ void nats_registry_reap(void)
 		next = reap_list->next;
 		LM_DBG("nats_registry: reaping retired handle id='%.*s'\n",
 			reap_list->id.len, reap_list->id.s);
+		/* Return the handle's index to the free pool so it can be reused
+		 * by a future bind (prevents long-run churn from exhausting the
+		 * index space). */
+		registry_index_free(reap_list->index);
 		nats_handle_free(reap_list);
 		reap_list = next;
 	}

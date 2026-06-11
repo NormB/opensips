@@ -18,6 +18,7 @@ SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slo
 IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
+IDXRECYCLE_SRCS := test_registry_index_recycle.c $(SHIM) ../nats_handle_registry.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
@@ -34,7 +35,8 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
                   test_ring_xproc_wakeup test_rpc_ipc_generation \
                   test_rpc_inbox_auth test_registry_lookup_ref \
-                  test_consumer_proc_boot_retry test_rpc_subject_validation
+                  test_consumer_proc_boot_retry test_rpc_subject_validation \
+                  test_registry_index_recycle test_ring_push_bounded_spin
 
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
@@ -45,7 +47,8 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_msg_ref_teardown test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_inbox_auth test_registry_lookup_ref \
-     test_consumer_proc_boot_retry test_rpc_subject_validation
+     test_consumer_proc_boot_retry test_rpc_subject_validation \
+     test_registry_index_recycle test_ring_push_bounded_spin
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -115,6 +118,11 @@ test_rpc_inbox_auth: $(INBOXAUTH_SRCS) test_shim.h ../nats_rpc_subject.h ../nats
 test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(LOOKUPREF_SRCS) $(LDFLAGS)
 
+# Per-handle index is allocated after the duplicate check and recycled on
+# reap, so duplicate/failed binds can't exhaust the index space.
+test_registry_index_recycle: $(IDXRECYCLE_SRCS) test_shim.h ../nats_handle_registry.h
+	$(CC) $(CFLAGS) -o $@ $(IDXRECYCLE_SRCS) $(LDFLAGS)
+
 # Source-pattern test: the consumer process retries instead of exiting
 # (an instance-fatal bail) when the broker is down at boot.
 test_consumer_proc_boot_retry: test_consumer_proc_boot_retry.c
@@ -153,6 +161,13 @@ RINGSPIN_SRCS := test_ring_bounded_spin.c $(SHIM)
 test_ring_bounded_spin: $(RINGSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(RINGSPIN_SRCS) $(LDFLAGS)
 
+# Producer-side analogue: #includes ../nats_ring.c to forge a
+# stalled-consumer state and a SIGALRM watchdog proves push bails (-1)
+# instead of spinning the consumer process forever.
+PUSHSPIN_SRCS := test_ring_push_bounded_spin.c $(SHIM)
+test_ring_push_bounded_spin: $(PUSHSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
+	$(CC) $(CFLAGS) -o $@ $(PUSHSPIN_SRCS) $(LDFLAGS)
+
 # Guards the removal of the unused, ref-unsafe registry ring helpers
 # (nats_registry_ring_get / nats_registry_set_ring_capacity).  Source
 # assertion; self-contained, reads ../nats_handle_registry.{c,h}.
@@ -185,6 +200,8 @@ check: all
 	./test_registry_lookup_ref
 	./test_consumer_proc_boot_retry
 	./test_rpc_subject_validation
+	./test_registry_index_recycle
+	./test_ring_push_bounded_spin
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
@@ -201,7 +218,8 @@ clean:
 	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
 	      test_rpc_ipc_generation test_rpc_inbox_auth \
 	      test_registry_lookup_ref test_consumer_proc_boot_retry \
-	      test_rpc_subject_validation
+	      test_rpc_subject_validation test_registry_index_recycle \
+	      test_ring_push_bounded_spin
 
 # Heartbeat + persist-precision tests (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c

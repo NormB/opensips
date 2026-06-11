@@ -185,6 +185,18 @@ void nats_ring_destroy(nats_ring_t *r)
 	shm_free(r);
 }
 
+/*
+ * Bound on how many times push will spin waiting for a single slot's
+ * previous consumer to publish consumed_gen before giving up and
+ * reporting "full".  The consumer (a SIP worker) may die AFTER advancing
+ * tail but BEFORE the consumed_gen release-store, leaving the slot
+ * forever un-consumed while the ring still looks non-full; without a cap
+ * the producer (the consumer process) would spin here forever, pinning a
+ * CPU.  Bailing with -1 lets the caller back off; a merely-preempted
+ * consumer that resumes within the cap is still observed on the fast path.
+ */
+#define NATS_RING_PUSH_SPIN_MAX  4096u
+
 int nats_ring_push(nats_ring_t *r,
                    const char *subject, uint32_t subject_len,
                    const char *data,    uint32_t data_len,
@@ -198,6 +210,9 @@ int nats_ring_push(nats_ring_t *r,
 {
 	uint64_t h, t;
 	nats_ring_slot_t *slot;
+	unsigned spins = 0;     /* consumed_gen stall counter */
+	uint64_t spin_h = 0;    /* head value the stall counter is tracking */
+	int      spin_tracking = 0;
 
 	if (!r)
 		return -1;
@@ -232,14 +247,27 @@ int nats_ring_push(nats_ring_t *r,
 				__ATOMIC_ACQUIRE);
 			if (got != want) {
 				/* Consumer is still finishing the previous
-				 * generation of this slot.  Yield and retry
-				 * the reservation loop -- another producer
-				 * might race us past it. */
+				 * generation of this slot.  Bounded wait: if the
+				 * SAME head stays blocked on an un-consumed slot
+				 * for too long, the popper that reserved the
+				 * previous generation likely died -- bail as full
+				 * so the caller backs off rather than pinning a
+				 * CPU forever.  A tail/head that advances (real
+				 * progress) resets the counter. */
+				if (spin_tracking && h == spin_h) {
+					if (++spins >= NATS_RING_PUSH_SPIN_MAX)
+						return -1;
+				} else {
+					spin_tracking = 1;
+					spin_h = h;
+					spins  = 0;
+				}
 				nats_ring_cpu_relax();
 				continue;
 			}
 		}
 
+		spin_tracking = 0;
 		if (atomic_compare_exchange_weak_explicit(
 				&r->head, &h, h + 1,
 				memory_order_acq_rel,
@@ -324,9 +352,11 @@ int nats_ring_push(nats_ring_t *r,
  * reactor / futex wait and try again later instead of burning a core.
  * The cap is generous so a merely-preempted producer that comes back
  * within a few microseconds is still observed on the fast path; only a
- * genuinely stalled producer trips it.
+ * genuinely stalled producer trips it.  Bailing is cheap and harmless --
+ * the caller just re-arms its futex wait and retries -- so the cap is
+ * kept low (a stalled slot should not burn a whole scheduler quantum).
  */
-#define NATS_RING_POP_SPIN_MAX  100000u
+#define NATS_RING_POP_SPIN_MAX  4096u
 
 int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 {
