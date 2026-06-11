@@ -143,10 +143,13 @@ static void nats_intern_release(char *p)
 		(p - offsetof(nats_intern_node_t, str));
 	unsigned int hash   = _fnv1a(n->str, n->len);
 	unsigned int bucket = hash & NATS_INTERN_BMASK;
-	if (--n->refcount > 0) return;
 	nats_intern_node_t **prev;
+	/* Locate the node in its chain BEFORE touching refcount: on a
+	 * double-release the node was already unlinked + freed, so the walk
+	 * misses it and we never decrement freed memory or double-free. */
 	for (prev = &g_t->buckets[bucket]; *prev; prev = &(*prev)->next) {
 		if (*prev == n) {
+			if (--n->refcount > 0) return;
 			*prev = n->next;
 			g_t->size--;
 			free(n);
