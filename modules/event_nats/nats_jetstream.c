@@ -36,6 +36,13 @@
 #include "../../lib/nats/nats_pool.h"
 #include "nats_jetstream.h"
 
+/* Named JetStream API error codes (jsErrCode), replacing the raw literals
+ * that were scattered through the MI handlers below.  Values are from the
+ * NATS server API error registry. */
+#define JS_ERR_STREAM_NOT_FOUND     10059  /* JSStreamNotFoundErr */
+#define JS_ERR_CONSUMER_NOT_FOUND   10014  /* JSConsumerNotFoundErr */
+#define JS_ERR_MSG_NOT_FOUND        10037  /* JSNoMessageFoundErr */
+
 /* Helper: get JetStream context, return MI error if unavailable */
 static jsCtx *_get_js(void)
 {
@@ -293,7 +300,7 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 
 	s = nats_dl.js_GetStreamInfo(&si, js, name_buf, NULL, &jerr);
 	if (s != NATS_OK || !si) {
-		if (jerr == 10059) /* stream not found */
+		if (jerr == JS_ERR_STREAM_NOT_FOUND) /* stream not found */
 			return init_mi_error(404, MI_SSTR("stream not found"));
 		LM_ERR("nats_dl.js_GetStreamInfo(%s) failed: %s (jerr=%d)\n",
 			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -567,7 +574,7 @@ mi_response_t *mi_nats_stream_delete(const mi_params_t *params,
 
 	s = nats_dl.js_DeleteStream(js, name_buf, NULL, &jerr);
 	if (s != NATS_OK) {
-		if (jerr == 10059)
+		if (jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("stream not found"));
 		LM_ERR("nats_dl.js_DeleteStream(%s) failed: %s (jerr=%d)\n",
 			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -606,7 +613,7 @@ mi_response_t *mi_nats_stream_purge(const mi_params_t *params,
 
 	s = nats_dl.js_PurgeStream(js, name_buf, NULL, &jerr);
 	if (s != NATS_OK) {
-		if (jerr == 10059)
+		if (jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("stream not found"));
 		LM_ERR("nats_dl.js_PurgeStream(%s) failed: %s (jerr=%d)\n",
 			name_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -759,7 +766,7 @@ mi_response_t *mi_nats_consumer_info(const mi_params_t *params,
 
 	s = nats_dl.js_GetConsumerInfo(&ci, js, stream_buf, consumer_buf, NULL, &jerr);
 	if (s != NATS_OK || !ci) {
-		if (jerr == 10014 || jerr == 10059)
+		if (jerr == JS_ERR_CONSUMER_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("consumer not found"));
 		LM_ERR("nats_dl.js_GetConsumerInfo(%s/%s) failed: %s (jerr=%d)\n",
 			stream_buf, consumer_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -1007,7 +1014,7 @@ mi_response_t *mi_nats_consumer_delete(const mi_params_t *params,
 
 	s = nats_dl.js_DeleteConsumer(js, stream_buf, consumer_buf, NULL, &jerr);
 	if (s != NATS_OK) {
-		if (jerr == 10014 || jerr == 10059)
+		if (jerr == JS_ERR_CONSUMER_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("consumer not found"));
 		LM_ERR("nats_dl.js_DeleteConsumer(%s/%s) failed: %s (jerr=%d)\n",
 			stream_buf, consumer_buf, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -1054,7 +1061,7 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 
 	s = nats_dl.js_GetMsg(&msg, js, name_buf, (uint64_t)seq_int, NULL, &jerr);
 	if (s != NATS_OK || !msg) {
-		if (jerr == 10037 || jerr == 10059)
+		if (jerr == JS_ERR_MSG_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("message not found"));
 		LM_ERR("nats_dl.js_GetMsg(%s, %d) failed: %s (jerr=%d)\n",
 			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
@@ -1123,7 +1130,7 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 
 	s = nats_dl.js_DeleteMsg(js, name_buf, (uint64_t)seq_int, NULL, &jerr);
 	if (s != NATS_OK) {
-		if (jerr == 10037 || jerr == 10059)
+		if (jerr == JS_ERR_MSG_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("message not found"));
 		LM_ERR("nats_dl.js_DeleteMsg(%s, %d) failed: %s (jerr=%d)\n",
 			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
