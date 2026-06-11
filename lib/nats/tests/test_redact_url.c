@@ -110,6 +110,21 @@ int main(void)
 		fprintf(stderr, "  ok: out_sz=0 did not crash\n");
 	}
 
+	/* CASE 14: password contains '@' — the userinfo/host boundary is the
+	 *           LAST '@', so everything up to it must be masked (#45). */
+	nats_redact_url("nats://user:p@ss@host:4222", buf, sizeof(buf));
+	ASSERT_EQ(buf, "nats://[redacted]@host:4222", "last '@' is the boundary");
+
+	/* CASE 15: scheme-less URL WITH credentials — still redact (#45).
+	 *           A NATS URL string is always a URL, so user:pass@host
+	 *           without a scheme is credentials, not data. */
+	nats_redact_url("user:pass@host:4222", buf, sizeof(buf));
+	ASSERT_EQ(buf, "[redacted]@host:4222", "scheme-less creds redacted");
+
+	/* CASE 16: scheme-less, password with '@' */
+	nats_redact_url("u:p@w@host:4222", buf, sizeof(buf));
+	ASSERT_EQ(buf, "[redacted]@host:4222", "scheme-less last '@' boundary");
+
 	/* CASE 13: small buffer — must NUL-terminate even on truncation */
 	{
 		char small[10];
