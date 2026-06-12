@@ -546,6 +546,15 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		return -1;
 	}
 
+	/* Initialize the result set BEFORE any failure return below:
+	 * callers (usrloc's cdb_load_urecord) declare the cdb_res_t on the
+	 * stack uninitialized and run cdb_free_rows(res) on ANY query
+	 * failure, so res must be walkable even when we fast-fail.
+	 * Returning -1 with res uninitialized made a REGISTER arriving
+	 * during a broker outage free a garbage list head (SIGSEGV --
+	 * caught by sip_e2e case 040_broker_bounce). */
+	cdb_res_init(res);
+
 	ncon = (nats_cachedb_con *)con->data;
 	if (!ncon) {
 		LM_ERR("null NATS connection\n");
@@ -560,8 +569,6 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 		LM_DBG("NATS unavailable — query deferred (fast-fail)\n");
 		return -1;
 	}
-
-	cdb_res_init(res);
 
 	if (!filter) {
 		LM_DBG("no filter provided, returning empty result\n");

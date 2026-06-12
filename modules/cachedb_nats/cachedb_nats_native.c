@@ -1475,6 +1475,10 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		LM_ERR("null parameter\n");
 		return -1;
 	}
+	/* Init the result set BEFORE any failure return: callers may
+	 * cdb_free_rows(res) on failure (see the matching fix + rationale
+	 * in nats_cache_query, sip_e2e case 040_broker_bounce). */
+	cdb_res_init(res);
 	ncon = (nats_cachedb_con *)con->data;
 	if (!ncon) {
 		LM_ERR("null NATS connection\n");
@@ -1484,7 +1488,6 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
-	cdb_res_init(res);
 	if (key->len <= 0) {
 		LM_ERR("invalid map key length\n");
 		return -1;
