@@ -64,6 +64,7 @@
 #include "../../dprint.h"
 #include "../../str.h"
 #include "../../ipc.h"
+#include "../../mem/mem.h"
 #include "../../mem/shm_mem.h"
 
 /* Module-scope params defined in cachedb_nats.c. */
@@ -622,10 +623,16 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
 
 	/* Store patterns for the watcher thread.  The strings are owned by
 	 * OpenSIPS's module parameter parser and persist for the process
-	 * lifetime, so we only need to copy the pointer array. */
-	_watch_patterns = malloc(num_patterns * sizeof(char *));
+	 * lifetime, so we only need to copy the pointer array.
+	 *
+	 * pkg memory is correct here: the array is allocated on this (the
+	 * rank-1 worker's main) thread before pthread_create() below, read
+	 * but never freed by the watcher thread, and released only after
+	 * pthread_join() in nats_watch_stop() -- so it is never touched
+	 * concurrently and OpenSIPS's pkg accounting applies. */
+	_watch_patterns = pkg_malloc(num_patterns * sizeof(char *));
 	if (!_watch_patterns) {
-		LM_ERR("failed to allocate watch patterns array\n");
+		LM_ERR("no more pkg memory for watch patterns array\n");
 		return -1;
 	}
 	for (i = 0; i < num_patterns; i++)
@@ -636,7 +643,7 @@ int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
 	if (pthread_create(&_watcher_tid, NULL, _watcher_thread_fn, NULL) != 0) {
 		LM_ERR("failed to create watcher thread\n");
 		atomic_store(&_watcher_running, 0);
-		free(_watch_patterns);
+		pkg_free(_watch_patterns);
 		_watch_patterns = NULL;
 		_num_patterns   = 0;
 		return -1;
@@ -688,7 +695,7 @@ void nats_watch_stop(void)
 		nats_dl.kvWatcher_Destroy(w_claim);
 
 	if (_watch_patterns) {
-		free(_watch_patterns);
+		pkg_free(_watch_patterns);
 		_watch_patterns = NULL;
 		_num_patterns = 0;
 	}
@@ -797,32 +804,28 @@ void nats_watcher_proc_main(int rank)
 	}
 
 	/* Build the patterns array from the modparam-fed kv_watch_list.
-	 * Stays alive for the lifetime of the process; no need to free. */
-	if (kv_watch_count > 0) {
-		patterns = malloc((kv_watch_count + 1) * sizeof(char *));
-		if (!patterns) {
-			LM_ERR("watcher proc: malloc failed for patterns\n");
-			return;
-		}
-		i = 0;
-		for (e = kv_watch_list; e; e = e->next)
-			patterns[i++] = e->pattern;
-		patterns[i] = NULL;
-		_watch_patterns = patterns;
-		_num_patterns = kv_watch_count;
-	} else {
-		_watch_patterns = NULL;
-		_num_patterns = 0;
+	 * Single-threaded process here, so pkg memory is safe and gives
+	 * OpenSIPS's accounting; it stays alive for the lifetime of the
+	 * process (reclaimed on SIGTERM), so it is never freed.
+	 *
+	 * mod_init forks this process ONLY when kv_watch_count > 0 (see the
+	 * exports.procs gate in cachedb_nats.c), so the count is always
+	 * positive here -- no _num_patterns == 0 fallback is reachable. */
+	patterns = pkg_malloc((kv_watch_count + 1) * sizeof(char *));
+	if (!patterns) {
+		LM_ERR("watcher proc: no more pkg memory for patterns\n");
+		return;
 	}
+	i = 0;
+	for (e = kv_watch_list; e; e = e->next)
+		patterns[i++] = e->pattern;
+	patterns[i] = NULL;
+	_watch_patterns = patterns;
+	_num_patterns = kv_watch_count;
 
 	atomic_store(&_watcher_running, 1);
 
-	if (_num_patterns > 0) {
-		LM_INFO("watcher proc: watching %d pattern(s)\n", _num_patterns);
-	} else {
-		LM_INFO("watcher proc: no kv_watch patterns configured; "
-			"loop will block on watcher creation until at least one is set\n");
-	}
+	LM_INFO("watcher proc: watching %d pattern(s)\n", _num_patterns);
 
 	/* Run forever.  SIGTERM from main on shutdown will terminate the
 	 * process directly. */

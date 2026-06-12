@@ -7,9 +7,9 @@ Date: 2026-06-11, branch head `c1429fea4`.
 Tags: `[SEC]` security · `[PERF]` performance · `[MAINT]` maintainability · `[SURV]` survivability.
 Items merged where multiple reviews found the same root cause.
 
-**Status (2026-06-11):** P0–P2 (1–44) and most of P3 done. The P3 security
+**Status (2026-06-12):** P0–P2 (1–44) and most of P3 done. The P3 security
 nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
-72, 73) are landed. Remaining P3: 60 (split the 3k-line files) and 71 (b/c sub-parts) -- both
+71, 72, 73) are landed. Remaining P3: only 60 (split the 3k-line files) --
 larger/structural and deliberately left for a dedicated reviewed pass. (74's
 unit-testable gaps are filled; its live-broker paths stay with the e2e harness.)
 Progress is tracked in git (`feature/nats`), not just these checkboxes.
@@ -340,9 +340,12 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
   for test binaries.**
 - [x] **70. [MAINT] Honor `expected_kv_no` in raw_query (`cachedb_nats_native.c:925-1016,
   1061-1131`) — callers requesting more columns get OOB frees in the core's reply-free loop.**
-- [ ] **71. [MAINT] Watcher hygiene: add `\n` to LM_INFO lines (`cachedb_nats_watch.c:625-627`),
+- [x] **71. [MAINT] Watcher hygiene: add `\n` to LM_INFO lines (`cachedb_nats_watch.c:625-627`),
   drop the unreachable `_num_patterns==0` branch (`:799-804`), use pkg_malloc not raw
-  malloc (`:605,618`).**
+  malloc (`:605,618`).** `_watch_patterns` now pkg_malloc/pkg_free'd in both the rank-1
+  pthread path and the dedicated proc (always main-thread, never the watcher thread — the
+  index-rebuild path still avoids pkg); dead proc-main logging branch removed. Covered by
+  `tests/test_watcher_pkg_mem.c`.
 - [x] **72. [MAINT] Unify the aliased drain-timeout modparams (`nats_drain_timeout_ms` /
   `cdb_drain_timeout_ms` both write one global, last-writer-wins) — take the max across
   registrants like reconnect params.**

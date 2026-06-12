@@ -22,7 +22,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_revmap_delete test_cas_retry_policy \
         test_pk_stack_key test_resync_timer test_op_stats test_index_converge \
         test_query_keyset_refcount test_watcher_leak_stat \
-        test_map_key_encode test_map_migrate test_map_compose test_raw_query_cols test_rebuild_thread_safe
+        test_map_key_encode test_map_migrate test_map_compose test_raw_query_cols test_rebuild_thread_safe \
+        test_watcher_pkg_mem
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -37,7 +38,7 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_intern_wiring test_intern_unit test_entry_blob_combine \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
-                  test_allops_fastfail
+                  test_allops_fastfail test_watcher_pkg_mem
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -225,6 +226,12 @@ test_raw_query_cols: test_raw_query_cols.c
 test_rebuild_thread_safe: test_rebuild_thread_safe.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# Source-pattern (NATS_TODO #71): the watcher's _watch_patterns array is
+# pkg_malloc/pkg_free'd (not raw libc malloc/free), and the unreachable
+# _num_patterns==0 logging branch in the dedicated proc is gone.
+test_watcher_pkg_mem: test_watcher_pkg_mem.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -269,6 +276,7 @@ check: all
 	./test_map_compose
 	./test_raw_query_cols
 	./test_rebuild_thread_safe
+	./test_watcher_pkg_mem
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
