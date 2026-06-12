@@ -922,6 +922,17 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 		nats_rpc_staged_clear();
 		return -3;
 	}
+	/* Fast-fail on a disconnected pool: natsConnection_RequestMsg on a
+	 * reconnecting connection cannot succeed (no reply can arrive) and
+	 * would block THIS process -- a timer/event route, per the route
+	 * restriction -- for the full timeout_ms.  Mirror w_nats_fetch's
+	 * disconnected fast-fail instead. */
+	if (!nats_pool_is_connected()) {
+		LM_WARN("nats_request: NATS disconnected; failing fast "
+			"instead of blocking %d ms\n", tmo);
+		nats_rpc_staged_clear();
+		return -3;
+	}
 
 	subj_c = nats_rpc_cstr_buf(subj_buf, sizeof(subj_buf), subject->s, subject->len);
 	if (!subj_c) {

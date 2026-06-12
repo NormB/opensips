@@ -891,6 +891,16 @@ int nats_cache_raw_query_impl(cachedb_con *con, str *attr,
 	char cmd_buf[NATS_RAW_CMD_BUF];
 	char *tok1, *tok2, *tok3, *saveptr;
 
+	/* Zero the out-params FIRST so every failure return below leaves
+	 * them deterministic -- the API contract does not require callers
+	 * to pre-initialize them, and a -1 with garbage *reply_no / *reply
+	 * is a latent crash in any caller that checks them before rc (see
+	 * the matching cdb_res_init fix in nats_cache_query). */
+	if (reply)
+		*reply = NULL;
+	if (reply_no)
+		*reply_no = 0;
+
 	if (!con || !attr || !attr->s || attr->len <= 0) {
 		LM_ERR("null or empty raw_query command\n");
 		return -1;

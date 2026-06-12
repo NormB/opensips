@@ -31,3 +31,4 @@ test_rebuild_thread_safe
 test_watcher_pkg_mem
 test_json_tu_split
 test_query_res_init
+test_outparam_contracts

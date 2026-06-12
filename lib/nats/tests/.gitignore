@@ -17,3 +17,4 @@ test_validate_publish_subject
 test_validate_subject_cache
 test_validate_modes
 test_pool_merge
+test_async_first_connect

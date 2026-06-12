@@ -23,7 +23,8 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_pk_stack_key test_resync_timer test_op_stats test_index_converge \
         test_query_keyset_refcount test_watcher_leak_stat \
         test_map_key_encode test_map_migrate test_map_compose test_raw_query_cols test_rebuild_thread_safe \
-        test_watcher_pkg_mem test_json_tu_split test_query_res_init
+        test_watcher_pkg_mem test_json_tu_split test_query_res_init \
+        test_outparam_contracts
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -38,7 +39,7 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_intern_wiring test_intern_unit test_entry_blob_combine \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
-                  test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init
+                  test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -243,6 +244,11 @@ test_json_tu_split: test_json_tu_split.c
 test_query_res_init: test_query_res_init.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Out-param contracts: raw_query zeroes *reply/*reply_no at entry,
+# get() zeroes *val -- every failure return leaves them deterministic.
+test_outparam_contracts: test_outparam_contracts.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -290,6 +296,7 @@ check: all
 	./test_watcher_pkg_mem
 	./test_json_tu_split
 	./test_query_res_init
+	./test_outparam_contracts
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
