@@ -84,7 +84,9 @@ int main(void)
 
 	/* ---- production wiring -------------------------------------- */
 	{
-		const char *p = "../nats_consumer_proc.c";
+		/* ensure_backoff_seconds and the reconcile callback moved to
+		 * the sub-config TU in the NATS_TODO #60 split. */
+		const char *p = "../nats_sub_config.c";
 		ASSERT(file_contains(p, "#define ENSURE_BACKOFF_CAP_S 60u"),
 			"production caps the backoff at 60 s");
 		ASSERT(file_contains(p, "ensure_backoff_seconds(h->ensure_failures)"),

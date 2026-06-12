@@ -89,6 +89,7 @@
 #include "nats_consumer_proc.h"
 #include "nats_rpc_consumer.h"
 #include "nats_rpc_ipc.h"
+#include "nats_consumer_proc_internal.h"
 
 /* SHM heartbeat block -- bumped per loop iteration so a watchdog or
  * MI handler can detect a wedged or crashed consumer process.
@@ -118,12 +119,6 @@ void nats_consumer_hb_destroy(void)
 	}
 }
 
-static inline long long _now_monotonic_us(void)
-{
-	struct timespec ts;
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-	return (long long)ts.tv_sec * 1000000LL + (long long)ts.tv_nsec / 1000LL;
-}
 
 static inline void nats_consumer_hb_tick(void)
 {
@@ -196,72 +191,18 @@ static int fetch_budget_ms(int configured, int num_subs)
 
 /* ── process-local state ─────────────────────────────────────── */
 
-typedef struct proc_sub_state {
-	str                   id;              /* copy of registry handle id
-	                                        * (process-local buffer, NOT
-	                                        *  shared) */
-	uint16_t              handle_idx;      /* stable index from registry */
-	natsSubscription     *sub;             /* active pull subscription */
-	struct nats_ring     *ring;            /* borrowed ref to handle ring */
-	nats_handle_t        *h_ref;           /* borrowed ref to SHM handle
-	                                        * (used for pending_ops
-	                                        *  accounting). */
-	time_t                last_fetch;
 
-	/* Per-handle pull/push/defer/error counters live in the SHM handle
-	 * (nats_handle_t: pulls_requested, msgs_delivered, fetch_skips_full,
-	 * backpressure_drops, fetch_errors, ...) so the attendant's MI
-	 * handlers can read them.  Bumped here via hstat_add(). */
-
-	/* Monotonic-us timestamp of the last oversize-message WARN, so a flood
-	 * of oversized messages logs at most once per interval (the per-handle
-	 * `terms` counter still increments on every one). */
-	long long             last_oversize_warn_us;
-
-	/* Highest stream sequence delivered so far.  Survives a rebuild (the
-	 * proc_sub_state_t is kept when the natsSubscription is recreated), so
-	 * a vanished+recreated durable can resume just past it instead of
-	 * replaying the whole stream under deliver_policy=all. */
-	uint64_t              last_stream_seq;
-
-	/* Subscription-refresh bookkeeping. */
-	int                   dirty;   /* 1 iff the subscription needs
-	                                 * rebuild (epoch bump or broker
-	                                 * GC'd ephemeral); cleared when
-	                                 * ensure_subscription_for_handle
-	                                 * successfully creates a fresh
-	                                 * natsSubscription. */
-
-	/* String cleanup slots.  These point at the malloc'd C-strings
-	 * and arrays we hand to nats.c in ensure_subscription_for_handle();
-	 * nats.c holds borrowed pointers for the life of the subscription,
-	 * so we stash them here and the retire/reap teardown path frees
-	 * them along with the proc_sub_state_t.  NULL entries mean
-	 * "no allocation for that slot". */
-	char                 *c_durable;
-	char                 *c_filter;
-	char                 *c_stream;
-	char                 *c_domain;
-	char                 *c_api_prefix;
-	char                 *c_sample_freq;
-	int64_t              *backoff_arr;
-	const char          **filters_arr;
-	int                   filters_arr_len;
-
-	struct proc_sub_state *next;
-} proc_sub_state_t;
-
-static proc_sub_state_t *g_subs = NULL;
+proc_sub_state_t *g_subs = NULL;
 
 /* Dense idx -> proc_sub_state_t table maintained alongside g_subs so the
  * ack drain callback (which only carries the handle_idx via the ack
  * token) can find the owning subscription's handle in O(1) without
  * scanning the linked list per ack.  Updated under the same single-
  * producer assumption as g_subs (the consumer process only). */
-static proc_sub_state_t *g_subs_by_idx[NATS_REGISTRY_MAX_HANDLES] = {0};
+proc_sub_state_t *g_subs_by_idx[NATS_REGISTRY_MAX_HANDLES] = {0};
 
 static natsConnection   *g_nc   = NULL;
-static jsCtx            *g_js   = NULL;
+jsCtx            *g_js   = NULL;
 
 /* SHM-handle stat bump.  All counters live in the per-handle SHM
  * struct; producers are this process only, readers are MI in the
@@ -277,908 +218,14 @@ static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
 	__atomic_fetch_add(field, v, __ATOMIC_RELAXED);
 }
 
-/* ── natsMsg ref table ───────────────────────────────────────── */
-
-/*
- * Process-local 2D ref table: for each (handle_idx, slot_idx) we keep
- * the live natsMsg* plus a 16-bit generation counter bumped every
- * time the slot is reused.  The ack token encodes generation so a
- * stale ack (one issued for a natsMsg that has already been acked and
- * the slot reused) is detected and ignored.
- *
- * The ring-capacity dimension is sized at first use of a handle in
- * store_msg_ref().  Rings may share the same capacity
- * (NATS_HANDLE_RING_CAPACITY) or override it per-handle via
- * `ring_capacity` at bind time; we key off the handle's ring
- * object so any per-handle capacity is honoured.
- */
-typedef struct msg_ref_slot {
-	natsMsg   *msg;
-	uint16_t   generation;
-	uint16_t   in_use;       /* 1 iff msg != NULL and ack pending */
-	uint32_t   _pad;
-	long long  claimed_at_us; /* CLOCK_MONOTONIC us at store; for orphan reap */
-} msg_ref_slot_t;
-
-/* Reclaim a msg-ref slot if it has been outstanding longer than this: a
- * worker that died after popping a message but before acking would
- * otherwise leak its slot forever.  Generously larger than any reasonable
- * JetStream ack_wait (default 30s) so a slow-but-live worker still within
- * its ack_wait is never reaped; the broker has long since redelivered an
- * orphan this old, so its original ack would be rejected anyway. */
-#define NATS_MSG_REF_ORPHAN_TTL_US   (120LL * 1000000LL)
-/* How often the main loop scans for orphans (cheap, but no need every tick). */
-#define NATS_MSG_REF_REAP_INTERVAL_US (30LL * 1000000LL)
-
-/* Minimum interval between oversize-message WARN lines per subscription, so
- * a flood of oversized messages cannot flood the log. */
-#define NATS_OVERSIZE_WARN_INTERVAL_US (5LL * 1000000LL)
-
-/* Count of orphaned msg-ref slots reclaimed (telemetry). */
-static unsigned long g_msg_ref_orphans_reaped;
-
-typedef struct msg_ref_row {
-	uint32_t         capacity;     /* 0 == row not allocated yet */
-	msg_ref_slot_t  *slots;        /* [capacity] */
-	uint32_t         next_slot;    /* round-robin hint */
-} msg_ref_row_t;
-
-static msg_ref_row_t g_msg_refs[NATS_REGISTRY_MAX_HANDLES];
-
-static int ensure_row(uint16_t handle_idx, uint32_t capacity)
-{
-	msg_ref_row_t *row;
-	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
-		return -1;
-	row = &g_msg_refs[handle_idx];
-	if (row->slots)
-		return 0;
-	row->slots = (msg_ref_slot_t *)calloc(capacity, sizeof(msg_ref_slot_t));
-	if (!row->slots) {
-		LM_ERR("nats_consumer_proc: oom for msg-ref row "
-			"handle_idx=%u capacity=%u\n",
-			(unsigned)handle_idx, (unsigned)capacity);
-		return -1;
-	}
-	row->capacity  = capacity;
-	row->next_slot = 0;
-	return 0;
-}
-
-/* Reserve a slot, stash the natsMsg, return the packed ack_token.
- * On failure (no free slot) returns 0 and sets *ok to 0. */
-static uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
-                              natsMsg *m, int *ok)
-{
-	msg_ref_row_t  *row;
-	msg_ref_slot_t *slot;
-	uint32_t        i, start;
-
-	*ok = 0;
-	if (ensure_row(handle_idx, ring_capacity) < 0)
-		return 0;
-	row = &g_msg_refs[handle_idx];
-
-	/* Scan from next_slot for a free slot.  The ring and the ref
-	 * table are the same size by construction, so if the ring ever
-	 * has room (the worker hasn't acked yet for some outstanding
-	 * slot), we should also have a free entry.  If not, the worker
-	 * is lagging acks -- return the "full" signal and let the caller
-	 * skip the push. */
-	start = row->next_slot;
-	for (i = 0; i < row->capacity; i++) {
-		uint32_t idx = (start + i) % row->capacity;
-		slot = &row->slots[idx];
-		if (!slot->in_use) {
-			slot->msg           = m;
-			slot->in_use        = 1;
-			slot->generation    = (uint16_t)(slot->generation + 1);
-			slot->claimed_at_us = _now_monotonic_us();
-			row->next_slot      = (idx + 1) % row->capacity;
-			*ok = 1;
-			return nats_ack_token_pack(handle_idx, idx, slot->generation);
-		}
-	}
-
-	LM_WARN("nats_consumer_proc: msg-ref table full for handle_idx=%u; "
-		"worker is not acking fast enough\n", (unsigned)handle_idx);
-	return 0;
-}
-
-/* Take the msg out of the ref table if generation matches.  Returns
- * the natsMsg* (which the caller MUST destroy after calling the
- * requested ack action), or NULL if the slot is stale / unused. */
-static natsMsg *release_msg_ref(uint64_t token)
-{
-	uint16_t         handle_idx = nats_ack_token_handle(token);
-	uint32_t         slot_idx   = nats_ack_token_slot(token);
-	uint16_t         gen        = nats_ack_token_generation(token);
-	msg_ref_row_t   *row;
-	msg_ref_slot_t  *slot;
-	natsMsg         *m;
-
-	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
-		return NULL;
-	row = &g_msg_refs[handle_idx];
-	if (!row->slots || slot_idx >= row->capacity)
-		return NULL;
-	slot = &row->slots[slot_idx];
-	if (!slot->in_use) {
-		LM_DBG("nats_consumer_proc: stale ack for token=0x%016lx "
-			"(slot already free)\n", (unsigned long)token);
-		return NULL;
-	}
-	if (slot->generation != gen) {
-		LM_DBG("nats_consumer_proc: generation mismatch for "
-			"token=0x%016lx (expected gen=%u got %u) -- stale ack\n",
-			(unsigned long)token,
-			(unsigned)slot->generation, (unsigned)gen);
-		return NULL;
-	}
-	m = slot->msg;
-	slot->msg    = NULL;
-	slot->in_use = 0;
-	/* keep generation; next use bumps it again. */
-	return m;
-}
-
-/*
- * Reclaim msg-ref slots that have been outstanding longer than
- * NATS_MSG_REF_ORPHAN_TTL_US -- the worker that owned them died before
- * acking.  Destroys the leaked natsMsg, frees the slot (bumping the
- * generation so a late ack is rejected), and counts it.  Runs in the
- * consumer process's single-threaded main loop, so no locking is needed.
- * Returns the number of slots reaped.
- */
-static int reap_orphan_msg_refs(void)
-{
-	long long now = _now_monotonic_us();
-	int reaped = 0;
-	uint32_t h, i;
-
-	for (h = 0; h < NATS_REGISTRY_MAX_HANDLES; h++) {
-		msg_ref_row_t *row = &g_msg_refs[h];
-		if (!row->slots)
-			continue;
-		for (i = 0; i < row->capacity; i++) {
-			msg_ref_slot_t *slot = &row->slots[i];
-			if (!slot->in_use)
-				continue;
-			if (now - slot->claimed_at_us <= NATS_MSG_REF_ORPHAN_TTL_US)
-				continue;
-			if (slot->msg)
-				nats_dl.natsMsg_Destroy(slot->msg);
-			slot->msg        = NULL;
-			slot->in_use     = 0;
-			slot->generation = (uint16_t)(slot->generation + 1);
-			g_msg_ref_orphans_reaped++;
-			reaped++;
-		}
-	}
-	if (reaped > 0)
-		LM_WARN("nats_consumer_proc: reaped %d orphaned msg-ref slot(s) "
-			"(worker died mid-processing?); total reaped=%lu\n",
-			reaped, g_msg_ref_orphans_reaped);
-	return reaped;
-}
 
 /* ── forward declarations ────────────────────────────────────── */
 
 typedef struct drain_ack_ctx drain_ack_ctx_t;
 
-static int  reconcile_subs_cb(nats_handle_t *h, void *user);
-static int  ensure_subscription_for_handle(nats_handle_t *h);
 static int  pull_one_batch(proc_sub_state_t *ss, int budget_ms);
 static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
 static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
-static proc_sub_state_t *find_sub_by_index(uint16_t index);
-
-/* ── enum mapping helpers ────────────────────────────────────── */
-
-static jsDeliverPolicy map_deliver_policy(nats_deliver_policy_e p)
-{
-	switch (p) {
-		case NATS_DELIVER_ALL:              return js_DeliverAll;
-		case NATS_DELIVER_LAST:             return js_DeliverLast;
-		case NATS_DELIVER_NEW:              return js_DeliverNew;
-		case NATS_DELIVER_LAST_PER_SUBJECT: return js_DeliverLastPerSubject;
-		case NATS_DELIVER_BY_START_SEQ:     return js_DeliverByStartSequence;
-		case NATS_DELIVER_BY_START_TIME:    return js_DeliverByStartTime;
-	}
-	return js_DeliverAll;
-}
-
-static jsAckPolicy map_ack_policy(nats_ack_policy_e p)
-{
-	switch (p) {
-		case NATS_ACK_EXPLICIT: return js_AckExplicit;
-		case NATS_ACK_NONE:     return js_AckNone;
-		case NATS_ACK_ALL:      return js_AckAll;
-	}
-	return js_AckExplicit;
-}
-
-static jsReplayPolicy map_replay_policy(nats_replay_policy_e p)
-{
-	switch (p) {
-		case NATS_REPLAY_INSTANT:  return js_ReplayInstant;
-		case NATS_REPLAY_ORIGINAL: return js_ReplayOriginal;
-	}
-	return js_ReplayInstant;
-}
-
-/* ── helpers ─────────────────────────────────────────────────── */
-
-/* nats_str_to_cstr() was consolidated into lib/nats/nats_str.h as
- * nats_str_to_cstr() -- see P3-63.  It mallocs a process-local NUL-terminated
- * copy (nats.c wants C strings; registry str buffers are not NUL-terminated);
- * subscriptions are long-lived so the copies are kept on the proc_sub_state_t
- * and freed by the retire/reap teardown path. */
-
-static int dup_str_local(str *dst, const str *src)
-{
-	dst->s = (char *)malloc((size_t)src->len);
-	if (!dst->s)
-		return -1;
-	memcpy(dst->s, src->s, src->len);
-	dst->len = src->len;
-	return 0;
-}
-
-/* Match a proc-sub state by handle IDENTITY (the unique per-claim index),
- * NOT by id string.  Ids are reused on unbind+rebind, so an id match could
- * return a different (old or new) handle's sub; the index is unique among
- * live + retired-not-yet-reaped handles. */
-static proc_sub_state_t *find_sub_by_index(uint16_t index)
-{
-	proc_sub_state_t *s;
-	for (s = g_subs; s; s = s->next) {
-		if (s->handle_idx == index)
-			return s;
-	}
-	return NULL;
-}
-
-/* Free all the malloc'd C-strings / arrays we stashed on ss during
- * ensure_subscription_for_handle().  nats.c's jsConsumerConfig holds
- * borrowed pointers for the life of the subscription; the retire/reap
- * teardown path calls us once the subscription is destroyed.
- *
- * Leaves ss itself alive -- caller decides whether to free the struct
- * (on full teardown) or to clear the slots for recreation (on an
- * ephemeral consumer rebuild). */
-static void free_proc_sub_strings(proc_sub_state_t *ss)
-{
-	int i;
-	if (!ss)
-		return;
-
-	free(ss->c_durable);     ss->c_durable     = NULL;
-	free(ss->c_filter);      ss->c_filter      = NULL;
-	free(ss->c_stream);      ss->c_stream      = NULL;
-	free(ss->c_domain);      ss->c_domain      = NULL;
-	free(ss->c_api_prefix);  ss->c_api_prefix  = NULL;
-	free(ss->c_sample_freq); ss->c_sample_freq = NULL;
-
-	free(ss->backoff_arr);   ss->backoff_arr   = NULL;
-
-	if (ss->filters_arr) {
-		for (i = 0; i < ss->filters_arr_len; i++)
-			free((void *)ss->filters_arr[i]);
-		free(ss->filters_arr);
-		ss->filters_arr     = NULL;
-		ss->filters_arr_len = 0;
-	}
-}
-
-/* ── subscription setup ──────────────────────────────────────── */
-
-/*
- * Create a pull subscription for `h` if this process has not already
- * done so.  Succeeds idempotently: if we already have a proc_sub_state
- * for this id, returns 0 without touching the server.
- *
- * The c-string fields passed into nats.c config structs are stashed
- * on the proc_sub_state_t (see str_to_cstr comment) and freed by the
- * retire/reap teardown path when the subscription is destroyed.
- */
-/* Parse a comma-separated list of durations into an allocated
- * `int64_t` array of nanoseconds.  Returns 0 on success and fills
- * `*out_arr` and `*out_len`; returns -1 on parse error.  Called only
- * when `csv` is non-empty.  The returned array is malloc'd (NOT SHM);
- * the caller owns it and should treat it as consumer-process-local
- * (freed by the retire/reap teardown path when the sub is destroyed).
- *
- * Grammar matches nats_handle_parse's duration syntax:
- *   <int>(ms|s|m|h|d), no suffix = ms.
- */
-static int parse_backoff_csv(const str *csv, int64_t **out_arr, int *out_len)
-{
-	int64_t *arr = NULL;
-	int      n = 0, cap = 0;
-	const char *p = csv->s;
-	const char *end = csv->s + csv->len;
-
-	*out_arr = NULL;
-	*out_len = 0;
-	if (csv->len <= 0) return 0;
-
-	while (p < end) {
-		const char *tok_end;
-		int tok_len;
-		long long v = 0;
-		int i = 0, digits = 0;
-		long long mult;
-
-		/* skip leading ws + commas */
-		while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
-			p++;
-		if (p >= end) break;
-
-		tok_end = memchr(p, ',', end - p);
-		if (!tok_end) tok_end = end;
-		tok_len = (int)(tok_end - p);
-		/* trim trailing ws */
-		while (tok_len > 0 &&
-		       (p[tok_len-1] == ' ' || p[tok_len-1] == '\t'))
-			tok_len--;
-		if (tok_len == 0) { p = tok_end; continue; }
-
-		while (i < tok_len && p[i] >= '0' && p[i] <= '9') {
-			v = v * 10 + (p[i] - '0');
-			digits++;
-			i++;
-			/* clamp to keep v * mult * 1e6 within int64; INT64_MAX/1e6
-			 * is ~9.2e12 ms, well past any sane backoff. */
-			if (v > 9000000000000LL) { free(arr); return -1; }
-		}
-		if (!digits) { free(arr); return -1; }
-
-		if (i == tok_len)                                 mult = 1LL;
-		else if (i + 2 == tok_len && p[i]=='m' && p[i+1]=='s') mult = 1LL;
-		else if (i + 1 == tok_len && p[i]=='s') mult = 1000LL;
-		else if (i + 1 == tok_len && p[i]=='m') mult = 60LL * 1000LL;
-		else if (i + 1 == tok_len && p[i]=='h') mult = 60LL*60LL*1000LL;
-		else if (i + 1 == tok_len && p[i]=='d') mult = 24LL*60LL*60LL*1000LL;
-		else { free(arr); return -1; }
-
-		/* Reject if conversion to nanoseconds would overflow int64. */
-		if (mult > 0 && v > INT64_MAX / mult / 1000000LL) {
-			free(arr);
-			return -1;
-		}
-
-		if (n == cap) {
-			int newcap = cap ? cap * 2 : 8;
-			int64_t *tmp = (int64_t *)realloc(arr,
-				sizeof(int64_t) * (size_t)newcap);
-			if (!tmp) { free(arr); return -1; }
-			arr = tmp;
-			cap = newcap;
-		}
-		arr[n++] = v * mult * 1000000LL;   /* ms -> ns */
-
-		p = tok_end;
-	}
-
-	*out_arr = arr;
-	*out_len = n;
-	return 0;
-}
-
-/* Parse a comma-separated list of filter subjects into an allocated
- * `const char **` array.  Returns 0 and fills `*out_arr` + `*out_len`;
- * returns -1 on OOM.  Each element and the array are malloc'd; the
- * retire/reap teardown path frees them when the subscription is
- * destroyed. */
-static int parse_filters_csv(const str *csv,
-                             const char ***out_arr, int *out_len)
-{
-	const char **arr = NULL;
-	int n = 0, cap = 0;
-	const char *p = csv->s;
-	const char *end = csv->s + csv->len;
-
-	*out_arr = NULL;
-	*out_len = 0;
-	if (csv->len <= 0) return 0;
-
-	while (p < end) {
-		const char *tok_end;
-		int tok_len;
-		char *dup;
-
-		while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
-			p++;
-		if (p >= end) break;
-
-		tok_end = memchr(p, ',', end - p);
-		if (!tok_end) tok_end = end;
-		tok_len = (int)(tok_end - p);
-		while (tok_len > 0 &&
-		       (p[tok_len-1] == ' ' || p[tok_len-1] == '\t'))
-			tok_len--;
-		if (tok_len == 0) { p = tok_end; continue; }
-
-		dup = (char *)malloc((size_t)tok_len + 1);
-		if (!dup) goto oom;
-		memcpy(dup, p, tok_len);
-		dup[tok_len] = '\0';
-
-		if (n == cap) {
-			int newcap = cap ? cap * 2 : 4;
-			const char **tmp = (const char **)realloc(arr,
-				sizeof(const char *) * (size_t)newcap);
-			if (!tmp) { free(dup); goto oom; }
-			arr = tmp;
-			cap = newcap;
-		}
-		arr[n++] = dup;
-		p = tok_end;
-	}
-
-	*out_arr = arr;
-	*out_len = n;
-	return 0;
-
-oom:
-	{
-		int i;
-		for (i = 0; i < n; i++) free((void *)arr[i]);
-	}
-	free(arr);
-	return -1;
-}
-
-static int ensure_subscription_for_handle(nats_handle_t *h)
-{
-	proc_sub_state_t *ss;
-	jsConsumerConfig  cc;
-	jsSubOptions      so;
-	jsOptions         js_opts;
-	jsOptions        *js_opts_p = NULL;
-	natsStatus        s;
-	char             *durable_c     = NULL;
-	char             *filter_c      = NULL;
-	char             *stream_c      = NULL;
-	char             *sample_freq_c = NULL;
-	char             *domain_c      = NULL;
-	char             *api_prefix_c  = NULL;
-	int64_t          *backoff_arr   = NULL;
-	int               backoff_len   = 0;
-	const char      **filters_arr   = NULL;
-	int               filters_len   = 0;
-	int               is_rebuild    = 0;
-
-	if (!h || !h->ring)
-		return 0;   /* handle still being constructed or TEST_SHIM */
-
-	/* Dirty handles refresh in place -- the sub was destroyed
-	 * on the epoch bump or on a fetch-time "consumer vanished" error,
-	 * and we now rebuild the natsSubscription while keeping the
-	 * proc_sub_state_t (and its counters) intact. */
-	ss = find_sub_by_index(h->index);
-	if (ss) {
-		if (!ss->dirty)
-			return 0;   /* clean + already subscribed */
-		/* Rebuild path: free any strings we allocated last time so
-		 * we can stash fresh ones below.  The old natsSubscription
-		 * has already been destroyed by whoever set dirty. */
-		free_proc_sub_strings(ss);
-		ss->sub = NULL;
-		is_rebuild = 1;
-		if (h->type == NATS_CONSUMER_EPHEMERAL) {
-			LM_DBG("nats_consumer_proc: re-creating ephemeral "
-				"consumer for %.*s\n",
-				(int)h->id.len, h->id.s);
-		} else {
-			LM_DBG("nats_consumer_proc: refreshing subscription for "
-				"%.*s (epoch bump)\n",
-				(int)h->id.len, h->id.s);
-		}
-	} else {
-		ss = (proc_sub_state_t *)calloc(1, sizeof(*ss));
-		if (!ss) {
-			LM_ERR("nats_consumer_proc: proc_sub_state calloc failed\n");
-			return -1;
-		}
-		if (dup_str_local(&ss->id, &h->id) < 0) {
-			LM_ERR("nats_consumer_proc: id dup failed\n");
-			free(ss);
-			return -1;
-		}
-		ss->ring       = h->ring;
-		ss->handle_idx = h->index;
-		ss->h_ref      = h;
-	}
-
-	/* Pre-size the ref row so pull_one_batch doesn't pay for the
-	 * first-use allocation under load.
-	 *
-	 * The ref-row capacity must be at least max_ack_pending: the broker
-	 * may deliver that many messages before any acks come back, and
-	 * each delivery occupies one ref slot until acked.  Sizing from
-	 * ring_capacity alone (an earlier design) caused
-	 * msg-ref-table-full drops at any handle where max_ack_pending >
-	 * ring_capacity, which then triggered ack_wait redeliveries and
-	 * stalled the ack floor at the broker.
-	 *
-	 * Take max(ring_capacity, max_ack_pending) -- ring_capacity is the
-	 * worker-visible buffer; max_ack_pending is the broker's in-flight
-	 * cap; the ref table needs to span the larger of the two.  When
-	 * max_ack_pending is unset (0 = "unlimited"), fall back to
-	 * ring_capacity. */
-	{
-		uint32_t ref_cap = nats_ring_capacity(h->ring);
-		if (h->max_ack_pending > 0 &&
-		    (uint32_t)h->max_ack_pending > ref_cap)
-			ref_cap = (uint32_t)h->max_ack_pending;
-		if (ensure_row(h->index, ref_cap) < 0) {
-			LM_ERR("nats_consumer_proc: ref-row init failed for "
-				"id='%.*s'\n", h->id.len, h->id.s);
-			if (!is_rebuild) {
-				free(ss->id.s);
-				free(ss);
-			}
-			return -1;
-		}
-	}
-	/* Build jsConsumerConfig with the full handle-config matrix. */
-	nats_dl.jsConsumerConfig_Init(&cc);
-
-	durable_c    = nats_str_to_cstr(&h->durable);
-	filter_c     = nats_str_to_cstr(&h->filter);
-	stream_c     = nats_str_to_cstr(&h->stream);
-	domain_c     = nats_str_to_cstr(&h->js_domain);
-	api_prefix_c = nats_str_to_cstr(&h->api_prefix);
-
-	/* Render sample_freq as a string -- nats.c expects a C string here,
-	 * e.g. "25" for 25% sampling.  Only set when the script supplied
-	 * a non-zero value; zero means "disabled / don't sample".
-	 *
-	 * Buffer sized for any 32-bit int (max -2147483648 = 11 chars + NUL),
-	 * not the validated 0..100 range, so gcc -Wformat-truncation is
-	 * satisfied without relying on cross-translation-unit value tracking. */
-	if (h->sample_freq > 0) {
-		sample_freq_c = (char *)malloc(12);
-		if (sample_freq_c)
-			snprintf(sample_freq_c, 12, "%d", h->sample_freq);
-	}
-
-	if (h->type == NATS_CONSUMER_DURABLE && durable_c)
-		cc.Durable = durable_c;
-	if (filter_c)
-		cc.FilterSubject = filter_c;
-
-	/* Multi-filter: nats.c 3.13 exposes FilterSubjects (array) +
-	 * FilterSubjectsLen.  Only honored when single-subject FilterSubject
-	 * is unset -- the broker rejects the combination.  We parse the CSV
-	 * at subscription time rather than keeping it pre-split in SHM so
-	 * the parser output stays simple. */
-	if (h->filters_csv.len > 0) {
-		if (parse_filters_csv(&h->filters_csv,
-				&filters_arr, &filters_len) < 0) {
-			LM_ERR("nats_consumer_proc: filters= oom/parse failure "
-				"for id='%.*s'\n", h->id.len, h->id.s);
-			goto fail_free_sub;
-		}
-		if (filter_c && filters_len > 0) {
-			LM_WARN("nats_consumer_proc: both filter= and filters= set "
-				"for id='%.*s'; ignoring multi-filter list\n",
-				h->id.len, h->id.s);
-		} else if (filters_len > 0) {
-			cc.FilterSubjects    = filters_arr;
-			cc.FilterSubjectsLen = filters_len;
-		}
-	}
-
-	cc.DeliverPolicy  = map_deliver_policy(h->deliver_policy);
-	cc.AckPolicy      = map_ack_policy(h->ack_policy);
-	cc.ReplayPolicy   = map_replay_policy(h->replay_policy);
-
-	/* ack_wait / max_deliver / max_ack_pending (ns vs unit-less in nats.c) */
-	if (h->ack_wait_ms > 0)
-		cc.AckWait = (int64_t)h->ack_wait_ms * 1000000LL;
-	if (h->max_deliver > 0)
-		cc.MaxDeliver = (int64_t)h->max_deliver;
-	if (h->max_ack_pending > 0)
-		cc.MaxAckPending = (int64_t)h->max_ack_pending;
-
-	/* Backoff: nats.c takes int64_t[] in nanoseconds.  Drop in on top
-	 * of MaxDeliver; the broker honours whichever CSV length we ship. */
-	if (h->backoff_csv.len > 0) {
-		if (parse_backoff_csv(&h->backoff_csv,
-				&backoff_arr, &backoff_len) < 0) {
-			LM_ERR("nats_consumer_proc: backoff= parse failed for "
-				"id='%.*s'\n", h->id.len, h->id.s);
-			goto fail_free_sub;
-		}
-		if (backoff_len > 0) {
-			cc.BackOff    = backoff_arr;
-			cc.BackOffLen = backoff_len;
-		}
-	}
-
-	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ)
-		cc.OptStartSeq = h->start_seq;
-	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME)
-		cc.OptStartTime = h->start_time_unix_ns;
-
-	/* Replay-flood guard: a durable consumer that vanished (deleted server
-	 * side / GC'd) and is being recreated with deliver_policy=all would
-	 * otherwise replay the ENTIRE stream from sequence 1 -- a flood
-	 * proportional to stream size.  If we have already delivered messages,
-	 * bias the recreate to resume just past the last one instead. */
-	if (is_rebuild && ss && ss->last_stream_seq > 0 &&
-	    h->deliver_policy == NATS_DELIVER_ALL) {
-		LM_WARN("nats_consumer_proc: recreating consumer '%.*s' with "
-			"deliver_policy=all would replay the whole stream; biasing "
-			"to resume from stream_seq %llu\n",
-			(int)h->id.len, h->id.s,
-			(unsigned long long)(ss->last_stream_seq + 1));
-		cc.DeliverPolicy = js_DeliverByStartSequence;
-		cc.OptStartSeq   = ss->last_stream_seq + 1;
-	}
-
-	/* Shaping + ephemeral options.  nats.c uses ns for InactiveThreshold. */
-	if (h->inactive_threshold_ms > 0)
-		cc.InactiveThreshold =
-			(int64_t)h->inactive_threshold_ms * 1000000LL;
-	if (h->rate_limit_bps > 0)
-		cc.RateLimit = (uint64_t)h->rate_limit_bps;
-	if (sample_freq_c)
-		cc.SampleFrequency = sample_freq_c;
-	if (h->headers_only)
-		cc.HeadersOnly = true;
-
-	if (h->replay_policy == NATS_REPLAY_ORIGINAL) {
-		LM_INFO("nats_consumer_proc: id='%.*s' replay_policy=original; "
-			"historical replay may introduce multi-second idle gaps "
-			"between messages and is not a correctness issue\n",
-			h->id.len, h->id.s);
-	}
-
-	nats_dl.jsSubOptions_Init(&so);
-	so.Stream    = stream_c;
-	so.Config    = cc;
-	/* We drive acks ourselves via the worker-driven ack-IPC path,
-	 * not via nats.c's auto-ack. */
-	so.ManualAck = true;
-
-	/* Multi-env: when js_domain / api_prefix are set, build a per-call
-	 * jsOptions and hand it to js_PullSubscribe.  nats.c uses
-	 * jsOptions.Domain to route API calls to a mirror / leaf domain and
-	 * jsOptions.Prefix to override the default "$JS.API" prefix when a
-	 * site has a custom gateway. */
-	if (domain_c || api_prefix_c) {
-		nats_dl.jsOptions_Init(&js_opts);
-		if (domain_c)     js_opts.Domain = domain_c;
-		if (api_prefix_c) js_opts.Prefix = api_prefix_c;
-		js_opts_p = &js_opts;
-	}
-
-	/* nats.c 3.10's js_PullSubscribe has no public multi-filter form:
-	 * the public signature only takes a single `subject` string, and the
-	 * library's internal _subscribeMulti validator rejects
-	 *   ((numSubjects <= 0) || empty(subjects[0])) && !consBound
-	 * with NATS_INVALID_ARG, even when Config.FilterSubjects is populated.
-	 *
-	 * Workaround: when FilterSubjects is in play we
-	 *   1. js_AddConsumer up-front with the full config so the broker
-	 *      materializes the multi-filter consumer (falling back to
-	 *      js_UpdateConsumer if the consumer already exists with a
-	 *      compatible config from a prior run);
-	 *   2. flip jsSubOptions into the consBound branch (so.Stream +
-	 *      so.Consumer) so js_PullSubscribe takes the "attach to existing
-	 *      consumer" path instead of trying to create one from an empty
-	 *      subject and a `Config.FilterSubject` it cannot use.
-	 *
-	 * Single-filter pull subscribe stays on the original direct path.
-	 */
-	if (!filter_c && cc.FilterSubjectsLen > 0 && durable_c) {
-		jsConsumerInfo *ci_tmp = NULL;
-		natsStatus      cs;
-
-		cs = nats_dl.js_AddConsumer(&ci_tmp, g_js, stream_c, &cc,
-			js_opts_p, NULL);
-		if (cs != NATS_OK) {
-			natsStatus us;
-			us = nats_dl.js_UpdateConsumer(&ci_tmp, g_js, stream_c, &cc,
-				js_opts_p, NULL);
-			if (us != NATS_OK) {
-				LM_ERR("nats_consumer_proc: nats_dl.js_AddConsumer('%.*s')"
-					" failed: %s (update also %s)\n",
-					h->id.len, h->id.s,
-					nats_dl.natsStatus_GetText(cs),
-					nats_dl.natsStatus_GetText(us));
-				goto fail_free_sub;
-			}
-		}
-		if (ci_tmp)
-			nats_dl.jsConsumerInfo_Destroy(ci_tmp);
-
-		/* In the bound path nats.c does not consult so.Config; it
-		 * looks up the existing consumer via Stream + Consumer. */
-		so.Consumer = durable_c;
-
-		s = nats_dl.js_PullSubscribe(&ss->sub, g_js,
-			"" /* subject empty: bound path uses opts->Consumer */,
-			NULL /* durable NULL: same reason */,
-			js_opts_p,
-			&so,
-			NULL);
-	} else {
-		s = nats_dl.js_PullSubscribe(&ss->sub, g_js,
-			filter_c /* may be NULL when Config has FilterSubject */,
-			durable_c /* may be NULL for ephemeral */,
-			js_opts_p,
-			&so,
-			NULL);
-	}
-	if (s != NATS_OK) {
-		LM_ERR("nats_consumer_proc: nats_dl.js_PullSubscribe('%.*s') failed: %s\n",
-			h->id.len, h->id.s, nats_dl.natsStatus_GetText(s));
-		goto fail_free_sub;
-	}
-
-	ss->last_fetch = 0;
-	ss->dirty      = 0;
-	if (!is_rebuild) {
-		ss->next = g_subs;
-		g_subs = ss;
-		if (ss->handle_idx < NATS_REGISTRY_MAX_HANDLES)
-			g_subs_by_idx[ss->handle_idx] = ss;
-	}
-
-	/* Stash the allocations on ss so the retire / rebuild paths can
-	 * free them without leaking.  nats.c has borrowed pointers into
-	 * these for the life of the subscription, so they must outlive
-	 * the nats_dl.natsSubscription_Destroy() call but NOT the
-	 * proc_sub_state_t itself. */
-	ss->c_durable       = durable_c;
-	ss->c_filter        = filter_c;
-	ss->c_stream        = stream_c;
-	ss->c_domain        = domain_c;
-	ss->c_api_prefix    = api_prefix_c;
-	ss->c_sample_freq   = sample_freq_c;
-	ss->backoff_arr     = backoff_arr;
-	ss->filters_arr     = filters_arr;
-	ss->filters_arr_len = filters_len;
-
-	/* Publish the subscription pointer back to the handle so MI can
-	 * introspect it (read-only).  This is a process-local pointer the
-	 * SIP workers must not dereference; they just observe non-NULL as
-	 * "consumer process has a live sub". */
-	h->subscription = (void *)ss->sub;
-
-	LM_INFO("nats_consumer_proc: %s id='%.*s' index=%u "
-		"stream='%.*s' filter='%.*s' durable='%.*s' filters_n=%d "
-		"backoff_n=%d domain='%s' prefix='%s'\n",
-		is_rebuild ? "refreshed" : "subscribed",
-		h->id.len, h->id.s, (unsigned)h->index,
-		h->stream.len, h->stream.s,
-		h->filter.len, h->filter.s,
-		h->durable.len, h->durable.s,
-		filters_len, backoff_len,
-		domain_c ? domain_c : "",
-		api_prefix_c ? api_prefix_c : "");
-
-	return 0;
-
-fail_free_sub:
-	{
-		int i;
-		for (i = 0; i < filters_len; i++) free((void *)filters_arr[i]);
-	}
-	free(filters_arr);
-	free(backoff_arr);
-	free(sample_freq_c);
-	free(domain_c);
-	free(api_prefix_c);
-	free(durable_c);
-	free(filter_c);
-	free(stream_c);
-	/* On rebuild failure, keep the proc_sub_state_t on g_subs but
-	 * leave dirty=1 so the next reconcile tick retries.  Reset any
-	 * partially filled string slots (we freed the locals above, so
-	 * the ss-> copies must not point at stale memory).  On first-bind
-	 * failure, free the struct since it never landed on g_subs. */
-	if (is_rebuild) {
-		ss->c_durable     = NULL;
-		ss->c_filter      = NULL;
-		ss->c_stream      = NULL;
-		ss->c_domain      = NULL;
-		ss->c_api_prefix  = NULL;
-		ss->c_sample_freq = NULL;
-		ss->backoff_arr   = NULL;
-		ss->filters_arr     = NULL;
-		ss->filters_arr_len = 0;
-		return -1;
-	}
-	free(ss->id.s);
-	free(ss);
-	return -1;
-}
-
-/* Exponential backoff for ensure_subscription_for_handle() failures.
- *
- * Capped at 60 s -- long enough that a wedged handle (e.g. broker-side
- * durable deleted by an operator) stops dominating tick CPU and log
- * noise, short enough that a transient broker outage clears within a
- * minute of recovery.  The shift on `failures` saturates harmlessly
- * once it exceeds the unsigned width, but the cap fires long before
- * that ever matters. */
-#define ENSURE_BACKOFF_CAP_S 60u
-
-static unsigned ensure_backoff_seconds(unsigned failures)
-{
-	unsigned shift;
-	if (failures == 0)
-		return 0;
-	shift = failures - 1;
-	if (shift >= 6)            /* 1<<6 = 64 > cap; saturate */
-		return ENSURE_BACKOFF_CAP_S;
-	return 1u << shift;
-}
-
-static int reconcile_subs_cb(nats_handle_t *h, void *user)
-{
-	time_t now;
-	int    rc;
-
-	(void)user;
-	/* Skip retired handles -- the teardown path owns them now.
-	 * A retired handle is already off its bucket chain so registry
-	 * foreach should not surface it, but defense-in-depth against a
-	 * race where unbind fires between the foreach-global-lock
-	 * acquisition and the bucket-lock acquisition. */
-	if (__atomic_load_n(&h->retire, __ATOMIC_SEQ_CST))
-		return 0;
-
-	/* Backoff gate: a handle whose ensure_subscription_for_handle()
-	 * has been failing keeps getting visited every reconcile tick,
-	 * but we only actually retry once `ensure_next_retry_at` has
-	 * elapsed.  Keeps a wedged handle from sucking IDLE_RETRY_MS of
-	 * CPU per tick and flooding the log with the same "Error (update
-	 * also Error)" line. */
-	now = time(NULL);
-	if (h->ensure_next_retry_at != 0 && now < h->ensure_next_retry_at)
-		return 0;
-
-	rc = ensure_subscription_for_handle(h);
-	if (rc == 0) {
-		/* Success or no-op (clean + already subscribed).  Either way,
-		 * the broker is happy -- reset the backoff so the next failure
-		 * starts at the 1 s base.  Only logs the recovery transition
-		 * to avoid spamming every tick of a stable handle. */
-		if (h->ensure_failures > 0) {
-			LM_INFO("nats_consumer_proc: handle '%.*s' recovered after "
-			        "%u failed ensure attempt(s)\n",
-			        (int)h->id.len, h->id.s, h->ensure_failures);
-		}
-		h->ensure_failures = 0;
-		h->ensure_next_retry_at = 0;
-	} else {
-		unsigned wait_s;
-		h->ensure_failures++;
-		wait_s = ensure_backoff_seconds(h->ensure_failures);
-		h->ensure_next_retry_at = now + (time_t)wait_s;
-		/* Log the saturation transition once so operators see when a
-		 * handle has truly wedged versus when the backoff is still
-		 * climbing -- the WARN at the cap is the signal to inspect or
-		 * unbind. */
-		if (h->ensure_failures == 7) {
-			LM_WARN("nats_consumer_proc: handle '%.*s' has failed "
-			        "ensure_subscription %u times; backoff now capped "
-			        "at %u s.  Likely broker-side consumer was deleted; "
-			        "run `nats_consumer_unbind` to clear or recreate the "
-			        "durable.\n",
-			        (int)h->id.len, h->id.s, h->ensure_failures,
-			        ENSURE_BACKOFF_CAP_S);
-		}
-	}
-	return 0;
-}
 
 /* ── header serialization ────────────────────────────────────── */
 
@@ -1307,20 +354,15 @@ done_vals:
 
 /* ── fetch loop ──────────────────────────────────────────────── */
 
-static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
+/* One clamped Fetch for *ss with full status triage (idle timeout,
+ * connection closed, vanished-consumer rebuild flagging, transient
+ * errors).  Fills *list and returns 1 when there are messages to
+ * process; 0 when this pull is done (nothing fetched / flow-control
+ * skip / error already accounted). */
+static int _fetch_batch(proc_sub_state_t *ss, int budget_ms,
+	natsMsgList *list)
 {
-	natsMsgList  list;
-	natsStatus   s;
-	int          pushed = 0;
-	int          i;
-
-	if (!ss || !ss->sub || !ss->ring)
-		return 0;
-
-	/* In-use guard: hold a pending_ops reference across the blocking
-	 * Fetch() + push loop so unbind can defer while we're mid-pull.
-	 * Paired with the dec below. */
-	nats_handle_pending_inc(ss->h_ref);
+	natsStatus s;
 
 	/* Dynamic batch sizing: never request more than will fit in the
 	 * ring's free slots.  Prior to this, a static fetch_batch larger
@@ -1354,7 +396,7 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 			 * redelivers them next pull.  This is flow control, not a
 			 * drop, so it has its own counter. */
 			hstat_add(ss->h_ref, &ss->h_ref->fetch_skips_full, 1);
-			goto out;
+			return 0;
 		}
 		eff_fb = (max_fb < free_sl) ? max_fb : (free_sl - 1);
 		if (eff_fb < 1)
@@ -1367,23 +409,23 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		if (budget_ms > 0 && budget_ms < tmo)
 			tmo = budget_ms;
 
-		memset(&list, 0, sizeof(list));
+		memset(list, 0, sizeof(*list));
 		hstat_add(ss->h_ref, &ss->h_ref->pulls_requested, 1);
-		s = nats_dl.natsSubscription_Fetch(&list, ss->sub,
+		s = nats_dl.natsSubscription_Fetch(list, ss->sub,
 		        eff_fb, tmo, NULL);
 	}
 
 	/* Fast path on idle: timeout is the steady-state condition when
 	 * the broker has nothing to send us. */
 	if (s == NATS_TIMEOUT)
-		goto out;
+		return 0;
 
 	if (s == NATS_CONNECTION_CLOSED) {
 		LM_DBG("nats_consumer_proc: connection closed during fetch "
 			"on id='%.*s'\n", ss->id.len, ss->id.s);
 		/* The outer loop's epoch check will observe the reconnect
 		 * when the library reconnects and will flip ss->dirty then. */
-		goto out;
+		return 0;
 	}
 
 	/* Ephemeral-GC / subscription-invalidated detection.
@@ -1407,208 +449,246 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		}
 		ss->dirty = 1;
 		hstat_add(ss->h_ref, &ss->h_ref->fetch_errors, 1);
-		goto out;
+		return 0;
 	}
 
-	if (s != NATS_OK && list.Count == 0) {
+	if (s != NATS_OK && list->Count == 0) {
 		/* Non-fatal per-sub error; log at DBG to avoid flooding logs
 		 * when e.g. max_ack_pending gates us out. */
 		hstat_add(ss->h_ref, &ss->h_ref->fetch_errors, 1);
 		LM_DBG("nats_consumer_proc: fetch id='%.*s': %s\n",
 			ss->id.len, ss->id.s, nats_dl.natsStatus_GetText(s));
-		goto out;
+		return 0;
 	}
+
+	return 1;
+}
+
+/* JetStream pull-delivered messages have natsMsg_GetReply() set to the
+ * per-delivery $JS.ACK.<...> subject for ack tracking, NOT to the
+ * publisher's application reply.  Acks are dispatched separately via
+ * the ref-table token, so the ACK subject is not useful to the script
+ * via $nats_reply_to.
+ *
+ * The original publisher's application reply is preserved by
+ * convention in the Nats-Reply-To header (set by the publisher with
+ * `nats pub -H 'Nats-Reply-To: <inbox>'` or the equivalent SDK call).
+ * For JS-delivered messages we extract that header and surface it as
+ * the reply; without it, the message has no application reply
+ * destination. */
+static void _resolve_app_reply(natsMsg *m, const char **reply,
+	size_t *reply_len)
+{
+	if (*reply_len >= 8 &&
+	    memcmp(*reply, "$JS.ACK.", 8) == 0) {
+		const char *hdr_reply = NULL;
+		natsStatus  hs;
+
+		hs = nats_dl.natsMsgHeader_Get(m, "Nats-Reply-To", &hdr_reply);
+		if (hs == NATS_OK && hdr_reply != NULL) {
+			*reply     = hdr_reply;
+			*reply_len = strlen(hdr_reply);
+		} else {
+			*reply     = NULL;
+			*reply_len = 0;
+		}
+	}
+}
+
+/* Deliver one fetched natsMsg into the handle's SHM ring: poison
+ * backstop, msg-ref stash, header serialization, ring push and the
+ * full push-result dispatch (defer on ring-full, Term on oversize).
+ * Always consumes @m (ownership transferred to the ref table on
+ * success, destroyed otherwise).  Returns 1 iff the message was
+ * pushed to the ring. */
+static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
+{
+	const char *subject;
+	const char *data;
+	const char *reply;
+	int         data_len;
+	size_t      subject_len;
+	size_t      reply_len;
+
+	jsMsgMetaData *md = NULL;
+	uint64_t  stream_seq   = 0;
+	uint64_t  consumer_seq = 0;
+	uint64_t  delivered    = 0;
+	uint64_t  pending      = 0;
+	int64_t   timestamp_ns = 0;
+	uint64_t  ack_token    = 0;
+	int       ref_ok       = 0;
+
+	char     hdr_buf[NATS_RING_HEADERS_MAX];
+	int      hdr_len       = 0;
+	int      hdr_truncated = 0;
+	int      hdr_count     = 0;
+
+	int rc;
+
+	subject     = nats_dl.natsMsg_GetSubject(m);
+	data        = nats_dl.natsMsg_GetData(m);
+	data_len    = nats_dl.natsMsg_GetDataLength(m);
+	reply       = nats_dl.natsMsg_GetReply(m);
+	subject_len = subject ? strlen(subject) : 0;
+	reply_len   = reply   ? strlen(reply)   : 0;
+	/* Keep data/data_len consistent: a NULL payload pointer with a
+	 * non-zero length would feed a bogus span to the ring push. */
+	if (!data || data_len < 0)
+		data_len = 0;
+
+	/* JetStream pull deliveries carry the $JS.ACK subject in the
+	 * reply slot; surface the publisher's Nats-Reply-To header (if
+	 * any) as the application reply instead. */
+	_resolve_app_reply(m, &reply, &reply_len);
+
+	/* Serialize headers into the per-message stack buffer; ring_push
+	 * copies the bytes into the slot so this local array's lifetime
+	 * ends with the loop iteration. */
+	hdr_len = serialize_headers(m, hdr_buf, (int)sizeof(hdr_buf),
+		&hdr_truncated, &hdr_count);
+	if (hdr_truncated) {
+		LM_DBG("nats_consumer_proc: headers truncated on id='%.*s' "
+			"(count_emitted=%d cap=%d)\n",
+			ss->id.len, ss->id.s,
+			hdr_count, (int)sizeof(hdr_buf));
+	}
+
+	if (nats_dl.natsMsg_GetMetaData(&md, m) == NATS_OK && md) {
+		stream_seq   = md->Sequence.Stream;
+		consumer_seq = md->Sequence.Consumer;
+		delivered    = md->NumDelivered;
+		pending      = md->NumPending;
+		timestamp_ns = md->Timestamp;
+		nats_dl.jsMsgMetaData_Destroy(md);
+		/* Track the high-water stream sequence so a
+		 * vanished+recreated durable can resume past it. */
+		if (stream_seq > ss->last_stream_seq)
+			ss->last_stream_seq = stream_seq;
+	}
+
+	/* Poison-message backstop.  With max_deliver=0 the broker
+	 * redelivers a permanently-failing message forever with no
+	 * dead-letter.  When poison_max_deliver is configured and this
+	 * message has already been delivered more than that many times,
+	 * Term it (stop redelivery) instead of handing it to a worker
+	 * that will only fail and redeliver it again.  Counts as both a
+	 * Term and a poison drop. */
+	if (nats_consumer_poison_max_deliver > 0 &&
+			delivered > (uint64_t)nats_consumer_poison_max_deliver) {
+		LM_WARN("nats_consumer_proc: poison message on id='%.*s' "
+			"(delivered=%llu > poison_max_deliver=%d); terminating\n",
+			ss->id.len, ss->id.s,
+			(unsigned long long)delivered,
+			nats_consumer_poison_max_deliver);
+		(void)nats_dl.natsMsg_Term(m, NULL);
+		hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
+		hstat_add(ss->h_ref, &ss->h_ref->poisoned, 1);
+		nats_dl.natsMsg_Destroy(m);
+		return 0;
+	}
+
+	/* Stash the natsMsg under a fresh (handle, slot, gen) token.
+	 * On ref-table exhaustion we leave the broker to redeliver --
+	 * not acking this message means it comes back after
+	 * ack_wait, by which time workers will (hopefully) have
+	 * caught up on their ack backlog. */
+	ack_token = store_msg_ref(ss->handle_idx,
+		nats_ring_capacity(ss->ring), m, &ref_ok);
+	if (!ref_ok) {
+		/* msg-ref table exhausted: the message was fetched but
+		 * can't be tracked for ack, so leave it un-acked and let
+		 * the broker redeliver after ack_wait. */
+		hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
+		nats_dl.natsMsg_Destroy(m);
+		return 0;
+	}
+
+	rc = nats_ring_push(ss->ring,
+		subject ? subject : "", (uint32_t)subject_len,
+		data    ? data    : "", (uint32_t)data_len,
+		stream_seq, consumer_seq, delivered, pending,
+		timestamp_ns, ack_token,
+		reply   ? reply   : "", (uint32_t)reply_len,
+		hdr_len > 0 ? hdr_buf : NULL,
+		(uint16_t)(hdr_len > 0 ? hdr_len : 0),
+		(uint8_t)(hdr_truncated ? 1 : 0));
+
+	if (rc == 0) {
+		hstat_add(ss->h_ref, &ss->h_ref->msgs_delivered, 1);
+		if (delivered > 1)
+			hstat_add(ss->h_ref, &ss->h_ref->redeliveries, 1);
+		/* natsMsg stays alive in the ref table until the worker
+		 * sends an ack IPC.  Do NOT destroy it here. */
+	} else if (rc == -1) {
+		/* Ring full: release the ref slot and do NOT ack.
+		 * Broker redelivers after ack_wait. */
+		(void)release_msg_ref(ack_token);
+		hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
+		LM_DBG("nats_consumer_proc: ring full id='%.*s', "
+			"deferring message\n",
+			ss->id.len, ss->id.s);
+		nats_dl.natsMsg_Destroy(m);
+	} else {
+		/* -2 / -3: payload or subject too large.  These are
+		 * permanently undeliverable on the current ring
+		 * geometry; terminate the message so the broker
+		 * doesn't redeliver forever.  Release the ref slot
+		 * first so we don't leak it on retry. */
+		(void)release_msg_ref(ack_token);
+		/* This is a permanent Term, not back-pressure -- it is
+		 * counted via the per-handle `terms` counter below, so do
+		 * not also fold it into backpressure_drops. */
+		{
+			/* Rate-limit: a stream of oversize messages must not
+			 * flood the log (the `terms` counter below still records
+			 * every one). */
+			long long now = _now_monotonic_us();
+			if (now - ss->last_oversize_warn_us >=
+					NATS_OVERSIZE_WARN_INTERVAL_US) {
+				LM_WARN("nats_consumer_proc: oversize message on "
+					"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
+					"terminating (rate-limited)\n",
+					ss->id.len, ss->id.s,
+					subject_len, data_len, rc);
+				ss->last_oversize_warn_us = now;
+			}
+		}
+		(void)nats_dl.natsMsg_Term(m, NULL);
+		hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
+		nats_dl.natsMsg_Destroy(m);
+	}
+
+	return rc == 0 ? 1 : 0;
+}
+
+static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
+{
+	natsMsgList  list;
+	int          pushed = 0;
+	int          i;
+
+	if (!ss || !ss->sub || !ss->ring)
+		return 0;
+
+	/* In-use guard: hold a pending_ops reference across the blocking
+	 * Fetch() + push loop so unbind can defer while we're mid-pull.
+	 * Paired with the dec below. */
+	nats_handle_pending_inc(ss->h_ref);
+
+	if (!_fetch_batch(ss, budget_ms, &list))
+		goto out;
 
 	ss->last_fetch = time(NULL);
 
 	for (i = 0; i < list.Count; i++) {
-		natsMsg    *m = list.Msgs[i];
-		const char *subject;
-		const char *data;
-		const char *reply;
-		int         data_len;
-		size_t      subject_len;
-		size_t      reply_len;
-
-		jsMsgMetaData *md = NULL;
-		uint64_t  stream_seq   = 0;
-		uint64_t  consumer_seq = 0;
-		uint64_t  delivered    = 0;
-		uint64_t  pending      = 0;
-		int64_t   timestamp_ns = 0;
-		uint64_t  ack_token    = 0;
-		int       ref_ok       = 0;
-
-		char     hdr_buf[NATS_RING_HEADERS_MAX];
-		int      hdr_len       = 0;
-		int      hdr_truncated = 0;
-		int      hdr_count     = 0;
-
-		int rc;
-
+		natsMsg *m = list.Msgs[i];
 		if (!m)
 			continue;
-
-		subject     = nats_dl.natsMsg_GetSubject(m);
-		data        = nats_dl.natsMsg_GetData(m);
-		data_len    = nats_dl.natsMsg_GetDataLength(m);
-		reply       = nats_dl.natsMsg_GetReply(m);
-		subject_len = subject ? strlen(subject) : 0;
-		reply_len   = reply   ? strlen(reply)   : 0;
-		/* Keep data/data_len consistent: a NULL payload pointer with a
-		 * non-zero length would feed a bogus span to the ring push. */
-		if (!data || data_len < 0)
-			data_len = 0;
-
-		/* JetStream pull-delivered messages have nats_dl.natsMsg_GetReply()
-		 * set to the per-delivery $JS.ACK.<...> subject for ack
-		 * tracking, NOT to the publisher's application reply.  Acks
-		 * are dispatched separately via the ref-table token, so the
-		 * ACK subject is not useful to the script via $nats_reply_to.
-		 *
-		 * The original publisher's application reply is preserved by
-		 * convention in the Nats-Reply-To header (set by the
-		 * publisher with `nats pub -H 'Nats-Reply-To: <inbox>'` or
-		 * the equivalent SDK call).  For JS-delivered messages we
-		 * extract that header and surface it as the reply; without
-		 * it, the message has no application reply destination. */
-		if (reply_len >= 8 &&
-		    memcmp(reply, "$JS.ACK.", 8) == 0) {
-			const char *hdr_reply = NULL;
-			natsStatus  hs;
-
-			hs = nats_dl.natsMsgHeader_Get(m, "Nats-Reply-To", &hdr_reply);
-			if (hs == NATS_OK && hdr_reply != NULL) {
-				reply     = hdr_reply;
-				reply_len = (int)strlen(hdr_reply);
-			} else {
-				reply     = NULL;
-				reply_len = 0;
-			}
-		}
-
-		/* Serialize headers into the per-message stack buffer; ring_push
-		 * copies the bytes into the slot so this local array's lifetime
-		 * ends with the loop iteration. */
-		hdr_len = serialize_headers(m, hdr_buf, (int)sizeof(hdr_buf),
-			&hdr_truncated, &hdr_count);
-		if (hdr_truncated) {
-			LM_DBG("nats_consumer_proc: headers truncated on id='%.*s' "
-				"(count_emitted=%d cap=%d)\n",
-				ss->id.len, ss->id.s,
-				hdr_count, (int)sizeof(hdr_buf));
-		}
-
-		if (nats_dl.natsMsg_GetMetaData(&md, m) == NATS_OK && md) {
-			stream_seq   = md->Sequence.Stream;
-			consumer_seq = md->Sequence.Consumer;
-			delivered    = md->NumDelivered;
-			pending      = md->NumPending;
-			timestamp_ns = md->Timestamp;
-			nats_dl.jsMsgMetaData_Destroy(md);
-			/* Track the high-water stream sequence so a
-			 * vanished+recreated durable can resume past it. */
-			if (stream_seq > ss->last_stream_seq)
-				ss->last_stream_seq = stream_seq;
-		}
-
-		/* Poison-message backstop.  With max_deliver=0 the broker
-		 * redelivers a permanently-failing message forever with no
-		 * dead-letter.  When poison_max_deliver is configured and this
-		 * message has already been delivered more than that many times,
-		 * Term it (stop redelivery) instead of handing it to a worker
-		 * that will only fail and redeliver it again.  Counts as both a
-		 * Term and a poison drop. */
-		if (nats_consumer_poison_max_deliver > 0 &&
-				delivered > (uint64_t)nats_consumer_poison_max_deliver) {
-			LM_WARN("nats_consumer_proc: poison message on id='%.*s' "
-				"(delivered=%llu > poison_max_deliver=%d); terminating\n",
-				ss->id.len, ss->id.s,
-				(unsigned long long)delivered,
-				nats_consumer_poison_max_deliver);
-			(void)nats_dl.natsMsg_Term(m, NULL);
-			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
-			hstat_add(ss->h_ref, &ss->h_ref->poisoned, 1);
-			nats_dl.natsMsg_Destroy(m);
-			list.Msgs[i] = NULL;
-			continue;
-		}
-
-		/* Stash the natsMsg under a fresh (handle, slot, gen) token.
-		 * On ref-table exhaustion we leave the broker to redeliver --
-		 * not acking this message means it comes back after
-		 * ack_wait, by which time workers will (hopefully) have
-		 * caught up on their ack backlog. */
-		ack_token = store_msg_ref(ss->handle_idx,
-			nats_ring_capacity(ss->ring), m, &ref_ok);
-		if (!ref_ok) {
-			/* msg-ref table exhausted: the message was fetched but
-			 * can't be tracked for ack, so leave it un-acked and let
-			 * the broker redeliver after ack_wait. */
-			hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
-			nats_dl.natsMsg_Destroy(m);
-			list.Msgs[i] = NULL;
-			continue;
-		}
-
-		rc = nats_ring_push(ss->ring,
-			subject ? subject : "", (uint32_t)subject_len,
-			data    ? data    : "", (uint32_t)data_len,
-			stream_seq, consumer_seq, delivered, pending,
-			timestamp_ns, ack_token,
-			reply   ? reply   : "", (uint32_t)reply_len,
-			hdr_len > 0 ? hdr_buf : NULL,
-			(uint16_t)(hdr_len > 0 ? hdr_len : 0),
-			(uint8_t)(hdr_truncated ? 1 : 0));
-
-		if (rc == 0) {
-			pushed++;
-			hstat_add(ss->h_ref, &ss->h_ref->msgs_delivered, 1);
-			if (delivered > 1)
-				hstat_add(ss->h_ref, &ss->h_ref->redeliveries, 1);
-			/* natsMsg stays alive in the ref table until the worker
-			 * sends an ack IPC.  Do NOT destroy it here. */
-			list.Msgs[i] = NULL;
-		} else if (rc == -1) {
-			/* Ring full: release the ref slot and do NOT ack.
-			 * Broker redelivers after ack_wait. */
-			(void)release_msg_ref(ack_token);
-			hstat_add(ss->h_ref, &ss->h_ref->backpressure_drops, 1);
-			LM_DBG("nats_consumer_proc: ring full id='%.*s', "
-				"deferring message\n",
-				ss->id.len, ss->id.s);
-			nats_dl.natsMsg_Destroy(m);
-			list.Msgs[i] = NULL;
-		} else {
-			/* -2 / -3: payload or subject too large.  These are
-			 * permanently undeliverable on the current ring
-			 * geometry; terminate the message so the broker
-			 * doesn't redeliver forever.  Release the ref slot
-			 * first so we don't leak it on retry. */
-			(void)release_msg_ref(ack_token);
-			/* This is a permanent Term, not back-pressure -- it is
-			 * counted via the per-handle `terms` counter below, so do
-			 * not also fold it into backpressure_drops. */
-			{
-				/* Rate-limit: a stream of oversize messages must not
-				 * flood the log (the `terms` counter below still records
-				 * every one). */
-				long long now = _now_monotonic_us();
-				if (now - ss->last_oversize_warn_us >=
-						NATS_OVERSIZE_WARN_INTERVAL_US) {
-					LM_WARN("nats_consumer_proc: oversize message on "
-						"id='%.*s' (subject_len=%zu data_len=%d rc=%d); "
-						"terminating (rate-limited)\n",
-						ss->id.len, ss->id.s,
-						subject_len, data_len, rc);
-					ss->last_oversize_warn_us = now;
-				}
-			}
-			(void)nats_dl.natsMsg_Term(m, NULL);
-			hstat_add(ss->h_ref, &ss->h_ref->terms, 1);
-			nats_dl.natsMsg_Destroy(m);
-			list.Msgs[i] = NULL;
-		}
+		pushed += _push_one_msg(ss, m);
+		/* _push_one_msg always consumes the message (ref table on
+		 * success, destroyed otherwise). */
+		list.Msgs[i] = NULL;
 	}
 
 	/* natsMsgList_Destroy walks the Msgs array and destroys any

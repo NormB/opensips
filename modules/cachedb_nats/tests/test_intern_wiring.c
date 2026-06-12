@@ -69,13 +69,13 @@ int main(void)
 		"lock_set_alloc"),
 		"intern uses gen_lock_set for sharded locking");
 
-	/* Callers in cachedb_nats_json.c -- the optimization is
-	 * pointless if _entry_add_key still strdups instead of
-	 * interning. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	/* Callers in cachedb_nats_json_index.c (the index TU after the
+	 * NATS_TODO #60 split) -- the optimization is pointless if
+	 * _entry_add_key still strdups instead of interning. */
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"nats_intern_acquire"),
 		"_entry_add_key acquires from intern table");
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"nats_intern_release"),
 		"key release path goes through intern table");
 

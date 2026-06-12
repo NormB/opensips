@@ -26,3 +26,4 @@ test_serialize_headers_no_header
 test_slurp_file_cap
 test_subs_by_idx
 test_ensure_backoff
+test_proc_tu_split

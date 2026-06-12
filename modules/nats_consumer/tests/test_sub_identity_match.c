@@ -67,13 +67,16 @@ static int grep_in_function(const char *path, const char *fn_name,
 
 int main(void)
 {
+	/* After the NATS_TODO #60 split, ensure_subscription_for_handle
+	 * lives in the sub-config TU; the teardown stays in the proc TU. */
 	const char *src = "../nats_consumer_proc.c";
+	const char *sub = "../nats_sub_config.c";
 
 	/* reconcile path keys on handle index, not id string. */
-	ASSERT(grep_in_function(src, "ensure_subscription_for_handle",
+	ASSERT(grep_in_function(sub, "ensure_subscription_for_handle",
 		"find_sub_by_index") >= 1,
 		"ensure_subscription_for_handle matches by handle index");
-	ASSERT(grep_in_function(src, "ensure_subscription_for_handle",
+	ASSERT(grep_in_function(sub, "ensure_subscription_for_handle",
 		"find_sub_by_id") == 0,
 		"ensure_subscription_for_handle no longer matches by id string");
 

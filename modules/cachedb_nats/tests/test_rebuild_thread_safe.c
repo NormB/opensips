@@ -71,7 +71,7 @@ static int count(const char *hay, const char *needle)
 
 int main(void)
 {
-	const char *src = "../cachedb_nats_json.c";
+	const char *src = "../cachedb_nats_json_index.c";
 	char *body = body_after(src, "nats_json_index_rebuild(kvStore");
 	ASSERT(body != NULL, "found nats_json_index_rebuild body");
 	if (!body) { fprintf(stderr, "\n=== FAILS=%d ===\n", g_fails); return 1; }
