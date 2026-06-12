@@ -868,6 +868,20 @@ natsConnection *nats_pool_get(void)
 	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
 	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
 
+	/* Async first connect: with the broker unreachable at BOOT,
+	 * natsConnection_Connect() returns NATS_NOT_YET_CONNECTED
+	 * immediately and cnats keeps dialing in the background using the
+	 * reconnect settings above, firing the connected callback on first
+	 * success.  Without this every OpenSIPS process blocked inside the
+	 * synchronous retry loop below for the full max_reconnect budget
+	 * (~2 min) during child_init -- core timers stalled and SIP was
+	 * unresponsive (caught by test_boot_degraded_e2e.sh).  Reuse
+	 * _pool_reconnected_cb as the first-connect callback: it sets
+	 * _connected, bumps the reconnect epoch and marks KV handles
+	 * stale -- exactly the post-connect bookkeeping needed here. */
+	nats_dl.natsOptions_SetRetryOnFailedConnect(opts, true,
+		_pool_reconnected_cb, NULL);
+
 	/* TLS configuration -- sourced from the tls_mgm "nats" client
 	 * domain (apply_tls_from_mgm).  Set up only when at least one
 	 * configured URL is tls://. */
@@ -885,6 +899,18 @@ natsConnection *nats_pool_get(void)
 			s = nats_dl.natsConnection_Connect(&_nc, opts);
 			if (s == NATS_OK)
 				break;
+
+			/* Broker unreachable: the connection object is live and
+			 * dialing in the background (SetRetryOnFailedConnect).
+			 * Continue DEGRADED instead of blocking this process --
+			 * _connected stays 0 (fast-fails everywhere) until the
+			 * first-connect callback fires. */
+			if (s == NATS_NOT_YET_CONNECTED) {
+				LM_WARN("NATS pool: broker unreachable at startup; "
+					"continuing degraded with background "
+					"connect retries\n");
+				break;
+			}
 
 			attempts++;
 			{
@@ -917,6 +943,12 @@ natsConnection *nats_pool_get(void)
 	}
 
 	nats_dl.natsOptions_Destroy(opts);
+
+	/* Degraded start: skip the connected bookkeeping -- the
+	 * first-connect callback handles it when the broker appears. */
+	if (s != NATS_OK)
+		return _nc;
+
 	atomic_store(&_connected, 1);
 
 	/* Log connected URL — natsConnection_GetConnectedUrl is documented

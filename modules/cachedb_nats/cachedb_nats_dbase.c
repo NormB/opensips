@@ -282,6 +282,13 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 		return -1;
 	}
 
+	/* Deterministic out-param on every path: callers only free val->s
+	 * on rc == 0, but zeroing at entry turns a caller bug from a
+	 * garbage-pointer free into a clean NULL and makes the miss (-2) /
+	 * empty (0) paths uniform. */
+	val->s = NULL;
+	val->len = 0;
+
 	ncon = (nats_cachedb_con *)con->data;
 	if (!ncon) {
 		LM_ERR("null NATS connection\n");

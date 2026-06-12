@@ -1315,6 +1315,16 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		}
 	}
 
+	/* Fast-fail on a disconnected pool BEFORE claiming a slot: the
+	 * publish would land on a dead connection, so the slot is
+	 * guaranteed to burn its entire timeout -- during an outage every
+	 * call would otherwise eat a slice of the bounded slot pool. */
+	if (!nats_pool_is_connected()) {
+		LM_WARN("nats_request[async]: NATS disconnected; failing fast\n");
+		nats_rpc_staged_clear();
+		return -2;
+	}
+
 	LM_DBG("nats_request[async]: about to claim slot\n");
 	slot = nats_rpc_slot_claim();
 	LM_DBG("nats_request[async]: slot=%p idx=%u\n",

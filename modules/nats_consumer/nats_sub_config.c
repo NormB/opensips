@@ -649,6 +649,17 @@ int ensure_subscription_for_handle(nats_handle_t *h)
 	if (!h || !h->ring)
 		return 0;   /* handle still being constructed or TEST_SHIM */
 
+	/* Never attempt JetStream subscribe/create calls at a disconnected
+	 * pool: each attempt blocks the consumer proc for a full JS
+	 * request timeout per handle per reconcile tick, and racing the
+	 * background first-connect mid-call crashed inside cnats
+	 * (js_PullSubscribe SIGSEGV the moment the late broker arrived --
+	 * test_boot_degraded_e2e).  Pending handles simply wait here; the
+	 * reconnect epoch bump re-runs the reconcile against a live
+	 * connection. */
+	if (!nats_pool_is_connected())
+		return 0;
+
 	/* Dirty handles refresh in place -- the sub was destroyed
 	 * on the epoch bump or on a fetch-time "consumer vanished" error,
 	 * and we now rebuild the natsSubscription while keeping the

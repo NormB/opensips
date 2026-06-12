@@ -369,6 +369,45 @@ checkboxes.
 
 ---
 
+## Fault-class hardening follow-up (2026-06-12, post-#60)
+
+Live-broker e2e runs surfaced gaps the unit suites couldn't see. Each fault
+class now has a dedicated e2e exercising success AND failure paths:
+
+- **Out-param contracts on failure returns.** usrloc & friends free/use
+  caller-owned out-params on ANY backend failure: `query`/`map_get` must
+  `cdb_res_init(res)` (fixed earlier; SIGSEGV in 040_broker_bounce),
+  `raw_query` now zeroes `*reply`/`*reply_no` at entry, `get` zeroes `*val`.
+  Tests: `test_query_res_init.c`, `test_outparam_contracts.c`.
+- **Broker down at op time (fast-fail).** Sync `nats_request` had no
+  connectivity guard (blocked a timer/event process for the full timeout);
+  async submit burned an RPC slot per call. Both fast-fail now.
+  Test: `test_request_fastfail.c`.
+- **Broker SIGKILLed mid-traffic + restarted (distinct from docker pause).**
+  `cachedb_nats/tests/test_outage_matrix_e2e.sh` (9 ops × up/down/restart,
+  watcher resume) and `nats_consumer/tests/test_outage_rpc_fetch_e2e.sh`
+  (fetch -2 / request -3 / durable recovery) — both against a private
+  disposable broker.
+- **Broker down at BOOT (the #7 sub-part that was never wired).** The pool's
+  synchronous connect loop blocked every child_init ~2 min (core timers
+  stalled). Now `natsOptions_SetRetryOnFailedConnect` + NOT_YET_CONNECTED
+  continue degraded immediately; `_pool_reconnected_cb` doubles as the
+  first-connect callback. The consumer proc additionally gates
+  `ensure_subscription_for_handle` on `nats_pool_is_connected()` — repeated
+  JS subscribe attempts against a dialing connection crashed inside cnats
+  the moment the late broker arrived. Tests:
+  `lib/nats/tests/test_async_first_connect.c` (structural),
+  `lib/nats/tests/test_boot_degraded_e2e.sh` (behavioral: degraded boot,
+  clean failure, full recovery on late broker, consumer subscribes).
+
+Known-untested (documented, deliberate): stream/consumer deleted server-side
+while a durable is bound (wedges until operator unbind — recovery procedure,
+not code); reconnect racing an in-flight async RPC reply (bounded by the
+request timeout); broker-side max_ack_pending saturation under slow acks
+(stress-tier).
+
+---
+
 ## Verified-good (no action; confirmed by review)
 
 - tls_mgm `verify_cert` defaults to 1; no insecure-skip backdoor.
