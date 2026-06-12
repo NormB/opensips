@@ -84,8 +84,10 @@ int main(void)
 	ASSERT(grep_in_function("../cachedb_nats_dbase.c",
 		"nats_cache_counter_op", "nats_cas_should_retry") >= 1,
 		"counter CAS loop bails on non-conflict errors");
+	/* the CAS write step now lives in the _update_apply_and_cas helper
+	 * extracted from nats_cache_update (NATS_TODO #60 decomposition) */
 	ASSERT(grep_in_function("../cachedb_nats_json.c",
-		"nats_cache_update", "nats_cas_should_retry") >= 1,
+		"_update_apply_and_cas", "nats_cas_should_retry") >= 1,
 		"update CAS loop bails on non-conflict errors");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

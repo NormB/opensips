@@ -60,35 +60,35 @@ int main(void)
 	/* Single-alloc layout in _get_or_create_entry_in.  The blob is
 	 * the size of the entry struct + field_value bytes + inline
 	 * keys[] slots, all in one shm_malloc. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"size_t blob_sz"),
 		"_get_or_create_entry_in computes a single blob size");
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"shm_malloc(blob_sz)"),
 		"_get_or_create_entry_in does ONE shm_malloc for the blob");
 
 	/* The blob's three regions are pointer-arithmetic'd, NOT
 	 * separately shm_malloc'd. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"e->field_value  = blob + entry_sz"),
 		"field_value points into the blob (pointer arithmetic)");
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"e->keys         = (char **)(blob + entry_sz + fv_sz)"),
 		"keys[] points into the blob (pointer arithmetic)");
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"e->keys_inline  = 1"),
 		"keys_inline flag set to 1 on initial blob allocation");
 
 	/* The grow path in _entry_add_key handles inline -> external. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"e->keys_inline  = 0"),
 		"_entry_add_key clears keys_inline when growing");
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"if (e->keys_inline)"),
 		"_entry_add_key branches on keys_inline at grow site");
 
 	/* _free_entry conditionally frees keys[]. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"if (!e->keys_inline && e->keys)"),
 		"_free_entry skips keys[] free when still inline");
 
@@ -100,7 +100,7 @@ int main(void)
 	 * its return point; one is the blob alloc, anything more
 	 * is a regression. */
 	{
-		FILE *f = fopen("../cachedb_nats_json.c", "r");
+		FILE *f = fopen("../cachedb_nats_json_index.c", "r");
 		char line[4096];
 		int in_func = 0;
 		int mallocs_in_func = 0;
@@ -125,7 +125,7 @@ int main(void)
 
 	/* The intern table is still wired -- the blob change must
 	 * not have accidentally broken the intern integration. */
-	ASSERT(file_contains("../cachedb_nats_json.c",
+	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"nats_intern_acquire"),
 		"intern integration preserved");
 

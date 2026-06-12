@@ -258,7 +258,7 @@ int main(void)
 
 	/* D. production wiring */
 	{
-		const char *json  = "../cachedb_nats_json.c";
+		const char *json  = "../cachedb_nats_json_index.c";
 		const char *watch = "../cachedb_nats_watch.c";
 		ASSERT(grep_in_function(json, "nats_json_index_add", "nats_rev_put") >= 1,
 			"index_add populates the reverse map");

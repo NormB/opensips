@@ -93,13 +93,20 @@ int main(void)
 
 	/* production wiring */
 	{
-		const char *p = "../nats_consumer_proc.c";
+		/* After the NATS_TODO #60 split: the sub-state typedef (and
+		 * its last_stream_seq field) lives in the internal header;
+		 * ensure_subscription_for_handle in the sub-config TU. */
+		const char *p = "../nats_consumer_proc_internal.h";
+		const char *sub = "../nats_sub_config.c";
 		ASSERT(file_contains(p, "last_stream_seq"),
 			"sub state tracks the high-water stream sequence");
-		ASSERT(grep_in_function(p, "ensure_subscription_for_handle",
+		/* the config matrix (and the bias) now lives in the
+		 * build_consumer_config helper extracted from
+		 * ensure_subscription_for_handle */
+		ASSERT(grep_in_function(sub, "build_consumer_config",
 			"js_DeliverByStartSequence") >= 1,
 			"recreate biases deliver_all to start-sequence");
-		ASSERT(grep_in_function(p, "ensure_subscription_for_handle",
+		ASSERT(grep_in_function(sub, "build_consumer_config",
 			"NATS_DELIVER_ALL") >= 1,
 			"bias is gated on deliver_policy=all");
 	}

@@ -1,0 +1,1806 @@
+/*
+ * Copyright (C) 2025 Summit-2026 / cachedb_nats contributors
+ *
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ */
+
+/*
+ * cachedb_nats_json_index.c — SHM-backed JSON search index
+ *
+ * Owns the field:value -> document-key search index for JSON documents
+ * stored in NATS JetStream KV buckets: hash table + doc-key reverse map
+ * (revmap) in SHM, sharded lock set, and the index lifecycle
+ * (init / build / add / remove / rebuild / destroy).  Also owns the
+ * defensive JSON parse helpers (_json_parse_guard and friends) used
+ * before any broker-supplied document reaches the recursive cJSON
+ * parser.
+ *
+ * Split out of cachedb_nats_json.c (NATS_TODO #60); the query() /
+ * update() cachedb callbacks live there, the escape/sink/serializer
+ * helpers in cachedb_nats_json_ser.c.  Cross-TU private declarations
+ * are in cachedb_nats_json_internal.h.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <pthread.h>
+
+#include "../../dprint.h"
+#include "../../mem/mem.h"
+#include "../../mem/shm_mem.h"
+#include "../../cachedb/cachedb.h"
+#include "../../lib/nats/nats_dl.h"   /* libnats function-pointer table */
+
+#include "cachedb_nats_json.h"
+#include "cachedb_nats.h"
+#include "cachedb_nats_stats.h"
+#include "cachedb_nats_dbase.h"
+#include "cachedb_nats_intern.h"
+#include "cachedb_nats_json_internal.h"
+
+/*
+ * Defensive limits for broker-supplied JSON documents before they reach
+ * the recursive cJSON_Parse() (see _json_parse_guard).  cJSON recurses
+ * one C stack frame per nesting level with no internal cap, so an
+ * attacker who can publish to the KV bucket could otherwise crash a SIP
+ * worker with a deeply nested value.  Depth 64 is far beyond any real
+ * usrloc/cachedb document; the byte cap matches NATS's default
+ * max_payload (1 MiB).
+ */
+#define NATS_JSON_MAX_DEPTH  64
+#define NATS_JSON_MAX_BYTES  (1 * 1024 * 1024)
+
+/* ------------------------------------------------------------------ */
+/*                       Global search index                          */
+/* ------------------------------------------------------------------ */
+
+nats_search_idx *g_idx = NULL;
+
+/**
+ * nats_json_get_index() — Return the global search index pointer.
+ *
+ * Other modules (e.g. MI commands, watchers) use this to inspect index
+ * state such as document counts.  Returns NULL if the index has not been
+ * initialised yet.
+ */
+nats_search_idx *nats_json_get_index(void)
+{
+	return g_idx;
+}
+
+/* ------------------------------------------------------------------ */
+/*                       djb2 hash function                           */
+/* ------------------------------------------------------------------ */
+
+/* Runtime bucket count (set by nats_json_index_init from the
+ * `index_buckets` modparam).  Default keeps current behaviour for
+ * callers that don't override it. */
+int nats_idx_buckets = NATS_IDX_DEFAULT_BUCKETS;
+int nats_idx_bucket_mask = NATS_IDX_DEFAULT_BUCKETS - 1;
+
+/**
+ * _hash() — Compute a bucket index using the djb2 hash algorithm.
+ *
+ * Takes a byte string of length @len and produces a value in
+ * [0, nats_idx_buckets).  djb2 is a fast, well-distributed hash suitable
+ * for short strings such as "field:value" index keys.  The magic constant
+ * 5381 and the shift-add recurrence (h * 33 + c) are from Dan Bernstein's
+ * original comp.lang.c posting.  The bucket count is forced to a power
+ * of two at init, so `& nats_idx_bucket_mask` replaces the modulo.
+ */
+unsigned int _hash(const char *s, int len)
+{
+	unsigned int h = 5381;
+	int i;
+	/* djb2: h = h * 33 + c, expressed as ((h << 5) + h) + c */
+	for (i = 0; i < len; i++)
+		h = ((h << 5) + h) + (unsigned char)s[i];
+	return h & nats_idx_bucket_mask;
+}
+
+/* ------------------------------------------------------------------ */
+/*                    Simple JSON field parser                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * _skip_ws() — Advance past JSON whitespace characters.
+ *
+ * Skips spaces, tabs, newlines, and carriage returns.  All JSON parser
+ * entry points call this before inspecting the next token.  Returns a
+ * pointer to the first non-whitespace character, or @end if the buffer
+ * is exhausted.
+ */
+const char *_skip_ws(const char *p, const char *end)
+{
+	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+		p++;
+	return p;
+}
+
+/**
+ * _parse_json_string() — Parse a JSON quoted string with escape handling.
+ *
+ * Expects @p to point at the opening double-quote.  Scans forward,
+ * honouring backslash-escaped characters (\\, \", \n, etc.) so that
+ * embedded quotes do not terminate the string early.  On success, sets
+ * *out to the first character after the opening quote and *out_len to
+ * the raw byte length (escape sequences are NOT decoded — the returned
+ * slice points directly into the original buffer).
+ *
+ * Returns a pointer past the closing quote, or NULL on malformed input.
+ */
+const char *_parse_json_string(const char *p, const char *end,
+	const char **out, int *out_len)
+{
+	const char *start;
+
+	if (p >= end || *p != '"')
+		return NULL;
+	p++; /* skip opening quote */
+	start = p;
+
+	while (p < end && *p != '"') {
+		if (*p == '\\') {
+			p++; /* skip escaped char */
+			if (p >= end)
+				return NULL;
+		}
+		p++;
+	}
+	if (p >= end)
+		return NULL;
+
+	*out = start;
+	*out_len = (int)(p - start);
+	p++; /* skip closing quote */
+	return p;
+}
+
+/**
+ * _skip_json_value() — Skip over any JSON value without extracting it.
+ *
+ * Handles all six JSON value types via a simple state machine:
+ *   - Strings:  scan to closing quote, respecting backslash escapes.
+ *   - Objects / Arrays: track brace/bracket depth, skipping over nested
+ *     strings (to avoid miscounting braces inside string literals).
+ *   - Primitives (number, bool, null): advance until the next structural
+ *     character or whitespace.
+ *
+ * Returns a pointer past the value, or NULL on malformed input.
+ */
+const char *_skip_json_value(const char *p, const char *end)
+{
+	int depth;
+
+	p = _skip_ws(p, end);
+	if (p >= end)
+		return NULL;
+
+	/*
+	 * JSON parser state machine — dispatch on the first character to
+	 * determine the value type, then advance past the entire value.
+	 */
+	switch (*p) {
+	case '"': /* string — scan to unescaped closing quote */
+		p++;
+		while (p < end && *p != '"') {
+			if (*p == '\\') {
+				p++; /* skip the escaped character */
+				if (p >= end) return NULL;
+			}
+			p++;
+		}
+		return (p < end) ? p + 1 : NULL;
+
+	case '{': /* object */
+	case '[': /* array  */
+		/* depth-tracking: increment on open, decrement on close */
+		depth = 1;
+		p++;
+		while (p < end && depth > 0) {
+			if (*p == '{' || *p == '[') depth++;
+			else if (*p == '}' || *p == ']') depth--;
+			else if (*p == '"') {
+				/* skip embedded strings so their content cannot
+				 * be mistaken for structural characters */
+				p++;
+				while (p < end && *p != '"') {
+					if (*p == '\\') { p++; if (p >= end) return NULL; }
+					p++;
+				}
+				if (p >= end) return NULL;
+			}
+			p++;
+		}
+		return p;
+
+	default: /* number, bool, null — consume until delimiter */
+		while (p < end && *p != ',' && *p != '}' && *p != ']'
+				&& *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+			p++;
+		return p;
+	}
+}
+
+/**
+ * _json_parse_guard() — defensive pre-validation of broker-supplied JSON
+ * before it is handed to the recursive cJSON_Parse() in cdb_json_to_dict.
+ *
+ * The bundled cJSON (lib/cJSON.c) recurses one C stack frame per nesting
+ * level with no depth cap, so a deeply nested document published by
+ * anyone able to write to the KV bucket would exhaust the SIP worker's
+ * stack and crash it.  This guard is pure and iterative (no recursion,
+ * no allocation).  It rejects (returns -1):
+ *   - NULL / non-positive / oversized (> @max_bytes) input,
+ *   - any raw embedded NUL — invalid JSON that would otherwise silently
+ *     truncate the document at the C-string boundary,
+ *   - object/array nesting deeper than @max_depth.
+ * Brace/bracket counting skips over string literals (respecting '\'
+ * escapes) so structural characters inside strings are not miscounted.
+ * Returns 0 when the document is safe to parse.
+ *
+ * Mirrored by tests/test_json_parse_guard.c — keep the two in sync.
+ */
+static int _json_parse_guard(const char *data, int data_len,
+		int max_depth, int max_bytes)
+{
+	int i, depth = 0, in_string = 0;
+
+	if (!data || data_len <= 0 || data_len > max_bytes)
+		return -1;
+
+	if (memchr(data, '\0', (size_t)data_len) != NULL)
+		return -1;
+
+	for (i = 0; i < data_len; i++) {
+		unsigned char c = (unsigned char)data[i];
+		if (in_string) {
+			if (c == '\\') { i++; continue; }   /* skip escaped byte */
+			if (c == '"') in_string = 0;
+			continue;
+		}
+		if (c == '"') { in_string = 1; continue; }
+		if (c == '{' || c == '[') {
+			if (++depth > max_depth) return -1;
+		} else if (c == '}' || c == ']') {
+			if (depth > 0) depth--;
+		}
+	}
+	return 0;
+}
+
+/**
+ * _safe_json_to_dict() — guard + parse a broker-supplied JSON document.
+ *
+ * Runs _json_parse_guard() to reject hostile input (deep nesting, raw
+ * NUL, oversize), then hands cdb_json_to_dict() a guaranteed
+ * NUL-terminated copy — the kvEntry value bytes are not contractually
+ * NUL-terminated, and the recursive C-string parser must never run off
+ * the end of the value buffer.  Small documents use a stack buffer; only
+ * large ones touch the allocator.  Returns 0 on success, -1 on rejection
+ * or parse failure.
+ */
+int _safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
+{
+	char stackbuf[1024];
+	char *buf;
+	int rc;
+
+	if (_json_parse_guard(data, data_len,
+			NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES) != 0) {
+		LM_WARN("rejecting broker JSON document (%d bytes): failed "
+			"depth/size/NUL guard before parse\n", data_len);
+		return -1;
+	}
+
+	if (data_len < (int)sizeof(stackbuf)) {
+		buf = stackbuf;
+	} else {
+		buf = pkg_malloc(data_len + 1);
+		if (!buf) {
+			LM_ERR("no pkg memory for %d-byte JSON parse copy\n",
+				data_len);
+			return -1;
+		}
+	}
+	memcpy(buf, data, data_len);
+	buf[data_len] = '\0';
+
+	rc = cdb_json_to_dict(buf, out, NULL);
+
+	if (buf != stackbuf)
+		pkg_free(buf);
+	return rc;
+}
+
+/**
+ * _parse_json_fields() — Extract top-level string fields from a JSON object.
+ *
+ * Iterates over the top-level key/value pairs of a JSON object.  For every
+ * pair whose value is a JSON string, the user-supplied @callback is invoked
+ * with the field name, field length, value, value length, and the opaque
+ * @ctx pointer.  Non-string values (numbers, bools, nested objects/arrays)
+ * are silently skipped.
+ *
+ * Callback mechanism:
+ *   The callback signature is:
+ *     void cb(const char *field, int flen, const char *val, int vlen, void *ctx)
+ *   It is called synchronously for each string field while the JSON buffer
+ *   is still valid.  The field/val pointers reference the original @json
+ *   buffer and must not be stored beyond the callback's lifetime.
+ *
+ * Returns the number of string fields processed, or -1 on parse error.
+ */
+static int _parse_json_fields(const char *json, int len,
+	void (*callback)(const char *field, int flen,
+		const char *val, int vlen, void *ctx),
+	void *ctx)
+{
+	const char *p = json;
+	const char *end = json + len;
+	const char *field, *val;
+	int flen, vlen;
+	int count = 0;
+
+	p = _skip_ws(p, end);
+	if (p >= end || *p != '{')
+		return -1;
+	p++; /* skip '{' */
+
+	while (1) {
+		p = _skip_ws(p, end);
+		if (p >= end)
+			return -1;
+		if (*p == '}')
+			break;
+
+		/* expect comma between pairs (skip it) */
+		if (*p == ',') {
+			p++;
+			p = _skip_ws(p, end);
+			if (p >= end)
+				return -1;
+		}
+
+		/* parse field name */
+		p = _parse_json_string(p, end, &field, &flen);
+		if (!p)
+			return -1;
+
+		/* expect colon */
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':')
+			return -1;
+		p++;
+		if (p >= end)
+			return -1;
+
+		/* check if value is a string */
+		p = _skip_ws(p, end);
+		if (p >= end)
+			return -1;
+
+		if (*p == '"') {
+			/* string value — parse and invoke the caller's callback
+			 * with field name + value slices from the original buffer */
+			p = _parse_json_string(p, end, &val, &vlen);
+			if (!p)
+				return -1;
+			callback(field, flen, val, vlen, ctx);
+			count++;
+		} else {
+			/* non-string value — skip without invoking callback */
+			p = _skip_json_value(p, end);
+			if (!p)
+				return -1;
+		}
+	}
+
+	return count;
+}
+
+/* ------------------------------------------------------------------ */
+/*                    Index entry management                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * _find_entry() — Look up an index entry by its "field:value" key.
+ *
+ * Hashes @fv to select a bucket, then walks the singly-linked chain of
+ * entries in that bucket comparing both length and content.  Returns the
+ * matching entry or NULL.  Must be called with g_idx->lock held.
+ */
+static nats_idx_entry *_find_entry_in(nats_search_idx *idx,
+	const char *fv, int fv_len)
+{
+	unsigned int bucket = _hash(fv, fv_len);
+	nats_idx_entry *e;
+
+	for (e = idx->buckets[bucket]; e; e = e->next) {
+		if (e->fv_len == (unsigned int)fv_len
+				&& memcmp(e->field_value, fv, fv_len) == 0)
+			return e;
+	}
+	return NULL;
+}
+
+nats_idx_entry *_find_entry(const char *fv, int fv_len)
+{
+	return _find_entry_in(g_idx, fv, fv_len);
+}
+
+/**
+ * _get_or_create_entry() — Find or create an index entry for a field:value.
+ *
+ * First tries _find_entry(); if the entry does not exist, allocates a new
+ * nats_idx_entry, copies the "field:value" string, pre-allocates the key
+ * array (initial capacity 8), and inserts the entry at the head of the
+ * bucket's chain.  Must be called with g_idx->lock held.
+ *
+ * Returns the entry pointer, or NULL on allocation failure.
+ */
+static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
+	const char *fv, int fv_len)
+{
+	nats_idx_entry *e;
+	unsigned int bucket;
+
+	e = _find_entry_in(idx, fv, fv_len);
+	if (e)
+		return e;
+
+	/* SHM allocations: the index lives in shared memory so every
+	 * worker dereferences the same pointers; entry storage must
+	 * follow.  Failures here are unlikely but logged loudly because
+	 * they reflect SHM exhaustion rather than per-process pkg
+	 * pressure. */
+	/* Single-allocation layout to cut the per-new-entry shm_malloc
+	 * count from 3 to 1.  The blob is sized to hold the entry
+	 * struct + the field_value bytes + an inline keys[] array of
+	 * NATS_IDX_KEYS_INLINE pointers.  field_value and keys are
+	 * pointer-arithmetic'd into the blob; _free_entry releases
+	 * just the blob (no separate shm_free for fv/keys) unless
+	 * keys_inline has been cleared by a later geometric-growth.
+	 *
+	 * Why this matters: the watcher's nats_json_index_add path was
+	 * spending half of opensips CPU on hp_shm_malloc -> sem_wait at
+	 * 100k AoRs (PERF_NOTES "HP_MALLOC contention hypothesis").
+	 * Cutting allocs from 3 to 1 per new entry gives the cold-fill
+	 * path 3x fewer bucket-lock acquires; the re-register hot path
+	 * was already cut to ~zero by the doc-key intern table.
+	 *
+	 * Memory waste: the inline keys[] occupies
+	 * NATS_IDX_KEYS_INLINE * 8 = 64 bytes in the blob.  When the
+	 * key array grows beyond NATS_IDX_KEYS_INLINE, _entry_add_key
+	 * allocates a fresh keys[] separately and clears keys_inline;
+	 * the inline 64 bytes is then dead but stays in the blob until
+	 * the entry itself is freed.  Trivial overhead. */
+	{
+		size_t entry_sz = sizeof(nats_idx_entry);
+		size_t fv_sz    = (size_t)fv_len + 1;
+		size_t keys_sz  = sizeof(char *) * NATS_IDX_KEYS_INLINE;
+		size_t blob_sz  = entry_sz + fv_sz + keys_sz;
+		char  *blob     = shm_malloc(blob_sz);
+		if (!blob) {
+			LM_ERR("no SHM for index entry blob (%zu bytes)\n",
+				blob_sz);
+			return NULL;
+		}
+		memset(blob, 0, blob_sz);
+		e               = (nats_idx_entry *)blob;
+		e->field_value  = blob + entry_sz;
+		e->keys         = (char **)(blob + entry_sz + fv_sz);
+		e->keys_inline  = 1;
+	}
+
+	memcpy(e->field_value, fv, (size_t)fv_len);
+	e->field_value[fv_len] = '\0';
+	e->fv_len = fv_len;
+
+	e->alloc_keys = NATS_IDX_KEYS_INLINE;
+	e->num_keys   = 0;
+
+	bucket = _hash(fv, fv_len);
+	e->next = idx->buckets[bucket];
+	idx->buckets[bucket] = e;
+
+	return e;
+}
+
+/* The thin wrapper _get_or_create_entry(fv, fv_len) -> _get_or_create_entry_in(
+ * g_idx, fv, fv_len) was removed: every call site already targets a
+ * specific index (the live index OR a shadow index during rebuild),
+ * so the wrapper had no callers and gcc -Wunused-function under
+ * -Werror flagged it. */
+
+/**
+ * _entry_add_key() — Append a document key to an entry's key list.
+ *
+ * The key list is a dynamic array of strdup'd strings.  Duplicates are
+ * detected by a linear scan and silently ignored.  When the array is full
+ * it is doubled in size via realloc (geometric growth: 8 -> 16 -> 32 ...).
+ * Must be called with g_idx->lock held.
+ *
+ * Returns 0 on success, -1 on allocation failure.
+ */
+static int _entry_add_key(nats_idx_entry *e, const char *key)
+{
+	int i;
+	char *interned;
+	int   klen = (int)strlen(key);
+
+	/* Intern up front so the dup check can compare pointers instead
+	 * of running strcmp on every stored key.  All stored keys are
+	 * already canonical (acquired through nats_intern_acquire); the
+	 * intern table guarantees the same content always resolves to
+	 * the same SHM pointer.  Pointer equality is therefore both
+	 * correct and O(1).
+	 *
+	 * Cost of the upfront acquire: one hash lookup + (if hit) one
+	 * refcount bump.  Cheaper than strcmp over N >= 2 stored keys,
+	 * which is the common case in re-register storms where every
+	 * AoR's 5 indexed fields share the same doc key. */
+	interned = nats_intern_acquire(key, klen);
+	if (!interned) {
+		LM_ERR("no SHM for interned key string\n");
+		return -1;
+	}
+
+	for (i = 0; i < e->num_keys; i++) {
+		if (e->keys[i] == interned) {
+			/* duplicate: drop the extra refcount we just took
+			 * so the intern entry's refcount stays balanced. */
+			nats_intern_release(interned);
+			return 0;
+		}
+	}
+
+	/* Geometric growth (double) when the key array is full.  The
+	 * twist: the initial keys[] is INSIDE the entry's single-alloc
+	 * blob (e->keys_inline=1) and cannot be shm_realloc'd because
+	 * it isn't a separate allocation.  The first time we grow past
+	 * NATS_IDX_KEYS_INLINE we shm_malloc a fresh array, copy the
+	 * inline contents over, clear keys_inline.  Subsequent grows
+	 * use shm_realloc on the now-separate block. */
+	if (e->num_keys >= e->alloc_keys) {
+		int    new_alloc = e->alloc_keys * 2;
+		char **new_keys;
+		if (e->keys_inline) {
+			new_keys = shm_malloc(sizeof(char *) * new_alloc);
+			if (!new_keys) {
+				LM_ERR("no SHM to grow inline keys array\n");
+				/* release the ref acquired above so the intern
+				 * entry's refcount stays balanced on OOM. */
+				nats_intern_release(interned);
+				return -1;
+			}
+			memcpy(new_keys, e->keys,
+				sizeof(char *) * (size_t)e->num_keys);
+			e->keys         = new_keys;
+			e->keys_inline  = 0;
+		} else {
+			/* shm_realloc preserves contents; on failure the
+			 * original block is untouched. */
+			new_keys = shm_realloc(e->keys,
+				sizeof(char *) * new_alloc);
+			if (!new_keys) {
+				LM_ERR("no SHM to grow keys array\n");
+				/* release the ref acquired above so the intern
+				 * entry's refcount stays balanced on OOM. */
+				nats_intern_release(interned);
+				return -1;
+			}
+			e->keys = new_keys;
+		}
+		e->alloc_keys = new_alloc;
+	}
+
+	/* New unique key for this entry: store the canonical pointer
+	 * we already acquired at the top of the function.  The intern
+	 * refcount is now owned by this slot in e->keys[]; release
+	 * happens in _entry_remove_key. */
+	e->keys[e->num_keys++] = interned;
+	return 0;
+}
+
+/**
+ * _entry_remove_key() — Remove a document key from an entry's key list.
+ *
+ * Performs a linear scan for @key.  When found, frees the string and fills
+ * the gap by moving the last element into the vacated slot (swap-remove).
+ * This is O(n) in the key count but avoids a memmove and keeps the array
+ * compact.  Must be called with g_idx->lock held.
+ */
+static void _entry_remove_key(nats_idx_entry *e, const char *key)
+{
+	int   i;
+	char *interned;
+	int   klen = (int)strlen(key);
+
+	/* Intern to get the canonical pointer; subsequent scan is O(1)
+	 * pointer compare.  This adds an extra acquire+release per call
+	 * but eliminates the strcmp per stored key. */
+	interned = nats_intern_acquire(key, klen);
+	if (!interned) return;
+
+	for (i = 0; i < e->num_keys; i++) {
+		if (e->keys[i] == interned) {
+			/* Release twice: once for the slot's ref (kept since
+			 * _entry_add_key), once for the acquire we just did
+			 * at the top of this function. */
+			nats_intern_release(e->keys[i]);
+			nats_intern_release(interned);
+			/* swap-remove: move the last element into this slot */
+			e->num_keys--;
+			if (i < e->num_keys)
+				e->keys[i] = e->keys[e->num_keys];
+			return;
+		}
+	}
+	/* Not found: release our extra acquire to balance refcount. */
+	nats_intern_release(interned);
+}
+
+/**
+ * _free_entry() — Free a single index entry and all its owned memory.
+ *
+ * Releases the field_value string, every strdup'd key in the key array,
+ * the key array itself, and finally the entry struct.  Safe to call with
+ * a NULL pointer (no-op).
+ */
+static void _free_entry(nats_idx_entry *e)
+{
+	int i;
+	if (!e)
+		return;
+
+	/* Release intern refcounts on every doc key.  The underlying
+	 * SHM string is freed only when no other entry still
+	 * references it. */
+	if (e->keys) {
+		for (i = 0; i < e->num_keys; i++)
+			nats_intern_release(e->keys[i]);
+	}
+
+	/* Free the keys[] array only if it has been grown past the
+	 * inline NATS_IDX_KEYS_INLINE slots into a separate SHM
+	 * allocation.  When still inline, it is part of the entry
+	 * blob and freed with the entry below. */
+	if (!e->keys_inline && e->keys)
+		shm_free(e->keys);
+
+	/* The entry struct, the field_value bytes, and (if inline)
+	 * the keys[] slots all live in a single shm_malloc'd blob.
+	 * One free releases the lot. */
+	shm_free(e);
+}
+
+/* ------------------------------------------------------------------ */
+/*             Callback context for JSON field indexing                */
+/* ------------------------------------------------------------------ */
+
+typedef struct _idx_add_ctx {
+	const char *doc_key;     /* the KV key for this document */
+	nats_search_idx *target; /* destination index — NULL means g_idx */
+} idx_add_ctx;
+
+/**
+ * _index_field_cb() — Callback used during JSON parsing to index fields.
+ *
+ * Invoked by _parse_json_fields() for every top-level string field in a
+ * JSON document.  Builds the composite "field:value" lookup key into a
+ * stack buffer, then calls _get_or_create_entry() + _entry_add_key() to
+ * record the association between this field:value pair and the document's
+ * KV key (carried in ctx->doc_key).
+ */
+static void _index_field_cb(const char *field, int flen,
+	const char *val, int vlen, void *ctx)
+{
+	idx_add_ctx *actx = (idx_add_ctx *)ctx;
+	char fv_buf[1024];
+	int fv_len;
+	nats_idx_entry *e;
+
+	/* guard against negative lengths that could cause integer underflow
+	 * and subsequent out-of-bounds memcpy */
+	if (flen < 0 || vlen < 0)
+		return;
+
+	/* build "field:value" string */
+	fv_len = flen + 1 + vlen;
+	if (fv_len >= (int)sizeof(fv_buf)) {
+		LM_WARN("field:value too long (%d), skipping\n", fv_len);
+		return;
+	}
+	memcpy(fv_buf, field, flen);
+	fv_buf[flen] = ':';
+	memcpy(fv_buf + flen + 1, val, vlen);
+	fv_buf[fv_len] = '\0';
+
+	e = _get_or_create_entry_in(actx->target ? actx->target : g_idx,
+		fv_buf, fv_len);
+	if (!e)
+		return;
+
+	_entry_add_key(e, actx->doc_key);
+}
+
+/* ------------------------------------------------------------------ */
+/*                      Public API functions                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * nats_json_index_init() — Allocate and initialise the global search index.
+ *
+ * Allocates the nats_search_idx struct (heap, not SHM — the index is
+ * process-local), zeroes the bucket array, and initialises the protecting
+ * mutex.  Must be called once per OpenSIPS worker process before any
+ * index_add / query / update operations.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+/* Round @v up to the next power of two, with a floor at @min.
+ * Used to coerce the operator-supplied `index_buckets` modparam
+ * into a power-of-two value so `_hash` can use a bitmask. */
+static int _round_up_pow2(int v, int min)
+{
+	int r = 1;
+	if (v < min)
+		v = min;
+	while (r < v)
+		r <<= 1;
+	return r;
+}
+
+/* ------------------------------------------------------------------ */
+/*        doc-key -> field:value reverse map (fast delete)            */
+/* ------------------------------------------------------------------ */
+/*
+ * The watcher's delete-by-key path only has the KV key (the document's
+ * JSON is already gone), so it used nats_json_index_remove(), which walks
+ * EVERY bucket/entry under all shard locks -- O(buckets x entries) on each
+ * expiry/unregister.  This reverse map records, per doc-key, the list of
+ * "field:value" strings the document was indexed under, so a delete can
+ * remove the key from only those entries (O(fields)).
+ *
+ * Design notes:
+ *   - It stores the fv STRINGS, not nats_idx_entry pointers, so there is
+ *     no dangling-pointer hazard: the delete re-looks-up each entry by
+ *     string under its own forward-index shard lock, exactly like
+ *     nats_json_index_remove_fields().
+ *   - The reverse-map lock and the forward-index shard locks are NEVER
+ *     held at the same time: the delete snapshots the fv list under the
+ *     reverse lock, releases it, then takes forward shard locks.  With a
+ *     SEPARATE lock set there is no lock-order relationship to deadlock on.
+ *   - A reverse-map miss is always safe: the caller falls back to the full
+ *     nats_json_index_remove() walk (correct, just slower).  This makes
+ *     the map best-effort -- the index stays the source of truth.
+ */
+typedef struct nats_rev_node {
+	struct nats_rev_node *next;
+	unsigned int          hash;
+	int                   key_len;
+	int                   n_fv;     /* number of fv strings in blob */
+	int                   blob_len; /* bytes (each fv is NUL-terminated) */
+	char                 *fv_blob;  /* SHM: n_fv NUL-terminated fv strings */
+	char                  key[];    /* NUL-terminated doc key */
+} nats_rev_node;
+
+typedef struct nats_rev_map {
+	nats_rev_node **buckets;        /* nats_idx_buckets heads */
+	gen_lock_set_t *locks;          /* OWN lock set, NATS_IDX_SHARDS */
+} nats_rev_map;
+
+static nats_rev_map *g_rev = NULL;
+
+static int nats_rev_init(void)
+{
+	nats_rev_map *r;
+
+	if (g_rev)
+		return 0;
+
+	r = shm_malloc(sizeof(*r));
+	if (!r) {
+		LM_ERR("rev map: no SHM for header\n");
+		return -1;
+	}
+	memset(r, 0, sizeof(*r));
+
+	r->buckets = shm_malloc(sizeof(nats_rev_node *) * (size_t)nats_idx_buckets);
+	if (!r->buckets) {
+		LM_ERR("rev map: no SHM for %d bucket heads\n", nats_idx_buckets);
+		shm_free(r);
+		return -1;
+	}
+	memset(r->buckets, 0, sizeof(nats_rev_node *) * (size_t)nats_idx_buckets);
+
+	r->locks = lock_set_alloc(NATS_IDX_SHARDS);
+	if (!r->locks || !lock_set_init(r->locks)) {
+		LM_ERR("rev map: lock_set_alloc/init(%d) failed\n", NATS_IDX_SHARDS);
+		if (r->locks) lock_set_dealloc(r->locks);
+		shm_free(r->buckets);
+		shm_free(r);
+		return -1;
+	}
+
+	g_rev = r;
+	return 0;
+}
+
+static void _rev_free_node(nats_rev_node *n)
+{
+	if (!n) return;
+	if (n->fv_blob) shm_free(n->fv_blob);
+	shm_free(n);
+}
+
+static void nats_rev_destroy(void)
+{
+	int i;
+	nats_rev_node *n, *next;
+
+	if (!g_rev) return;
+
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		lock_set_get(g_rev->locks, i);
+
+	for (i = 0; i < nats_idx_buckets; i++) {
+		for (n = g_rev->buckets[i]; n; n = next) {
+			next = n->next;
+			_rev_free_node(n);
+		}
+		g_rev->buckets[i] = NULL;
+	}
+
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		lock_set_release(g_rev->locks, i);
+
+	lock_set_destroy(g_rev->locks);
+	lock_set_dealloc(g_rev->locks);
+	shm_free(g_rev->buckets);
+	shm_free(g_rev);
+	g_rev = NULL;
+}
+
+/* Insert-or-replace the fv blob recorded for @key.  @blob is n_fv
+ * NUL-terminated "field:value" strings totalling @blob_len bytes. */
+static void nats_rev_put(const char *key, int key_len,
+	const char *blob, int blob_len, int n_fv)
+{
+	unsigned int hash, bucket;
+	int shard;
+	nats_rev_node *n, **pp;
+	char *blob_copy;
+
+	if (!g_rev || !key || key_len <= 0 || n_fv <= 0 || blob_len <= 0)
+		return;
+
+	blob_copy = shm_malloc((size_t)blob_len);
+	if (!blob_copy) {
+		LM_ERR("rev map: no SHM for fv blob (%d bytes)\n", blob_len);
+		return;   /* best-effort: a miss just falls back to the full walk */
+	}
+	memcpy(blob_copy, blob, (size_t)blob_len);
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			/* replace */
+			if (n->fv_blob) shm_free(n->fv_blob);
+			n->fv_blob  = blob_copy;
+			n->blob_len = blob_len;
+			n->n_fv     = n_fv;
+			lock_set_release(g_rev->locks, shard);
+			return;
+		}
+	}
+
+	n = shm_malloc(sizeof(*n) + (size_t)key_len + 1);
+	if (!n) {
+		LM_ERR("rev map: no SHM for node (key_len=%d)\n", key_len);
+		shm_free(blob_copy);
+		lock_set_release(g_rev->locks, shard);
+		return;
+	}
+	n->hash     = hash;
+	n->key_len  = key_len;
+	n->n_fv     = n_fv;
+	n->blob_len = blob_len;
+	n->fv_blob  = blob_copy;
+	memcpy(n->key, key, (size_t)key_len);
+	n->key[key_len] = '\0';
+	n->next = g_rev->buckets[bucket];
+	g_rev->buckets[bucket] = n;
+
+	lock_set_release(g_rev->locks, shard);
+}
+
+/* Drop the reverse-map record for @key (if any). */
+static void nats_rev_remove(const char *key)
+{
+	unsigned int hash, bucket;
+	int shard, key_len;
+	nats_rev_node *n, **pp;
+
+	if (!g_rev || !key)
+		return;
+	key_len = (int)strlen(key);
+	if (key_len <= 0)
+		return;
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			*pp = n->next;
+			lock_set_release(g_rev->locks, shard);
+			_rev_free_node(n);
+			return;
+		}
+	}
+	lock_set_release(g_rev->locks, shard);
+}
+
+/* Drop every reverse-map record (used on a full index rebuild; the map
+ * repopulates as documents are re-added). */
+static void nats_rev_clear(void)
+{
+	int i;
+	nats_rev_node *n, *next;
+
+	if (!g_rev) return;
+
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		lock_set_get(g_rev->locks, i);
+	for (i = 0; i < nats_idx_buckets; i++) {
+		for (n = g_rev->buckets[i]; n; n = next) {
+			next = n->next;
+			_rev_free_node(n);
+		}
+		g_rev->buckets[i] = NULL;
+	}
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		lock_set_release(g_rev->locks, i);
+}
+
+/* nats_json_index_remove_by_revmap() is defined after the forward-index
+ * shard-lock helpers below (it uses them). */
+
+int nats_json_index_init(void)
+{
+	if (g_idx) {
+		LM_WARN("search index already initialized\n");
+		return 0;
+	}
+
+	/* Coerce the requested bucket count into a power of two (so the
+	 * hash can use a bitmask) and at least NATS_IDX_SHARDS (so each
+	 * shard guards exactly buckets/shards buckets). */
+	int requested = nats_idx_buckets > 0
+		? nats_idx_buckets : NATS_IDX_DEFAULT_BUCKETS;
+	int rounded = _round_up_pow2(requested, NATS_IDX_SHARDS);
+	if (rounded != requested)
+		LM_INFO("index_buckets %d rounded up to power of two "
+			"%d (min %d)\n",
+			requested, rounded, NATS_IDX_SHARDS);
+	nats_idx_buckets = rounded;
+	nats_idx_bucket_mask = rounded - 1;
+
+	/* Allocate the index header in SHM so every forked OpenSIPS
+	 * worker sees the same instance.  Pre-fork allocation matters:
+	 * once child_init runs, each worker maps the same SHM segment
+	 * and dereferences the same pointer values. */
+	g_idx = shm_malloc(sizeof(nats_search_idx));
+	if (!g_idx) {
+		LM_ERR("index init: shm_malloc for nats_search_idx header "
+			"failed (%zu bytes; tune -m / shared memory size)\n",
+			sizeof(nats_search_idx));
+		return -1;
+	}
+	memset(g_idx, 0, sizeof(nats_search_idx));
+	atomic_store(&g_idx->num_documents, 0);
+
+	g_idx->buckets = shm_malloc(
+		sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+	if (!g_idx->buckets) {
+		LM_ERR("index init: shm_malloc for buckets array failed "
+			"(%d buckets, %zu bytes)\n",
+			nats_idx_buckets,
+			sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
+	}
+	memset(g_idx->buckets, 0,
+		sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets);
+
+	g_idx->shard_locks = lock_set_alloc(NATS_IDX_SHARDS);
+	if (!g_idx->shard_locks) {
+		LM_ERR("index init: lock_set_alloc(%d) for shard locks "
+			"failed (SHM exhausted?)\n", NATS_IDX_SHARDS);
+		shm_free(g_idx->buckets);
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
+	}
+	if (!lock_set_init(g_idx->shard_locks)) {
+		LM_ERR("index init: lock_set_init failed for %d shards\n",
+			NATS_IDX_SHARDS);
+		lock_set_dealloc(g_idx->shard_locks);
+		shm_free(g_idx->buckets);
+		shm_free(g_idx);
+		g_idx = NULL;
+		return -1;
+	}
+
+	/* Allocate the delete-by-key reverse map.  Best-effort: on failure
+	 * the watcher's delete path just falls back to the full-walk remove. */
+	if (nats_rev_init() < 0)
+		LM_WARN("search index: reverse map init failed; deletes will use "
+			"the slower full-index walk\n");
+
+	LM_DBG("search index initialized in SHM (%d buckets, %d shards)\n",
+		nats_idx_buckets, NATS_IDX_SHARDS);
+	return 0;
+}
+
+static inline void _idx_lock_all(nats_search_idx *idx)
+{
+	int i;
+	for (i = 0; i < NATS_IDX_SHARDS; i++)
+		lock_set_get(idx->shard_locks, i);
+}
+static inline void _idx_unlock_all(nats_search_idx *idx)
+{
+	int i;
+	for (i = NATS_IDX_SHARDS - 1; i >= 0; i--)
+		lock_set_release(idx->shard_locks, i);
+}
+
+/*
+ * Fast delete-by-key for the watcher: if the reverse map has a record for
+ * @key, remove the key from only the entries it was indexed under
+ * (O(fields)) instead of walking every bucket.  Returns 0 on a hit (key
+ * removed), -1 on a miss -- the caller MUST fall back to
+ * nats_json_index_remove() on -1.
+ *
+ * The fv blob is copied + the rev node unlinked under the reverse shard
+ * lock, which is released BEFORE any forward-index shard lock is taken, so
+ * the two (separate) lock sets are never held simultaneously.
+ */
+int nats_json_index_remove_by_revmap(const char *key)
+{
+	unsigned int hash, bucket;
+	int shard, key_len, i;
+	nats_rev_node *n, **pp;
+	char *blob = NULL;
+	int blob_len = 0, n_fv = 0, off;
+	const char *p;
+
+	if (!g_idx || !g_rev || !key)
+		return -1;
+	key_len = (int)strlen(key);
+	if (key_len <= 0)
+		return -1;
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+	for (pp = &g_rev->buckets[bucket]; *pp; pp = &(*pp)->next) {
+		n = *pp;
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			blob = malloc((size_t)n->blob_len);
+			if (blob) {
+				memcpy(blob, n->fv_blob, (size_t)n->blob_len);
+				blob_len = n->blob_len;
+				n_fv     = n->n_fv;
+			}
+			*pp = n->next;
+			lock_set_release(g_rev->locks, shard);
+			_rev_free_node(n);
+			goto have_blob;
+		}
+	}
+	lock_set_release(g_rev->locks, shard);
+	return -1;   /* miss -> caller falls back to the full walk */
+
+have_blob:
+	if (!blob)
+		return -1;   /* OOM copying -> fall back to the full walk */
+
+	p   = blob;
+	off = 0;
+	for (i = 0; i < n_fv && off < blob_len; i++) {
+		int flen = (int)strlen(p);
+		unsigned int fb = _hash(p, flen);
+		int fs = NATS_IDX_SHARD_OF(fb);
+		nats_idx_entry *e;
+
+		_idx_lock_shard(g_idx, fs);
+		e = _find_entry_in(g_idx, p, flen);
+		if (e)
+			_entry_remove_key(e, key);
+		_idx_unlock_shard(g_idx, fs);
+
+		off += flen + 1;
+		p   += flen + 1;
+	}
+	free(blob);
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+	LM_DBG("removed key '%s' via revmap (%d field entries)\n", key, n_fv);
+	return 0;
+}
+
+/* Per-entry callback type used by _drain_kv_snapshot.  Return 0 to
+ * keep iterating, non-zero to stop early. */
+typedef int (*_kv_snapshot_cb)(const char *key,
+	const char *data, int data_len, void *ctx);
+
+/* Drain the initial snapshot phase of a kvStore_WatchAll subscription:
+ * open a watcher with UpdatesOnly=false, loop on kvWatcher_Next until
+ * libnats delivers the end-of-snapshot sentinel (NULL entry), invoke
+ * @cb for each delivered live entry, then destroy the watcher.
+ *
+ * Replaces the legacy "kvStore_Keys + N × kvStore_Get" pattern: instead
+ * of N round-trips serially, the broker streams every existing entry
+ * through a single subscription (one round-trip latency, then
+ * server-paced delivery).  For a 50k-key bucket on a typical 200 µs
+ * RTT this collapses cold-start work from ~10 s to ~1-2 s.
+ *
+ * IgnoreDeletes is set so tombstones are skipped (we only index live
+ * docs).  MetaOnly is left false because we need value bytes to parse
+ * JSON.  The snapshot phase's per-call timeout is large (30 s) — the
+ * broker delivers entries immediately once the subscription is
+ * established; a 30-s wait is only hit if the broker is actually
+ * stalled, in which case caller-bubbled error is the right outcome.
+ *
+ * Returns the number of entries the callback successfully indexed
+ * (return value 0), or -1 on a NATS-level error before any entry was
+ * delivered. */
+static int _drain_kv_snapshot(kvStore *kv,
+	_kv_snapshot_cb cb, void *ctx)
+{
+	kvWatcher *w = NULL;
+	kvWatchOptions opts;
+	kvEntry *entry = NULL;
+	natsStatus s;
+	int count = 0;
+
+	nats_dl.kvWatchOptions_Init(&opts);
+	opts.IgnoreDeletes = true;
+	opts.UpdatesOnly   = false;   /* include the initial snapshot */
+
+	s = nats_dl.kvStore_WatchAll(&w, kv, &opts);
+	if (s != NATS_OK) {
+		LM_ERR("kvStore_WatchAll failed: %s\n",
+			nats_dl.natsStatus_GetText(s));
+		return -1;
+	}
+
+	for (;;) {
+		const char *key, *data;
+		int data_len;
+
+		s = nats_dl.kvWatcher_Next(&entry, w, 30000);
+		if (s == NATS_TIMEOUT) {
+			LM_WARN("snapshot stalled at %d entries; aborting\n",
+				count);
+			break;
+		}
+		if (s != NATS_OK) {
+			LM_ERR("kvWatcher_Next failed: %s\n",
+				nats_dl.natsStatus_GetText(s));
+			nats_dl.kvWatcher_Destroy(w);
+			return -1;
+		}
+		if (!entry)
+			break;   /* end-of-snapshot sentinel */
+
+		key      = nats_dl.kvEntry_Key(entry);
+		data     = nats_dl.kvEntry_ValueString(entry);
+		data_len = nats_dl.kvEntry_ValueLen(entry);
+
+		if (key && data && data_len > 0) {
+			if (cb(key, data, data_len, ctx) == 0)
+				count++;
+		}
+
+		nats_dl.kvEntry_Destroy(entry);
+		entry = NULL;
+	}
+
+	if (entry) nats_dl.kvEntry_Destroy(entry);
+	nats_dl.kvWatcher_Destroy(w);
+	return count;
+}
+
+/* Snapshot-callback adapter for nats_json_index_build: filters by
+ * prefix and JSON-shape heuristic, then invokes the global-index
+ * insert. */
+struct _build_snapshot_ctx {
+	const char *prefix;
+	int prefix_len;
+};
+
+static int _build_snapshot_cb(const char *key,
+	const char *data, int data_len, void *ctx)
+{
+	struct _build_snapshot_ctx *bctx = ctx;
+	if (bctx->prefix_len > 0 &&
+	    strncmp(key, bctx->prefix, bctx->prefix_len) != 0)
+		return -1;
+	if (data[0] != '{')
+		return -1;
+	return nats_json_index_add(key, data, data_len);
+}
+
+/**
+ * nats_json_index_build() — Bulk-load the index from a NATS KV store.
+ *
+ * For each live entry whose key matches @prefix and whose value
+ * starts with '{' (heuristic JSON detection), calls
+ * nats_json_index_add() to parse and index every top-level string
+ * field.  Used once at startup to warm the index.
+ *
+ * Returns the number of documents indexed, or -1 on error.
+ */
+int nats_json_index_build(kvStore *kv, const char *prefix)
+{
+	struct _build_snapshot_ctx ctx;
+	int count;
+
+	if (!g_idx) {
+		LM_ERR("search index not initialized\n");
+		return -1;
+	}
+	if (!kv) {
+		LM_ERR("null KV store\n");
+		return -1;
+	}
+
+	ctx.prefix = prefix;
+	ctx.prefix_len = prefix ? (int)strlen(prefix) : 0;
+
+	count = _drain_kv_snapshot(kv, _build_snapshot_cb, &ctx);
+	if (count < 0) return -1;
+
+	LM_INFO("search index built: %d documents indexed\n", count);
+	return count;
+}
+
+/**
+ * nats_json_index_add() — Parse a JSON document and add it to the index.
+ *
+ * Acquires the index mutex, invokes _parse_json_fields() with the
+ * _index_field_cb callback to extract every top-level string field, and
+ * creates or updates "field:value" -> key mappings in the hash table.
+ * Increments the global document counter on success.
+ *
+ * Returns 0 on success, -1 if parsing fails or parameters are NULL.
+ */
+/* Parse-then-insert split for index_add: parse the document into a
+ * stack/heap-backed field-value list outside the lock, then take the
+ * lock briefly only to insert each (field:value, key) pair.  The
+ * previous design held the index mutex for the full duration of
+ * _parse_json_fields, which scaled with document size and serialised
+ * concurrent index work (queries, removes, other adds) on the entire
+ * CPU-bound parse.
+ *
+ * For a typical AoR document (~500 bytes, 2-3 top-level string
+ * fields) the lock-held window drops from "parse + N inserts" to
+ * "N inserts", roughly a 10× reduction. */
+
+#define _IDX_FV_INLINE 16
+
+typedef struct {
+	const char *field; int flen;
+	const char *val;   int vlen;
+} _idx_fv_t;
+
+typedef struct {
+	_idx_fv_t  inline_buf[_IDX_FV_INLINE];
+	_idx_fv_t *items;
+	int n;
+	int cap;
+	int oom;
+} _idx_fv_list_t;
+
+static void _idx_fv_init(_idx_fv_list_t *l)
+{
+	l->items = l->inline_buf;
+	l->n = 0;
+	l->cap = _IDX_FV_INLINE;
+	l->oom = 0;
+}
+
+static void _idx_fv_free(_idx_fv_list_t *l)
+{
+	if (l->items != l->inline_buf)
+		free(l->items);
+	l->items = NULL;
+}
+
+static int _idx_fv_grow(_idx_fv_list_t *l)
+{
+	int newcap = l->cap * 2;
+	_idx_fv_t *next;
+	if (l->items == l->inline_buf) {
+		next = malloc(newcap * sizeof(_idx_fv_t));
+		if (!next) return -1;
+		memcpy(next, l->items, l->n * sizeof(_idx_fv_t));
+	} else {
+		next = realloc(l->items, newcap * sizeof(_idx_fv_t));
+		if (!next) return -1;
+	}
+	l->items = next;
+	l->cap = newcap;
+	return 0;
+}
+
+static void _collect_fv_cb(const char *field, int flen,
+	const char *val, int vlen, void *ctx)
+{
+	_idx_fv_list_t *l = ctx;
+	if (l->oom) return;
+	if (flen < 0 || vlen < 0) return;
+	if (l->n == l->cap && _idx_fv_grow(l) < 0) {
+		l->oom = 1;
+		return;
+	}
+	l->items[l->n++] = (_idx_fv_t){field, flen, val, vlen};
+}
+
+int nats_json_index_add(const char *key, const char *json_str, int json_len)
+{
+	_idx_fv_list_t list;
+	int rc, i;
+
+	if (!g_idx || !key || !json_str)
+		return -1;
+
+	/* Parse the document into a flat (field, value) list with no
+	 * lock held.  The parser is CPU-bound at ~bytes/cycle, so this
+	 * is where the heavy lifting happens; running it unlocked lets
+	 * concurrent queries / removes / adds proceed. */
+	_idx_fv_init(&list);
+	rc = _parse_json_fields(json_str, json_len, _collect_fv_cb, &list);
+	if (rc < 0 || list.oom) {
+		_idx_fv_free(&list);
+		LM_WARN("failed to parse JSON for key '%s'\n", key);
+		return -1;
+	}
+
+	/* Per-field shard locking.  Each collected pair hashes to one
+	 * bucket → one shard; we lock only that shard for the insert,
+	 * release between fields.  Two concurrent index_add calls
+	 * whose fields happen to land on disjoint shards therefore
+	 * proceed in parallel rather than serialising on a shared
+	 * lock-all.
+	 *
+	 * Locking order is determined per-field by NATS_IDX_SHARD_OF
+	 * so all callers acquire shards in increasing index order
+	 * whenever they need more than one — but since each iteration
+	 * acquires and immediately releases a single shard, the
+	 * hierarchy is trivial: no thread ever holds two shard locks
+	 * simultaneously here.  This means a high-fan-out doc cannot
+	 * deadlock against a whole-index op (lock_all) — when lock_all
+	 * is contending, our per-field lock waits behind it for that
+	 * shard, then proceeds. */
+	/* Accumulate the document's fv strings into a blob for the reverse
+	 * map, so a later delete-by-key can target only these entries instead
+	 * of walking the whole index.  Best-effort: on OOM we just skip the
+	 * rev record (the delete falls back to the full walk). */
+	char  rev_stack[1024];
+	char *rev_blob = rev_stack;
+	int   rev_cap  = (int)sizeof(rev_stack);
+	int   rev_len  = 0, rev_nfv = 0, rev_oom = 0;
+
+	for (i = 0; i < list.n; i++) {
+		char fv_buf[1024];
+		int  fv_len;
+		unsigned int bucket;
+		int shard;
+		nats_idx_entry *e;
+		const _idx_fv_t *p = &list.items[i];
+
+		if (p->flen < 0 || p->vlen < 0) continue;
+		fv_len = p->flen + 1 + p->vlen;
+		if (fv_len >= (int)sizeof(fv_buf)) {
+			LM_WARN("field:value too long (%d), skipping\n", fv_len);
+			continue;
+		}
+		memcpy(fv_buf, p->field, p->flen);
+		fv_buf[p->flen] = ':';
+		memcpy(fv_buf + p->flen + 1, p->val, p->vlen);
+		fv_buf[fv_len] = '\0';
+
+		/* append "field:value\0" to the rev blob */
+		if (!rev_oom) {
+			int need = rev_len + fv_len + 1;
+			if (need > rev_cap) {
+				int newcap = rev_cap * 2;
+				char *nb;
+				while (newcap < need) newcap *= 2;
+				nb = (rev_blob == rev_stack) ? malloc(newcap)
+				                             : realloc(rev_blob, newcap);
+				if (!nb) {
+					rev_oom = 1;
+				} else {
+					if (rev_blob == rev_stack)
+						memcpy(nb, rev_blob, rev_len);
+					rev_blob = nb;
+					rev_cap  = newcap;
+				}
+			}
+			if (!rev_oom) {
+				memcpy(rev_blob + rev_len, fv_buf, fv_len + 1);
+				rev_len += fv_len + 1;
+				rev_nfv++;
+			}
+		}
+
+		bucket = _hash(fv_buf, fv_len);
+		shard  = NATS_IDX_SHARD_OF(bucket);
+
+		_idx_lock_shard(g_idx, shard);
+		e = _get_or_create_entry_in(g_idx, fv_buf, fv_len);
+		if (e)
+			_entry_add_key(e, key);
+		_idx_unlock_shard(g_idx, shard);
+	}
+
+	atomic_fetch_add_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+
+	/* Record (or replace) the doc's fv set for fast delete-by-key. */
+	if (!rev_oom && rev_nfv > 0)
+		nats_rev_put(key, (int)strlen(key), rev_blob, rev_len, rev_nfv);
+	if (rev_blob != rev_stack)
+		free(rev_blob);
+
+	_idx_fv_free(&list);
+
+	LM_DBG("indexed key '%s' (%d fields)\n", key, rc);
+	return 0;
+}
+
+/* Internal: add a parsed JSON document to a CALLER-PROVIDED index
+ * struct.  No locking — caller has exclusive ownership of @target
+ * (the rebuild path holds it on a thread-local shadow until the
+ * atomic swap). */
+static int _index_add_into(nats_search_idx *target, const char *key,
+	const char *json_str, int json_len)
+{
+	idx_add_ctx ctx;
+	int rc;
+
+	if (!target || !key || !json_str) return -1;
+	ctx.doc_key = key;
+	ctx.target = target;
+	rc = _parse_json_fields(json_str, json_len, _index_field_cb, &ctx);
+	if (rc >= 0)
+		atomic_fetch_add_explicit(&target->num_documents, 1,
+			memory_order_relaxed);
+	return rc < 0 ? -1 : 0;
+}
+
+/**
+ * nats_json_index_remove() — Remove a document from the index by its KV key.
+ *
+ * Acquires the mutex and walks every bucket/entry in the hash table,
+ * calling _entry_remove_key() to strip the document key from each entry's
+ * key list.  This is O(entries * keys_per_entry) but is acceptable because
+ * remove is infrequent compared to queries.  Decrements the document count.
+ *
+ * Returns 0 on success, -1 if parameters are NULL or index is uninitialised.
+ */
+int nats_json_index_remove(const char *key)
+{
+	unsigned int b;
+	nats_idx_entry *e;
+
+	if (!g_idx || !key)
+		return -1;
+
+	_idx_lock_all(g_idx);
+
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
+		for (e = g_idx->buckets[b]; e; e = e->next)
+			_entry_remove_key(e, key);
+	}
+
+	_idx_unlock_all(g_idx);
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+
+	/* Drop any reverse-map record so it can't go stale. */
+	nats_rev_remove(key);
+
+	LM_DBG("removed key '%s' from index\n", key);
+	return 0;
+}
+
+/* Per-field-callback adapter for nats_json_index_remove_fields:
+ * looks up the (field:value) entry, locks just its shard, removes
+ * the doc-key from its keys[] array, releases the shard.  Field +
+ * value byte slices alias into the caller-owned old JSON, which
+ * stays live across this entire call sequence. */
+typedef struct {
+	const char *doc_key;
+} _idx_remove_ctx;
+
+static void _index_remove_field_cb(const char *field, int flen,
+	const char *val, int vlen, void *ctx)
+{
+	_idx_remove_ctx *rctx = ctx;
+	char fv_buf[1024];
+	int fv_len = flen + 1 + vlen;
+	unsigned int bucket;
+	int shard;
+	nats_idx_entry *e;
+
+	if (flen < 0 || vlen < 0) return;
+	if (fv_len >= (int)sizeof(fv_buf)) return;
+	memcpy(fv_buf, field, flen);
+	fv_buf[flen] = ':';
+	memcpy(fv_buf + flen + 1, val, vlen);
+	fv_buf[fv_len] = '\0';
+
+	bucket = _hash(fv_buf, fv_len);
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	_idx_lock_shard(g_idx, shard);
+	e = _find_entry_in(g_idx, fv_buf, fv_len);
+	if (e)
+		_entry_remove_key(e, rctx->doc_key);
+	_idx_unlock_shard(g_idx, shard);
+}
+
+int nats_json_index_remove_fields(const char *key,
+	const char *json_str, int json_len)
+{
+	_idx_remove_ctx ctx;
+	int rc;
+
+	if (!g_idx || !key || !json_str || json_len <= 0)
+		return 0;
+
+	ctx.doc_key = key;
+	rc = _parse_json_fields(json_str, json_len, _index_remove_field_cb,
+		&ctx);
+	if (rc < 0)
+		return -1;
+
+	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+		memory_order_relaxed);
+
+	/* The doc's fv set is changing (this is the remove half of an
+	 * update); drop the old reverse-map record -- the add half re-puts
+	 * the new one. */
+	nats_rev_remove(key);
+
+	LM_DBG("removed key '%s' (%d field entries) from index\n",
+		key, rc);
+	return 0;
+}
+
+/**
+ * nats_json_index_rebuild() — Clear the index and rebuild from KV data.
+ *
+ * Acquires the mutex, walks every bucket and frees all entries (clearing
+ * the entire hash table), resets the document counter, then releases the
+ * lock and calls nats_json_index_build() to re-scan the KV store.  Used
+ * when the index may have drifted from the KV contents (e.g. after a
+ * NATS reconnect or an MI rebuild command).
+ *
+ * Returns the number of documents re-indexed, or -1 on error.
+ */
+/* Snapshot-callback adapter for nats_json_index_rebuild: indexes
+ * into the caller-owned shadow rather than the global index. */
+struct _rebuild_snapshot_ctx {
+	nats_search_idx *shadow;
+	const char *prefix;
+	int prefix_len;
+};
+
+static int _rebuild_snapshot_cb(const char *key,
+	const char *data, int data_len, void *ctx)
+{
+	struct _rebuild_snapshot_ctx *rctx = ctx;
+	if (rctx->prefix_len > 0 &&
+	    strncmp(key, rctx->prefix, rctx->prefix_len) != 0)
+		return -1;
+	if (data[0] != '{')
+		return -1;
+	return _index_add_into(rctx->shadow, key, data, data_len);
+}
+
+int nats_json_index_rebuild(kvStore *kv, const char *prefix)
+{
+	nats_search_idx shadow;
+	struct _rebuild_snapshot_ctx ctx;
+	int count;
+	nats_idx_entry **old_buckets;
+	int old_num;
+	unsigned int b;
+	nats_idx_entry *e, *next;
+	size_t buckets_bytes;
+
+	if (!g_idx) return -1;
+	if (!kv)    { LM_ERR("null KV store\n"); return -1; }
+
+	LM_INFO("rebuilding search index (shadow build + atomic swap)...\n");
+
+	/* Step 1: build the new state into a thread-local shadow struct.
+	 * The shadow header is on the stack but its buckets array must be
+	 * heap-allocated since the bucket count is now runtime-tunable.
+	 * Only this caller sees the shadow; the lock field is unused
+	 * because no other thread can reach `shadow` -- we pass it
+	 * explicitly through _index_add_into.
+	 *
+	 * These scratch arrays MUST be shm_malloc, not pkg_malloc: this
+	 * function runs on the watcher pthread (cachedb_nats_watch.c), and
+	 * pkg memory is per-process and NOT thread-safe -- a pkg_malloc here
+	 * races the SIP worker's main-thread pkg use and corrupts the pkg
+	 * free list (manifesting as a spurious "out of pkg memory" with the
+	 * pool nearly empty).  shm_malloc takes the shm lock and is safe. */
+	memset(&shadow, 0, sizeof(shadow));
+	buckets_bytes = sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets;
+	shadow.buckets = shm_malloc(buckets_bytes);
+	if (!shadow.buckets) {
+		LM_ERR("rebuild: shm_malloc for shadow buckets failed "
+			"(%d buckets, %zu bytes)\n",
+			nats_idx_buckets, buckets_bytes);
+		return -1;
+	}
+	memset(shadow.buckets, 0, buckets_bytes);
+
+	ctx.shadow = &shadow;
+	ctx.prefix = prefix;
+	ctx.prefix_len = prefix ? (int)strlen(prefix) : 0;
+
+	count = _drain_kv_snapshot(kv, _rebuild_snapshot_cb, &ctx);
+	if (count < 0) {
+		/* No entries in bucket / WatchAll failed harmlessly →
+		 * shadow stays empty; we still proceed with the atomic
+		 * swap so the live index is reset to empty consistently
+		 * with the legacy behaviour (which silently used count=0
+		 * when kvStore_Keys returned NATS_NOT_FOUND). */
+		count = 0;
+	}
+
+	/* Step 2: atomic swap under all shard locks.  Snapshot the old
+	 * buckets pointer (entries remain reachable to readers up until
+	 * we release the locks, after which they're disowned), then
+	 * install the shadow's buckets and num_documents.  Queries
+	 * arriving DURING this critical section block on whatever
+	 * shard they need and see the new state when they get in.
+	 *
+	 * Note: we swap the pointer-to-buckets, not the buckets bytes.
+	 * The old g_idx->buckets array (SHM) stays put; we copy from
+	 * shadow.buckets into it.  This avoids forcing a SHM realloc
+	 * while shards are locked. */
+	_idx_lock_all(g_idx);
+	old_buckets = shm_malloc(buckets_bytes);   /* shm: watcher-pthread safe */
+	if (!old_buckets) {
+		_idx_unlock_all(g_idx);
+		shm_free(shadow.buckets);
+		LM_ERR("rebuild: shm_malloc for old-buckets snapshot "
+			"failed (%d buckets, %zu bytes)\n",
+			nats_idx_buckets, buckets_bytes);
+		return -1;
+	}
+	memcpy(old_buckets, g_idx->buckets, buckets_bytes);
+	old_num = atomic_load_explicit(&g_idx->num_documents,
+		memory_order_relaxed);
+	memcpy(g_idx->buckets, shadow.buckets, buckets_bytes);
+	atomic_store_explicit(&g_idx->num_documents,
+		atomic_load_explicit(&shadow.num_documents, memory_order_relaxed),
+		memory_order_relaxed);
+	_idx_unlock_all(g_idx);
+
+	/* Step 3: free the old (now-disowned) bucket entries outside
+	 * the lock, so any blocked readers proceed immediately. */
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
+		e = old_buckets[b];
+		while (e) {
+			next = e->next;
+			_free_entry(e);
+			e = next;
+		}
+	}
+	shm_free(old_buckets);
+	shm_free(shadow.buckets);
+
+	/* The shadow rebuild populated the forward index but not the reverse
+	 * map; clear it so it can't carry stale records.  It repopulates as
+	 * documents are re-added (deletes of not-yet-readded docs fall back to
+	 * the full-walk remove until then). */
+	nats_rev_clear();
+
+	LM_INFO("search index rebuilt: %d docs (was %d)\n", count, old_num);
+	return count;
+}
+
+/**
+ * nats_json_index_destroy() — Tear down the global index and free all memory.
+ *
+ * Acquires the mutex, walks every bucket, frees all entries and their key
+ * lists, then destroys the mutex and frees the nats_search_idx struct.
+ * Sets g_idx to NULL so subsequent calls are safe no-ops.  Called during
+ * OpenSIPS worker shutdown.
+ */
+void nats_json_index_destroy(void)
+{
+	unsigned int b;
+	nats_idx_entry *e, *next;
+
+	if (!g_idx)
+		return;
+
+	_idx_lock_all(g_idx);
+
+	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
+		e = g_idx->buckets[b];
+		while (e) {
+			next = e->next;
+			_free_entry(e);
+			e = next;
+		}
+		g_idx->buckets[b] = NULL;
+	}
+	atomic_store_explicit(&g_idx->num_documents, 0,
+		memory_order_relaxed);
+
+	_idx_unlock_all(g_idx);
+
+	if (g_idx->shard_locks) {
+		lock_set_destroy(g_idx->shard_locks);
+		lock_set_dealloc(g_idx->shard_locks);
+	}
+
+	if (g_idx->buckets)
+		shm_free(g_idx->buckets);
+	shm_free(g_idx);
+	g_idx = NULL;
+
+	/* Tear down the delete-by-key reverse map. */
+	nats_rev_destroy();
+
+	LM_DBG("search index destroyed\n");
+}

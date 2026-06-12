@@ -203,7 +203,7 @@ int main(void)
 
 	/* (3) source: production passes esc_len + 1, not bare esc_len */
 	{
-		char *b = extract_func_body("../cachedb_nats_json.c",
+		char *b = extract_func_body("../cachedb_nats_json_ser.c",
 			"_sink_emit_string");
 		ASSERT(b != NULL, "found production _sink_emit_string body");
 		if (b) {

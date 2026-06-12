@@ -7,12 +7,12 @@ Date: 2026-06-11, branch head `c1429fea4`.
 Tags: `[SEC]` security · `[PERF]` performance · `[MAINT]` maintainability · `[SURV]` survivability.
 Items merged where multiple reviews found the same root cause.
 
-**Status (2026-06-12):** P0–P2 (1–44) and most of P3 done. The P3 security
-nits (45–52, 55–58) and the testable maintainability items (62, 65, 67–70,
-71, 72, 73) are landed. Remaining P3: only 60 (split the 3k-line files) --
-larger/structural and deliberately left for a dedicated reviewed pass. (74's
-unit-testable gaps are filled; its live-broker paths stay with the e2e harness.)
-Progress is tracked in git (`feature/nats`), not just these checkboxes.
+**Status (2026-06-12):** All 74 items done. P0–P2 (1–44) landed first; the
+P3 security nits (45–52, 55–58), the testable maintainability items (62, 65,
+67–73) and finally 60 (the TU split + function decomposition) are all in.
+(74's unit-testable gaps are filled; its live-broker paths stay with the e2e
+harness.) Progress is tracked in git (`feature/nats`), not just these
+checkboxes.
 
 ---
 
@@ -311,9 +311,18 @@ Progress is tracked in git (`feature/nats`), not just these checkboxes.
 - [x] **59. [MAINT] Rename event_nats's internal `nats_consumer.c/.h` (e.g. `event_nats_sub.c`)
   and differentiate the two `"NATS consumer"` proc display names
   (`event_nats.c:235`, `nats_consumer/nats_consumer.c:449`).**
-- [ ] **60. [MAINT] Split `cachedb_nats_json.c` (3087 lines → index / serializer / query+update
+- [x] **60. [MAINT] Split `cachedb_nats_json.c` (3087 lines → index / serializer / query+update
   TUs) and `nats_consumer_proc.c` (1960 lines → msg_ref, sub_config, proc loop); decompose
-  the ~400-line functions.**
+  the ~400-line functions.** Landed as `cachedb_nats_json_index.c` (1806) + `_ser.c` (510) +
+  `cachedb_nats_json.c` (query+update) with `cachedb_nats_json_internal.h`, and
+  `nats_msg_ref.c` (226) + `nats_sub_config.c` + `nats_consumer_proc.c` (proc loop) with
+  `nats_consumer_proc_internal.h` — verbatim moves, promoted statics declared in the internal
+  headers (modules load RTLD_LOCAL, no cross-.so leakage). The four 320–380-line functions
+  (`ensure_subscription_for_handle`, `nats_cache_query`, `nats_cache_update`,
+  `pull_one_batch`) are decomposed at their natural seams; every function is now ≤160 lines
+  (proc_main, a linear setup+loop at 293, deliberately left whole). Covered by
+  `tests/test_json_tu_split.c` and `tests/test_proc_tu_split.c`; affected structural tests
+  repointed at the new TUs/helpers.
 - [x] **61. [MAINT] Factor the duplicated URL tokenizer in `nats_pool_register`
   (`nats_pool.c:489-546` vs `parse_urls` `:165-236`).**
 - [x] **62. [MAINT] Sweep stale docs/comments: nonexistent `@param tls`, `nats_OpenWithConfig`,

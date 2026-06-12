@@ -29,3 +29,4 @@ test_map_compose
 test_raw_query_cols
 test_rebuild_thread_safe
 test_watcher_pkg_mem
+test_json_tu_split

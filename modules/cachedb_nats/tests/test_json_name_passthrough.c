@@ -283,15 +283,25 @@ int main(void)
 	 * actually use the RAW emitter (the fix) and that the raw helper
 	 * exists. */
 	{
+		/* After the NATS_TODO #60 split the helper DEFINITION lives
+		 * in the serializer TU while the copy-through CALL SITES stay
+		 * with the update path in cachedb_nats_json.c. */
 		FILE *f = fopen("../cachedb_nats_json.c", "r");
+		FILE *fs = fopen("../cachedb_nats_json_ser.c", "r");
 		int have_raw_helper = 0, raw_uses = 0, line_no = 0;
 		char line[2048];
 		CHECK(f != NULL, "open cachedb_nats_json.c for source check");
+		CHECK(fs != NULL, "open cachedb_nats_json_ser.c for source check");
+		if (fs) {
+			while (fgets(line, sizeof(line), fs)) {
+				if (strstr(line, "_sink_emit_raw_string(json_sink_t"))
+					have_raw_helper = 1;
+			}
+			fclose(fs);
+		}
 		if (f) {
 			while (fgets(line, sizeof(line), f)) {
 				line_no++;
-				if (strstr(line, "_sink_emit_raw_string(json_sink_t"))
-					have_raw_helper = 1;
 				/* count the copy-through call sites that emit a
 				 * parsed (already-escaped) name via the raw helper */
 				if (strstr(line, "_sink_emit_raw_string(") &&
