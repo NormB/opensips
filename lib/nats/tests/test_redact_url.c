@@ -102,6 +102,13 @@ int main(void)
 	ASSERT_EQ(buf, "nats://[redacted]@h:4222/topic@home",
 		"only authority @ is redacted");
 
+	/* CASE 11b: base64 NATS token containing '/' and '=' — the in-token
+	 *            '/' must NOT be mistaken for the path separator, which
+	 *            would end the '@' search early and leak the token. */
+	nats_redact_url("nats://AbC/dEf=@host:4222", buf, sizeof(buf));
+	ASSERT_EQ(buf, "nats://[redacted]@host:4222",
+		"slash-bearing base64 token redacted");
+
 	/* CASE 12: out_sz == 0 — must not crash, no write */
 	{
 		char tiny[1] = {'X'};
