@@ -30,7 +30,6 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 	const char *scheme_end;
 	const char *authority;
 	const char *at;
-	const char *next_slash;
 	const char *url_end;
 	const char *scan;
 
@@ -46,15 +45,31 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 	else
 		authority = url;
 
-	next_slash = memchr(authority, '/', (size_t)(url_end - authority));
-	if (!next_slash) next_slash = url_end;
-
-	/* '@' separates userinfo from host and must be in the authority
-	 * section (before any path '/').  A password may itself contain '@',
-	 * so the boundary is the LAST '@' in the authority, not the first. */
+	/* Locate the userinfo '@' separator. Two subtleties:
+	 *  1. The userinfo (a base64 NATS token or user:pass) may itself
+	 *     contain '/' and '=', e.g. nats://AbC/dEf=@host. So the '@'
+	 *     search must NOT stop at the FIRST '/': that '/' can be INSIDE
+	 *     the credential, before the real '@' — stopping there misses the
+	 *     '@' entirely and the token is logged verbatim (credential leak).
+	 *  2. A path after the host may itself contain '@' (e.g. .../t@home).
+	 *     The host/port never contain '/' or '@', so the real path begins
+	 *     at the first '/' that occurs AFTER the first '@'.
+	 * So: path_start = first '/' after the first '@' (else end); the
+	 * userinfo '@' is the LAST '@' within [authority, path_start)
+	 * (passwords may contain '@'). */
 	at = NULL;
-	for (scan = authority; scan < next_slash; scan++)
-		if (*scan == '@') at = scan;
+	{
+		const char *first_at = memchr(authority, '@',
+			(size_t)(url_end - authority));
+		const char *path_start = url_end;
+		if (first_at) {
+			const char *slash = memchr(first_at, '/',
+				(size_t)(url_end - first_at));
+			if (slash) path_start = slash;
+		}
+		for (scan = authority; scan < path_start; scan++)
+			if (*scan == '@') at = scan;
+	}
 
 	if (!at) {
 		/* No userinfo — copy verbatim */
