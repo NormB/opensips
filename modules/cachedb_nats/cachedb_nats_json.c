@@ -282,6 +282,22 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		return -1;
 	}
 
+	/* [REV-23] reject AoRs that encode to an invalid NATS subject (empty token)
+	 * before kvStore_Get -- such a key cannot exist, so a read is just an empty
+	 * result (not an error). Validate the encoded AoR portion (past the prefix). */
+	{
+		int plen = (fts_json_prefix && *fts_json_prefix)
+			? (int)strlen(fts_json_prefix) : 0;
+		const char *enc = target_key + plen;
+		if (_kv_key_validate(enc, (int)strlen(enc)) < 0) {
+			LM_DBG("PK query: AoR encodes to invalid subject "
+				"(encoded len %d) -> empty result\n",
+				(int)strlen(enc));
+			if (key_heap) free(target_key);
+			return 0;   /* empty result, not an error */
+		}
+	}
+
 	s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 	if (s == NATS_NOT_FOUND) {
 		if (key_heap) free(target_key);
@@ -1079,6 +1095,17 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 				row_filter->key.name.len, row_filter->key.name.s,
 				row_filter->val.s.len, row_filter->val.s.s,
 				row_filter->val.s.len * 3 + 1);
+			return NULL;
+		}
+		/* [REV-23] reject AoRs that encode to an invalid NATS subject (empty
+		 * token: leading/trailing/double '.') BEFORE any kvStore_* -- else
+		 * JetStream rejects the publish and the REGISTER is silently lost.
+		 * Fail the save loudly; log is redacted (length only, not the AoR). */
+		if (_kv_key_validate(enc, enc_len) < 0) {
+			LM_ERR("update: AoR encodes to an invalid NATS subject "
+				"(empty/edge-dot token; encoded len %d) -- rejecting "
+				"the save\n", enc_len);
+			free(enc);
 			return NULL;
 		}
 		if (fts_json_prefix && *fts_json_prefix) {
