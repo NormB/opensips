@@ -831,3 +831,67 @@ int _value_size_ok(int len, int max)
 		return 1;
 	return len <= max;
 }
+
+/* ------------------------------------------------------------------ */
+/*   P4 read-side expiry filter (SPEC §4.2 [REV-3/1/26])              */
+/* ------------------------------------------------------------------ */
+
+/* Read an integer field @name from a parsed contact dict.  Returns 0 + *out
+ * (CDB_INT32/INT64), or -1 if absent / present-but-not-an-integer. */
+static int _dict_int_field(const cdb_dict_t *d, const char *name, int len,
+	int64_t *out)
+{
+	struct list_head *pos;
+
+	list_for_each(pos, d) {
+		cdb_pair_t *p = list_entry(pos, cdb_pair_t, list);
+		if (p->key.name.len != len ||
+		    memcmp(p->key.name.s, name, len) != 0)
+			continue;
+		if (p->val.type == CDB_INT32) { *out = p->val.val.i32; return 0; }
+		if (p->val.type == CDB_INT64) { *out = p->val.val.i64; return 0; }
+		return -1;
+	}
+	return -1;
+}
+
+/* [REV-3/1/26] (SPEC §4.2): omit expired contacts from a parsed read row before
+ * usrloc sees them.  expires==0 is permanent (always kept); expires + grace <=
+ * now is expired (omitted); an absent / non-integer expires is fail-closed
+ * (treated expired, never served).  Pure read mutation of @row_dict — NO writes
+ * to NATS.  If every contact is omitted the row keeps an empty contacts dict. */
+void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace)
+{
+	struct list_head *pos;
+
+	if (!row_dict)
+		return;
+	list_for_each(pos, row_dict) {
+		cdb_pair_t *pair = list_entry(pos, cdb_pair_t, list);
+		struct list_head *cpos, *ctmp;
+
+		if (pair->val.type != CDB_DICT)
+			continue;
+		if (pair->key.name.len != 8 ||
+		    memcmp(pair->key.name.s, "contacts", 8) != 0)
+			continue;
+
+		list_for_each_safe(cpos, ctmp, &pair->val.val.dict) {
+			cdb_pair_t *c = list_entry(cpos, cdb_pair_t, list);
+			int64_t exp;
+			int omit;
+
+			if (c->val.type != CDB_DICT)
+				continue;
+			if (_dict_int_field(&c->val.val.dict, "expires", 7, &exp) != 0)
+				omit = 1;   /* fail-closed: absent / unparseable */
+			else
+				omit = _contact_is_expired(exp, now, grace);
+			if (omit) {
+				list_del(&c->list);
+				_free_one_pair(c);
+			}
+		}
+		break;             /* only one top-level "contacts" */
+	}
+}

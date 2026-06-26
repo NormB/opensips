@@ -162,6 +162,12 @@ int _cseq_new_wins(const char *new_json, int new_len,
  * row before the CAS write so an oversize save fails cleanly. */
 int _value_size_ok(int len, int max);
 
+/* P4 [REV-3/1/26] (SPEC §4.2): omit expired contacts from a parsed read row
+ * before usrloc sees them — expires==0 kept (permanent), expires+grace<=now
+ * omitted, absent/non-integer expires omitted (fail-closed).  Pure read
+ * mutation, NO writes.  An all-expired row keeps an empty contacts dict. */
+void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):

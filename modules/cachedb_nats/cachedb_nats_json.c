@@ -349,6 +349,9 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
 		 * strip the cachedb_nats-private row_exp/schema_version peers. */
 		_row_strip_private_keys(&row->dict);
+		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
+		 * sees them; fail-closed on an unparseable expires. */
+		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
 	}
@@ -566,6 +569,9 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
 		 * strip the cachedb_nats-private row_exp/schema_version peers. */
 		_row_strip_private_keys(&row->dict);
+		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
+		 * sees them; fail-closed on an unparseable expires. */
+		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
