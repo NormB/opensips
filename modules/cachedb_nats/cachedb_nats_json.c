@@ -270,6 +270,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	int   key_heap = 0;
 	const char *data;
 	int data_len;
+	int vclass;
 
 	/* Build the target key on the stack (heap only for rare long
 	 * keys) -- saves two allocs per usrloc read on the PK fast path. */
@@ -311,7 +312,20 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	}
 	data = nats_dl.kvEntry_ValueString(entry);
 	data_len = nats_dl.kvEntry_ValueLen(entry);
-	if (data && data_len > 0 && data[0] == '{') {
+	/* P2.5 [REV-26] (SPEC §4.2): an EMPTY value is a delete marker (absent);
+	 * a non-empty non-object is POISON — a hard integrity error, never masked
+	 * as an empty AoR (which usrloc would read as a silent deregistration). */
+	vclass = _value_classify(data, data_len);
+	if (vclass == NATS_VAL_POISON) {
+		NATS_CDB_STATS_INC(poison_values_rejected);
+		LM_ERR("PK read: poison value for key '%s' (len %d, not a JSON "
+			"object); failing the lookup rather than masking "
+			"corruption as an empty AoR\n", target_key, data_len);
+		nats_dl.kvEntry_Destroy(entry);
+		if (key_heap) free(target_key);
+		return -1;
+	}
+	if (vclass == NATS_VAL_OBJECT) {
 		row = pkg_malloc(sizeof *row);
 		if (!row) {
 			LM_ERR("no pkg memory for cdb_row_t\n");
@@ -478,6 +492,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 	for (i = 0; i < result_cnt; i++) {
 		const char *data;
 		int data_len;
+		int vclass;
 
 		s = nats_dl.kvStore_Get(&entry, ncon->kv, match_keys[i]);
 		if (s == NATS_NOT_FOUND) {
@@ -503,7 +518,21 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		data = nats_dl.kvEntry_ValueString(entry);
 		data_len = nats_dl.kvEntry_ValueLen(entry);
 
-		if (!data || data_len <= 0 || data[0] != '{') {
+		/* P2.5 [REV-26] (SPEC §4.2): a non-empty non-object value is
+		 * poison — alarm + count rather than silently dropping the row
+		 * (which would mask corruption as an empty AoR).  An EMPTY value
+		 * is a delete marker: skip it quietly. */
+		vclass = _value_classify(data, data_len);
+		if (vclass == NATS_VAL_POISON) {
+			NATS_CDB_STATS_INC(poison_values_rejected);
+			LM_ERR("read: poison value for key '%s' (len %d, not a "
+				"JSON object); row omitted and flagged, not "
+				"masked as empty\n", match_keys[i], data_len);
+			nats_dl.kvEntry_Destroy(entry);
+			entry = NULL;
+			continue;
+		}
+		if (vclass != NATS_VAL_OBJECT) {
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			continue;
