@@ -174,6 +174,19 @@ cdb_ctdict2info(const cdb_dict_t *ct_fields, str *contact)
 
 	memset(&ci, 0, sizeof(ucontact_info_t));
 
+	/* Default the fields new_ucontact() dereferences UNCONDITIONALLY so a
+	 * cachedb row missing one of them fails closed (the contact is skipped)
+	 * instead of SIGSEGV'ing the worker [REV-26].  The DB read path
+	 * (dbrow2info) always sets these from its columns; this path used to set
+	 * them only when the field was present in the row.  user_agent is OPTIONAL
+	 * -> default to an empty str (served, no UA); the contact URI and callid
+	 * are REQUIRED -> left empty here and the contact is rejected below if the
+	 * row did not supply them.  (The statics persist across calls, so the reset
+	 * also prevents a previous row's value leaking into a row that omits it.) */
+	ua.s = NULL; ua.len = 0;
+	ci.user_agent = &ua;
+	contact->s = NULL; contact->len = 0;
+
 	/* TODO: find a less convoluted way of implementing this */
 	list_for_each (_, ct_fields) {
 		pair = list_entry(_, cdb_pair_t, list);
@@ -257,6 +270,15 @@ cdb_ctdict2info(const cdb_dict_t *ct_fields, str *contact)
 			ci.user_agent = &ua;
 			break;
 		}
+	}
+
+	/* Fail closed on a row missing a REQUIRED field rather than crash in
+	 * new_ucontact (which dups callid unconditionally and parse_uri's the
+	 * contact URI).  The caller logs and skips this contact. [REV-26] */
+	if (ZSTR(*contact) || !ci.callid) {
+		LM_ERR("cachedb contact row missing %s; skipping it\n",
+		       ZSTR(*contact) ? "the contact URI" : "callid");
+		return NULL;
 	}
 
 	return &ci;
