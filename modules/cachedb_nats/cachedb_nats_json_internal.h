@@ -95,6 +95,10 @@ char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len);
 /* Percent-encode arbitrary bytes into a NATS-KV-safe key. */
 char *_kv_encode_key(const char *in, int in_len, int *out_len);
 
+/* [REV-23] Validate an encoded row key (AoR portion): reject empty key or any
+ * empty subject token (leading/trailing/double '.'). 0 = ok, -1 = reject. */
+int _kv_key_validate(const char *enc, int enc_len);
+
 /* "<fts_json_prefix>" + encoded PK value, stack buffer with heap
  * fallback (sets *heap when the caller must free). */
 char *_pk_target_key(const char *val, int val_len,
