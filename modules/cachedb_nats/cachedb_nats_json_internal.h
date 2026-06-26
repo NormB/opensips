@@ -133,6 +133,12 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict);
 enum nats_val_class { NATS_VAL_EMPTY = 0, NATS_VAL_OBJECT = 1, NATS_VAL_POISON = 2 };
 int _value_classify(const char *data, int len);
 
+/* P2.6 [REV-18/REV-35] (SPEC §4.2 step 3): strip the cachedb_nats-private
+ * top-level peers (row_exp, schema_version) from a freshly parsed read row so
+ * usrloc sees exactly {contacts, aorhash}.  Frees each removed pair completely
+ * (it is no longer reachable from cdb_free_rows). */
+void _row_strip_private_keys(cdb_dict_t *row_dict);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):

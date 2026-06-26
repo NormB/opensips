@@ -35,6 +35,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../mem/mem.h"
+#include "../../lib/osips_malloc.h"
+#include "../../cachedb/cachedb_dict.h"
 #include "cachedb_nats_json_internal.h"
 
 /* ------------------------------------------------------------------ */
@@ -564,4 +567,55 @@ int _value_classify(const char *data, int len)
 	if (p >= end)
 		return NATS_VAL_EMPTY;        /* all whitespace == delete marker */
 	return (*p == '{') ? NATS_VAL_OBJECT : NATS_VAL_POISON;
+}
+
+/* ------------------------------------------------------------------ */
+/*   P2.6 strip cachedb_nats-private top-level peers (SPEC §4.2 step 3) */
+/* ------------------------------------------------------------------ */
+
+/* True for the cachedb_nats-private top-level peers usrloc must never see. */
+static int _is_private_top_key(const char *name, int len)
+{
+	return (len == 7  && memcmp(name, "row_exp", 7) == 0) ||
+	       (len == 14 && memcmp(name, "schema_version", 14) == 0);
+}
+
+/* Free one removed pair completely (it is no longer in any dict, so
+ * cdb_free_rows will not reach it).  row_exp/schema_version are normally
+ * CDB_INT32, but a crafted-yet-valid object could carry them as a string or a
+ * nested dict (P2.5 only gates the top-level value type), so free by type. */
+static void _free_one_pair(cdb_pair_t *p)
+{
+	switch (p->val.type) {
+	case CDB_DICT:
+		cdb_free_entries(&p->val.val.dict, osips_pkg_free);
+		break;
+	case CDB_STR:
+		if (p->val.val.st.s)
+			osips_pkg_free(p->val.val.st.s);
+		break;
+	default:
+		break;
+	}
+	pkg_free(p);
+}
+
+/* [REV-18/REV-35] (SPEC §4.2 step 3): the cdb_row_t handed to usrloc must be
+ * exactly {contacts, aorhash}.  Strip the cachedb_nats-private top-level peers
+ * (row_exp, schema_version) at row assembly — they are top-level peers, not
+ * members of any contact subdict, so this is a top-level walk.  Safe against
+ * removal mid-iteration (list_for_each_safe). */
+void _row_strip_private_keys(cdb_dict_t *row_dict)
+{
+	struct list_head *pos, *tmp;
+
+	if (!row_dict)
+		return;
+	list_for_each_safe(pos, tmp, row_dict) {
+		cdb_pair_t *pair = list_entry(pos, cdb_pair_t, list);
+		if (_is_private_top_key(pair->key.name.s, pair->key.name.len)) {
+			list_del(&pair->list);
+			_free_one_pair(pair);
+		}
+	}
 }
