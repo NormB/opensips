@@ -110,6 +110,13 @@ char *_build_seed_doc(const char *field, int flen,
 
 /* --- usrloc row metadata (cachedb_nats_json_rowmeta.c) ------------- */
 
+/* P2.3 [REV-20] (SPEC §4.1 step 0): 1 if any incoming contact field value
+ * carries an embedded NUL (a raw 0x00 or the escaped "\u0000" cJSON would
+ * decode to 0x00) at any nesting depth.  Checked before any merge / kvStore op
+ * so the save is refused cleanly (no partial row); the value cannot round-trip
+ * (the reader's strlen truncates it). */
+int _dict_has_nul_field(const cdb_dict_t *dict);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):

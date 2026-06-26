@@ -79,6 +79,9 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long op_failed;
 	_Atomic unsigned long watcher_restarts;
 	_Atomic unsigned long watcher_handle_leaks;
+	/* P2.3 [REV-20] (§12 integrity): contact saves refused because a field
+	 * carried an embedded NUL that could not round-trip. */
+	_Atomic unsigned long nul_fields_rejected;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
@@ -109,8 +112,8 @@ int nats_cdb_stats_init(void);
 void nats_cdb_stats_destroy(void);
 
 /*
- * MI handler: "nats_cdb_stats" — returns a JSON object with all four
- * counters. Safe to call from the MI process.
+ * MI handler: "nats_cdb_stats" — returns a JSON object with every counter.
+ * Safe to call from the MI process.
  */
 mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	struct mi_handler *async_hdl);

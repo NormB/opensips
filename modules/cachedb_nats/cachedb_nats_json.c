@@ -1416,6 +1416,19 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
+	/* P2.3 [REV-20] (SPEC §4.1 step 0): reject-at-write hygiene, before any
+	 * merge or kvStore op.  A contact field carrying an embedded NUL cannot
+	 * round-trip (the reader's strlen truncates it — silent corruption), so
+	 * fail the save cleanly with no partial row and bump the integrity
+	 * counter.  The value is NOT logged (redacted); only the filter field. */
+	if (_dict_has_nul_field(pairs)) {
+		NATS_CDB_STATS_INC(nul_fields_rejected);
+		LM_ERR("update rejected: a contact field for filter '%.*s' "
+			"contains an embedded NUL (value redacted)\n",
+			row_filter->key.name.len, row_filter->key.name.s);
+		return -1;
+	}
+
 	target_key = _update_resolve_target_key(row_filter);
 	if (!target_key)
 		return -1;
