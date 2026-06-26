@@ -82,6 +82,9 @@ typedef struct _nats_cdb_stats {
 	/* P2.3 [REV-20] (§12 integrity): contact saves refused because a field
 	 * carried an embedded NUL that could not round-trip. */
 	_Atomic unsigned long nul_fields_rejected;
+	/* P2.5 [REV-26] (§12 integrity): reads that hit a non-empty, non-object
+	 * stored value (poison) — surfaced instead of masked as an empty AoR. */
+	_Atomic unsigned long poison_values_rejected;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */

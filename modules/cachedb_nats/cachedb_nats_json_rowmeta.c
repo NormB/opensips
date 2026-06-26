@@ -537,3 +537,31 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 		break;             /* only one top-level "contacts" */
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/*   P2.5 fail-closed poison classification (SPEC §4.2 [REV-26])       */
+/* ------------------------------------------------------------------ */
+
+/* Classify a stored KV value on read (SPEC §4.2):
+ *   NATS_VAL_EMPTY  — zero-length / all-whitespace: a server-side delete
+ *                     marker; treat the AoR as absent (no error).
+ *   NATS_VAL_OBJECT — first non-whitespace byte is '{': parse it.
+ *   NATS_VAL_POISON — non-empty and not a JSON object (null / string / number
+ *                     / array / garbage): a hard integrity error.  The current
+ *                     `data[0]=='{'` gate masks this as an empty AoR — a silent
+ *                     deregistration a stale node / co-writer / attacker could
+ *                     plant — so [REV-26] alarms + counts instead. */
+int _value_classify(const char *data, int len)
+{
+	const char *p, *end;
+
+	if (!data || len <= 0)
+		return NATS_VAL_EMPTY;
+	p = data;
+	end = data + len;
+	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+		p++;
+	if (p >= end)
+		return NATS_VAL_EMPTY;        /* all whitespace == delete marker */
+	return (*p == '{') ? NATS_VAL_OBJECT : NATS_VAL_POISON;
+}

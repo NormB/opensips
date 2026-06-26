@@ -125,6 +125,14 @@ int _dict_has_nul_field(const cdb_dict_t *dict);
  * document without a top-level "contacts" object. */
 void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict);
 
+/* P2.5 [REV-26] (SPEC §4.2): classify a stored KV value on read.  An EMPTY
+ * value (zero-length / all-whitespace) is a legitimate server-side delete
+ * marker (absent); an OBJECT is parsed; a non-empty value that is not a JSON
+ * object is POISON — a hard integrity error that must NOT be masked as an
+ * empty AoR (silent deregistration). */
+enum nats_val_class { NATS_VAL_EMPTY = 0, NATS_VAL_OBJECT = 1, NATS_VAL_POISON = 2 };
+int _value_classify(const char *data, int len);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):
