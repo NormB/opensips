@@ -108,4 +108,16 @@ char *_pk_target_key(const char *val, int val_len,
 char *_build_seed_doc(const char *field, int flen,
 	const char *val, int vlen, int *out_len);
 
+/* --- usrloc row metadata (cachedb_nats_json_rowmeta.c) ------------- */
+
+/* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
+ * cachedb_nats-private row_exp / schema_version top-level peers over the
+ * merged contact set.  Returns a freshly malloc'd document (caller frees):
+ * a usrloc row (top-level "contacts" object present) gets row_exp = min of the
+ * non-zero per-contact `expires` (0 if any permanent, int64, no 2038 clamp)
+ * and schema_version=1, replacing any stale peers; a document with no
+ * top-level "contacts" is returned byte-for-byte unchanged.  NULL on
+ * malformed input or OOM. */
+char *_row_finalize_metadata(const char *json, int len, int *out_len);
+
 #endif /* CACHEDB_NATS_JSON_INTERNAL_H */

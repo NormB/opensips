@@ -1275,6 +1275,24 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		return -1;
 	}
 
+	/* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
+	 * cachedb_nats-private row_exp / schema_version peers over the merged
+	 * contact set.  A document with no top-level "contacts" object (a
+	 * non-usrloc cachedb_nats consumer) is returned byte-for-byte
+	 * unchanged. */
+	{
+		char *finalized = _row_finalize_metadata(new_json,
+			(int)strlen(new_json), NULL);
+		if (!finalized) {
+			LM_ERR("failed to finalize row metadata (row_exp) "
+				"for key '%s'\n", target_key);
+			free(new_json);
+			return -1;
+		}
+		free(new_json);
+		new_json = finalized;
+	}
+
 	/* write back with CAS */
 	s = nats_dl.kvStore_UpdateString(&new_rev, ncon->kv, target_key,
 		new_json, rev);
