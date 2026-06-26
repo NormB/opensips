@@ -909,6 +909,11 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 				    !_cseq_new_wins(ops[op_idx].val_str,
 						ops[op_idx].val_len,
 						kvstart, (int)(kvend - kvstart))) {
+					/* [REV-8] stale cseq: keep the existing
+					 * higher-cseq value, discard the incoming one
+					 * (no rollback). */
+					LM_DBG("[REV-8] discarded stale-cseq write; "
+						"kept the existing higher-cseq contact\n");
 					if (_sink_write(s, kvstart,
 							(int)(kvend - kvstart)) < 0)
 						return -1;
