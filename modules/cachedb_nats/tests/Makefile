@@ -24,7 +24,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_query_keyset_refcount test_watcher_leak_stat \
         test_map_key_encode test_map_migrate test_map_compose test_raw_query_cols test_rebuild_thread_safe \
         test_watcher_pkg_mem test_json_tu_split test_query_res_init \
-        test_outparam_contracts test_kv_key_validate
+        test_outparam_contracts test_kv_key_validate test_row_exp_compute
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -40,7 +40,7 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
                   test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts \
-                  test_kv_key_validate
+                  test_kv_key_validate test_row_exp_compute
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -255,6 +255,12 @@ test_outparam_contracts: test_outparam_contracts.c
 test_kv_key_validate: test_kv_key_validate.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+# P2.1 [REV-34/REV-25/REV-18] row_exp = min(non-zero expires), 0 if any
+# permanent; int64 (no 2038 clamp); finalize emits row_exp+schema_version
+# top-level peers and leaves a non-usrloc doc unchanged. ASan'd (malloc path).
+test_row_exp_compute: test_row_exp_compute.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -304,6 +310,7 @@ check: all
 	./test_query_res_init
 	./test_outparam_contracts
 	./test_kv_key_validate
+	./test_row_exp_compute
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
