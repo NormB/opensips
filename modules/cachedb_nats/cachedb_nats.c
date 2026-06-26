@@ -478,6 +478,28 @@ struct module_exports exports = {
  *
  * @return  0 on success, -1 on error (aborts module loading).
  */
+/* [REV-24 / §11] Is the effective connection URL insecure for a PII store?
+ * Returns 1 when the WARN must fire: not tls://, OR no "user[:pass]@" in the
+ * authority (between "://" and the first '/').  Credentials in a path/query do
+ * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
+static int _nats_url_insecure(const char *url)
+{
+	const char *sep, *authority, *slash, *at;
+	int is_tls, has_creds;
+
+	if (!url)
+		return 1;
+	sep = strstr(url, "://");
+	if (!sep)
+		return 1;
+	is_tls = (sep - url == 3) && (strncmp(url, "tls", 3) == 0);
+	authority = sep + 3;
+	slash = strchr(authority, '/');
+	at = strchr(authority, '@');
+	has_creds = (at != NULL) && (slash == NULL || at < slash);
+	return (!is_tls || !has_creds) ? 1 : 0;
+}
+
 static int mod_init(void)
 {
 	cachedb_engine cde;
@@ -554,6 +576,17 @@ static int mod_init(void)
 				"using nats://localhost:4222\n");
 			url_to_use = "nats://localhost:4222";
 		}
+
+		/* [REV-24 / §11] The registration bucket is a PII / LI-relevant
+		 * store (subscriber IP, UA, call-id, path) and NATS KV has no
+		 * per-key ACL.  Transport + auth are mandatory: warn loudly when
+		 * the connection URL is plaintext and/or carries no credentials. */
+		if (_nats_url_insecure(url_to_use))
+			LM_WARN("cachedb_nats: connection URL '%s' is INSECURE for a "
+				"PII/lawful-intercept store (subscriber IP, user-agent, "
+				"call-id, path) — use tls:// with an authenticated account "
+				"and one bucket per trust domain (SPEC \xc2\xa7""11 [REV-24])\n",
+				url_to_use);
 
 		/* TLS comes from the tls_mgm "nats" client domain at connect
 		 * time (apply_tls_from_mgm in lib/nats).  Operator switches to
