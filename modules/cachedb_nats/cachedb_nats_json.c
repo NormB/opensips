@@ -327,6 +327,9 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			if (key_heap) free(target_key);
 			return -1;
 		}
+		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
+		 * (the shared converter clamped it to int32). */
+		_row_patch_last_mod_int64(data, data_len, &row->dict);
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
 	}
@@ -523,6 +526,9 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			entry = NULL;
 			continue;
 		}
+		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
+		 * (the shared converter clamped it to int32). */
+		_row_patch_last_mod_int64(data, data_len, &row->dict);
 
 		res->count++;
 		list_add_tail(&row->list, &res->rows);

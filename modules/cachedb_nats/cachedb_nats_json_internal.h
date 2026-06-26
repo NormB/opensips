@@ -117,6 +117,14 @@ char *_build_seed_doc(const char *field, int flen,
  * (the reader's strlen truncates it). */
 int _dict_has_nul_field(const cdb_dict_t *dict);
 
+/* P2.4 [REV-15/REV-30] (SPEC §3.1 Option A): the shared cdb_json_to_dict clamps
+ * every JSON number to CDB_INT32, silently narrowing a `last_mod` > INT32_MAX
+ * (a usrloc CDB_INT64).  Re-parse `last_mod` as int64 from the raw row @json and
+ * overwrite each contact's last_mod pair in @row_dict to CDB_INT64.  Only
+ * last_mod is widened (expires stays int32-bounded, REV-30).  No-op for a
+ * document without a top-level "contacts" object. */
+void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):
