@@ -533,6 +533,8 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 				    memcmp(fp->key.name.s, "last_mod", 8) == 0) {
 					fp->val.type = CDB_INT64;
 					fp->val.val.i64 = lm;
+					if (lm > (int64_t)INT32_MAX)  /* observe the preserved int64 from the production READ (not `nats kv`) — the int32-clamp case */
+						LM_DBG("[REV-30] preserved post-2038 last_mod=%lld\n", (long long)lm);
 					break;
 				}
 			}
