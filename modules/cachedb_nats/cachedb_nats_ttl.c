@@ -24,6 +24,8 @@
  * raw-publish wiring is added later (P6+).
  */
 
+#include <stdio.h>   /* snprintf */
+
 #include "cachedb_nats_ttl.h"
 
 /* [REV-6/F6] (§5) per-message TTL eligibility. */
@@ -122,4 +124,14 @@ enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev)
 	if (cur == TTL_CAP_UNSUPPORTED)
 		return TTL_CAP_UNSUPPORTED;         /* stay latched until a reconnect */
 	return TTL_CAP_SUPPORTED;
+}
+
+/* (§2.1 [TREV-5]) build "$KV.<bucket>.<key>" — one mapping, three consumers. */
+int nats_kv_key_to_subject(const char *bucket, const char *key,
+	char *buf, int buflen)
+{
+	int n = snprintf(buf, buflen, "$KV.%s.%s", bucket, key);
+	if (n < 0 || n >= buflen)
+		return -1;
+	return n;
 }
