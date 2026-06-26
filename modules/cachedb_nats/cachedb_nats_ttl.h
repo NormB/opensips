@@ -122,4 +122,14 @@ enum ttl_cap_event {
 };
 enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev);
 
+/* ---- key -> JetStream subject (§2.1 [TREV-5]) -------------------- */
+
+/* Build "$KV.<bucket>.<key>" for a row key into @buf (NUL-terminated); returns
+ * the written length, or -1 if @buf is too small.  @key is the already
+ * P1-encoded, KV-safe row key.  MUST be byte-identical to the subject
+ * kvStore_Put/Get uses for the same key (one mapping, three consumers), else a
+ * raw-published value lands where the reader never looks (split-brain). */
+int nats_kv_key_to_subject(const char *bucket, const char *key,
+	char *buf, int buflen);
+
 #endif /* CACHEDB_NATS_TTL_H */
