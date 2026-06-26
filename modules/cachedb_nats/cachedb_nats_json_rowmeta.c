@@ -816,3 +816,18 @@ int _cseq_new_wins(const char *new_json, int new_len,
 	(void)_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
 	return nlm > olm;
 }
+
+/* ------------------------------------------------------------------ */
+/*   P3 value-size / payload bound (SPEC §3.2/§4.1 [REV-5])            */
+/* ------------------------------------------------------------------ */
+
+/* [REV-5] Is a serialized KV value within the payload bound?  @max <= 0 means
+ * the guard is disabled (unbounded).  Checked on the FINAL merged row just
+ * before the CAS write, so an over-limit save fails cleanly with the previous
+ * revision untouched — never a silent truncation or a broker-side size error. */
+int _value_size_ok(int len, int max)
+{
+	if (max <= 0)
+		return 1;
+	return len <= max;
+}

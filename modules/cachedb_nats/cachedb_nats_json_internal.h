@@ -157,6 +157,11 @@ char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 int _cseq_new_wins(const char *new_json, int new_len,
 	const char *old_json, int old_len);
 
+/* P3 [REV-5] (SPEC §3.2/§4.1): 1 if a serialized value of @len bytes is within
+ * the payload bound @max (<= 0 disables the guard).  Checked on the final merged
+ * row before the CAS write so an oversize save fails cleanly. */
+int _value_size_ok(int len, int max);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):

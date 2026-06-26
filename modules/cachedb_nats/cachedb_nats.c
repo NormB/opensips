@@ -194,6 +194,15 @@ int   nats_cas_retries = 10;
  * deployment's real maximum node skew. */
 int   nats_reap_grace = 5;
 
+/* [REV-5] Max serialized KV value (one AoR row holds all its contacts), in
+ * bytes.  All contacts of an AoR share one message; NATS caps message size
+ * (max_payload, default 1 MiB; a stream's max_msg_size may be lower).  An
+ * oversize row is detected before the CAS write and the offending contact's
+ * save fails cleanly — never a silent truncation / corruption.  Default 1 MiB
+ * (the NATS max_payload default); set to the deployment's real per-message cap
+ * (and <= the stream's max_msg_size).  <= 0 disables the guard. */
+int   nats_max_value_size = 1048576;
+
 /* Whether to maintain the in-memory JSON-FTS search index.
  *
  * Default 1 (enabled) preserves legacy behaviour: the index is
@@ -316,6 +325,7 @@ static const param_export_t params[] = {
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
+	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
 	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
