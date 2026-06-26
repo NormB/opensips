@@ -892,8 +892,22 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
 					return -1;
 				if (_sink_putc(s, ':') < 0) return -1;
-				if (_sink_emit_op_value(s, &ops[op_idx]) < 0)
+				/* P2.2 [REV-8]: same-subkey collision — keep the
+				 * higher cseq (tie-break last_mod).  When the NEW
+				 * write is stale versus the existing value, discard
+				 * it and keep the existing one.  Only an object value
+				 * carrying a cseq engages this; everything else falls
+				 * through to last-writer-wins (overwrite), unchanged. */
+				if (ops[op_idx].val_type == 'O' &&
+				    !_cseq_new_wins(ops[op_idx].val_str,
+						ops[op_idx].val_len,
+						kvstart, (int)(kvend - kvstart))) {
+					if (_sink_write(s, kvstart,
+							(int)(kvend - kvstart)) < 0)
+						return -1;
+				} else if (_sink_emit_op_value(s, &ops[op_idx]) < 0) {
 					return -1;
+				}
 			} else {
 				/* Copy through the existing entry. */
 				if (!first && _sink_putc(s, ',') < 0) return -1;

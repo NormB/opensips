@@ -149,6 +149,14 @@ void _row_strip_private_keys(cdb_dict_t *row_dict);
 char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	time_t now, int grace, int *out_len);
 
+/* P2.2 [REV-8] (SPEC §4.1 step 2): same-contact-subkey merge ordering.  Returns
+ * 1 if the NEW value supersedes the OLD (higher cseq, tie-broken by higher
+ * last_mod), else 0 (the stale write is discarded, existing kept).  Engages only
+ * when BOTH values carry a cseq (usrloc contacts); otherwise returns 1
+ * (last-writer-wins) — unchanged behavior for non-usrloc subkeys / non-objects. */
+int _cseq_new_wins(const char *new_json, int new_len,
+	const char *old_json, int old_len);
+
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
  * merged contact set.  Returns a freshly malloc'd document (caller frees):
