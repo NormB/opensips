@@ -788,3 +788,31 @@ char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	}
 	return _contacts_drop_subkeys(json, len, ids, id_lens, n, out_len);
 }
+
+/* ------------------------------------------------------------------ */
+/*   P2.2 same-subkey cseq merge ordering (SPEC §4.1 step 2 [REV-8])   */
+/* ------------------------------------------------------------------ */
+
+/* [REV-8] On a same-contact-subkey collision in the merge, does the NEW value
+ * supersede the existing OLD one?  Higher `cseq` wins; a tie on cseq is broken
+ * by higher `last_mod` (absent == 0); an exact duplicate is NOT superseding
+ * (the stale write is discarded).  Engages ONLY when BOTH values carry a cseq
+ * (usrloc contacts) — otherwise returns 1 (last-writer-wins), preserving the
+ * generic merge's behavior for every non-usrloc cachedb_nats consumer and any
+ * non-object value.  Without this, a delayed/retransmitted REGISTER with an
+ * older cseq would roll the binding backward versus the SQL backend. */
+int _cseq_new_wins(const char *new_json, int new_len,
+	const char *old_json, int old_len)
+{
+	int64_t nc, oc, nlm = 0, olm = 0;
+
+	if (_contact_field_int64(new_json, new_json + new_len, "cseq", 4, &nc) != 0)
+		return 1;
+	if (_contact_field_int64(old_json, old_json + old_len, "cseq", 4, &oc) != 0)
+		return 1;
+	if (nc != oc)
+		return nc > oc;
+	(void)_contact_field_int64(new_json, new_json + new_len, "last_mod", 8, &nlm);
+	(void)_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
+	return nlm > olm;
+}
