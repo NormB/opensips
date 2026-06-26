@@ -74,6 +74,8 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
+#include "cachedb_nats_ttl.h"      /* nats_kv_key_to_subject(), NATS_KV_OP_DEL — P9 reaper CAS-delete */
+#include "cachedb_nats_reaper.h"   /* _reap_interval_guard() — P9 reaper host gate */
 #include "../../lib/nats/nats_pool.h"
 #include "../../timer.h"
 
@@ -86,6 +88,7 @@ static int mod_init(void);
 static int child_init(int rank);
 static void destroy(void);
 static void _nats_cdb_periodic_resync(unsigned int ticks, void *param);
+static void _nats_cdb_reaper_tick(unsigned int ticks, void *param);   /* P9 reaper host */
 
 /* script function wrappers (implementations in cachedb_nats_native.c) */
 static int w_nats_request_wrap(struct sip_msg *msg, str *subject, str *payload,
@@ -193,6 +196,20 @@ int   nats_cas_retries = 10;
  * never deletes/omits another node's still-live binding.  MUST be >= the
  * deployment's real maximum node skew. */
 int   nats_reap_grace = 5;
+
+/* [REV-1/16] (SPEC §4.3A) Reaper scan period, seconds.  The reaper is the
+ * AUTHORITATIVE per-contact expiry mechanism: native per-message TTL is only an
+ * opportunistic optimisation and is lost on update (#1994/#6959), so a periodic
+ * CAS-prune is what actually guarantees an expired binding is physically
+ * reclaimed.  >0 registers the reaper timer; <=0 disables it (TTL-only), which
+ * is refused at startup unless nats_unsafe_ttl_only is also set.  Default 30s. */
+int   nats_reap_interval = 30;
+
+/* [REV-2/PREV-26] Operator acknowledgement that running with the reaper OFF
+ * (nats_reap_interval<=0) is intentional and the #1994/#6959 TTL-loss risk is
+ * accepted.  Without it, a non-positive interval HARD-FAILS mod_init rather than
+ * silently leaving expiries unreclaimed. */
+int   nats_unsafe_ttl_only = 0;
 
 /* [REV-5] Max serialized KV value (one AoR row holds all its contacts), in
  * bytes.  All contacts of an AoR share one message; NATS caps message size
@@ -325,6 +342,8 @@ static const param_export_t params[] = {
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
+	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
+	{"nats_unsafe_ttl_only",    INT_PARAM,         &nats_unsafe_ttl_only},
 	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
@@ -710,6 +729,32 @@ static int mod_init(void)
 		}
 	}
 
+	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): register the periodic
+	 * CAS-prune timer.  Index-independent (enumerates via kvStore_Keys), so it
+	 * runs regardless of enable_search_index.  A non-positive interval disables
+	 * it (TTL-only) and is REFUSED unless nats_unsafe_ttl_only acknowledges the
+	 * #1994/#6959 TTL-loss risk. */
+	if (_reap_interval_guard(nats_reap_interval, nats_unsafe_ttl_only) < 0) {
+		LM_ERR("nats_reap_interval=%d disables the reaper (TTL-only), which "
+			"loses TTL on update (#1994/#6959) and leaves expired bindings "
+			"unreclaimed; set nats_reap_interval>0, or nats_unsafe_ttl_only=1 "
+			"to accept the risk\n", nats_reap_interval);
+		return -1;
+	}
+	if (nats_reap_interval > 0) {
+		if (register_timer("nats_cdb_reaper", _nats_cdb_reaper_tick, NULL,
+				nats_reap_interval, 0) < 0) {
+			LM_ERR("failed to register reaper timer\n");
+			return -1;
+		}
+		LM_INFO("cachedb_nats: reaper ENABLED, scan every %d s "
+			"(grace %d s)\n", nats_reap_interval, nats_reap_grace);
+	} else {
+		LM_WARN("cachedb_nats: reaper DISABLED (nats_unsafe_ttl_only=1); "
+			"relying on native per-message TTL only — expiries may be "
+			"lost on update (#1994/#6959)\n");
+	}
+
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
 	 * This avoids the "previously published" warning that occurs when
 	 * both startup_route's subscribe_event() and child_init's
@@ -905,6 +950,149 @@ static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
 		LM_WARN("periodic resync: index rebuild failed\n");
 	else
 		LM_DBG("periodic resync: index rebuilt\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*   P9 reaper host (SPEC §4.3A [REV-1/16])                           */
+/* ------------------------------------------------------------------ */
+
+/* CAS-guarded publish-delete of a KV key [REV-16].  Publishes a KV-Operation:DEL
+ * marker for "$KV.<bucket>.<key>" with ExpectLastSubjectSeq=@rev, so a
+ * concurrent re-REGISTER that bumped the head between our read and this delete
+ * makes the delete FAIL (jerr 10071) instead of destroying the renew.  A blind
+ * kvStore_Delete() would lose that race -- never use it here.
+ * Returns 0 deleted, 1 CAS-lost (a renew won -- leave the key), -1 on error. */
+static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
+	uint64_t rev)
+{
+	char subj[512];
+	natsMsg *m = NULL;
+	jsPubAck *pa = NULL;
+	jsErrCode je = 0;
+	jsPubOptions o;
+	natsStatus s;
+
+	if (nats_kv_key_to_subject(bucket, key, subj, sizeof subj) < 0)
+		return -1;
+	if (nats_dl.natsMsg_Create(&m, subj, NULL, NULL, 0) != NATS_OK)
+		return -1;
+	if (nats_dl.natsMsgHeader_Set(m, "KV-Operation", NATS_KV_OP_DEL) != NATS_OK) {
+		nats_dl.natsMsg_Destroy(m);
+		return -1;
+	}
+	nats_dl.jsPubOptions_Init(&o);
+	o.ExpectLastSubjectSeq = rev;             /* CAS predicate */
+	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
+	nats_dl.jsPubAck_Destroy(pa);
+	nats_dl.natsMsg_Destroy(m);
+	if (s == NATS_OK)
+		return 0;
+	if (je == 10071)                          /* JSStreamWrongLastSequenceErr */
+		return 1;                         /* a concurrent renew won the race */
+	LM_DBG("reaper: CAS-delete '%s' failed: %s (jerr=%d)\n",
+		key, nats_dl.natsStatus_GetText(s), je);
+	return -1;
+}
+
+/* The reaper tick: scan the bucket once, and for each DUE usrloc row either
+ * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.  Runs
+ * in the OpenSIPS timer process (like the resync handler) -- so it does NOT gate
+ * on nats_pool_is_connected() (that flag is process-local and always 0 here);
+ * a NULL KV/JS handle means the broker is down and we skip just this tick.
+ *
+ * Independent of the search index [REV-17]: enumeration is a direct
+ * kvStore_Keys() over the bucket, so the reaper works with enable_search_index=0.
+ * Malformed/poison rows are LEFT in place (the read path alarms them); permanent
+ * and not-yet-due rows are skipped by the cheap row_exp due-gate. */
+static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
+{
+	kvStore *kv;
+	jsCtx *js;
+	kvKeysList keys;
+	natsStatus s;
+	time_t now;
+	int i, prefix_len, reaped = 0;
+
+	(void)ticks; (void)param;
+
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
+	if (!kv) {
+		LM_DBG("reaper: no KV handle (broker down?); skipping tick\n");
+		return;
+	}
+	js = nats_pool_get_js();
+	if (!js) {
+		LM_DBG("reaper: no JetStream ctx; skipping tick\n");
+		return;
+	}
+
+	now = time(NULL);
+	prefix_len = (fts_json_prefix && *fts_json_prefix)
+		? (int)strlen(fts_json_prefix) : 0;
+
+	memset(&keys, 0, sizeof(keys));
+	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
+	if (s == NATS_NOT_FOUND)
+		return;                           /* empty bucket */
+	if (s != NATS_OK) {
+		LM_DBG("reaper: kvStore_Keys failed: %s\n",
+			nats_dl.natsStatus_GetText(s));
+		return;
+	}
+
+	for (i = 0; i < keys.Count; i++) {
+		const char *key = keys.Keys[i];
+		kvEntry *e = NULL;
+		const char *val;
+		int vlen, n_surv = 0, plen = 0;
+		uint64_t rev;
+		char *proj;
+
+		if (!key)
+			continue;
+		/* only our usrloc rows; never touch another consumer's keys. */
+		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
+			continue;
+		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
+			continue;                     /* mid-delete / vanished -> skip */
+		val = nats_dl.kvEntry_ValueString(e);
+		vlen = nats_dl.kvEntry_ValueLen(e);
+		rev = nats_dl.kvEntry_Revision(e);
+
+		/* cheap due-gate: skip permanent / not-yet-due rows without a
+		 * full reprojection (row_exp == min contact expiry). */
+		if (_reap_row_due_json(val, vlen, now, nats_reap_grace) == 0) {
+			nats_dl.kvEntry_Destroy(e);
+			continue;
+		}
+		proj = _reap_project_survivors(val, vlen, now, nats_reap_grace,
+			&n_surv, &plen);
+		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
+		if (!proj)
+			continue;                     /* malformed/poison: read path alarms it */
+		if (n_surv < 0) {                     /* not a usrloc row */
+			free(proj);
+			continue;
+		}
+		if (n_surv == 0) {
+			if (_reap_cas_delete(js, kv_bucket, key, rev) == 0) {
+				NATS_CDB_STATS_INC(rows_reaped);
+				reaped++;
+			}
+		} else {
+			uint64_t newrev = 0;
+			if (nats_dl.kvStore_UpdateString(&newrev, kv, key, proj, rev)
+					== NATS_OK) {
+				NATS_CDB_STATS_INC(rows_reaped);
+				reaped++;
+			}
+			/* CAS conflict / error: a concurrent writer won; retry next tick */
+		}
+		free(proj);
+	}
+	nats_dl.kvKeysList_Destroy(&keys);
+	if (reaped)
+		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
 }
 
 /**

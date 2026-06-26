@@ -165,7 +165,7 @@ static int64_t _row_exp_min(const int64_t *exp, int n)
  * slice is not an object, or the field is absent / not an integer.  Shared by
  * the row_exp `expires` scan (write side) and the int64 `last_mod` post-patch
  * (read side, P2.4). */
-static int _contact_field_int64(const char *vstart, const char *vend,
+int _contact_field_int64(const char *vstart, const char *vend,
 	const char *fname, int flen, int64_t *out)
 {
 	const char *p = _skip_ws(vstart, vend);
@@ -212,7 +212,7 @@ static int _contact_field_int64(const char *vstart, const char *vend,
 /* row_exp's per-contact `expires` accessor (write side).  A contact with no
  * usable expiry contributes nothing to row_exp; fail-closed read handling of a
  * poison/absent expiry is P2.5 [REV-26]. */
-static int _contact_expires(const char *vstart, const char *vend, int64_t *out)
+int _contact_expires(const char *vstart, const char *vend, int64_t *out)
 {
 	return _contact_field_int64(vstart, vend, "expires", 7, out);
 }
