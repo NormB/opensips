@@ -186,6 +186,14 @@ int   nats_request_default_timeout_ms = 500;
  * counters; minimum bound is 1. */
 int   nats_cas_retries = 10;
 
+/* [REV-1/REV-21] Max tolerated inter-node clock skew S, in seconds.  Used as
+ * the grace margin everywhere absolute `expires`/`row_exp` is compared with
+ * node-local now: the write-side expiry hygiene (P2.7), the read filter (P4),
+ * and the reaper (P9) all require `+S` slack so a node whose clock leads by S
+ * never deletes/omits another node's still-live binding.  MUST be >= the
+ * deployment's real maximum node skew. */
+int   nats_reap_grace = 5;
+
 /* Whether to maintain the in-memory JSON-FTS search index.
  *
  * Default 1 (enabled) preserves legacy behaviour: the index is
@@ -307,6 +315,7 @@ static const param_export_t params[] = {
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
+	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
 	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
