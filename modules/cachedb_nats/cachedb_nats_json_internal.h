@@ -178,4 +178,12 @@ void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace);
  * malformed input or OOM. */
 char *_row_finalize_metadata(const char *json, int len, int *out_len);
 
+/* Contact-object field parsers (rowmeta TU) shared with the reaper TU.
+ *   _contact_expires(): read the int64 `expires` of one contact-object slice
+ *     [vstart,vend); 0 + *out on success, -1 if absent/not-an-integer.
+ *   _contact_field_int64(): read any named int64 field of an object slice. */
+int _contact_expires(const char *vstart, const char *vend, int64_t *out);
+int _contact_field_int64(const char *vstart, const char *vend,
+	const char *fname, int flen, int64_t *out);
+
 #endif /* CACHEDB_NATS_JSON_INTERNAL_H */

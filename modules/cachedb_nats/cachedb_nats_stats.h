@@ -89,6 +89,11 @@ typedef struct _nats_cdb_stats {
 	 * would exceed nats_max_value_size (NATS payload cap) — cleanly, before
 	 * the CAS, rather than a silent truncation / broker-side error. */
 	_Atomic unsigned long value_oversize_rejected;
+	/* P9 [REV-1/16] (§4.3A): usrloc rows physically reclaimed by the reaper —
+	 * a fully-expired row CAS-deleted, or a partial row CAS-rewritten to its
+	 * survivors.  The authoritative expiry mechanism; counts actual reclaims,
+	 * not scan passes. */
+	_Atomic unsigned long rows_reaped;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
