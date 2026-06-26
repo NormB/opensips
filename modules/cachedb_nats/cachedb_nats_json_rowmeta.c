@@ -38,6 +38,68 @@
 #include "cachedb_nats_json_internal.h"
 
 /* ------------------------------------------------------------------ */
+/*   P2.3 reject-at-write NUL hygiene (SPEC §3.1 / §4.1 step 0)        */
+/* ------------------------------------------------------------------ */
+
+/* [REV-20] An OpenSIPS str is length-based, so a 0x00 byte is reachable in a
+ * contact field (ua/attr/...).  Such a value cannot round-trip: the reader is
+ * cJSON_Parse + str.len = strlen(valuestring), so an interior NUL truncates
+ * the value (silent corruption).  Returns 1 if @s carries a raw 0x00 OR the
+ * 6-byte JSON escape "\u0000" (which cJSON decodes to 0x00); else 0.  Fail
+ * closed: a value embedding the literal escape is conservatively refused (a
+ * real SIP UA/attr never carries it). */
+static int _field_has_nul(const char *s, int len)
+{
+	int i;
+
+	if (!s || len <= 0)
+		return 0;
+	for (i = 0; i < len; i++) {
+		if (s[i] == '\0')
+			return 1;                       /* raw 0x00 byte */
+		/* escaped JSON NUL: '\' 'u' '0' '0' '0' '0' (decodes to 0x00) */
+		if (s[i] == '\\' && i + 5 < len &&
+		    s[i+1] == 'u' &&
+		    s[i+2] == '0' && s[i+3] == '0' &&
+		    s[i+4] == '0' && s[i+5] == '0')
+			return 1;
+	}
+	return 0;
+}
+
+/* Recurse the incoming update dict (usrloc nests each contact's fields under
+ * contacts.<id>, so a NUL can sit at any depth); return 1 if any CDB_STR field
+ * value carries an embedded NUL.  Run before any merge / kvStore op so the save
+ * can be refused with no partial row (SPEC §4.1 step 0 [REV-20]). */
+int _dict_has_nul_field(const cdb_dict_t *dict)
+{
+	struct list_head *pos;
+	cdb_pair_t *pair;
+
+	if (!dict)
+		return 0;
+	list_for_each(pos, dict) {
+		pair = list_entry(pos, cdb_pair_t, list);
+		if (pair->unset)
+			continue;
+		switch (pair->val.type) {
+		case CDB_STR:
+			if (_field_has_nul(pair->val.val.st.s,
+					pair->val.val.st.len))
+				return 1;
+			break;
+		case CDB_DICT:
+			if (_dict_has_nul_field(&pair->val.val.dict))
+				return 1;
+			break;
+		default:
+			break;
+		}
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*   P2.1 row_exp / schema_version denormalization (SPEC §3.3/§4.1)    */
 /* ------------------------------------------------------------------ */
 
