@@ -157,13 +157,13 @@ static int64_t _row_exp_min(const int64_t *exp, int n)
 	return seen ? m : 0;
 }
 
-/* Find the integer-valued "expires" field within one contact-object slice
- * [vstart,vend).  Sets *out and returns 0 on success; returns -1 if the slice
- * is not an object, or has no integer "expires".  A contact with no usable
- * expiry contributes nothing to row_exp here (write side); the fail-closed
- * read handling of a poison/absent expiry is P2.5 [REV-26]. */
-static int _contact_expires(const char *vstart, const char *vend,
-	int64_t *out)
+/* Find the integer-valued field @fname (length @flen) within one contact-object
+ * slice [vstart,vend).  Sets *out and returns 0 on success; returns -1 if the
+ * slice is not an object, or the field is absent / not an integer.  Shared by
+ * the row_exp `expires` scan (write side) and the int64 `last_mod` post-patch
+ * (read side, P2.4). */
+static int _contact_field_int64(const char *vstart, const char *vend,
+	const char *fname, int flen, int64_t *out)
 {
 	const char *p = _skip_ws(vstart, vend);
 
@@ -190,19 +190,28 @@ static int _contact_expires(const char *vstart, const char *vend,
 		p++;
 		p = _skip_ws(p, vend);
 		vs = p;
-		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
+		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v;
 			if (_json_parse_int64(vs, vend, &v)) {
 				*out = v;
 				return 0;
 			}
-			/* non-integer expires — skip the value, keep scanning */
+			/* present but not an integer — keep scanning (no dup key
+			 * expected, but be tolerant); fall through to skip. */
 		}
 		p = _skip_json_value(p, vend);
 		if (!p)
 			return -1;
 	}
 	return -1;
+}
+
+/* row_exp's per-contact `expires` accessor (write side).  A contact with no
+ * usable expiry contributes nothing to row_exp; fail-closed read handling of a
+ * poison/absent expiry is P2.5 [REV-26]. */
+static int _contact_expires(const char *vstart, const char *vend, int64_t *out)
+{
+	return _contact_field_int64(vstart, vend, "expires", 7, out);
 }
 
 /* Collect every contact's integer `expires` from a "contacts" object slice
@@ -387,4 +396,144 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len)
 fail:
 	free(s.buf);
 	return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*   P2.4 int64 last_mod read seam (SPEC §3.1 Option A)               */
+/* ------------------------------------------------------------------ */
+
+/* Locate the raw JSON slice of the contact whose id == [id,id_len] within the
+ * "contacts" object slice [c_vs,c_ve).  Contact ids are base64(matchkey), so
+ * they are JSON-escape-free and a byte compare against the raw (un-decoded) key
+ * is exact.  Returns 0 + [*out_vs,*out_ve) on success, -1 if not found. */
+static int _raw_find_contact(const char *c_vs, const char *c_ve,
+	const char *id, int id_len, const char **out_vs, const char **out_ve)
+{
+	const char *p = _skip_ws(c_vs, c_ve);
+
+	if (p >= c_ve || *p != '{')
+		return -1;
+	p++;
+	while (p < c_ve) {
+		const char *name, *vs;
+		int nlen;
+
+		p = _skip_ws(p, c_ve);
+		if (p >= c_ve)
+			return -1;
+		if (*p == '}')
+			break;
+		if (*p == ',') { p++; continue; }
+
+		p = _parse_json_string(p, c_ve, &name, &nlen);
+		if (!p)
+			return -1;
+		p = _skip_ws(p, c_ve);
+		if (p >= c_ve || *p != ':')
+			return -1;
+		p++;
+		p = _skip_ws(p, c_ve);
+		vs = p;
+		p = _skip_json_value(p, c_ve);
+		if (!p)
+			return -1;
+		if (nlen == id_len && memcmp(name, id, id_len) == 0) {
+			*out_vs = vs;
+			*out_ve = p;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* [REV-15/REV-30] (SPEC §3.1 Option A): the shared cdb_json_to_dict clamps every
+ * JSON number to CDB_INT32 (cJSON valueint -> INT_MAX), silently narrowing a
+ * `last_mod` (a usrloc CDB_INT64, read as i64) that exceeds INT32_MAX.  Re-parse
+ * `last_mod` as int64 from the raw row JSON and overwrite each contact's
+ * `last_mod` pair in @row_dict to CDB_INT64 with the true value.  Only last_mod
+ * is widened — `expires` stays int32-bounded at the usrloc boundary [REV-30].
+ * A no-op for a document without a top-level "contacts" object (non-usrloc row)
+ * and for any contact whose last_mod is absent / non-integer (left untouched). */
+void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
+{
+	const char *p, *end, *c_vs = NULL, *c_ve = NULL;
+	struct list_head *pos;
+	cdb_pair_t *pair;
+
+	if (!json || len <= 0 || !row_dict)
+		return;
+
+	/* locate the raw top-level "contacts" object slice */
+	end = json + len;
+	p = _skip_ws(json, end);
+	if (p >= end || *p != '{')
+		return;
+	p++;
+	while (p < end) {
+		const char *name, *vs;
+		int nlen;
+
+		p = _skip_ws(p, end);
+		if (p >= end)
+			return;
+		if (*p == '}')
+			break;
+		if (*p == ',') { p++; continue; }
+		p = _parse_json_string(p, end, &name, &nlen);
+		if (!p)
+			return;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':')
+			return;
+		p++;
+		p = _skip_ws(p, end);
+		vs = p;
+		p = _skip_json_value(p, end);
+		if (!p)
+			return;
+		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
+			c_vs = vs;
+			c_ve = p;
+		}
+	}
+	if (!c_vs)
+		return;            /* not a usrloc row */
+
+	/* walk the parsed "contacts" dict; patch each contact's last_mod */
+	list_for_each(pos, row_dict) {
+		struct list_head *cpos;
+
+		pair = list_entry(pos, cdb_pair_t, list);
+		if (pair->val.type != CDB_DICT)
+			continue;
+		if (pair->key.name.len != 8 ||
+		    memcmp(pair->key.name.s, "contacts", 8) != 0)
+			continue;
+
+		list_for_each(cpos, &pair->val.val.dict) {
+			cdb_pair_t *cpair = list_entry(cpos, cdb_pair_t, list);
+			const char *rc_vs, *rc_ve;
+			struct list_head *fpos;
+			int64_t lm;
+
+			if (cpair->val.type != CDB_DICT)
+				continue;
+			if (_raw_find_contact(c_vs, c_ve, cpair->key.name.s,
+					cpair->key.name.len, &rc_vs, &rc_ve) != 0)
+				continue;
+			if (_contact_field_int64(rc_vs, rc_ve, "last_mod", 8, &lm) != 0)
+				continue;   /* absent / non-integer: leave the pair as-is */
+
+			list_for_each(fpos, &cpair->val.val.dict) {
+				cdb_pair_t *fp = list_entry(fpos, cdb_pair_t, list);
+				if (fp->key.name.len == 8 &&
+				    memcmp(fp->key.name.s, "last_mod", 8) == 0) {
+					fp->val.type = CDB_INT64;
+					fp->val.val.i64 = lm;
+					break;
+				}
+			}
+		}
+		break;             /* only one top-level "contacts" */
+	}
 }
