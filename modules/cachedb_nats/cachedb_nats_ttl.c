@@ -104,3 +104,22 @@ const char *_ttl_delete_op(int purge)
 {
 	return purge ? NATS_KV_OP_PURGE : NATS_KV_OP_DEL;
 }
+
+/* (§5.3 [REV-7]) kv_ttl==0 startup guard. */
+int _kv_ttl_guard(int kv_ttl)
+{
+	return (kv_ttl == 0) ? 0 : -1;
+}
+
+/* (§6 [TREV-8]) per-message-TTL capability latch transition. */
+enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev)
+{
+	if (ev == TTL_EV_RECONNECT)
+		return TTL_CAP_UNPROBED;            /* re-probe on reconnect */
+	if (ev == TTL_EV_SAW_10166 || ev == TTL_EV_SETUP_FAIL)
+		return TTL_CAP_UNSUPPORTED;         /* latch off for the connection */
+	/* TTL_EV_SETUP_OK */
+	if (cur == TTL_CAP_UNSUPPORTED)
+		return TTL_CAP_UNSUPPORTED;         /* stay latched until a reconnect */
+	return TTL_CAP_SUPPORTED;
+}
