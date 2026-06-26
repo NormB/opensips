@@ -98,4 +98,28 @@ enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr);
  * @purge, else DEL (tombstone, keep history). */
 const char *_ttl_delete_op(int purge);
 
+/* ---- startup guard + capability latch (§5.3 [REV-7], §6 [TREV-8]) -- */
+
+/* [REV-7] kv_ttl (bucket MaxAge) MUST be 0: a non-zero bucket TTL becomes
+ * stream MaxAge, which caps per-key TTL and silently expires permanent
+ * (expires==0) contacts.  Returns 0 if ok, -1 if the value must be refused. */
+int _kv_ttl_guard(int kv_ttl);
+
+/* [TREV-8] Per-message-TTL capability — operational, "by attempt", latched per
+ * connection.  SUPPORTED once the AllowMsgTTL setup succeeds and no 10166 seen;
+ * a 10166 (or setup failure) latches UNSUPPORTED (plain CAS + reaper); a
+ * reconnect re-probes (failover may land on a different server). */
+enum ttl_cap {
+	TTL_CAP_UNPROBED    = 0,
+	TTL_CAP_SUPPORTED   = 1,
+	TTL_CAP_UNSUPPORTED = 2,
+};
+enum ttl_cap_event {
+	TTL_EV_SETUP_OK   = 0,   /* js_UpdateStream AllowMsgTTL succeeded */
+	TTL_EV_SETUP_FAIL = 1,   /* setup rejected / errored */
+	TTL_EV_SAW_10166  = 2,   /* JSMessageTTLDisabledErr on a runtime publish */
+	TTL_EV_RECONNECT  = 3,   /* connection re-established */
+};
+enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev);
+
 #endif /* CACHEDB_NATS_TTL_H */
