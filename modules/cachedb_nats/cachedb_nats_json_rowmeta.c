@@ -619,3 +619,172 @@ void _row_strip_private_keys(cdb_dict_t *row_dict)
 		}
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/*   P2.7 skew-safe write-side expiry hygiene (SPEC §4.1 step 4)       */
+/* ------------------------------------------------------------------ */
+
+/* Upper bound on touched-expired subkeys dropped in one update.  An update that
+ * sets more than this many already-expired contacts (pathological) leaves the
+ * excess for the reaper (§4.3A) — never a correctness loss, only deferred. */
+#define NATS_MAX_DROP_IDS 256
+
+/* [REV-1/REV-21] A contact is already-expired when its absolute `expires` plus
+ * the skew grace S has passed node-local `now`.  expires==0 is permanent. */
+static int _contact_is_expired(int64_t expires, time_t now, int grace)
+{
+	return expires != 0 && (expires + (int64_t)grace) <= (int64_t)now;
+}
+
+/* Extract a set-contact pair's own `expires` (CDB_INT32/INT64) from its value
+ * dict.  Returns 0 + *out, or -1 if absent / not an integer. */
+static int _pair_contact_expires(const cdb_pair_t *p, int64_t *out)
+{
+	struct list_head *pos;
+
+	if (p->val.type != CDB_DICT)
+		return -1;
+	list_for_each(pos, &p->val.val.dict) {
+		cdb_pair_t *f = list_entry(pos, cdb_pair_t, list);
+		if (f->key.name.len != 7 || memcmp(f->key.name.s, "expires", 7) != 0)
+			continue;
+		if (f->val.type == CDB_INT32) { *out = f->val.val.i32; return 0; }
+		if (f->val.type == CDB_INT64) { *out = f->val.val.i64; return 0; }
+		return -1;
+	}
+	return -1;
+}
+
+/* Rewrite a "contacts" object slice [cvs,cve), dropping any subkey in @ids. */
+static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
+	const char **ids, const int *id_lens, int n_ids)
+{
+	const char *p = _skip_ws(cvs, cve), *end = cve;
+	int first = 1;
+
+	if (p >= end || *p != '{') return -1;
+	if (_sink_putc(s, '{') < 0) return -1;
+	p++;
+	while (p < end) {
+		const char *name, *vs;
+		int nlen, i, drop = 0;
+
+		p = _skip_ws(p, end);
+		if (p >= end) return -1;
+		if (*p == '}') break;
+		if (*p == ',') { p++; continue; }
+		p = _parse_json_string(p, end, &name, &nlen);
+		if (!p) return -1;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':') return -1;
+		p++;
+		p = _skip_ws(p, end);
+		vs = p;
+		p = _skip_json_value(p, end);
+		if (!p) return -1;
+		for (i = 0; i < n_ids; i++)
+			if (nlen == id_lens[i] && memcmp(name, ids[i], nlen) == 0) { drop = 1; break; }
+		if (drop) continue;
+		if (!first && _sink_putc(s, ',') < 0) return -1;
+		first = 0;
+		if (_sink_emit_raw_string(s, name, nlen) < 0) return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_write(s, vs, (int)(p - vs)) < 0) return -1;
+	}
+	if (_sink_putc(s, '}') < 0) return -1;
+	return 0;
+}
+
+/* Copy @json through, dropping subkeys @ids from the top-level "contacts"
+ * object.  Returns a fresh doc (caller frees), or NULL on error/OOM. */
+static char *_contacts_drop_subkeys(const char *json, int len,
+	const char **ids, const int *id_lens, int n_ids, int *out_len)
+{
+	const char *p, *end;
+	json_sink_t s;
+	int first = 1;
+
+	if (!json || len <= 0) return NULL;
+	end = json + len;
+	p = _skip_ws(json, end);
+	if (p >= end || *p != '{') return NULL;
+	if (_sink_init(&s, len + 16) < 0) return NULL;
+	if (_sink_putc(&s, '{') < 0) goto fail;
+	p++;
+	while (p < end) {
+		const char *name, *vs;
+		int nlen;
+
+		p = _skip_ws(p, end);
+		if (p >= end) goto fail;
+		if (*p == '}') break;
+		if (*p == ',') { p++; continue; }
+		p = _parse_json_string(p, end, &name, &nlen);
+		if (!p) goto fail;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':') goto fail;
+		p++;
+		p = _skip_ws(p, end);
+		vs = p;
+		p = _skip_json_value(p, end);
+		if (!p) goto fail;
+		if (!first && _sink_putc(&s, ',') < 0) goto fail;
+		first = 0;
+		if (_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
+		if (_sink_putc(&s, ':') < 0) goto fail;
+		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
+			if (_emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
+		} else {
+			if (_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
+		}
+	}
+	if (_sink_putc(&s, '}') < 0) goto fail;
+	return _sink_take(&s, out_len);
+fail:
+	free(s.buf);
+	return NULL;
+}
+
+/* [REV-21] (SPEC §4.1 step 4): drop from the merged @json only those contacts
+ * THIS update set/unset whose own `expires` is already past `now + S`.  The
+ * drop set is built solely from @pairs (the touched subkeys), so an untouched
+ * merged-in contact is never even considered — no collateral cross-node delete.
+ * A pair's subkey equals the stored contact key (base64, escape-free).  Returns
+ * a fresh doc (caller frees): unchanged when nothing is due.  NULL on error. */
+char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
+	time_t now, int grace, int *out_len)
+{
+	const char *ids[NATS_MAX_DROP_IDS];
+	int id_lens[NATS_MAX_DROP_IDS];
+	int n = 0;
+	struct list_head *pos;
+
+	if (!json || len <= 0) return NULL;
+	if (pairs) {
+		list_for_each(pos, pairs) {
+			cdb_pair_t *p = list_entry(pos, cdb_pair_t, list);
+			int64_t exp;
+
+			if (p->unset) continue;
+			if (p->key.name.len != 8 || memcmp(p->key.name.s, "contacts", 8) != 0)
+				continue;
+			if (p->subkey.len <= 0 || !p->subkey.s) continue;
+			if (_pair_contact_expires(p, &exp) != 0) continue;
+			if (!_contact_is_expired(exp, now, grace)) continue;
+			if (n < NATS_MAX_DROP_IDS) {
+				ids[n] = p->subkey.s;
+				id_lens[n] = p->subkey.len;
+				n++;
+			}
+		}
+	}
+	if (n == 0) {
+		char *copy = malloc(len + 1);
+		if (!copy) return NULL;
+		memcpy(copy, json, len);
+		copy[len] = '\0';
+		if (out_len) *out_len = len;
+		return copy;
+	}
+	return _contacts_drop_subkeys(json, len, ids, id_lens, n, out_len);
+}

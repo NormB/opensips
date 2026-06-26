@@ -29,6 +29,7 @@
 #define CACHEDB_NATS_JSON_INTERNAL_H
 
 #include <stdint.h>
+#include <time.h>
 
 #include "../../cachedb/cachedb.h"
 #include "cachedb_nats_json.h"
@@ -138,6 +139,15 @@ int _value_classify(const char *data, int len);
  * usrloc sees exactly {contacts, aorhash}.  Frees each removed pair completely
  * (it is no longer reachable from cdb_free_rows). */
 void _row_strip_private_keys(cdb_dict_t *row_dict);
+
+/* P2.7 [REV-21] (SPEC §4.1 step 4): skew-safe write-side hygiene.  Drop from the
+ * merged @json only those contacts THIS update set/unset (@pairs) whose own
+ * `expires != 0 && expires + grace <= now` — never an untouched merged-in
+ * contact (the drop set is built solely from @pairs).  @grace is the max-skew
+ * margin S (nats_reap_grace).  Returns a fresh doc (caller frees), unchanged
+ * when nothing is due; NULL on error. */
+char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
+	time_t now, int grace, int *out_len);
 
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the

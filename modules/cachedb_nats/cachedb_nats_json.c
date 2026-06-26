@@ -55,6 +55,7 @@
 extern char *fts_json_prefix;
 extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
+extern int   nats_reap_grace;    /* defined in cachedb_nats.c (max-skew S) */
 extern int   nats_enable_search_index;
 
 /* ------------------------------------------------------------------ */
@@ -1314,6 +1315,23 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	if (!new_json) {
 		LM_ERR("failed to apply pairs in single pass\n");
 		return -1;
+	}
+
+	/* P2.7 [REV-21] (SPEC §4.1 step 4): skew-safe write hygiene — drop a
+	 * contact THIS update set/unset whose own expires is already past
+	 * now + nats_reap_grace, before recomputing row_exp.  Untouched
+	 * merged-in contacts are never considered (no collateral delete). */
+	{
+		char *hygiened = _row_drop_expired_own(new_json,
+			(int)strlen(new_json), pairs, time(NULL),
+			nats_reap_grace, NULL);
+		if (!hygiened) {
+			LM_ERR("write hygiene failed for key '%s'\n", target_key);
+			free(new_json);
+			return -1;
+		}
+		free(new_json);
+		new_json = hygiened;
 	}
 
 	/* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
