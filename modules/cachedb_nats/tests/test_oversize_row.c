@@ -1,0 +1,77 @@
+/*
+ * Copyright (C) 2026 OpenSIPS Solutions
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * P3 / SPEC.md §3.2 §4.1 [REV-5]: value-size / payload bound.
+ *
+ * All contacts of an AoR live in ONE KV value; NATS caps message size
+ * (max_payload, default 1 MiB; a stream's max_msg_size may be lower).  SQL /
+ * Cassandra store one row per contact and have no such cliff.  cachedb_nats MUST
+ * detect an oversize merged value BEFORE the CAS write and fail the single
+ * offending contact's save (return error) — never corrupt or silently truncate
+ * the row, and leave the existing bindings intact.  (max_contacts is a separate
+ * usrloc responsibility, [REV-35]; this is the independent value-size guard.)
+ *
+ * _value_size_ok(len, max): max <= 0 means "unbounded" (knob disabled); else the
+ * serialized value must be <= max bytes.  The check runs on the FINAL merged doc
+ * just before kvStore_Update, so an over-limit write fails fatally (not a CAS
+ * retry) with the previous revision untouched.
+ *
+ *   gcc -DSIZE_CURRENT ... -> today: no size check (_value_size_ok always 1)
+ *                            => RED (an oversize value is not rejected).
+ *   gcc ...               -> the FIXED bound => GREEN.
+ *
+ * Rule 6: the AUTHORITATIVE proof is the Tier-2 e2e that registers contacts to
+ * the limit and asserts a clean bounded failure (no crash / silent truncation).
+ *
+ * Build: gcc -g -O0 -fsanitize=address -Wall -o test_oversize_row test_oversize_row.c
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ─── carried copy of the production guard (rowmeta TU) ─────────── */
+static int _value_size_ok(int len, int max)
+{
+#ifdef SIZE_CURRENT
+	(void)len; (void)max; return 1;   /* today: no value-size guard */
+#else
+	if (max <= 0)
+		return 1;                      /* knob disabled => unbounded */
+	return len <= max;
+#endif
+}
+
+/* ─── assertions ─────────────────────────────────────────────── */
+static int fails = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { printf("  FAIL: %s\n", msg); fails++; } \
+	else printf("  ok:   %s\n", msg); } while (0)
+
+int main(void)
+{
+#ifdef SIZE_CURRENT
+	printf("== carried copy: SIZE_CURRENT (no value-size guard) ==\n");
+#else
+	printf("== carried copy: FIXED bound ==\n");
+#endif
+
+	printf("[REV-5] within bound writes, over bound is rejected:\n");
+	CHECK(_value_size_ok(100, 1048576) == 1, "100 B <= 1 MiB => ok");
+	CHECK(_value_size_ok(1048576, 1048576) == 1, "exactly at limit => ok (<=)");
+	CHECK(_value_size_ok(1048577, 1048576) == 0, "one over the limit => rejected");
+	CHECK(_value_size_ok(5000000, 1048576) == 0, "5 MB value => rejected (would hit max_payload)");
+
+	printf("[REV-5] the knob disabled (max<=0) means unbounded:\n");
+	CHECK(_value_size_ok(5000000, 0) == 1, "max==0 => unbounded (no guard)");
+	CHECK(_value_size_ok(5000000, -1) == 1, "max<0 => unbounded");
+
+	printf("[REV-5] small / boundary / defensive:\n");
+	CHECK(_value_size_ok(0, 1048576) == 1, "empty value => ok");
+	CHECK(_value_size_ok(1, 1) == 1, "len==max==1 => ok");
+	CHECK(_value_size_ok(2, 1) == 0, "2 > 1 => rejected");
+	CHECK(_value_size_ok(0, 0) == 1, "0 len, unbounded => ok");
+
+	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
+	return fails ? 1 : 0;
+}

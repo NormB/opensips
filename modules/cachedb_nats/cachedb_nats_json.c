@@ -56,6 +56,7 @@ extern char *fts_json_prefix;
 extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 extern int   nats_reap_grace;    /* defined in cachedb_nats.c (max-skew S) */
+extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
 extern int   nats_enable_search_index;
 
 /* ------------------------------------------------------------------ */
@@ -1364,6 +1365,24 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		}
 		free(new_json);
 		new_json = finalized;
+	}
+
+	/* P3 [REV-5] (SPEC §3.2/§4.1): reject an oversize merged value BEFORE the
+	 * CAS write — fail this contact's save cleanly with the existing row (and
+	 * its bindings) untouched, rather than hit the NATS payload cap mid-write
+	 * (a broker error) or silently truncate.  Fatal (no CAS retry): the value
+	 * would be identical on every retry. */
+	{
+		int vlen = (int)strlen(new_json);
+		if (!_value_size_ok(vlen, nats_max_value_size)) {
+			NATS_CDB_STATS_INC(value_oversize_rejected);
+			LM_ERR("update rejected: merged value for key '%s' is %d "
+				"bytes, over nats_max_value_size=%d; save failed "
+				"(existing bindings intact, not truncated)\n",
+				target_key, vlen, nats_max_value_size);
+			free(new_json);
+			return -1;
+		}
 	}
 
 	/* write back with CAS */

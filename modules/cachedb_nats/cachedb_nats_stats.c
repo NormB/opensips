@@ -123,6 +123,9 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("poison_values_rejected"),
 		NATS_CDB_STATS_SUM(poison_values_rejected)) < 0)
 		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("value_oversize_rejected"),
+		NATS_CDB_STATS_SUM(value_oversize_rejected)) < 0)
+		goto error;
 
 	return resp;
 

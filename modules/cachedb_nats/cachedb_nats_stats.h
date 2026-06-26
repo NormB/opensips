@@ -85,6 +85,10 @@ typedef struct _nats_cdb_stats {
 	/* P2.5 [REV-26] (§12 integrity): reads that hit a non-empty, non-object
 	 * stored value (poison) — surfaced instead of masked as an empty AoR. */
 	_Atomic unsigned long poison_values_rejected;
+	/* P3 [REV-5] (§12 integrity): writes refused because the merged row value
+	 * would exceed nats_max_value_size (NATS payload cap) — cleanly, before
+	 * the CAS, rather than a silent truncation / broker-side error. */
+	_Atomic unsigned long value_oversize_rejected;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
