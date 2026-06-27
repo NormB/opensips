@@ -1555,6 +1555,18 @@ int nats_json_index_remove(const char *key)
 	return 0;
 }
 
+/* P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: observe the live
+ * forward-index document count.  Lets a joint reaper⊕watcher e2e assert that
+ * the in-SHM index entry — not merely the read-path view (P4) — is dropped when
+ * the server TTL-expires a key.  NULL-safe: an uninitialized index returns -1
+ * (distinct from an empty index, 0); never dereferences a NULL g_idx. */
+int nats_json_index_count(void)
+{
+	if (!g_idx)
+		return -1;
+	return atomic_load_explicit(&g_idx->num_documents, memory_order_relaxed);
+}
+
 /* Per-field-callback adapter for nats_json_index_remove_fields:
  * looks up the (field:value) entry, locks just its shard, removes
  * the doc-key from its keys[] array, releases the shard.  Field +

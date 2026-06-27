@@ -555,9 +555,42 @@ static void _watcher_loop(void)
 					/* Delete/Purge OR an empty-value Put (MaxAge
 					 * tombstone, [R1]).  Fast path: remove only the
 					 * entries this doc was indexed under (O(fields));
-					 * on a reverse-map miss fall back to the full walk. */
-					if (nats_json_index_remove_by_revmap(key) < 0)
+					 * on a reverse-map miss fall back to the full walk.
+					 * The revmap return is the PRECISE membership signal:
+					 * 0 => the key WAS indexed (revmap had its fv set) and
+					 * is now removed; <0 => no revmap record (a full-walk
+					 * fallback covers a possibly-stale entry). */
+					int before = nats_json_index_count();
+					int was_indexed = (nats_json_index_remove_by_revmap(key) == 0);
+					if (!was_indexed)
 						nats_json_index_remove(key);
+					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
+					 * REV-26] observability: a server-side TTL expiry
+					 * surfaces (cnats <=3.12) as an empty-value Put;
+					 * log it at INFO so operators — and the joint
+					 * reaper⊕watcher e2e — can SEE the watcher drop the
+					 * in-SHM index entry for a vanished key.  The
+					 * "was indexed -> removed" membership outcome is the
+					 * authoritative signal that the index (not just the
+					 * read-path filter) released the key; num_documents is
+					 * a supplementary delta-counter (note: it over-counts
+					 * a node's own writes because they are indexed both
+					 * inline and via this watcher echo — a known stat
+					 * caveat, not a membership error).  Ordinary
+					 * Delete/Purge markers from our own writes are
+					 * frequent, so they stay at DBG to avoid log spam. */
+					if (op == kvOp_Put)
+						LM_INFO("watcher: MaxAge tombstone (empty-value) "
+							"on '%s' -> index entry %s (num_documents "
+							"%d->%d)\n", key,
+							was_indexed ? "removed (was indexed)"
+							            : "not in revmap; full-walk fallback",
+							before, nats_json_index_count());
+					else
+						LM_DBG("watcher: delete/purge marker on '%s' -> "
+							"index entry %s (num_documents %d->%d)\n", key,
+							was_indexed ? "removed" : "full-walk fallback",
+							before, nats_json_index_count());
 				}
 			}
 

@@ -248,6 +248,14 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
 int nats_json_index_remove(const char *key);
 
 /*
+ * P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: live forward-index
+ * document count, for observability and the joint reaper⊕watcher e2e.
+ * @return  num_documents (>= 0), or -1 if the index is not initialized.
+ *          NULL-safe — never dereferences a NULL g_idx.
+ */
+int nats_json_index_count(void);
+
+/*
  * Fast delete-by-key using the doc-key -> field:value reverse map: removes
  * the key from only the entries it was indexed under (O(fields)) instead
  * of walking every bucket.  Returns 0 on a hit (key removed), -1 on a miss
