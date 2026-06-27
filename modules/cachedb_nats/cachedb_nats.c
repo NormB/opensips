@@ -525,6 +525,19 @@ static int mod_init(void)
 
 	LM_NOTICE("initializing module cachedb_nats ...\n");
 
+	/* P8 [REV-7 / TTL-SOLUTION-SPEC.md §5.3]: kv_ttl becomes the KV bucket's
+	 * MaxAge (nats_pool.c: kvCfg.TTL).  Stream MaxAge takes precedence over
+	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS
+	 * (expires==0) -- data loss in a registration store.  Refuse to start
+	 * (fail closed) before any bucket is created/bound. */
+	if (_kv_ttl_guard(kv_ttl) != 0) {
+		LM_ERR("cachedb_nats: kv_ttl=%d invalid -- a non-zero kv_ttl sets the "
+		       "KV bucket MaxAge, which overrides per-message TTL and would "
+		       "EXPIRE PERMANENT CONTACTS (expires==0). Set kv_ttl=0 [REV-7].\n",
+		       kv_ttl);
+		return -1;
+	}
+
 	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
 	 * pool's connect path can look up the "nats" client domain.  No
 	 * effect on plaintext (nats://) URLs; tls:// URLs error at
