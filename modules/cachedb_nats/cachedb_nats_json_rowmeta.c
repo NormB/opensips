@@ -279,13 +279,20 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
  *   - non-usrloc document (no top-level "contacts"): returned byte-for-byte
  *     unchanged, so other cachedb_nats consumers are never disturbed.
  * Returns NULL on malformed input or OOM. */
-char *_row_finalize_metadata(const char *json, int len, int *out_len)
+char *_row_finalize_metadata(const char *json, int len, int *out_len,
+	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same)
 {
 	const char *p, *end, *c_vs = NULL, *c_ve = NULL;
 	int64_t *exps = NULL;
 	int n_exp = 0, first = 1;
 	int64_t row_exp;
 	json_sink_t s;
+
+	/* P8: default the eligibility out-params to "ineligible" (no TTL) so every
+	 * early/error return leaves the caller with a safe value. */
+	if (out_row_exp)     *out_row_exp = 0;
+	if (out_n_contacts)  *out_n_contacts = 0;
+	if (out_all_same)    *out_all_same = 0;
 
 	if (!json || len <= 0)
 		return NULL;
@@ -339,6 +346,19 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len)
 	if (_row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0)
 		return NULL;
 	row_exp = _row_exp_min(exps, n_exp);
+
+	/* P8 [§5]: per-message-TTL eligibility inputs.  A row gets a TTL only when
+	 * it is a single contact OR all contacts share one expiry (else a min-expiry
+	 * TTL would expire siblings early).  all_same is computed over the same
+	 * expiry array used for row_exp. */
+	if (out_row_exp || out_n_contacts || out_all_same) {
+		int i, all_same = 1;
+		for (i = 1; i < n_exp; i++)
+			if (exps[i] != exps[0]) { all_same = 0; break; }
+		if (out_row_exp)    *out_row_exp = row_exp;
+		if (out_n_contacts) *out_n_contacts = n_exp;
+		if (out_all_same)   *out_all_same = (n_exp <= 1) ? 1 : all_same;
+	}
 	free(exps);
 
 	/* Pass 2: copy through every top-level field except the private peers,

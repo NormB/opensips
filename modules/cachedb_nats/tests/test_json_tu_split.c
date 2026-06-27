@@ -123,7 +123,9 @@ int main(void)
 	 * still far under the query+update TU's 1600 and the index TU's 2100, so it
 	 * remains a real anti-monolith guard; if it approaches the cap again, split
 	 * read-side vs write-side transforms into two TUs. */
-	ASSERT(n_rm > 0 && n_rm < 900, "rowmeta TU under 900 lines");
+	/* Cap 960 (raised from 900 for the P8 §5 eligibility out-params on
+	 * _row_finalize_metadata: row_exp / n_contacts / all_same). */
+	ASSERT(n_rm > 0 && n_rm < 960, "rowmeta TU under 960 lines");
 	/* Cap 1650 (raised from 1600 for the P8 R4 empty-value-marker re-create
 	 * branch in _update_fetch_or_seed).  P8's TTL write/activation logic lives
 	 * in cachedb_nats_ttl_put.c, NOT here, to keep this TU bounded. */
