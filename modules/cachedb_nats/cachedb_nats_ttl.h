@@ -132,4 +132,20 @@ enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev);
 int nats_kv_key_to_subject(const char *bucket, const char *key,
 	char *buf, int buflen);
 
+/* ---- the one usrloc-row write helper (§2.0 invariant) ----------- */
+
+/* P8 Stage 1b: single-shot CAS publish that re-asserts Nats-TTL.  EVERY
+ * usrloc-row write (registration + reaper survivor-write) goes through this; no
+ * kvStore_UpdateString may remain on the usrloc row path.  Implemented in
+ * cachedb_nats_ttl_put.c.  Forward-declare the cnats opaque handles (identical
+ * to nats.h's typedefs; C11 permits the redefinition) so this header stays
+ * usable by pure TUs that don't pull in <nats/nats.h>. */
+typedef struct __jsCtx   jsCtx;
+typedef struct __kvStore kvStore;
+enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
+	const char *bucket, const char *key,
+	const char *json, int json_len,
+	int got_entry, int value_len, uint64_t entry_rev,
+	int64_t msg_ttl_ms, uint64_t *out_rev);
+
 #endif /* CACHEDB_NATS_TTL_H */

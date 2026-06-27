@@ -1,0 +1,108 @@
+/*
+ * Copyright (C) 2026 OpenSIPS Solutions
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * P8 Stage 1b [TTL-SOLUTION-SPEC.md §2.0/§2.2]: nats_kv_put_row() -- the single
+ * helper through which EVERY usrloc-row write goes (the §2.0 invariant), so
+ * every write to a TTL-eligible subject re-asserts Nats-TTL [TREV-3].  It is a
+ * thin, single-shot publish: all re-read/re-merge/backoff stays in the callers'
+ * existing CAS loops.  The pure decisions it composes (_ttl_cas_predicate,
+ * _ttl_classify) are unit-tested in cachedb_nats_ttl.c; this file is the glue.
+ */
+#include <stdint.h>
+#include <string.h>
+
+#include <nats/nats.h>
+
+#include "../../dprint.h"
+#include "../../lib/nats/nats_dl.h"
+#include "cachedb_nats_ttl.h"
+
+/* natsStatus -> ttl_pub_status, so the classifier stays free of nats.h coupling. */
+static enum ttl_pub_status _pub_status(natsStatus s)
+{
+	if (s == NATS_OK)
+		return TTL_PUB_OK;
+	if (s == NATS_TIMEOUT || s == NATS_CONNECTION_CLOSED ||
+	    s == NATS_CONNECTION_DISCONNECTED || s == NATS_NOT_YET_CONNECTED)
+		return TTL_PUB_CONN_DOWN;
+	return TTL_PUB_JS_ERR;
+}
+
+/* Write `json` (json_len bytes) to the usrloc row at `key`, re-asserting the
+ * per-message TTL and preserving optimistic concurrency.  Single-shot.
+ *
+ *   js/kv       : pool-owned JetStream ctx + KV store (both call sites hold them)
+ *   got_entry   : the caller's prior read found an entry (NATS_OK)
+ *   value_len   : its value length (0 => empty-value MaxAge marker)
+ *   entry_rev   : its revision (CAS predicate target)
+ *   msg_ttl_ms  : Nats-TTL in ms, 0 => no TTL (ineligible/permanent row)
+ *   out_rev     : new revision on success (may be NULL)
+ *
+ * Returns an enum ttl_outcome (TTL_DONE/RETRY/LATCH_OFF/ASSERT_BUG/FAIL_SAVE);
+ * the caller maps RETRY to its re-read loop and LATCH_OFF to the legacy
+ * kvStore_UpdateString fallback + reaper.
+ */
+enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
+	const char *bucket, const char *key,
+	const char *json, int json_len,
+	int got_entry, int value_len, uint64_t entry_rev,
+	int64_t msg_ttl_ms, uint64_t *out_rev)
+{
+	char subj[512];
+	uint64_t cas_seq = 0, rev = 0;
+	enum ttl_cas_pred pred;
+	natsMsg *m = NULL;
+	jsPubAck *pa = NULL;
+	jsErrCode je = 0;
+	jsPubOptions o;
+	natsStatus s;
+
+	/* [R11] one mapping, three consumers (§2.1): never publish to a truncated
+	 * subject -- that would land the value where the reader never queries
+	 * (silent split-brain).  Fail the save instead. */
+	if (nats_kv_key_to_subject(bucket, key, subj, sizeof(subj)) < 0) {
+		LM_ERR("nats_kv_put_row: subject overflow for key '%s' -- failing "
+			"the save\n", key);
+		return TTL_FAIL_SAVE;
+	}
+
+	/* head_seq=0: js_GetLastMsg is unbound [R3], so an absent entry resolves to
+	 * NO_MESSAGE and is serviced with kvStore_CreateString -- the only helper
+	 * that re-creates over a server-side DEL/PURGE/MaxAge marker first-attempt
+	 * (avoids the [REV-27] re-REGISTER lockout).  That create carries no TTL;
+	 * the reaper backstops that row until the next refresh re-asserts. */
+	pred = _ttl_cas_predicate(got_entry, value_len, entry_rev, 0, &cas_seq);
+
+	if (pred == TTL_CAS_NO_MESSAGE) {
+		s = nats_dl.kvStore_CreateString(&rev, kv, key, json);
+		if (s == NATS_OK) {
+			if (out_rev)
+				*out_rev = rev;
+			return TTL_DONE;
+		}
+		if (_pub_status(s) == TTL_PUB_CONN_DOWN)
+			return TTL_FAIL_SAVE;
+		/* key already exists (a concurrent create won) -> re-read + retry */
+		return TTL_RETRY;
+	}
+
+	/* update OR create-over-empty-marker: CAS-publish with re-asserted TTL.
+	 * ExpectLastSubjectSeq == the revision we read is byte-for-byte the
+	 * optimistic check kvStore_UpdateString(rev) performed (§2.1). */
+	if (nats_dl.natsMsg_Create(&m, subj, NULL, json, json_len) != NATS_OK)
+		return TTL_FAIL_SAVE;
+	nats_dl.jsPubOptions_Init(&o);
+	o.ExpectLastSubjectSeq = cas_seq;
+	if (msg_ttl_ms > 0)
+		o.MsgTTL = msg_ttl_ms;             /* re-assert Nats-TTL [TREV-3] */
+
+	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
+	if (s == NATS_OK && pa && out_rev)
+		*out_rev = pa->Sequence;           /* KV revision == stream seq */
+	nats_dl.jsPubAck_Destroy(pa);
+	nats_dl.natsMsg_Destroy(m);
+
+	return _ttl_classify(_pub_status(s), je);
+}
