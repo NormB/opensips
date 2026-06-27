@@ -24,7 +24,7 @@ TESTS = test_intersect_uaf test_kvget_copy_pattern test_json_escape \
         test_query_keyset_refcount test_watcher_leak_stat \
         test_map_key_encode test_map_migrate test_map_compose test_raw_query_cols test_rebuild_thread_safe \
         test_watcher_pkg_mem test_json_tu_split test_query_res_init \
-        test_outparam_contracts test_kv_key_validate test_row_exp_compute test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_eligibility test_ttl_compute_boundary test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_put_decision test_ttl_fetch_marker test_ttl_row_eligibility test_ttl_write_invariant test_remove_stub
+        test_outparam_contracts test_kv_key_validate test_row_exp_compute test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_eligibility test_ttl_compute_boundary test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_put_decision test_ttl_fetch_marker test_ttl_row_eligibility test_ttl_write_invariant test_remove_stub test_index_count
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
@@ -40,7 +40,7 @@ TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
                   test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts \
-                  test_kv_key_validate test_row_exp_compute test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_eligibility test_ttl_compute_boundary test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_put_decision test_ttl_fetch_marker test_ttl_row_eligibility test_ttl_write_invariant test_remove_stub
+                  test_kv_key_validate test_row_exp_compute test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_eligibility test_ttl_compute_boundary test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_put_decision test_ttl_fetch_marker test_ttl_row_eligibility test_ttl_write_invariant test_remove_stub test_index_count
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is
@@ -350,6 +350,10 @@ test_insecure_url_warn: test_insecure_url_warn.c
 test_remove_stub: test_remove_stub.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
+# P10 [TREV-2a / REV-26] forward-index document-count accessor (observability).
+test_index_count: test_index_count.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
+
 check: all
 	./test_intersect_uaf
 	./test_kvget_copy_pattern
@@ -426,6 +430,7 @@ check: all
 	./test_reap_project
 	./test_insecure_url_warn
 	./test_remove_stub
+	./test_index_count
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
