@@ -1057,7 +1057,8 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		const char *key = keys.Keys[i];
 		kvEntry *e = NULL;
 		const char *val;
-		int vlen, n_surv = 0, plen = 0;
+		int vlen, n_surv = 0, plen = 0, p_all_same = 0;
+		int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
 		uint64_t rev;
 		char *proj;
 
@@ -1079,7 +1080,7 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			continue;
 		}
 		proj = _reap_project_survivors(val, vlen, now, nats_reap_grace,
-			&n_surv, &plen);
+			&n_surv, &plen, &p_row_exp, &p_all_same);
 		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
 		if (!proj)
 			continue;                     /* malformed/poison: read path alarms it */
@@ -1093,9 +1094,14 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 				reaped++;
 			}
 		} else {
+			/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
+			 * the pruned row RE-ASSERTS Nats-TTL (a plain kvStore_UpdateString
+			 * here would strip it and re-create #1994 for reaped rows).  The
+			 * reaper defers index convergence to the watcher (no index code). */
 			uint64_t newrev = 0;
-			if (nats_dl.kvStore_UpdateString(&newrev, kv, key, proj, rev)
-					== NATS_OK) {
+			if (nats_kv_write_row_cas(kv, kv_bucket, key, proj, plen, rev,
+					p_row_exp, n_surv, p_all_same, nats_reap_grace,
+					&newrev) == 0) {
 				NATS_CDB_STATS_INC(rows_reaped);
 				reaped++;
 			}

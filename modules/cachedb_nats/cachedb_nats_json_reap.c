@@ -135,7 +135,8 @@ static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs,
  * schema_version over exactly those survivors — so the 0=permanent sentinel and
  * int64 arithmetic have a single owner (the rowmeta TU). */
 char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
-	int *n_survivors, int *out_len)
+	int *n_survivors, int *out_len,
+	int64_t *out_row_exp, int *out_all_same)
 {
 	const char *p, *end, *c_vs = NULL;
 	int n_surv = 0, first = 1, tmp_len = 0;
@@ -144,6 +145,10 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 
 	if (n_survivors)
 		*n_survivors = 0;
+	if (out_row_exp)            /* P8: TTL eligibility of the projected survivors */
+		*out_row_exp = 0;
+	if (out_all_same)
+		*out_all_same = 0;
 	if (!json || len <= 0)
 		return NULL;
 	end = json + len;
@@ -239,8 +244,10 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 	if (!tmp)
 		return NULL;
 
-	/* stage 2: recompute row_exp + schema_version over the survivors. */
-	final = _row_finalize_metadata(tmp, tmp_len, out_len, NULL, NULL, NULL);
+	/* stage 2: recompute row_exp + schema_version over the survivors, and
+	 * expose the TTL eligibility inputs (n_survivors == n_contacts). */
+	final = _row_finalize_metadata(tmp, tmp_len, out_len,
+		out_row_exp, NULL, out_all_same);
 	free(tmp);
 	if (!final)
 		return NULL;

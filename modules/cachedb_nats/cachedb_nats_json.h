@@ -358,7 +358,8 @@ nats_search_idx *nats_json_get_index(void);
  *   _reap_row_due_json(): cheap due-gate over the stored row_exp — 1 due, 0 not
  *     due/permanent, -1 row_exp absent (legacy: treat as due). */
 char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
-	int *n_survivors, int *out_len);
+	int *n_survivors, int *out_len,
+	int64_t *out_row_exp, int *out_all_same);
 int _reap_row_due_json(const char *json, int len, time_t now, int grace);
 
 #endif /* CACHEDB_NATS_JSON_H */
