@@ -644,6 +644,10 @@ static int mod_init(void)
 	cde.cdb_func.get = nats_cache_get;
 	cde.cdb_func.set = nats_cache_set;
 	cde.cdb_func.remove = nats_cache_remove;
+	/* [P11 / SPEC §1.2 REV-10] non-NULL "unsupported" stub: usrloc
+	 * full-sharing never calls _remove; register it so a wrong-mode caller
+	 * fails loudly (-1 + LM_ERR) instead of a NULL function-pointer crash. */
+	cde.cdb_func._remove = nats_cache_remove_unsupported;
 	cde.cdb_func.add = nats_cache_add;
 	cde.cdb_func.sub = nats_cache_sub;
 	cde.cdb_func.get_counter = nats_cache_get_counter;

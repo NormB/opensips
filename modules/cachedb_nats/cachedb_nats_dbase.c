@@ -487,6 +487,26 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 }
 
 /**
+ * nats_cache_remove_unsupported() — non-NULL "unsupported" stub for the
+ * cachedb_funcs._remove slot  [P11 / SPEC §1.2 REV-10].
+ *
+ * _remove deletes a federation-metadata entry by named key and is only invoked
+ * in CM_FEDERATION_CACHEDB metadata maintenance (usrloc udomain.c:1315), which
+ * cachedb_nats does not implement.  usrloc full-sharing-cachedb never reaches it.
+ * It exists purely so a wrong-mode/misconfigured deployment that *does* call it
+ * fails loudly instead of dispatching through a NULL pointer and crashing.
+ *
+ * Dereferences NOTHING (con/attr/key may be anything a misconfigured caller
+ * passes); returns -1 unconditionally after a single LM_ERR.
+ */
+int nats_cache_remove_unsupported(cachedb_con *con, str *attr, const str *key)
+{
+	(void)con; (void)attr; (void)key;
+	LM_ERR("_remove not supported by cachedb_nats (use full-sharing mode)\n");
+	return -1;
+}
+
+/**
  * nats_cache_counter_op() — atomic counter increment/decrement via CAS.
  *
  * Implements an atomic read-modify-write cycle using NATS KV revisions
