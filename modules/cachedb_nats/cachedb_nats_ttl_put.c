@@ -12,12 +12,20 @@
  */
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #include <nats/nats.h>
 
 #include "../../dprint.h"
 #include "../../lib/nats/nats_dl.h"
+#include "../../lib/nats/nats_pool.h"   /* ttl cap latch + AllowMsgTTL setup + get_js */
 #include "cachedb_nats_ttl.h"
+#include "cachedb_nats_dbase.h"         /* nats_cas_should_retry (legacy fallback) */
+
+/* SubjectDeleteMarkerTTL: small, bounds the marker's lifetime/storage and the
+ * watcher event volume (§3 [TREV-10]); a server-side expiry leaves a marker for
+ * this long so the watcher can drop the index entry (R1). */
+#define NATS_TTL_MARKER_NS  (30LL * NATS_NS_PER_S)
 
 /* natsStatus -> ttl_pub_status, so the classifier stays free of nats.h coupling. */
 static enum ttl_pub_status _pub_status(natsStatus s)
@@ -105,4 +113,69 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	nats_dl.natsMsg_Destroy(m);
 
 	return _ttl_classify(_pub_status(s), je);
+}
+
+/* The §2.0 usrloc-row write entry point.  Both writers (registration update +
+ * reaper survivor-write) go through this; no caller calls kvStore_UpdateString
+ * on the row path directly.  Resolves per-message-TTL capability (probing +
+ * enabling AllowMsgTTL once per connection epoch, latch via _ttl_cap_next),
+ * computes ttl_ms from eligibility (§5), publishes with re-asserted TTL via
+ * nats_kv_put_row when supported, and falls back to the legacy CAS write
+ * (identical to pre-P8 behaviour) on a <2.11 / TTL-disabled / not-yet-probed
+ * broker.  Returns 0 = committed, 1 = CAS conflict (caller re-reads + retries),
+ * -1 = fatal/fail-the-save.  *out_rev set on success. */
+int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
+	const char *json, int json_len, uint64_t rev,
+	int64_t row_exp, int n_contacts, int all_same, int grace,
+	uint64_t *out_rev)
+{
+	int cap = nats_pool_ttl_cap();
+	natsStatus s;
+	uint64_t nr = 0;
+
+	/* probe once per connection epoch: enable AllowMsgTTL + latch the result */
+	if (cap == TTL_CAP_UNPROBED) {
+		int r = nats_pool_kv_setup_msg_ttl(bucket, NATS_TTL_MARKER_NS);
+		if (r >= 0) {                          /* r<0 transient: stay UNPROBED */
+			cap = _ttl_cap_next(TTL_CAP_UNPROBED,
+				r == 1 ? TTL_EV_SETUP_OK : TTL_EV_SETUP_FAIL);
+			nats_pool_ttl_cap_set(cap);
+		}
+	}
+
+	if (cap == TTL_CAP_SUPPORTED) {
+		int64_t ttl_ms = 0;
+		enum ttl_outcome o;
+		jsCtx *js = nats_pool_get_js();
+
+		if (_ttl_eligible(row_exp, n_contacts, all_same))
+			ttl_ms = _ttl_msgttl_ms(
+				_ttl_seconds(row_exp, (int64_t)time(NULL), grace));
+
+		/* got_entry=1: the caller wrote this after reading the row at `rev`
+		 * (a live doc, or a seed re-created over an empty marker [R4]). */
+		o = nats_kv_put_row(js, kv, bucket, key, json, json_len,
+			1, json_len, rev, ttl_ms, out_rev);
+		if (o == TTL_DONE)
+			return 0;
+		if (o == TTL_RETRY)
+			return 1;
+		if (o == TTL_LATCH_OFF)                /* 10166: latch off, fall back */
+			nats_pool_ttl_cap_set(
+				_ttl_cap_next(nats_pool_ttl_cap(), TTL_EV_SAW_10166));
+		else
+			return -1;                         /* FAIL_SAVE / ASSERT_BUG */
+	}
+
+	/* Legacy CAS write -- byte-for-byte the pre-P8 path; the ONLY allowed
+	 * kvStore_UpdateString on the usrloc row path (gated on TTL unavailable). */
+	s = nats_dl.kvStore_UpdateString(&nr, kv, key, json, rev);
+	if (s == NATS_OK) {
+		if (out_rev)
+			*out_rev = nr;
+		return 0;
+	}
+	if (!nats_cas_should_retry(s))
+		return -1;
+	return 1;
 }
