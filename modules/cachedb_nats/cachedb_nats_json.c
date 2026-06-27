@@ -1287,9 +1287,34 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	*out_rev = nats_dl.kvEntry_Revision(entry);
 
 	if (!data || data_len <= 0) {
-		LM_ERR("empty document for key '%s'\n", target_key);
+		/* [P8 R4 / TTL-SOLUTION-SPEC §2.2 TREV-2a] empty-value entry = a
+		 * server-side MaxAge delete marker (cnats 3.12 surfaces a TTL expiry
+		 * as NATS_OK with len 0, NOT NATS_NOT_FOUND).  Re-create the AoR OVER
+		 * the marker: seed an indexable base doc but keep the marker's
+		 * revision so the apply step CAS-updates at it (ExpectLastSubjectSeq) --
+		 * a fresh Create would be rejected (ExpectNoMessage over a marker,
+		 * [REV-27]).  Without this the first re-REGISTER after any server-side
+		 * expiry fails the save. */
+		char *seed = NULL;
+		int seed_len = 0;
+
+		if (!row_filter->val.is_str) {
+			LM_ERR("cannot re-create over marker: filter for key '%s' has "
+				"no string identity to seed the document\n", target_key);
+			nats_dl.kvEntry_Destroy(entry);
+			return -1;
+		}
+		seed = _build_seed_doc(row_filter->key.name.s,
+			row_filter->key.name.len,
+			row_filter->val.s.s, row_filter->val.s.len, &seed_len);
 		nats_dl.kvEntry_Destroy(entry);
-		return -1;
+		if (!seed) {
+			LM_ERR("failed to build seed doc over marker for key '%s'\n",
+				target_key);
+			return -1;
+		}
+		*out_json = seed;          /* *out_rev already = the marker's revision */
+		return 0;
 	}
 
 	/* make a mutable copy of the JSON; this becomes the
