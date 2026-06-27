@@ -84,11 +84,12 @@ int main(void)
 	ASSERT(grep_in_function("../cachedb_nats_dbase.c",
 		"nats_cache_counter_op", "nats_cas_should_retry") >= 1,
 		"counter CAS loop bails on non-conflict errors");
-	/* the CAS write step now lives in the _update_apply_and_cas helper
-	 * extracted from nats_cache_update (NATS_TODO #60 decomposition) */
-	ASSERT(grep_in_function("../cachedb_nats_json.c",
-		"_update_apply_and_cas", "nats_cas_should_retry") >= 1,
-		"update CAS loop bails on non-conflict errors");
+	/* P8: the CAS write step + its non-conflict bail moved into the shared
+	 * row-write helper nats_kv_write_row_cas() (cachedb_nats_ttl_put.c), the
+	 * §2.0 entry point both writers use; _update_apply_and_cas now delegates. */
+	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
+		"nats_kv_write_row_cas", "nats_cas_should_retry") >= 1,
+		"row-write helper bails on non-conflict errors (legacy fallback)");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

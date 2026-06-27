@@ -148,4 +148,13 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	int got_entry, int value_len, uint64_t entry_rev,
 	int64_t msg_ttl_ms, uint64_t *out_rev);
 
+/* The §2.0 write entry point both writers use: resolve TTL capability, compute
+ * eligibility-gated ttl_ms, publish via nats_kv_put_row (re-asserting TTL) or
+ * fall back to the legacy CAS write.  0 = done, 1 = CAS conflict (re-read +
+ * retry), -1 = fail.  *out_rev set on success. */
+int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
+	const char *json, int json_len, uint64_t rev,
+	int64_t row_exp, int n_contacts, int all_same, int grace,
+	uint64_t *out_rev);
+
 #endif /* CACHEDB_NATS_TTL_H */

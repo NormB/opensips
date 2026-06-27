@@ -50,6 +50,7 @@
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_intern.h"
 #include "cachedb_nats_json_internal.h"
+#include "cachedb_nats_ttl.h"        /* P8: nats_kv_write_row_cas() */
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
@@ -58,6 +59,7 @@ extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 extern int   nats_reap_grace;    /* defined in cachedb_nats.c (max-skew S) */
 extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
 extern int   nats_enable_search_index;
+/* kv_bucket is declared in cachedb_nats_dbase.h (included above) */
 
 /* ------------------------------------------------------------------ */
 /*                 Index search helper functions                      */
@@ -1353,7 +1355,9 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	int old_len = (int)strlen(json_buf);
 	char *new_json;
 	uint64_t new_rev;
-	natsStatus s;
+	int rc;
+	int64_t f_row_exp = 0;            /* P8 §5: per-message-TTL eligibility */
+	int f_n_contacts = 0, f_all_same = 0;
 
 	/* Apply every pair in a single pass over the doc.  Replaces
 	 * the legacy per-pair _json_apply_pair invocations, which
@@ -1392,7 +1396,8 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * unchanged. */
 	{
 		char *finalized = _row_finalize_metadata(new_json,
-			(int)strlen(new_json), NULL, NULL, NULL, NULL);
+			(int)strlen(new_json), NULL,
+			&f_row_exp, &f_n_contacts, &f_all_same);
 		if (!finalized) {
 			LM_ERR("failed to finalize row metadata (row_exp) "
 				"for key '%s'\n", target_key);
@@ -1421,41 +1426,27 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		}
 	}
 
-	/* write back with CAS */
-	s = nats_dl.kvStore_UpdateString(&new_rev, ncon->kv, target_key,
-		new_json, rev);
-	if (s == NATS_OK) {
-		/* Targeted index update: remove the key from only
-		 * the entries it was in (derived from the OLD
-		 * JSON we still hold in json_buf), then add it
-		 * to the entries derived from the NEW JSON.
-		 * Replaces the prior O(N) full-bucket-walk
-		 * remove that held all shard locks for the
-		 * duration. */
-		nats_json_index_remove_fields(target_key,
-			json_buf, old_len);
-		nats_json_index_add(target_key, new_json,
-			(int)strlen(new_json));
-
+	/* P8 [§2.0]: write back through the one row-write helper -- re-asserts
+	 * Nats-TTL on a >=2.11 broker (per-message TTL), falls back to the legacy
+	 * CAS write otherwise.  CAS predicate is `rev` (the revision we read).
+	 * Index maintenance stays HERE (R8): the reaper defers to the watcher, but
+	 * the registration worker keeps the index authoritative inline. */
+	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
+		new_json, (int)strlen(new_json), rev,
+		f_row_exp, f_n_contacts, f_all_same, nats_reap_grace, &new_rev);
+	if (rc == 0) {
+		/* Targeted index update: remove the key from only the entries it
+		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
+		nats_json_index_remove_fields(target_key, json_buf, old_len);
+		nats_json_index_add(target_key, new_json, (int)strlen(new_json));
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
 		free(new_json);
 		return 0;
 	}
 
-	/* Write failed.  Only a CAS conflict (revision mismatch) is
-	 * worth retrying; a timeout / connection error is not and
-	 * would just burn the whole budget on a degraded broker. */
-	if (!nats_cas_should_retry(s)) {
-		LM_WARN("update CAS write failed for key '%s' (%s); not a "
-			"conflict -- bailing\n", target_key,
-			nats_dl.natsStatus_GetText(s));
-		free(new_json);
-		return -1;
-	}
-
 	free(new_json);
-	return 1;
+	return rc;   /* 1 = CAS conflict (outer loop re-reads+retries), -1 = fatal */
 }
 
 /**
