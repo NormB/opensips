@@ -827,6 +827,26 @@ static int child_init(int rank)
 		return -1;
 	}
 
+	/* P11b [REV-25]: a PRE-EXISTING bucket may already carry a non-zero
+	 * backing-stream MaxAge (older deployment / another tool).  The kv_ttl
+	 * modparam guard (mod_init) only stops US from creating one; binding to an
+	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
+	 * (expires==0).  Detect it once (rank 1) and WARN loudly with the
+	 * remediation -- the documented migration policy, never a silent expiry.
+	 * WARN (not refuse) so a generic cachedb_nats TTL-cache user is not broken;
+	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
+	if (rank == 1) {
+		int64_t maxage_ns = 0;
+		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
+				_kv_legacy_bucket_maxage_warn(maxage_ns)) {
+			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
+				"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
+				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
+				"recreate it with MaxAge=0 (kv_ttl=0) and migrate [REV-25].\n",
+				kv_bucket, (long long)maxage_ns);
+		}
+	}
+
 	/* The JSON search index is now SHM-backed and was allocated in
 	 * mod_init pre-fork; every worker dereferences the same g_idx.
 	 * Only rank 1 populates it from KV: the watcher (also rank-1)

@@ -105,6 +105,13 @@ const char *_ttl_delete_op(int purge);
  * (expires==0) contacts.  Returns 0 if ok, -1 if the value must be refused. */
 int _kv_ttl_guard(int kv_ttl);
 
+/* P11b [REV-25]: policy for a PRE-EXISTING bucket already carrying a non-zero
+ * backing-stream MaxAge (the _kv_ttl_guard modparam check only stops THIS module
+ * from creating one).  A non-zero MaxAge silently expires permanent (expires==0)
+ * contacts.  @maxage_ns = bound stream MaxAge (ns).  Returns 1 if a startup WARN
+ * is warranted (non-zero), 0 if clean (MaxAge==0). */
+int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns);
+
 /* [TREV-8] Per-message-TTL capability — operational, "by attempt", latched per
  * connection.  SUPPORTED once the AllowMsgTTL setup succeeds and no 10166 seen;
  * a 10166 (or setup failure) latches UNSUPPORTED (plain CAS + reaper); a

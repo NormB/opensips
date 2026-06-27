@@ -1085,6 +1085,31 @@ void nats_pool_ttl_cap_set(int cap)
  * marker_ttl_ns = SubjectDeleteMarkerTTL (ns): emit a delete marker on
  * server-side expiry so the watcher learns of it (§4); 0 would mean silent
  * vanish -> index drift, so callers pass a small non-zero value. */
+/* P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns). */
+int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
+{
+	char stream[160];
+	jsStreamInfo *si = NULL;
+	jsErrCode jerr = 0;
+	natsStatus s;
+
+	if (!_js || !bucket || !out_ns)
+		return -1;
+	snprintf(stream, sizeof(stream), "KV_%s", bucket);
+
+	s = nats_dl.js_GetStreamInfo(&si, _js, stream, NULL, &jerr);
+	if (s != NATS_OK || !si || !si->Config) {
+		LM_WARN("NATS pool: GetStreamInfo(%s) failed (%s, jerr=%d); cannot "
+			"read bucket MaxAge\n", stream, nats_dl.natsStatus_GetText(s), jerr);
+		if (si)
+			nats_dl.jsStreamInfo_Destroy(si);
+		return -1;
+	}
+	*out_ns = (int64_t)si->Config->MaxAge;
+	nats_dl.jsStreamInfo_Destroy(si);
+	return 0;
+}
+
 int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns)
 {
 	char stream[160];

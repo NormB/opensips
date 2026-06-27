@@ -236,6 +236,14 @@ void nats_pool_ttl_cap_set(int cap);
 int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns);
 
 /*
+ * P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
+ * Used at child_init to detect a PRE-EXISTING bucket that already carries a
+ * non-zero MaxAge (which would silently expire permanent contacts).  Returns
+ * 0 on success (*out_ns set), -1 if the stream info is unavailable.
+ */
+int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns);
+
+/*
  * Returns non-zero once any module has registered the pool
  * (nats_pool_register).  Lets a module choose to contribute a default URL
  * only when nothing else has registered, instead of injecting a spurious
