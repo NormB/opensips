@@ -240,7 +240,7 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 		return NULL;
 
 	/* stage 2: recompute row_exp + schema_version over the survivors. */
-	final = _row_finalize_metadata(tmp, tmp_len, out_len);
+	final = _row_finalize_metadata(tmp, tmp_len, out_len, NULL, NULL, NULL);
 	free(tmp);
 	if (!final)
 		return NULL;

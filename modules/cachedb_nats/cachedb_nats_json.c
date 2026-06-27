@@ -1392,7 +1392,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * unchanged. */
 	{
 		char *finalized = _row_finalize_metadata(new_json,
-			(int)strlen(new_json), NULL);
+			(int)strlen(new_json), NULL, NULL, NULL, NULL);
 		if (!finalized) {
 			LM_ERR("failed to finalize row metadata (row_exp) "
 				"for key '%s'\n", target_key);

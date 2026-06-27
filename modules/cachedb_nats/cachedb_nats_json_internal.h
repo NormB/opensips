@@ -176,7 +176,10 @@ void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace);
  * and schema_version=1, replacing any stale peers; a document with no
  * top-level "contacts" is returned byte-for-byte unchanged.  NULL on
  * malformed input or OOM. */
-char *_row_finalize_metadata(const char *json, int len, int *out_len);
+/* P8: out_row_exp/out_n_contacts/out_all_same (all NULL-able) expose the
+ * per-message-TTL eligibility inputs computed during finalize (§5). */
+char *_row_finalize_metadata(const char *json, int len, int *out_len,
+	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same);
 
 /* Contact-object field parsers (rowmeta TU) shared with the reaper TU.
  *   _contact_expires(): read the int64 `expires` of one contact-object slice
