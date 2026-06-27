@@ -359,6 +359,16 @@ err_free_partial:
  */
 static atomic_int _kv_stale = 0;
 
+/* P8 [R6 / TTL-SOLUTION-SPEC.md §6 TREV-8]: per-message-TTL capability latch,
+ * process-global (each process owns its NATS connection, so each probes
+ * independently; the reaper runs in the timer process and must reach the same
+ * latch the worker does -- hence pool-global, not on a worker's ncon).
+ * 0=UNPROBED, 1=SUPPORTED, 2=UNSUPPORTED (mirrors enum ttl_cap).  The cachedb
+ * module drives transitions via the tested _ttl_cap_next(); the pool only
+ * stores the latch and resets it to UNPROBED on a reconnect (re-probe: a
+ * failover may land on a different server version/config). */
+static atomic_int _ttl_cap = 0;
+
 /*
  * Callback-thread-safe stderr emit.
  *
@@ -1049,6 +1059,90 @@ jsCtx *nats_pool_get_js(void)
  * The KV cache is process-local.  The _kv_stale flag is set by the
  * reconnect callback (nats.c thread) and consumed here via atomic_exchange.
  */
+/* P8 [R6]: read / set the process-global per-message-TTL capability latch.
+ * The cachedb module computes the next state via _ttl_cap_next() and stores it;
+ * the pool resets it to UNPROBED (0) on reconnect (see the cache-clear above). */
+int nats_pool_ttl_cap(void)
+{
+	return atomic_load(&_ttl_cap);
+}
+void nats_pool_ttl_cap_set(int cap)
+{
+	atomic_store(&_ttl_cap, cap);
+}
+
+/* P8 [R5 / TTL-SOLUTION-SPEC.md §3]: enable per-message TTL on a KV bucket's
+ * backing stream (KV_<bucket>) via js_UpdateStream.  Idempotent (no-op if
+ * already enabled).  Pure broker plumbing -- the caller (cachedb module) drives
+ * the capability latch from the return code so the tested _ttl_cap_next() state
+ * machine stays in the module, not in lib/nats.
+ *
+ *   return  1: AllowMsgTTL is now (or was already) enabled -> SUPPORTED
+ *           0: not available (server <2.11 / AllowMsgTTL rejected / MaxAge!=0)
+ *              -> UNSUPPORTED, fall back to reaper-only expiry
+ *          -1: transient (no JS / GetStreamInfo failed) -> leave UNPROBED, retry
+ *
+ * marker_ttl_ns = SubjectDeleteMarkerTTL (ns): emit a delete marker on
+ * server-side expiry so the watcher learns of it (§4); 0 would mean silent
+ * vanish -> index drift, so callers pass a small non-zero value. */
+int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns)
+{
+	char stream[160];
+	jsStreamInfo *si = NULL, *si2 = NULL;
+	jsErrCode jerr = 0;
+	natsStatus s;
+
+	if (!_js)
+		return -1;
+	snprintf(stream, sizeof(stream), "KV_%s", bucket);
+
+	s = nats_dl.js_GetStreamInfo(&si, _js, stream, NULL, &jerr);
+	if (s != NATS_OK || !si || !si->Config) {
+		LM_WARN("NATS pool: GetStreamInfo(%s) failed (%s, jerr=%d); cannot "
+			"probe AllowMsgTTL\n", stream, nats_dl.natsStatus_GetText(s), jerr);
+		if (si)
+			nats_dl.jsStreamInfo_Destroy(si);
+		return -1;
+	}
+
+	/* [R7 pair, §3] bucket MaxAge MUST be 0: a non-zero MaxAge overrides
+	 * per-message TTL and expires permanent contacts.  Refuse TTL here too. */
+	if (si->Config->MaxAge != 0) {
+		LM_ERR("NATS pool: stream %s has MaxAge=%lldns != 0; per-message TTL "
+			"would be overridden -- set kv_ttl=0. Falling back to reaper.\n",
+			stream, (long long)si->Config->MaxAge);
+		nats_dl.jsStreamInfo_Destroy(si);
+		return 0;
+	}
+
+	if (si->Config->AllowMsgTTL) {
+		LM_DBG("NATS pool: stream %s already has AllowMsgTTL\n", stream);
+		nats_dl.jsStreamInfo_Destroy(si);
+		return 1;
+	}
+
+	/* Enable on the EXISTING config (preserves Replicas/History/etc.). */
+	si->Config->AllowMsgTTL = true;
+	si->Config->SubjectDeleteMarkerTTL = marker_ttl_ns;
+	jerr = 0;
+	s = nats_dl.js_UpdateStream(&si2, _js, si->Config, NULL, &jerr);
+	if (si2)
+		nats_dl.jsStreamInfo_Destroy(si2);
+	nats_dl.jsStreamInfo_Destroy(si);
+
+	if (s == NATS_OK) {
+		LM_INFO("NATS pool: enabled AllowMsgTTL on stream %s "
+			"(SubjectDeleteMarkerTTL=%lldns)\n",
+			stream, (long long)marker_ttl_ns);
+		return 1;
+	}
+	/* JSMessageTTLDisabledErr (10166) / server <2.11 / rejected */
+	LM_INFO("NATS pool: AllowMsgTTL not available on %s (%s, jerr=%d); "
+		"per-message TTL off, reaper remains authoritative\n",
+		stream, nats_dl.natsStatus_GetText(s), jerr);
+	return 0;
+}
+
 kvStore *nats_pool_get_kv(const char *bucket, int replicas,
                           int history, int64_t ttl_secs)
 {
@@ -1096,6 +1190,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 			}
 		}
 		_kv_cache_cnt = 0;
+		atomic_store(&_ttl_cap, 0);   /* [R6] re-probe TTL capability after reconnect */
 		LM_NOTICE("NATS pool: KV cache cleared after reconnect\n");
 	}
 

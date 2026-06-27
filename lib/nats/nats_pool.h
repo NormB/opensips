@@ -217,6 +217,25 @@ void nats_pool_unregister(void);
 int nats_pool_is_connected(void);
 
 /*
+ * P8 [R6 / TTL-SOLUTION-SPEC.md §6 TREV-8]: process-global per-message-TTL
+ * capability latch (0=UNPROBED, 1=SUPPORTED, 2=UNSUPPORTED; mirrors enum
+ * ttl_cap).  Reachable by both the worker (registration write) and the timer
+ * process (reaper survivor-write).  The cachedb module computes transitions via
+ * _ttl_cap_next() and stores the result with nats_pool_ttl_cap_set(); the pool
+ * resets it to UNPROBED on reconnect so capability is re-probed after a failover.
+ */
+int  nats_pool_ttl_cap(void);
+void nats_pool_ttl_cap_set(int cap);
+
+/*
+ * P8 [R5 / TTL-SOLUTION-SPEC.md §3]: enable per-message TTL (AllowMsgTTL +
+ * SubjectDeleteMarkerTTL) on a KV bucket's backing stream, idempotently.
+ * Returns 1 = enabled/already, 0 = unavailable (latch UNSUPPORTED, reaper-only),
+ * -1 = transient (leave UNPROBED, retry).  The caller drives the latch from this.
+ */
+int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns);
+
+/*
  * Returns non-zero once any module has registered the pool
  * (nats_pool_register).  Lets a module choose to contribute a default URL
  * only when nothing else has registered, instead of injecting a spurious
