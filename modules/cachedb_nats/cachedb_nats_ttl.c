@@ -113,6 +113,18 @@ int _kv_ttl_guard(int kv_ttl)
 	return (kv_ttl == 0) ? 0 : -1;
 }
 
+/* P11b [REV-25 / §5.3 REV-7]: policy for a PRE-EXISTING bucket whose backing
+ * stream already carries a non-zero MaxAge (created by an older deployment or
+ * another tool — the _kv_ttl_guard modparam check above only stops THIS module
+ * from creating one).  A non-zero stream MaxAge expires EVERY key after that
+ * age, including PERMANENT contacts (expires==0) — silent registration loss.
+ * @maxage_ns: the bound bucket's backing-stream MaxAge in ns.
+ * @return 1 => warn (non-zero MaxAge; never silent), 0 => clean (MaxAge==0). */
+int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns)
+{
+	return maxage_ns != 0 ? 1 : 0;
+}
+
 /* (§6 [TREV-8]) per-message-TTL capability latch transition. */
 enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev)
 {
