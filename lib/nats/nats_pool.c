@@ -1110,10 +1110,21 @@ int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
 	return 0;
 }
 
+/* A Placement whose Cluster is NULL is a stub a single-node nats-server <2.11
+ * returns in its stream config.  libnats' _marshalPlacement() does
+ * natsBuf_Append(buf, Placement->Cluster, -1) -- i.e. strlen(Cluster) -- with no
+ * NULL guard, so handing such a config back to js_UpdateStream() segfaults
+ * during marshaling.  Flag it so the caller drops it. */
+static int _placement_unmarshalable(const jsPlacement *p)
+{
+	return p != NULL && p->Cluster == NULL;
+}
+
 int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns)
 {
 	char stream[160];
 	jsStreamInfo *si = NULL, *si2 = NULL;
+	jsPlacement *dropped_placement = NULL;
 	jsErrCode jerr = 0;
 	natsStatus s;
 
@@ -1149,8 +1160,19 @@ int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns)
 	/* Enable on the EXISTING config (preserves Replicas/History/etc.). */
 	si->Config->AllowMsgTTL = true;
 	si->Config->SubjectDeleteMarkerTTL = marker_ttl_ns;
+
+	/* Drop a stub Placement{Cluster=NULL} (single-node <2.11 servers return it)
+	 * to avoid libnats' marshaler strlen(NULL) crash.  Save + restore so
+	 * jsStreamInfo_Destroy still frees it (no leak). */
+	if (_placement_unmarshalable(si->Config->Placement)) {
+		dropped_placement = si->Config->Placement;
+		si->Config->Placement = NULL;
+	}
+
 	jerr = 0;
 	s = nats_dl.js_UpdateStream(&si2, _js, si->Config, NULL, &jerr);
+	if (dropped_placement)
+		si->Config->Placement = dropped_placement;
 	if (si2)
 		nats_dl.jsStreamInfo_Destroy(si2);
 	nats_dl.jsStreamInfo_Destroy(si);
