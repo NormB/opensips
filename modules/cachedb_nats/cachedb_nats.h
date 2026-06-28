@@ -157,6 +157,23 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires);
 int nats_cache_remove(cachedb_con *con, str *attr);
 
 /*
+ * _remove() "unsupported" stub  [P11 / SPEC §1.2 REV-10].
+ *
+ * The cachedb_funcs._remove slot (delete a federation-metadata entry by named
+ * key) is only exercised in CM_FEDERATION_CACHEDB metadata maintenance, which
+ * cachedb_nats does not implement.  usrloc full-sharing-cachedb never calls it.
+ * It is registered NON-NULL solely so a wrong-mode/misconfigured deployment that
+ * reaches it fails LOUDLY (-1 + LM_ERR) instead of dispatching through a NULL
+ * function pointer and crashing.  The real federation impl (G4) is a follow-up.
+ *
+ * @param con   cachedb connection (ignored — never dereferenced).
+ * @param attr  Value key (ignored).
+ * @param key   Column/key name (ignored).
+ * @return      always -1 (operation unsupported).
+ */
+int nats_cache_remove_unsupported(cachedb_con *con, str *attr, const str *key);
+
+/*
  * Atomic add to a counter stored as an integer value.
  *
  * Uses compare-and-swap (CAS) with up to NATS_CAS_RETRIES attempts

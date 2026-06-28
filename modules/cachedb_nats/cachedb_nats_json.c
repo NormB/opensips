@@ -50,12 +50,16 @@
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_intern.h"
 #include "cachedb_nats_json_internal.h"
+#include "cachedb_nats_ttl.h"        /* P8: nats_kv_write_row_cas() */
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
 extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
+extern int   nats_reap_grace;    /* defined in cachedb_nats.c (max-skew S) */
+extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
 extern int   nats_enable_search_index;
+/* kv_bucket is declared in cachedb_nats_dbase.h (included above) */
 
 /* ------------------------------------------------------------------ */
 /*                 Index search helper functions                      */
@@ -270,6 +274,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	int   key_heap = 0;
 	const char *data;
 	int data_len;
+	int vclass;
 
 	/* Build the target key on the stack (heap only for rare long
 	 * keys) -- saves two allocs per usrloc read on the PK fast path. */
@@ -280,6 +285,22 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			filter->key.name.len, filter->key.name.s,
 			filter->val.s.len, filter->val.s.s);
 		return -1;
+	}
+
+	/* [REV-23] reject AoRs that encode to an invalid NATS subject (empty token)
+	 * before kvStore_Get -- such a key cannot exist, so a read is just an empty
+	 * result (not an error). Validate the encoded AoR portion (past the prefix). */
+	{
+		int plen = (fts_json_prefix && *fts_json_prefix)
+			? (int)strlen(fts_json_prefix) : 0;
+		const char *enc = target_key + plen;
+		if (_kv_key_validate(enc, (int)strlen(enc)) < 0) {
+			LM_DBG("PK query: AoR encodes to invalid subject "
+				"(encoded len %d) -> empty result\n",
+				(int)strlen(enc));
+			if (key_heap) free(target_key);
+			return 0;   /* empty result, not an error */
+		}
 	}
 
 	s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
@@ -295,7 +316,20 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	}
 	data = nats_dl.kvEntry_ValueString(entry);
 	data_len = nats_dl.kvEntry_ValueLen(entry);
-	if (data && data_len > 0 && data[0] == '{') {
+	/* P2.5 [REV-26] (SPEC §4.2): an EMPTY value is a delete marker (absent);
+	 * a non-empty non-object is POISON — a hard integrity error, never masked
+	 * as an empty AoR (which usrloc would read as a silent deregistration). */
+	vclass = _value_classify(data, data_len);
+	if (vclass == NATS_VAL_POISON) {
+		NATS_CDB_STATS_INC(poison_values_rejected);
+		LM_ERR("PK read: poison value for key '%s' (len %d, not a JSON "
+			"object); failing the lookup rather than masking "
+			"corruption as an empty AoR\n", target_key, data_len);
+		nats_dl.kvEntry_Destroy(entry);
+		if (key_heap) free(target_key);
+		return -1;
+	}
+	if (vclass == NATS_VAL_OBJECT) {
 		row = pkg_malloc(sizeof *row);
 		if (!row) {
 			LM_ERR("no pkg memory for cdb_row_t\n");
@@ -311,6 +345,15 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			if (key_heap) free(target_key);
 			return -1;
 		}
+		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
+		 * (the shared converter clamped it to int32). */
+		_row_patch_last_mod_int64(data, data_len, &row->dict);
+		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
+		 * strip the cachedb_nats-private row_exp/schema_version peers. */
+		_row_strip_private_keys(&row->dict);
+		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
+		 * sees them; fail-closed on an unparseable expires. */
+		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
 	}
@@ -459,6 +502,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 	for (i = 0; i < result_cnt; i++) {
 		const char *data;
 		int data_len;
+		int vclass;
 
 		s = nats_dl.kvStore_Get(&entry, ncon->kv, match_keys[i]);
 		if (s == NATS_NOT_FOUND) {
@@ -484,7 +528,21 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		data = nats_dl.kvEntry_ValueString(entry);
 		data_len = nats_dl.kvEntry_ValueLen(entry);
 
-		if (!data || data_len <= 0 || data[0] != '{') {
+		/* P2.5 [REV-26] (SPEC §4.2): a non-empty non-object value is
+		 * poison — alarm + count rather than silently dropping the row
+		 * (which would mask corruption as an empty AoR).  An EMPTY value
+		 * is a delete marker: skip it quietly. */
+		vclass = _value_classify(data, data_len);
+		if (vclass == NATS_VAL_POISON) {
+			NATS_CDB_STATS_INC(poison_values_rejected);
+			LM_ERR("read: poison value for key '%s' (len %d, not a "
+				"JSON object); row omitted and flagged, not "
+				"masked as empty\n", match_keys[i], data_len);
+			nats_dl.kvEntry_Destroy(entry);
+			entry = NULL;
+			continue;
+		}
+		if (vclass != NATS_VAL_OBJECT) {
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			continue;
@@ -507,6 +565,15 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			entry = NULL;
 			continue;
 		}
+		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
+		 * (the shared converter clamped it to int32). */
+		_row_patch_last_mod_int64(data, data_len, &row->dict);
+		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
+		 * strip the cachedb_nats-private row_exp/schema_version peers. */
+		_row_strip_private_keys(&row->dict);
+		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
+		 * sees them; fail-closed on an unparseable expires. */
+		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
@@ -834,8 +901,27 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
 					return -1;
 				if (_sink_putc(s, ':') < 0) return -1;
-				if (_sink_emit_op_value(s, &ops[op_idx]) < 0)
+				/* P2.2 [REV-8]: same-subkey collision — keep the
+				 * higher cseq (tie-break last_mod).  When the NEW
+				 * write is stale versus the existing value, discard
+				 * it and keep the existing one.  Only an object value
+				 * carrying a cseq engages this; everything else falls
+				 * through to last-writer-wins (overwrite), unchanged. */
+				if (ops[op_idx].val_type == 'O' &&
+				    !_cseq_new_wins(ops[op_idx].val_str,
+						ops[op_idx].val_len,
+						kvstart, (int)(kvend - kvstart))) {
+					/* [REV-8] stale cseq: keep the existing
+					 * higher-cseq value, discard the incoming one
+					 * (no rollback). */
+					LM_DBG("[REV-8] discarded stale-cseq write; "
+						"kept the existing higher-cseq contact\n");
+					if (_sink_write(s, kvstart,
+							(int)(kvend - kvstart)) < 0)
+						return -1;
+				} else if (_sink_emit_op_value(s, &ops[op_idx]) < 0) {
 					return -1;
+				}
 			} else {
 				/* Copy through the existing entry. */
 				if (!first && _sink_putc(s, ',') < 0) return -1;
@@ -1081,6 +1167,17 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 				row_filter->val.s.len * 3 + 1);
 			return NULL;
 		}
+		/* [REV-23] reject AoRs that encode to an invalid NATS subject (empty
+		 * token: leading/trailing/double '.') BEFORE any kvStore_* -- else
+		 * JetStream rejects the publish and the REGISTER is silently lost.
+		 * Fail the save loudly; log is redacted (length only, not the AoR). */
+		if (_kv_key_validate(enc, enc_len) < 0) {
+			LM_ERR("update: AoR encodes to an invalid NATS subject "
+				"(empty/edge-dot token; encoded len %d) -- rejecting "
+				"the save\n", enc_len);
+			free(enc);
+			return NULL;
+		}
 		if (fts_json_prefix && *fts_json_prefix) {
 			int plen = strlen(fts_json_prefix);
 			target_key = pkg_malloc(plen + enc_len + 1);
@@ -1192,9 +1289,34 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	*out_rev = nats_dl.kvEntry_Revision(entry);
 
 	if (!data || data_len <= 0) {
-		LM_ERR("empty document for key '%s'\n", target_key);
+		/* [P8 R4 / TTL-SOLUTION-SPEC §2.2 TREV-2a] empty-value entry = a
+		 * server-side MaxAge delete marker (cnats 3.12 surfaces a TTL expiry
+		 * as NATS_OK with len 0, NOT NATS_NOT_FOUND).  Re-create the AoR OVER
+		 * the marker: seed an indexable base doc but keep the marker's
+		 * revision so the apply step CAS-updates at it (ExpectLastSubjectSeq) --
+		 * a fresh Create would be rejected (ExpectNoMessage over a marker,
+		 * [REV-27]).  Without this the first re-REGISTER after any server-side
+		 * expiry fails the save. */
+		char *seed = NULL;
+		int seed_len = 0;
+
+		if (!row_filter->val.is_str) {
+			LM_ERR("cannot re-create over marker: filter for key '%s' has "
+				"no string identity to seed the document\n", target_key);
+			nats_dl.kvEntry_Destroy(entry);
+			return -1;
+		}
+		seed = _build_seed_doc(row_filter->key.name.s,
+			row_filter->key.name.len,
+			row_filter->val.s.s, row_filter->val.s.len, &seed_len);
 		nats_dl.kvEntry_Destroy(entry);
-		return -1;
+		if (!seed) {
+			LM_ERR("failed to build seed doc over marker for key '%s'\n",
+				target_key);
+			return -1;
+		}
+		*out_json = seed;          /* *out_rev already = the marker's revision */
+		return 0;
 	}
 
 	/* make a mutable copy of the JSON; this becomes the
@@ -1233,7 +1355,9 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	int old_len = (int)strlen(json_buf);
 	char *new_json;
 	uint64_t new_rev;
-	natsStatus s;
+	int rc;
+	int64_t f_row_exp = 0;            /* P8 §5: per-message-TTL eligibility */
+	int f_n_contacts = 0, f_all_same = 0;
 
 	/* Apply every pair in a single pass over the doc.  Replaces
 	 * the legacy per-pair _json_apply_pair invocations, which
@@ -1248,41 +1372,81 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		return -1;
 	}
 
-	/* write back with CAS */
-	s = nats_dl.kvStore_UpdateString(&new_rev, ncon->kv, target_key,
-		new_json, rev);
-	if (s == NATS_OK) {
-		/* Targeted index update: remove the key from only
-		 * the entries it was in (derived from the OLD
-		 * JSON we still hold in json_buf), then add it
-		 * to the entries derived from the NEW JSON.
-		 * Replaces the prior O(N) full-bucket-walk
-		 * remove that held all shard locks for the
-		 * duration. */
-		nats_json_index_remove_fields(target_key,
-			json_buf, old_len);
-		nats_json_index_add(target_key, new_json,
-			(int)strlen(new_json));
+	/* P2.7 [REV-21] (SPEC §4.1 step 4): skew-safe write hygiene — drop a
+	 * contact THIS update set/unset whose own expires is already past
+	 * now + nats_reap_grace, before recomputing row_exp.  Untouched
+	 * merged-in contacts are never considered (no collateral delete). */
+	{
+		char *hygiened = _row_drop_expired_own(new_json,
+			(int)strlen(new_json), pairs, time(NULL),
+			nats_reap_grace, NULL);
+		if (!hygiened) {
+			LM_ERR("write hygiene failed for key '%s'\n", target_key);
+			free(new_json);
+			return -1;
+		}
+		free(new_json);
+		new_json = hygiened;
+	}
 
+	/* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
+	 * cachedb_nats-private row_exp / schema_version peers over the merged
+	 * contact set.  A document with no top-level "contacts" object (a
+	 * non-usrloc cachedb_nats consumer) is returned byte-for-byte
+	 * unchanged. */
+	{
+		char *finalized = _row_finalize_metadata(new_json,
+			(int)strlen(new_json), NULL,
+			&f_row_exp, &f_n_contacts, &f_all_same);
+		if (!finalized) {
+			LM_ERR("failed to finalize row metadata (row_exp) "
+				"for key '%s'\n", target_key);
+			free(new_json);
+			return -1;
+		}
+		free(new_json);
+		new_json = finalized;
+	}
+
+	/* P3 [REV-5] (SPEC §3.2/§4.1): reject an oversize merged value BEFORE the
+	 * CAS write — fail this contact's save cleanly with the existing row (and
+	 * its bindings) untouched, rather than hit the NATS payload cap mid-write
+	 * (a broker error) or silently truncate.  Fatal (no CAS retry): the value
+	 * would be identical on every retry. */
+	{
+		int vlen = (int)strlen(new_json);
+		if (!_value_size_ok(vlen, nats_max_value_size)) {
+			NATS_CDB_STATS_INC(value_oversize_rejected);
+			LM_ERR("update rejected: merged value for key '%s' is %d "
+				"bytes, over nats_max_value_size=%d; save failed "
+				"(existing bindings intact, not truncated)\n",
+				target_key, vlen, nats_max_value_size);
+			free(new_json);
+			return -1;
+		}
+	}
+
+	/* P8 [§2.0]: write back through the one row-write helper -- re-asserts
+	 * Nats-TTL on a >=2.11 broker (per-message TTL), falls back to the legacy
+	 * CAS write otherwise.  CAS predicate is `rev` (the revision we read).
+	 * Index maintenance stays HERE (R8): the reaper defers to the watcher, but
+	 * the registration worker keeps the index authoritative inline. */
+	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
+		new_json, (int)strlen(new_json), rev,
+		f_row_exp, f_n_contacts, f_all_same, nats_reap_grace, &new_rev);
+	if (rc == 0) {
+		/* Targeted index update: remove the key from only the entries it
+		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
+		nats_json_index_remove_fields(target_key, json_buf, old_len);
+		nats_json_index_add(target_key, new_json, (int)strlen(new_json));
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
 		free(new_json);
 		return 0;
 	}
 
-	/* Write failed.  Only a CAS conflict (revision mismatch) is
-	 * worth retrying; a timeout / connection error is not and
-	 * would just burn the whole budget on a degraded broker. */
-	if (!nats_cas_should_retry(s)) {
-		LM_WARN("update CAS write failed for key '%s' (%s); not a "
-			"conflict -- bailing\n", target_key,
-			nats_dl.natsStatus_GetText(s));
-		free(new_json);
-		return -1;
-	}
-
 	free(new_json);
-	return 1;
+	return rc;   /* 1 = CAS conflict (outer loop re-reads+retries), -1 = fatal */
 }
 
 /**
@@ -1367,6 +1531,19 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			"is_pk=1 filters are accepted in this mode\n",
 			nats_enable_search_index
 				? "not yet initialized" : "disabled",
+			row_filter->key.name.len, row_filter->key.name.s);
+		return -1;
+	}
+
+	/* P2.3 [REV-20] (SPEC §4.1 step 0): reject-at-write hygiene, before any
+	 * merge or kvStore op.  A contact field carrying an embedded NUL cannot
+	 * round-trip (the reader's strlen truncates it — silent corruption), so
+	 * fail the save cleanly with no partial row and bump the integrity
+	 * counter.  The value is NOT logged (redacted); only the filter field. */
+	if (_dict_has_nul_field(pairs)) {
+		NATS_CDB_STATS_INC(nul_fields_rejected);
+		LM_ERR("update rejected: a contact field for filter '%.*s' "
+			"contains an embedded NUL (value redacted)\n",
 			row_filter->key.name.len, row_filter->key.name.s);
 		return -1;
 	}

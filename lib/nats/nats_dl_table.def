@@ -32,6 +32,10 @@ NATS_DL_FN(jsPubAck_Destroy)
 NATS_DL_FN(jsPubOptions_Init)
 NATS_DL_FN(js_PublishAsync)
 NATS_DL_FN(js_PublishAsyncComplete)
+/* [TTL-SOLUTION §2.4 / TREV-4] synchronous CAS+TTL raw publish with inline
+ * jsPubAck + jsErrCode — drives the per-key-TTL retry loop (the async variant
+ * surfaces the CAS/TTL rejection later on a different thread, so it cannot). */
+NATS_DL_FN(js_PublishMsg)
 NATS_DL_FN(js_PullSubscribe)
 NATS_DL_FN(js_PurgeStream)
 NATS_DL_FN(jsStreamConfig_Init)
@@ -40,6 +44,9 @@ NATS_DL_FN(jsStreamInfoList_Destroy)
 NATS_DL_FN(js_Streams)
 NATS_DL_FN(jsSubOptions_Init)
 NATS_DL_FN(js_UpdateConsumer)
+/* [TTL-SOLUTION §2.4 / TREV-4] flip AllowMsgTTL + SubjectDeleteMarkerTTL on the
+ * KV-backing stream (kvConfig has no such fields); one-time bucket setup. */
+NATS_DL_FN(js_UpdateStream)
 
 /* JetStream KV store */
 NATS_DL_FN(kvEntry_Destroy)

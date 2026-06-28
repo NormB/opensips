@@ -375,9 +375,34 @@ static int _kv_char_safe(unsigned char c)
 	    (c >= 'a' && c <= 'z'))
 		return 1;
 	switch (c) {
-	case '-': case '_': case '/': case '\\': case '.':
+	/* [REV-23] '\\' removed from the safe set: it must be '=HH'-escaped, both
+	 * to satisfy the project's backslash-adversarial rule and to keep the
+	 * encoded key unambiguous. '.' and '/' stay literal (valid NATS subject
+	 * token chars; keeps `nats kv` greppability); keys that would yield an
+	 * EMPTY subject token are rejected by _kv_key_validate() on the PK path. */
+	case '-': case '_': case '/': case '.':
 		return 1;
 	}
+	return 0;
+}
+
+/* [REV-23] Validate an already-encoded usrloc row key (the AoR portion, not the
+ * fts_json_prefix which ends on a token boundary). NATS rejects a subject with
+ * an empty token, so a leading '.', trailing '.', or '..' would make JetStream
+ * reject the publish and the REGISTER would be silently lost. Reject such keys
+ * (and the empty key) up-front so the save fails loudly instead. The only '.'
+ * left after encoding are literal dots passed through from the input.
+ * Returns 0 if the key is a valid subject, -1 to reject. */
+int _kv_key_validate(const char *enc, int enc_len)
+{
+	int i;
+	if (!enc || enc_len <= 0)
+		return -1;                                   /* empty key */
+	if (enc[0] == '.' || enc[enc_len - 1] == '.')
+		return -1;                                   /* leading/trailing empty token */
+	for (i = 1; i < enc_len; i++)
+		if (enc[i] == '.' && enc[i - 1] == '.')
+			return -1;                           /* empty middle token */
 	return 0;
 }
 

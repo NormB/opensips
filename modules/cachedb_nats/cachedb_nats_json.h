@@ -248,6 +248,14 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
 int nats_json_index_remove(const char *key);
 
 /*
+ * P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: live forward-index
+ * document count, for observability and the joint reaper⊕watcher e2e.
+ * @return  num_documents (>= 0), or -1 if the index is not initialized.
+ *          NULL-safe — never dereferences a NULL g_idx.
+ */
+int nats_json_index_count(void);
+
+/*
  * Fast delete-by-key using the doc-key -> field:value reverse map: removes
  * the key from only the entries it was indexed under (O(fields)) instead
  * of walking every bucket.  Returns 0 on a hit (key removed), -1 on a miss
@@ -347,5 +355,19 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
  *                index contents.
  */
 nats_search_idx *nats_json_get_index(void);
+
+/* P9 reaper (SPEC §4.3A) — pure, broker-less per-row decisions, defined in the
+ * rowmeta TU; exposed here so the reaper timer host in cachedb_nats.c can drive
+ * them over each stored row before any CAS write/delete.
+ *   _reap_project_survivors(): drop DUE contacts, recompute row_exp, return a
+ *     fresh document (caller frees); *n_survivors = survivor count (0 => the row
+ *     is fully due, CAS-delete the key; -1 => not a usrloc row, skip).  NULL on
+ *     malformed/OOM.
+ *   _reap_row_due_json(): cheap due-gate over the stored row_exp — 1 due, 0 not
+ *     due/permanent, -1 row_exp absent (legacy: treat as due). */
+char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
+	int *n_survivors, int *out_len,
+	int64_t *out_row_exp, int *out_all_same);
+int _reap_row_due_json(const char *json, int len, time_t now, int grace);
 
 #endif /* CACHEDB_NATS_JSON_H */

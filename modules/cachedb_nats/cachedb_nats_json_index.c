@@ -939,6 +939,36 @@ static void nats_rev_put(const char *key, int key_len,
 	lock_set_release(g_rev->locks, shard);
 }
 
+/* REV-26: is @key already in the reverse map (i.e. already indexed)?  Read-only
+ * membership test under the key's shard lock, mirroring nats_rev_put's lookup.
+ * Used by nats_json_index_add to count a doc-key ONCE: a node indexes its own
+ * write both inline and via the watcher echo, so an unconditional num_documents
+ * increment over-counts.  Returns 1 if present, 0 otherwise / not initialized. */
+static int nats_rev_contains(const char *key, int key_len)
+{
+	unsigned int hash, bucket;
+	int shard;
+	nats_rev_node *n;
+
+	if (!g_rev || !key || key_len <= 0)
+		return 0;
+
+	hash   = _hash(key, key_len);
+	bucket = hash;
+	shard  = NATS_IDX_SHARD_OF(bucket);
+
+	lock_set_get(g_rev->locks, shard);
+	for (n = g_rev->buckets[bucket]; n; n = n->next) {
+		if (n->hash == hash && n->key_len == key_len &&
+		    memcmp(n->key, key, (size_t)key_len) == 0) {
+			lock_set_release(g_rev->locks, shard);
+			return 1;
+		}
+	}
+	lock_set_release(g_rev->locks, shard);
+	return 0;
+}
+
 /* Drop the reverse-map record for @key (if any). */
 static void nats_rev_remove(const char *key)
 {
@@ -1388,9 +1418,18 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 {
 	_idx_fv_list_t list;
 	int rc, i;
+	int was_present;
 
 	if (!g_idx || !key || !json_str)
 		return -1;
+
+	/* REV-26: count this doc-key ONCE.  A node indexes its own write twice —
+	 * inline here in the registration worker AND via the KV watcher echo of the
+	 * same Put — so an unconditional num_documents++ over-counts (the stat then
+	 * read ~2x the true cardinality until a fresh build).  Capture membership
+	 * BEFORE the field inserts / rev_put below; only a genuinely-new key (or a
+	 * re-add after remove_fields, which dropped the rev record) increments. */
+	was_present = nats_rev_contains(key, (int)strlen(key));
 
 	/* Parse the document into a flat (field, value) list with no
 	 * lock held.  The parser is CPU-bound at ~bytes/cycle, so this
@@ -1483,8 +1522,9 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		_idx_unlock_shard(g_idx, shard);
 	}
 
-	atomic_fetch_add_explicit(&g_idx->num_documents, 1,
-		memory_order_relaxed);
+	if (!was_present)
+		atomic_fetch_add_explicit(&g_idx->num_documents, 1,
+			memory_order_relaxed);
 
 	/* Record (or replace) the doc's fv set for fast delete-by-key. */
 	if (!rev_oom && rev_nfv > 0)
@@ -1553,6 +1593,18 @@ int nats_json_index_remove(const char *key)
 
 	LM_DBG("removed key '%s' from index\n", key);
 	return 0;
+}
+
+/* P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: observe the live
+ * forward-index document count.  Lets a joint reaper⊕watcher e2e assert that
+ * the in-SHM index entry — not merely the read-path view (P4) — is dropped when
+ * the server TTL-expires a key.  NULL-safe: an uninitialized index returns -1
+ * (distinct from an empty index, 0); never dereferences a NULL g_idx. */
+int nats_json_index_count(void)
+{
+	if (!g_idx)
+		return -1;
+	return atomic_load_explicit(&g_idx->num_documents, memory_order_relaxed);
 }
 
 /* Per-field-callback adapter for nats_json_index_remove_fields:
