@@ -79,6 +79,21 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long op_failed;
 	_Atomic unsigned long watcher_restarts;
 	_Atomic unsigned long watcher_handle_leaks;
+	/* P2.3 [REV-20] (§12 integrity): contact saves refused because a field
+	 * carried an embedded NUL that could not round-trip. */
+	_Atomic unsigned long nul_fields_rejected;
+	/* P2.5 [REV-26] (§12 integrity): reads that hit a non-empty, non-object
+	 * stored value (poison) — surfaced instead of masked as an empty AoR. */
+	_Atomic unsigned long poison_values_rejected;
+	/* P3 [REV-5] (§12 integrity): writes refused because the merged row value
+	 * would exceed nats_max_value_size (NATS payload cap) — cleanly, before
+	 * the CAS, rather than a silent truncation / broker-side error. */
+	_Atomic unsigned long value_oversize_rejected;
+	/* P9 [REV-1/16] (§4.3A): usrloc rows physically reclaimed by the reaper —
+	 * a fully-expired row CAS-deleted, or a partial row CAS-rewritten to its
+	 * survivors.  The authoritative expiry mechanism; counts actual reclaims,
+	 * not scan passes. */
+	_Atomic unsigned long rows_reaped;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
@@ -109,8 +124,8 @@ int nats_cdb_stats_init(void);
 void nats_cdb_stats_destroy(void);
 
 /*
- * MI handler: "nats_cdb_stats" — returns a JSON object with all four
- * counters. Safe to call from the MI process.
+ * MI handler: "nats_cdb_stats" — returns a JSON object with every counter.
+ * Safe to call from the MI process.
  */
 mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	struct mi_handler *async_hdl);

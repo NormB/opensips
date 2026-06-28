@@ -74,6 +74,8 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
+#include "cachedb_nats_ttl.h"      /* nats_kv_key_to_subject(), NATS_KV_OP_DEL — P9 reaper CAS-delete */
+#include "cachedb_nats_reaper.h"   /* _reap_interval_guard() — P9 reaper host gate */
 #include "../../lib/nats/nats_pool.h"
 #include "../../timer.h"
 
@@ -86,6 +88,7 @@ static int mod_init(void);
 static int child_init(int rank);
 static void destroy(void);
 static void _nats_cdb_periodic_resync(unsigned int ticks, void *param);
+static void _nats_cdb_reaper_tick(unsigned int ticks, void *param);   /* P9 reaper host */
 
 /* script function wrappers (implementations in cachedb_nats_native.c) */
 static int w_nats_request_wrap(struct sip_msg *msg, str *subject, str *payload,
@@ -185,6 +188,37 @@ int   nats_request_default_timeout_ms = 500;
  * pathological hotspots.  Operator can raise for very contended
  * counters; minimum bound is 1. */
 int   nats_cas_retries = 10;
+
+/* [REV-1/REV-21] Max tolerated inter-node clock skew S, in seconds.  Used as
+ * the grace margin everywhere absolute `expires`/`row_exp` is compared with
+ * node-local now: the write-side expiry hygiene (P2.7), the read filter (P4),
+ * and the reaper (P9) all require `+S` slack so a node whose clock leads by S
+ * never deletes/omits another node's still-live binding.  MUST be >= the
+ * deployment's real maximum node skew. */
+int   nats_reap_grace = 5;
+
+/* [REV-1/16] (SPEC §4.3A) Reaper scan period, seconds.  The reaper is the
+ * AUTHORITATIVE per-contact expiry mechanism: native per-message TTL is only an
+ * opportunistic optimisation and is lost on update (#1994/#6959), so a periodic
+ * CAS-prune is what actually guarantees an expired binding is physically
+ * reclaimed.  >0 registers the reaper timer; <=0 disables it (TTL-only), which
+ * is refused at startup unless nats_unsafe_ttl_only is also set.  Default 30s. */
+int   nats_reap_interval = 30;
+
+/* [REV-2/PREV-26] Operator acknowledgement that running with the reaper OFF
+ * (nats_reap_interval<=0) is intentional and the #1994/#6959 TTL-loss risk is
+ * accepted.  Without it, a non-positive interval HARD-FAILS mod_init rather than
+ * silently leaving expiries unreclaimed. */
+int   nats_unsafe_ttl_only = 0;
+
+/* [REV-5] Max serialized KV value (one AoR row holds all its contacts), in
+ * bytes.  All contacts of an AoR share one message; NATS caps message size
+ * (max_payload, default 1 MiB; a stream's max_msg_size may be lower).  An
+ * oversize row is detected before the CAS write and the offending contact's
+ * save fails cleanly — never a silent truncation / corruption.  Default 1 MiB
+ * (the NATS max_payload default); set to the deployment's real per-message cap
+ * (and <= the stream's max_msg_size).  <= 0 disables the guard. */
+int   nats_max_value_size = 1048576;
 
 /* Whether to maintain the in-memory JSON-FTS search index.
  *
@@ -307,6 +341,10 @@ static const param_export_t params[] = {
 	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
 	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
+	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
+	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
+	{"nats_unsafe_ttl_only",    INT_PARAM,         &nats_unsafe_ttl_only},
+	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
 	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
@@ -459,11 +497,46 @@ struct module_exports exports = {
  *
  * @return  0 on success, -1 on error (aborts module loading).
  */
+/* [REV-24 / §11] Is the effective connection URL insecure for a PII store?
+ * Returns 1 when the WARN must fire: not tls://, OR no "user[:pass]@" in the
+ * authority (between "://" and the first '/').  Credentials in a path/query do
+ * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
+static int _nats_url_insecure(const char *url)
+{
+	const char *sep, *authority, *slash, *at;
+	int is_tls, has_creds;
+
+	if (!url)
+		return 1;
+	sep = strstr(url, "://");
+	if (!sep)
+		return 1;
+	is_tls = (sep - url == 3) && (strncmp(url, "tls", 3) == 0);
+	authority = sep + 3;
+	slash = strchr(authority, '/');
+	at = strchr(authority, '@');
+	has_creds = (at != NULL) && (slash == NULL || at < slash);
+	return (!is_tls || !has_creds) ? 1 : 0;
+}
+
 static int mod_init(void)
 {
 	cachedb_engine cde;
 
 	LM_NOTICE("initializing module cachedb_nats ...\n");
+
+	/* P8 [REV-7 / TTL-SOLUTION-SPEC.md §5.3]: kv_ttl becomes the KV bucket's
+	 * MaxAge (nats_pool.c: kvCfg.TTL).  Stream MaxAge takes precedence over
+	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS
+	 * (expires==0) -- data loss in a registration store.  Refuse to start
+	 * (fail closed) before any bucket is created/bound. */
+	if (_kv_ttl_guard(kv_ttl) != 0) {
+		LM_ERR("cachedb_nats: kv_ttl=%d invalid -- a non-zero kv_ttl sets the "
+		       "KV bucket MaxAge, which overrides per-message TTL and would "
+		       "EXPIRE PERMANENT CONTACTS (expires==0). Set kv_ttl=0 [REV-7].\n",
+		       kv_ttl);
+		return -1;
+	}
 
 	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
 	 * pool's connect path can look up the "nats" client domain.  No
@@ -536,6 +609,17 @@ static int mod_init(void)
 			url_to_use = "nats://localhost:4222";
 		}
 
+		/* [REV-24 / §11] The registration bucket is a PII / LI-relevant
+		 * store (subscriber IP, UA, call-id, path) and NATS KV has no
+		 * per-key ACL.  Transport + auth are mandatory: warn loudly when
+		 * the connection URL is plaintext and/or carries no credentials. */
+		if (_nats_url_insecure(url_to_use))
+			LM_WARN("cachedb_nats: connection URL '%s' is INSECURE for a "
+				"PII/lawful-intercept store (subscriber IP, user-agent, "
+				"call-id, path) — use tls:// with an authenticated account "
+				"and one bucket per trust domain (SPEC \xc2\xa7""11 [REV-24])\n",
+				url_to_use);
+
 		/* TLS comes from the tls_mgm "nats" client domain at connect
 		 * time (apply_tls_from_mgm in lib/nats).  Operator switches to
 		 * TLS by writing tls:// in cachedb_url and defining the
@@ -560,6 +644,10 @@ static int mod_init(void)
 	cde.cdb_func.get = nats_cache_get;
 	cde.cdb_func.set = nats_cache_set;
 	cde.cdb_func.remove = nats_cache_remove;
+	/* [P11 / SPEC §1.2 REV-10] non-NULL "unsupported" stub: usrloc
+	 * full-sharing never calls _remove; register it so a wrong-mode caller
+	 * fails loudly (-1 + LM_ERR) instead of a NULL function-pointer crash. */
+	cde.cdb_func._remove = nats_cache_remove_unsupported;
 	cde.cdb_func.add = nats_cache_add;
 	cde.cdb_func.sub = nats_cache_sub;
 	cde.cdb_func.get_counter = nats_cache_get_counter;
@@ -658,6 +746,32 @@ static int mod_init(void)
 		}
 	}
 
+	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): register the periodic
+	 * CAS-prune timer.  Index-independent (enumerates via kvStore_Keys), so it
+	 * runs regardless of enable_search_index.  A non-positive interval disables
+	 * it (TTL-only) and is REFUSED unless nats_unsafe_ttl_only acknowledges the
+	 * #1994/#6959 TTL-loss risk. */
+	if (_reap_interval_guard(nats_reap_interval, nats_unsafe_ttl_only) < 0) {
+		LM_ERR("nats_reap_interval=%d disables the reaper (TTL-only), which "
+			"loses TTL on update (#1994/#6959) and leaves expired bindings "
+			"unreclaimed; set nats_reap_interval>0, or nats_unsafe_ttl_only=1 "
+			"to accept the risk\n", nats_reap_interval);
+		return -1;
+	}
+	if (nats_reap_interval > 0) {
+		if (register_timer("nats_cdb_reaper", _nats_cdb_reaper_tick, NULL,
+				nats_reap_interval, 0) < 0) {
+			LM_ERR("failed to register reaper timer\n");
+			return -1;
+		}
+		LM_INFO("cachedb_nats: reaper ENABLED, scan every %d s "
+			"(grace %d s)\n", nats_reap_interval, nats_reap_grace);
+	} else {
+		LM_WARN("cachedb_nats: reaper DISABLED (nats_unsafe_ttl_only=1); "
+			"relying on native per-message TTL only — expiries may be "
+			"lost on update (#1994/#6959)\n");
+	}
+
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
 	 * This avoids the "previously published" warning that occurs when
 	 * both startup_route's subscribe_event() and child_init's
@@ -711,6 +825,26 @@ static int child_init(int rank)
 	if (!kv) {
 		LM_ERR("failed to get/create KV bucket '%s'\n", kv_bucket);
 		return -1;
+	}
+
+	/* P11b [REV-25]: a PRE-EXISTING bucket may already carry a non-zero
+	 * backing-stream MaxAge (older deployment / another tool).  The kv_ttl
+	 * modparam guard (mod_init) only stops US from creating one; binding to an
+	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
+	 * (expires==0).  Detect it once (rank 1) and WARN loudly with the
+	 * remediation -- the documented migration policy, never a silent expiry.
+	 * WARN (not refuse) so a generic cachedb_nats TTL-cache user is not broken;
+	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
+	if (rank == 1) {
+		int64_t maxage_ns = 0;
+		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
+				_kv_legacy_bucket_maxage_warn(maxage_ns)) {
+			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
+				"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
+				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
+				"recreate it with MaxAge=0 (kv_ttl=0) and migrate [REV-25].\n",
+				kv_bucket, (long long)maxage_ns);
+		}
 	}
 
 	/* The JSON search index is now SHM-backed and was allocated in
@@ -853,6 +987,155 @@ static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
 		LM_WARN("periodic resync: index rebuild failed\n");
 	else
 		LM_DBG("periodic resync: index rebuilt\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*   P9 reaper host (SPEC §4.3A [REV-1/16])                           */
+/* ------------------------------------------------------------------ */
+
+/* CAS-guarded publish-delete of a KV key [REV-16].  Publishes a KV-Operation:DEL
+ * marker for "$KV.<bucket>.<key>" with ExpectLastSubjectSeq=@rev, so a
+ * concurrent re-REGISTER that bumped the head between our read and this delete
+ * makes the delete FAIL (jerr 10071) instead of destroying the renew.  A blind
+ * kvStore_Delete() would lose that race -- never use it here.
+ * Returns 0 deleted, 1 CAS-lost (a renew won -- leave the key), -1 on error. */
+static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
+	uint64_t rev)
+{
+	char subj[512];
+	natsMsg *m = NULL;
+	jsPubAck *pa = NULL;
+	jsErrCode je = 0;
+	jsPubOptions o;
+	natsStatus s;
+
+	if (nats_kv_key_to_subject(bucket, key, subj, sizeof subj) < 0)
+		return -1;
+	if (nats_dl.natsMsg_Create(&m, subj, NULL, NULL, 0) != NATS_OK)
+		return -1;
+	if (nats_dl.natsMsgHeader_Set(m, "KV-Operation", NATS_KV_OP_DEL) != NATS_OK) {
+		nats_dl.natsMsg_Destroy(m);
+		return -1;
+	}
+	nats_dl.jsPubOptions_Init(&o);
+	o.ExpectLastSubjectSeq = rev;             /* CAS predicate */
+	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
+	nats_dl.jsPubAck_Destroy(pa);
+	nats_dl.natsMsg_Destroy(m);
+	if (s == NATS_OK)
+		return 0;
+	if (je == 10071)                          /* JSStreamWrongLastSequenceErr */
+		return 1;                         /* a concurrent renew won the race */
+	LM_DBG("reaper: CAS-delete '%s' failed: %s (jerr=%d)\n",
+		key, nats_dl.natsStatus_GetText(s), je);
+	return -1;
+}
+
+/* The reaper tick: scan the bucket once, and for each DUE usrloc row either
+ * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.  Runs
+ * in the OpenSIPS timer process (like the resync handler) -- so it does NOT gate
+ * on nats_pool_is_connected() (that flag is process-local and always 0 here);
+ * a NULL KV/JS handle means the broker is down and we skip just this tick.
+ *
+ * Independent of the search index [REV-17]: enumeration is a direct
+ * kvStore_Keys() over the bucket, so the reaper works with enable_search_index=0.
+ * Malformed/poison rows are LEFT in place (the read path alarms them); permanent
+ * and not-yet-due rows are skipped by the cheap row_exp due-gate. */
+static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
+{
+	kvStore *kv;
+	jsCtx *js;
+	kvKeysList keys;
+	natsStatus s;
+	time_t now;
+	int i, prefix_len, reaped = 0;
+
+	(void)ticks; (void)param;
+
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
+	if (!kv) {
+		LM_DBG("reaper: no KV handle (broker down?); skipping tick\n");
+		return;
+	}
+	js = nats_pool_get_js();
+	if (!js) {
+		LM_DBG("reaper: no JetStream ctx; skipping tick\n");
+		return;
+	}
+
+	now = time(NULL);
+	prefix_len = (fts_json_prefix && *fts_json_prefix)
+		? (int)strlen(fts_json_prefix) : 0;
+
+	memset(&keys, 0, sizeof(keys));
+	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
+	if (s == NATS_NOT_FOUND)
+		return;                           /* empty bucket */
+	if (s != NATS_OK) {
+		LM_DBG("reaper: kvStore_Keys failed: %s\n",
+			nats_dl.natsStatus_GetText(s));
+		return;
+	}
+
+	for (i = 0; i < keys.Count; i++) {
+		const char *key = keys.Keys[i];
+		kvEntry *e = NULL;
+		const char *val;
+		int vlen, n_surv = 0, plen = 0, p_all_same = 0;
+		int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
+		uint64_t rev;
+		char *proj;
+
+		if (!key)
+			continue;
+		/* only our usrloc rows; never touch another consumer's keys. */
+		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
+			continue;
+		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
+			continue;                     /* mid-delete / vanished -> skip */
+		val = nats_dl.kvEntry_ValueString(e);
+		vlen = nats_dl.kvEntry_ValueLen(e);
+		rev = nats_dl.kvEntry_Revision(e);
+
+		/* cheap due-gate: skip permanent / not-yet-due rows without a
+		 * full reprojection (row_exp == min contact expiry). */
+		if (_reap_row_due_json(val, vlen, now, nats_reap_grace) == 0) {
+			nats_dl.kvEntry_Destroy(e);
+			continue;
+		}
+		proj = _reap_project_survivors(val, vlen, now, nats_reap_grace,
+			&n_surv, &plen, &p_row_exp, &p_all_same);
+		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
+		if (!proj)
+			continue;                     /* malformed/poison: read path alarms it */
+		if (n_surv < 0) {                     /* not a usrloc row */
+			free(proj);
+			continue;
+		}
+		if (n_surv == 0) {
+			if (_reap_cas_delete(js, kv_bucket, key, rev) == 0) {
+				NATS_CDB_STATS_INC(rows_reaped);
+				reaped++;
+			}
+		} else {
+			/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
+			 * the pruned row RE-ASSERTS Nats-TTL (a plain kvStore_UpdateString
+			 * here would strip it and re-create #1994 for reaped rows).  The
+			 * reaper defers index convergence to the watcher (no index code). */
+			uint64_t newrev = 0;
+			if (nats_kv_write_row_cas(kv, kv_bucket, key, proj, plen, rev,
+					p_row_exp, n_surv, p_all_same, nats_reap_grace,
+					&newrev) == 0) {
+				NATS_CDB_STATS_INC(rows_reaped);
+				reaped++;
+			}
+			/* CAS conflict / error: a concurrent writer won; retry next tick */
+		}
+		free(proj);
+	}
+	nats_dl.kvKeysList_Destroy(&keys);
+	if (reaped)
+		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
 }
 
 /**

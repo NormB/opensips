@@ -361,6 +361,26 @@ static void *_watcher_thread_fn(void *arg)
  * cleared only by the OpenSIPS core sending SIGTERM (which
  * terminates the process directly).
  */
+
+/* P8 [R1 / TTL-SOLUTION-SPEC.md §4 TREV-2a]: classify the index action for a
+ * watched KV entry.  cnats 3.12 surfaces a server-side MaxAge TTL-expiry as an
+ * EMPTY-VALUE kvOp_Put (NOT a Delete/Purge op); treating that as a REMOVAL is
+ * what keeps the forward index from pointing at a vanished key once per-message
+ * TTL is enabled.  Pure (carried-copy unit: tests/test_ttl_watch_marker.c). */
+enum watch_idx_action { WATCH_IDX_SKIP = 0, WATCH_IDX_ADD = 1, WATCH_IDX_REMOVE = 2 };
+static enum watch_idx_action _watch_index_action(int op, int val_len, char val0)
+{
+	if (op == kvOp_Delete || op == kvOp_Purge)
+		return WATCH_IDX_REMOVE;
+	if (op == kvOp_Put) {
+		if (val_len <= 0)
+			return WATCH_IDX_REMOVE;   /* empty-value Put = MaxAge tombstone */
+		if (val0 == '{')
+			return WATCH_IDX_ADD;      /* JSON doc; prefix checked at call site */
+	}
+	return WATCH_IDX_SKIP;
+}
+
 static void _watcher_loop(void)
 {
 	kvEntry        *entry = NULL;
@@ -517,24 +537,61 @@ static void _watcher_loop(void)
 				continue;
 			}
 
-			if (op == kvOp_Put) {
-				const char *val     = nats_dl.kvEntry_ValueString(entry);
-				int         val_len = nats_dl.kvEntry_ValueLen(entry);
+			{
+				const char *val     = (op == kvOp_Put) ?
+					nats_dl.kvEntry_ValueString(entry) : NULL;
+				int         val_len = (op == kvOp_Put) ?
+					nats_dl.kvEntry_ValueLen(entry) : 0;
+				enum watch_idx_action act =
+					_watch_index_action(op, val_len, val ? val[0] : 0);
 
-				/* Only index keys that match the JSON prefix and
-				 * actually contain JSON data. Non-JSON keys are
-				 * silently skipped -- no warning spam. */
-				if (val && val_len > 0 && val[0] == '{' &&
-				    (prefix_len == 0 ||
-				     strncmp(key, fts_json_prefix, prefix_len) == 0)) {
-					nats_json_index_add(key, val, val_len);
+				if (act == WATCH_IDX_ADD) {
+					/* Only index keys that match the JSON prefix.
+					 * Non-JSON keys are silently skipped -- no spam. */
+					if (prefix_len == 0 ||
+					    strncmp(key, fts_json_prefix, prefix_len) == 0)
+						nats_json_index_add(key, val, val_len);
+				} else if (act == WATCH_IDX_REMOVE) {
+					/* Delete/Purge OR an empty-value Put (MaxAge
+					 * tombstone, [R1]).  Fast path: remove only the
+					 * entries this doc was indexed under (O(fields));
+					 * on a reverse-map miss fall back to the full walk.
+					 * The revmap return is the PRECISE membership signal:
+					 * 0 => the key WAS indexed (revmap had its fv set) and
+					 * is now removed; <0 => no revmap record (a full-walk
+					 * fallback covers a possibly-stale entry). */
+					int before = nats_json_index_count();
+					int was_indexed = (nats_json_index_remove_by_revmap(key) == 0);
+					if (!was_indexed)
+						nats_json_index_remove(key);
+					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
+					 * REV-26] observability: a server-side TTL expiry
+					 * surfaces (cnats <=3.12) as an empty-value Put;
+					 * log it at INFO so operators — and the joint
+					 * reaper⊕watcher e2e — can SEE the watcher drop the
+					 * in-SHM index entry for a vanished key.  The
+					 * "was indexed -> removed" membership outcome is the
+					 * authoritative signal that the index (not just the
+					 * read-path filter) released the key; num_documents is
+					 * a supplementary delta-counter (note: it over-counts
+					 * a node's own writes because they are indexed both
+					 * inline and via this watcher echo — a known stat
+					 * caveat, not a membership error).  Ordinary
+					 * Delete/Purge markers from our own writes are
+					 * frequent, so they stay at DBG to avoid log spam. */
+					if (op == kvOp_Put)
+						LM_INFO("watcher: MaxAge tombstone (empty-value) "
+							"on '%s' -> index entry %s (num_documents "
+							"%d->%d)\n", key,
+							was_indexed ? "removed (was indexed)"
+							            : "not in revmap; full-walk fallback",
+							before, nats_json_index_count());
+					else
+						LM_DBG("watcher: delete/purge marker on '%s' -> "
+							"index entry %s (num_documents %d->%d)\n", key,
+							was_indexed ? "removed" : "full-walk fallback",
+							before, nats_json_index_count());
 				}
-			} else if (op == kvOp_Delete || op == kvOp_Purge) {
-				/* Fast path: remove only the entries this doc was
-				 * indexed under (O(fields)).  On a reverse-map miss
-				 * fall back to the full-index walk. */
-				if (nats_json_index_remove_by_revmap(key) < 0)
-					nats_json_index_remove(key);
 			}
 
 			/* Raise EVI event for downstream script consumers */
