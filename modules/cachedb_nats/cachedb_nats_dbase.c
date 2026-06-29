@@ -402,8 +402,13 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 	if (nats_str_to_buf(attr, key_buf, sizeof(key_buf)) < 0)
 		return -1;
 
+	/* Generic cache_store() path: no per-key TTL here.  (usrloc rows DO get
+	 * per-key expiry — via the row-write per-message Nats-TTL re-assert in
+	 * cachedb_nats_ttl_put.c on a >=2.11 broker, backed by the P9 reaper —
+	 * but that rides the CAS-UPSERT row seam, not this generic set().) */
 	if (expires > 0)
-		LM_DBG("per-key TTL (%d s) ignored — NATS KV uses bucket-level TTL\n",
+		LM_DBG("per-key TTL (%d s) ignored on generic cache_store — "
+			"NATS KV uses bucket-level TTL on this path\n",
 			expires);
 
 	/* null-terminate the value — use stack buffer or heap for large values */
