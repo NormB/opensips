@@ -316,11 +316,15 @@ modparam("cachedb_nats", "kv_history", 10)
 		modification.  A value of zero disables expiry.
 	</para>
 	<para>
-		Note: NATS KV TTL is bucket-wide.  Per-key TTL is not supported by
-		the NATS JetStream KV API.  The <emphasis>expires</emphasis> argument
-		to <function>cache_store</function> and <function>cache_add</function>
-		is accepted for API compatibility but does not set a per-key TTL.
-		This parameter only takes effect when the bucket is first created.
+		Note: this <varname>kv_ttl</varname> is bucket-wide and only takes
+		effect when the bucket is first created.  The
+		<emphasis>expires</emphasis> argument to
+		<function>cache_store</function> and <function>cache_add</function> is
+		accepted for API compatibility but does not set a per-key TTL on these
+		generic paths.  Per-key expiry <emphasis>is</emphasis> honoured on the
+		usrloc row-write path, which re-asserts a per-message
+		<literal>Nats-TTL</literal> on NATS JetStream 2.11+ and is backed by
+		the reaper timer — see the usrloc playbook.
 	</para>
 	<para>
 		<emphasis>

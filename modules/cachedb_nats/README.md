@@ -36,7 +36,7 @@ full string.  Long defaults split across `<br>` breaks.
 | `kv_bucket` | string | `opensips` | JetStream KV bucket name |
 | `kv_replicas` | int | 3 | Replication factor (only used when creating a new bucket) |
 | `kv_history` | int | 5 | Version history depth per key |
-| `kv_ttl` | int | 0 | Bucket-level TTL in seconds (0 = no expiry). Per-key TTL is not supported by NATS KV. |
+| `kv_ttl` | int | 0 | Bucket-wide TTL in seconds (0 = no expiry); applies to the generic `cache_store`/`cache_add` paths. Per-key expiry for usrloc rows is handled separately (per-message `Nats-TTL` on NATS 2.11+ via the row-write path, plus the reaper). |
 | `fts_json_prefix` | string | `json_` | Key prefix for JSON documents included in the search index |
 | `fts_max_results` | int | 100 | Maximum results returned by `cache_query` |
 | `kv_watch` | string | NULL | Key pattern to watch (e.g., `usrloc.>` for wildcard). NULL = watch all keys. |
