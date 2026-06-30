@@ -22,11 +22,6 @@
 #include "cachedb_nats_ttl.h"
 #include "cachedb_nats_dbase.h"         /* nats_cas_should_retry (legacy fallback) */
 
-/* SubjectDeleteMarkerTTL: small, bounds the marker's lifetime/storage and the
- * watcher event volume (§3 [TREV-10]); a server-side expiry leaves a marker for
- * this long so the watcher can drop the index entry (R1). */
-#define NATS_TTL_MARKER_NS  (30LL * NATS_NS_PER_S)
-
 /* natsStatus -> ttl_pub_status, so the classifier stays free of nats.h coupling. */
 static enum ttl_pub_status _pub_status(natsStatus s)
 {
@@ -77,14 +72,15 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	}
 
 	/* head_seq=0: js_GetLastMsg is unbound [R3], so an absent entry resolves to
-	 * NO_MESSAGE and is serviced with kvStore_CreateString -- the only helper
-	 * that re-creates over a server-side DEL/PURGE/MaxAge marker first-attempt
-	 * (avoids the [REV-27] re-REGISTER lockout).  That create carries no TTL;
-	 * the reaper backstops that row until the next refresh re-asserts. */
+	 * NO_MESSAGE and is serviced with kvStore_CreateStringWithTTL [PR #1000] --
+	 * which re-creates over a server-side DEL/PURGE/MaxAge marker first-attempt
+	 * (avoids the [REV-27] re-REGISTER lockout) AND carries the per-key TTL on
+	 * that create (Phase B).  ttl<=0 means no TTL (identical to kvStore_Create),
+	 * so the reaper no longer has to backstop the create path. */
 	pred = _ttl_cas_predicate(got_entry, value_len, entry_rev, 0, &cas_seq);
 
 	if (pred == TTL_CAS_NO_MESSAGE) {
-		s = nats_dl.kvStore_CreateString(&rev, kv, key, json);
+		s = nats_dl.kvStore_CreateStringWithTTL(&rev, kv, key, json, msg_ttl_ms);
 		if (s == NATS_OK) {
 			if (out_rev)
 				*out_rev = rev;
@@ -98,7 +94,14 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 
 	/* update OR create-over-empty-marker: CAS-publish with re-asserted TTL.
 	 * ExpectLastSubjectSeq == the revision we read is byte-for-byte the
-	 * optimistic check kvStore_UpdateString(rev) performed (§2.1). */
+	 * optimistic check kvStore_UpdateString(rev) performed (§2.1).
+	 *
+	 * Phase C: this path deliberately KEEPS the raw js_PublishMsg rather than
+	 * adopting kvStore_UpdateWithTTL [PR #1000].  js_PublishMsg returns the
+	 * numeric jsErrCode inline, which _ttl_classify needs for its stable
+	 * 10071(RETRY)/10166(LATCH_OFF)/10165(BUG) dispatch; the kvStore_*WithTTL
+	 * helpers expose only the error text (PR #1001), not the code.  Revisit once
+	 * libnats grows a jsErrCode accessor (nats_GetLastJSErrCode). */
 	if (nats_dl.natsMsg_Create(&m, subj, NULL, json, json_len) != NATS_OK)
 		return TTL_FAIL_SAVE;
 	nats_dl.jsPubOptions_Init(&o);
@@ -133,9 +136,12 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	natsStatus s;
 	uint64_t nr = 0;
 
-	/* probe once per connection epoch: enable AllowMsgTTL + latch the result */
+	/* probe once per connection epoch: detect AllowMsgTTL capability + latch
+	 * the result.  The bucket is created with AllowMsgTTL natively via
+	 * kvConfig.LimitMarkerTTL (nats_pool_get_kv), so this is now a read-only
+	 * capability check -- no js_UpdateStream retrofit. */
 	if (cap == TTL_CAP_UNPROBED) {
-		int r = nats_pool_kv_setup_msg_ttl(bucket, NATS_TTL_MARKER_NS);
+		int r = nats_pool_kv_supports_ttl(bucket);
 		if (r >= 0) {                          /* r<0 transient: stay UNPROBED */
 			cap = _ttl_cap_next(TTL_CAP_UNPROBED,
 				r == 1 ? TTL_EV_SETUP_OK : TTL_EV_SETUP_FAIL);

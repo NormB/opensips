@@ -52,17 +52,20 @@ static int def_has(const char *needle)
 
 int main(void)
 {
-	printf("== P6 libnats bindings: js_PublishMsg + js_UpdateStream ==\n");
+	printf("== P6 libnats bindings: js_PublishMsg (Phase A dropped js_UpdateStream) ==\n");
 
-	printf("[TREV-4] Part A: nats_dl_table.def lists both NATS_DL_FN entries:\n");
+	printf("[TREV-4] Part A: nats_dl_table.def lists the NATS_DL_FN entries:\n");
 	{
 		int a = def_has("NATS_DL_FN(js_PublishMsg)");
+		/* Phase A: per-key TTL is enabled at bucket creation via
+		 * kvConfig.LimitMarkerTTL (nats.c PR #1000), so the post-create
+		 * js_UpdateStream stream-RMW retrofit -- and its binding -- are gone. */
 		int b = def_has("NATS_DL_FN(js_UpdateStream)");
 		if (a < 0 || b < 0) {
 			printf("  SKIP: .def not readable from here\n");
 		} else {
 			CHECK(a == 1, "table has NATS_DL_FN(js_PublishMsg)");
-			CHECK(b == 1, "table has NATS_DL_FN(js_UpdateStream)");
+			CHECK(b == 0, "table no longer binds js_UpdateStream (Phase A: LimitMarkerTTL at create)");
 			/* the load-bearing distinction: NOT the async variant */
 			CHECK(def_has("NATS_DL_FN(js_PublishAsync)") == 1,
 			      "the existing js_PublishAsync entry is still present (sync added alongside)");
@@ -83,7 +86,6 @@ int main(void)
 			return fails ? 1 : 0;
 		}
 		CHECK(dlsym(h, "js_PublishMsg") != NULL, "dlsym js_PublishMsg resolves");
-		CHECK(dlsym(h, "js_UpdateStream") != NULL, "dlsym js_UpdateStream resolves");
 		/* sanity: a symbol already in the table also resolves the same way */
 		CHECK(dlsym(h, "js_GetStreamInfo") != NULL, "dlsym js_GetStreamInfo (already bound) resolves");
 		dlclose(h);

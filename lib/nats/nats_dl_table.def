@@ -44,9 +44,6 @@ NATS_DL_FN(jsStreamInfoList_Destroy)
 NATS_DL_FN(js_Streams)
 NATS_DL_FN(jsSubOptions_Init)
 NATS_DL_FN(js_UpdateConsumer)
-/* [TTL-SOLUTION §2.4 / TREV-4] flip AllowMsgTTL + SubjectDeleteMarkerTTL on the
- * KV-backing stream (kvConfig has no such fields); one-time bucket setup. */
-NATS_DL_FN(js_UpdateStream)
 
 /* JetStream KV store */
 NATS_DL_FN(kvEntry_Destroy)
@@ -65,6 +62,9 @@ NATS_DL_FN(kvStatus_Replicas)
 NATS_DL_FN(kvStatus_TTL)
 NATS_DL_FN(kvStatus_Values)
 NATS_DL_FN(kvStore_CreateString)
+/* [PR #1000] create-if-absent carrying a per-key TTL; re-creates over a
+ * DEL/PURGE/MaxAge marker first-attempt AND keeps the TTL (Phase B). */
+NATS_DL_FN(kvStore_CreateStringWithTTL)
 NATS_DL_FN(kvStore_Delete)
 NATS_DL_FN(kvStore_Destroy)
 NATS_DL_FN(kvStore_Get)
