@@ -44,7 +44,7 @@ on:
       - '.github/workflows/nats-tls-backends.yml'
 
 env:
-  NATS_C_VERSION: v3.12.0
+  NATS_C_VERSION: main
 
 jobs:
   tls_mgm_smoke:
