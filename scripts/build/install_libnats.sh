@@ -19,7 +19,10 @@
 
 set -e
 
-LIBNATS_VERSION="${LIBNATS_VERSION:-3.12.0}"
+# nats-io/nats.c ref to build. Uses main (nats.c's default branch): per-key KV
+# TTL (PR #1000 -- kvConfig.LimitMarkerTTL + kvStore_*WithTTL) is merged on main
+# but not yet in a tagged release, and cachedb_nats's per-key-TTL path requires it.
+LIBNATS_VERSION="${LIBNATS_VERSION:-main}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
 
 # Skip on cross-compile builds.  The multiarch CI uses *-cross
@@ -76,9 +79,9 @@ ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get -y \
 tmp=$(mktemp -d)
 cd "$tmp"
 
-wget -q "https://github.com/nats-io/nats.c/archive/refs/tags/v${LIBNATS_VERSION}.tar.gz" \
-    -O "nats.c-v${LIBNATS_VERSION}.tar.gz"
-tar xzf "nats.c-v${LIBNATS_VERSION}.tar.gz"
+wget -q "https://github.com/nats-io/nats.c/archive/refs/heads/${LIBNATS_VERSION}.tar.gz" \
+    -O "nats.c-${LIBNATS_VERSION}.tar.gz"
+tar xzf "nats.c-${LIBNATS_VERSION}.tar.gz"
 cd "nats.c-${LIBNATS_VERSION}"
 
 mkdir build

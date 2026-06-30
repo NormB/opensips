@@ -97,7 +97,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev libuv1-dev cmake \
             git ca-certificates
-          git clone --depth 1 --branch v3.12.0 \
+          git clone --depth 1 --branch main \
               https://github.com/nats-io/nats.c /tmp/nats.c
           cd /tmp/nats.c && mkdir build && cd build
           cmake -DNATS_BUILD_WITH_TLS=ON \
