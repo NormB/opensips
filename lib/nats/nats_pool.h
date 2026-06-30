@@ -233,7 +233,7 @@ void nats_pool_ttl_cap_set(int cap);
  * Returns 1 = enabled/already, 0 = unavailable (latch UNSUPPORTED, reaper-only),
  * -1 = transient (leave UNPROBED, retry).  The caller drives the latch from this.
  */
-int nats_pool_kv_setup_msg_ttl(const char *bucket, int64_t marker_ttl_ns);
+int nats_pool_kv_supports_ttl(const char *bucket);
 
 /*
  * P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
