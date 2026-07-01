@@ -1194,6 +1194,17 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		return disc ? -2 : -1;
 	}
 
+	if (state_obs == NATS_RPC_SLOT_DELIVERING) {
+		/* The consumer has pinned our claim and is writing the reply right
+		 * now.  Not ready yet -- and we must NOT abandon+free the slot under
+		 * the pin (that would break the consumer's exclusive DELIVERING ->
+		 * DELIVERED transition).  Keep polling even past the deadline: the
+		 * transition is a few instructions on the consumer thread, so the
+		 * next tick delivers an at-the-wire reply rather than dropping it. */
+		async_status = ASYNC_CONTINUE;
+		return 0;
+	}
+
 	/* state == INFLIGHT.  Check the per-call deadline so we
 	 * surface -1 even though the async core has no built-in
 	 * timeout for raw FDs.  Otherwise re-arm and keep polling. */
@@ -1202,7 +1213,15 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		int      cur_conn  = nats_pool_is_connected();
 		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
 
-		(void)nats_rpc_slot_abandon(s);
+		/* Claim the timeout only if we actually WIN the INFLIGHT ->
+		 * ABANDONED CAS.  If abandon() reports any other state the consumer
+		 * beat us and a reply is landing (DELIVERING) or landed (DELIVERED):
+		 * do NOT free -- keep polling so the reply is delivered on the next
+		 * tick instead of being lost exactly at the deadline. */
+		if (nats_rpc_slot_abandon(s) != NATS_RPC_SLOT_ABANDONED) {
+			async_status = ASYNC_CONTINUE;
+			return 0;
+		}
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_rpc_slot_free(s);
 		pkg_free(w);

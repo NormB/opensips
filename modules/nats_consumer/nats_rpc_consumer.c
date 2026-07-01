@@ -152,15 +152,36 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		}
 	}
 
-	/* Refuse to overwrite if the worker already ABANDONED or
-	 * the slot somehow transitioned to a non-INFLIGHT state.
-	 * The slot's state field is the source of truth. */
+	/* Pin the claim BEFORE writing reply_* or re-validating the generation.
+	 * CAS INFLIGHT -> DELIVERING: if it fails, the worker already ABANDONED
+	 * (or the slot is otherwise non-INFLIGHT) -- drop.  While the slot is
+	 * DELIVERING the worker resume treats it as not-ready and never
+	 * abandons+frees it (resume_nats_request_slot), so no reclaim -- hence no
+	 * generation change -- can happen under us.  This makes "confirm this is
+	 * still our claim" and "publish the reply" atomic w.r.t. the worker,
+	 * closing the slot-reuse misdelivery window that existed when the
+	 * generation re-check was a separate step after an INFLIGHT -> DELIVERED
+	 * CAS (a worker that re-claimed the slot could observe DELIVERED with the
+	 * old reply in the gap before the rollback). */
 	{
-		int cur = atomic_load_explicit(&s->state, memory_order_acquire);
-		if (cur != NATS_RPC_SLOT_INFLIGHT) {
+		int expected = NATS_RPC_SLOT_INFLIGHT;
+		if (!atomic_compare_exchange_strong_explicit(
+				&s->state, &expected, NATS_RPC_SLOT_DELIVERING,
+				memory_order_acq_rel, memory_order_relaxed)) {
 			nats_dl.natsMsg_Destroy(msg);
 			return;
 		}
+	}
+
+	/* Now pinned.  Re-validate the generation: if the slot was freed and
+	 * re-claimed before our pin, we pinned a DIFFERENT (newer) claim -- roll
+	 * back to INFLIGHT so the new claimant is undisturbed, and drop this stale
+	 * reply.  Only we transition out of DELIVERING, so a plain store is safe. */
+	if (atomic_load_explicit(&s->generation, memory_order_relaxed) != gen) {
+		atomic_store_explicit(&s->state, NATS_RPC_SLOT_INFLIGHT,
+			memory_order_release);
+		nats_dl.natsMsg_Destroy(msg);
+		return;
 	}
 
 	/* Copy subject (bounded). */
@@ -200,35 +221,13 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		s->reply_headers_truncated = (uint8_t)(trunc ? 1 : 0);
 	}
 
-	/* Publish the slot transition.  Use CAS from INFLIGHT to DELIVERED:
-	 * the worker may have ABANDONED + freed the slot between the
-	 * acquire-load above and here, and another caller could have
-	 * already CLAIMed it.  Blind-storing DELIVERED in that case would
-	 * clobber the new claimer's state and hand them a stale reply.
-	 * Release ordering on success ensures the worker observes the
-	 * reply_* writes above on its next timerfd tick. */
-	{
-		int expected = NATS_RPC_SLOT_INFLIGHT;
-		if (atomic_compare_exchange_strong_explicit(
-				&s->state, &expected, NATS_RPC_SLOT_DELIVERED,
-				memory_order_release, memory_order_relaxed)) {
-			/* Re-verify the generation did not advance between the
-			 * guard above and this CAS.  If the slot was freed and
-			 * re-claimed in that window, we just attached this (old)
-			 * reply to a different request that happens to also be
-			 * INFLIGHT.  Roll the state back to ABANDONED so the new
-			 * claimant times out cleanly instead of reading another
-			 * request's reply payload. */
-			if (atomic_load_explicit(&s->generation,
-					memory_order_relaxed) != gen) {
-				int d = NATS_RPC_SLOT_DELIVERED;
-				(void)atomic_compare_exchange_strong_explicit(
-					&s->state, &d, NATS_RPC_SLOT_ABANDONED,
-					memory_order_release,
-					memory_order_relaxed);
-			}
-		}
-	}
+	/* Publish: DELIVERING -> DELIVERED with release ordering so the worker's
+	 * next timerfd tick observes the reply_* writes above.  The slot is pinned
+	 * (only we transition out of DELIVERING) and the generation was validated
+	 * while pinned, so a plain release store is correct and race-free -- the
+	 * worker consumes this reply for exactly the claim it was minted for. */
+	atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
+		memory_order_release);
 
 	nats_dl.natsMsg_Destroy(msg);
 }

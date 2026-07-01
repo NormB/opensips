@@ -16,6 +16,7 @@ PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
                ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
 SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
+REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
 IDXRECYCLE_SRCS := test_registry_index_recycle.c $(SHIM) ../nats_handle_registry.c
@@ -34,7 +35,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_rpc_subject test_fetch_async_timerfd \
                   test_persist_cross_process test_msg_ref_teardown \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
-                  test_ring_xproc_wakeup test_rpc_ipc_generation \
+                  test_ring_xproc_wakeup test_rpc_ipc_generation test_rpc_reply_pin \
                   test_rpc_inbox_auth test_registry_lookup_ref \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
                   test_registry_index_recycle test_ring_push_bounded_spin \
@@ -59,7 +60,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail test_rpc_reply_pin
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -118,6 +119,13 @@ test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_
 # claim's request.  Built with a 1-slot pool to force the reuse.
 test_rpc_ipc_generation: $(IPCGEN_SRCS) test_shim.h ../nats_rpc_slot.h ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(IPCGEN_SRCS) $(LDFLAGS)
+
+# Slot-reuse reply-misdelivery: on_inbox_reply pins the claim (INFLIGHT ->
+# DELIVERING) before writing reply_* + re-checking generation, so a worker that
+# re-claimed the slot can never consume another request's reply.  1-slot pool
+# forces the reuse.
+test_rpc_reply_pin: $(REPLYPIN_SRCS) test_shim.h ../nats_rpc_slot.h
+	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(REPLYPIN_SRCS) $(LDFLAGS)
 
 # Reply-inbox authentication: a forged reply that guesses slot+gen but
 # not the per-call corr_id must be rejected by on_inbox_reply's check.
@@ -297,6 +305,7 @@ check: all
 	./test_registry_ring_ref_safety
 	./test_ring_xproc_wakeup
 	./test_rpc_ipc_generation
+	./test_rpc_reply_pin
 	./test_rpc_inbox_auth
 	./test_registry_lookup_ref
 	./test_consumer_proc_boot_retry

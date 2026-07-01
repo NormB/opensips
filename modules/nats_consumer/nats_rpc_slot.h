@@ -90,6 +90,16 @@ enum {
 	NATS_RPC_SLOT_INFLIGHT  = 2,
 	NATS_RPC_SLOT_DELIVERED = 3,
 	NATS_RPC_SLOT_ABANDONED = 4,
+	/* DELIVERING pins the claim for the duration of a reply write: the
+	 * consumer CAS's INFLIGHT -> DELIVERING BEFORE writing reply_* or
+	 * re-validating the generation, and only then stores DELIVERED.  While a
+	 * slot is DELIVERING the worker resume treats it as not-ready and never
+	 * abandons+frees it, so the generation cannot change under the consumer.
+	 * This makes "confirm this is still our claim" and "publish the reply"
+	 * atomic w.r.t. the worker, closing the slot-reuse reply-misdelivery
+	 * window that existed when the generation re-check was a separate step
+	 * after the INFLIGHT -> DELIVERED CAS. */
+	NATS_RPC_SLOT_DELIVERING = 5,
 };
 
 /*

@@ -47,6 +47,7 @@ test_ring_wake_one
 test_ring_xproc_wakeup
 test_rpc_inbox_auth
 test_rpc_ipc_generation
+test_rpc_reply_pin
 test_rpc_subject_validation
 test_rpc_tunables
 test_slot_prefix_copy
