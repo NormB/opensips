@@ -46,6 +46,10 @@ typedef struct { int type; char *val; } col_t;
 
 static int ncols(int expected_kv_no) { return expected_kv_no >= 1 ? expected_kv_no : 1; }
 
+/* raw_kv_bucket_info fills 6 fixed columns but the core still frees
+ * expected_kv_no per row, so the row must have max(expected_kv_no, 6). */
+static int bi_ncols(int expected_kv_no) { return expected_kv_no > 6 ? expected_kv_no : 6; }
+
 /* build one row of `nc` zeroed columns, fill column 0 with the key */
 static col_t *build_row(int nc, const char *key)
 {
@@ -94,6 +98,34 @@ int main(void)
 			"row allocation uses expected_kv_no columns");
 		ASSERT(file_contains(n, "memset(rows[i], 0, ncols_per_row"),
 			"extra columns are zero-initialised (free as NULL)");
+	}
+
+	/* ---- raw_kv_bucket_info: same OOB class -------------------- */
+	/* bucket_info returns 1 row of 6 fixed columns, but the core frees
+	 * expected_kv_no columns per row.  Asking for > 6 output vars made the
+	 * core read+free past the 6-column row (heap OOB read + bad free).  The
+	 * fix sizes the row max(expected_kv_no, 6) and zeroes the extras. */
+	{
+		ASSERT(bi_ncols(6) == 6, "expected_kv_no<=6 -> 6 columns");
+		ASSERT(bi_ncols(7) == 7, "expected_kv_no=7 -> 7 columns");
+		ASSERT(bi_ncols(1) == 6, "expected_kv_no=1 still keeps the 6 filled columns");
+
+		/* model: core frees `expected` cols over a max(expected,6) row.
+		 * With the fix all are in-bounds; the old fixed-6 alloc would OOB
+		 * when expected=7 (ASan would trip). */
+		int expected = 7;
+		col_t *row = build_row(bi_ncols(expected), "bucket-name");   /* 7 cols */
+		ASSERT(row != NULL, "bucket_info row sized to max(expected_kv_no, 6)");
+		core_free_row(row, expected);
+		ASSERT(1, "core free over expected_kv_no cols is in-bounds (ASan-clean)");
+
+		const char *n = "../cachedb_nats_native.c";
+		ASSERT(file_contains(n, "bi_ncols"),
+			"raw_kv_bucket_info sizes the row by bi_ncols");
+		ASSERT(file_contains(n, "bi_ncols * sizeof(cdb_raw_entry)"),
+			"bucket_info row allocation uses max(expected_kv_no, 6) columns");
+		ASSERT(file_contains(n, "memset(rows[0], 0, bi_ncols"),
+			"bucket_info extra columns are zero-initialised (free as NULL)");
 	}
 
 	if (g_fails == 0) fprintf(stderr, "\n=== ALL PASS (fails=0) ===\n");

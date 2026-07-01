@@ -1160,19 +1160,26 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
 		return -1;
 	}
 
-	/* allocate 1 row with 6 columns */
+	/* Allocate 1 row.  We fill 6 fixed columns, but the cachedb core frees
+	 * expected_kv_no columns per row (free_raw_fetch), so the row MUST have
+	 * at least that many cdb_raw_entry slots -- a caller asking for > 6
+	 * output vars would otherwise make the core read+free past the row (heap
+	 * OOB).  Size to max(expected_kv_no, 6); the extra slots are zeroed so
+	 * they free harmlessly as NULL.  (Mirrors the raw_kv_keys ncols_per_row
+	 * fix.) */
+	int bi_ncols = (expected_kv_no > 6) ? expected_kv_no : 6;
 	rows = pkg_malloc(sizeof(cdb_raw_entry *));
 	if (!rows) {
 		nats_dl.kvStatus_Destroy(sts);
 		return -1;
 	}
-	rows[0] = pkg_malloc(6 * sizeof(cdb_raw_entry));
+	rows[0] = pkg_malloc(bi_ncols * sizeof(cdb_raw_entry));
 	if (!rows[0]) {
 		pkg_free(rows);
 		nats_dl.kvStatus_Destroy(sts);
 		return -1;
 	}
-	memset(rows[0], 0, 6 * sizeof(cdb_raw_entry));
+	memset(rows[0], 0, bi_ncols * sizeof(cdb_raw_entry));
 
 	/* col 0: bucket name */
 	bname = nats_dl.kvStatus_Bucket(sts);

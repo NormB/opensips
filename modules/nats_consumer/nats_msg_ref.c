@@ -186,6 +186,42 @@ natsMsg *release_msg_ref(uint64_t token)
 }
 
 /*
+ * Purge every outstanding msg-ref for a handle: destroy each in-use
+ * natsMsg, free the row's slots buffer, and zero the row.  Called from
+ * EVERY subscription-destroy site (retire teardown, vanished/GC'd-consumer
+ * recreate, reconnect-epoch refresh).  A delivered/fetched natsMsg stores a
+ * raw msg->sub pointer with no refcount on the subscription; once the sub is
+ * natsSubscription_Destroy'd, acking any still-held msg would deref a freed
+ * subscription (use-after-free).  Destroying the messages here severs that
+ * dangling reference -- the broker redelivers any un-acked JetStream message
+ * on reconnect, so dropping our local copy is also the correct semantics.
+ * Runs in the consumer process's single-threaded main loop (no locking).
+ */
+void purge_msg_ref_row(uint16_t handle_idx)
+{
+	msg_ref_row_t *row;
+	uint32_t i;
+
+	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
+		return;
+	row = &g_msg_refs[handle_idx];
+	if (row->slots) {
+		for (i = 0; i < row->capacity; i++) {
+			msg_ref_slot_t *slot = &row->slots[i];
+			if (slot->in_use && slot->msg) {
+				nats_dl.natsMsg_Destroy(slot->msg);
+				slot->msg    = NULL;
+				slot->in_use = 0;
+			}
+		}
+		free(row->slots);
+	}
+	row->slots     = NULL;
+	row->capacity  = 0;
+	row->next_slot = 0;
+}
+
+/*
  * Reclaim msg-ref slots that have been outstanding longer than
  * NATS_MSG_REF_ORPHAN_TTL_US -- the worker that owned them died before
  * acking.  Destroys the leaked natsMsg, frees the slot (bumping the

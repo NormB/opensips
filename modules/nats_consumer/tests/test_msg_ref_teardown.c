@@ -245,6 +245,16 @@ static char *extract_func_body(const char *path, const char *funcname)
 	size_t flen = strlen(funcname);
 	while ((p = strstr(p, funcname)) != NULL) {
 		char *q = p + flen;
+		/* Require a word boundary before the name so a search for
+		 * "_fetch_batch" does not match inside "eff_fetch_batch". */
+		if (p != buf) {
+			char c = p[-1];
+			if (c == '_' || (c >= 'a' && c <= 'z') ||
+			    (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+				p += flen;
+				continue;
+			}
+		}
 		while (*q == ' ' || *q == '\t') q++;
 		if (*q != '(') { p += flen; continue; }
 		char *brace = q;
@@ -266,26 +276,52 @@ static char *extract_func_body(const char *path, const char *funcname)
 
 static void test_source_structure(void)
 {
-	const char *src = "../nats_consumer_proc.c";
-	char *td = extract_func_body(src, "tear_down_retired_subs");
+	/* The purge walk lives in a shared helper purge_msg_ref_row()
+	 * (nats_msg_ref.c) so EVERY subscription-destroy site reuses the same
+	 * teardown -- destroying outstanding natsMsg* whose msg->sub is about
+	 * to be freed.  A site that destroys the sub but skips the purge leaves
+	 * a dangling msg->sub for a later ack to deref (UAF). */
+	char *purge = extract_func_body("../nats_msg_ref.c", "purge_msg_ref_row");
 
-	ASSERT(td != NULL, "found tear_down_retired_subs body");
-	if (!td)
-		return;
+	ASSERT(purge != NULL, "found purge_msg_ref_row body in nats_msg_ref.c");
+	if (purge) {
+		ASSERT(strstr(purge, "g_msg_refs[") != NULL,
+			"purge walks the handle's msg-ref row g_msg_refs[handle_idx]");
+		ASSERT(strstr(purge, "natsMsg_Destroy") != NULL,
+			"purge destroys outstanding natsMsg* via natsMsg_Destroy");
+		ASSERT(strstr(purge, "->in_use") != NULL,
+			"purge only destroys in-use slots");
+		ASSERT(strstr(purge, "free(row->slots)") != NULL,
+			"purge frees the row's slots buffer");
+		ASSERT(strstr(purge, "row->slots") != NULL &&
+		       strstr(purge, "NULL") != NULL,
+			"purge zeroes the row (slots pointer cleared)");
+		free(purge);
+	}
 
-	ASSERT(strstr(td, "g_msg_refs[ss->handle_idx]") != NULL,
-		"teardown walks the handle's msg-ref row g_msg_refs[ss->handle_idx]");
-	ASSERT(strstr(td, "natsMsg_Destroy") != NULL,
-		"teardown destroys outstanding natsMsg* via natsMsg_Destroy");
-	ASSERT(strstr(td, "->in_use") != NULL,
-		"teardown only destroys in-use slots");
-	ASSERT(strstr(td, "free(row->slots)") != NULL,
-		"teardown frees the row's slots buffer");
-	ASSERT(strstr(td, "row->slots     = NULL") != NULL ||
-	       strstr(td, "row->slots = NULL") != NULL,
-		"teardown zeroes the row (slots pointer cleared)");
-
-	free(td);
+	/* All THREE subscription-destroy sites must invoke the purge helper so
+	 * a later ack of an outstanding natsMsg can never deref a freed sub. */
+	{
+		const char *src = "../nats_consumer_proc.c";
+		const char *sites[] = {
+			"tear_down_retired_subs",   /* retire teardown */
+			"_fetch_batch",             /* vanished/GC'd consumer destroy */
+			"nats_consumer_proc_main",  /* reconnect-epoch sub refresh */
+		};
+		size_t i;
+		for (i = 0; i < sizeof(sites) / sizeof(sites[0]); i++) {
+			char msg[256];
+			char *body = extract_func_body(src, sites[i]);
+			ASSERT(body != NULL, sites[i]);
+			if (body) {
+				snprintf(msg, sizeof(msg),
+					"%s calls purge_msg_ref_row after destroying the sub",
+					sites[i]);
+				ASSERT(strstr(body, "purge_msg_ref_row") != NULL, msg);
+				free(body);
+			}
+		}
+	}
 }
 
 int main(void)

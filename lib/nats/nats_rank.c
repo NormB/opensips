@@ -36,11 +36,20 @@
 int nats_pool_should_init(int rank)
 {
 	/*
-	 * SIP workers (UDP + TCP, rank >= 1) and the HTTPD/MI process
-	 * (PROC_MODULE) are the only ranks that should initialize NATS.
-	 * Everything else (attendant, timer, TCP-main, module-exported
-	 * processes) either does not run SIP routing or has its own
-	 * explicit initialization path.
+	 * Ranks that must be able to PUBLISH to NATS:
+	 *   - SIP workers (UDP + TCP, rank >= 1): route-driven events + KV ops.
+	 *   - PROC_MODULE (HTTPD/MI): script/MI-driven publishes.
+	 *   - PROC_TIMER: the OpenSIPS timer process raises a large class of
+	 *     subscribable events SYNCHRONOUSLY in-process -- usrloc contact/AoR
+	 *     EXPIRY (E_UL_CONTACT_EXPIRED ...), dialog timeouts, tm timers.
+	 *     event_nats' raise callback runs in whatever process fires the
+	 *     event, so without a connection here every timer-raised NATS
+	 *     publish is dropped and mis-counted as a transient failure.  Many
+	 *     of the module's headline events (registration/dialog lifecycle)
+	 *     are timer-driven, so the timer MUST initialize.
+	 * Everything else (attendant PROC_MAIN, PROC_TCP_MAIN, module-exported
+	 * forks like the consumer/watcher procs) either does not raise events or
+	 * has its own explicit initialization path.
 	 */
-	return (rank == PROC_MODULE || rank >= 1);
+	return (rank == PROC_MODULE || rank == PROC_TIMER || rank >= 1);
 }
