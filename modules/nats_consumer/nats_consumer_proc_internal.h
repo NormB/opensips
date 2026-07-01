@@ -144,6 +144,11 @@ uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
 natsMsg *release_msg_ref(uint64_t token);
 /* Reclaim slots older than the orphan TTL; returns the reap count. */
 int reap_orphan_msg_refs(void);
+/* Destroy every outstanding natsMsg for a handle and free its ref row.
+ * MUST be called at every subscription-destroy site: a fetched natsMsg
+ * holds an unref'd msg->sub, so acking one after its sub is destroyed is a
+ * use-after-free. */
+void purge_msg_ref_row(uint16_t handle_idx);
 
 /* ── subscription config / lifecycle (nats_sub_config.c) ──────── */
 

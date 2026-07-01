@@ -242,6 +242,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	const char *val = NULL;
 	int key_len, val_len = 0;
 	unsigned long alloc_size;
+	kvOperation eff_op = op;
 
 	if (evi_kv_change_id == EVI_ERROR)
 		return;
@@ -257,6 +258,13 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 		val     = nats_dl.kvEntry_ValueString(entry);
 		val_len = nats_dl.kvEntry_ValueLen(entry);
 		if (!val) val_len = 0;
+		/* A server-side MaxAge/TTL expiry (and our own delete markers)
+		 * surface via cnats (<=3.12) as an empty-value Put.  The index
+		 * treats that as a REMOVE (_watch_index_action); raise it to EVI
+		 * subscribers as a delete too, so presence-tracking scripts see the
+		 * key vanish rather than a phantom "put" for a now-absent key. */
+		if (val_len == 0)
+			eff_op = kvOp_Delete;
 	}
 
 	/* Single shm allocation: struct + key\0 + [value\0] */
@@ -270,7 +278,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 		return;
 	}
 
-	ev->op       = op;
+	ev->op       = eff_op;
 	ev->revision = (int)nats_dl.kvEntry_Revision(entry);
 	ev->key_len  = key_len;
 	ev->val_len  = val_len;
@@ -296,13 +304,19 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	/* EVI not available at build time -- log the change instead */
 	const char *key = nats_dl.kvEntry_Key(entry);
 	const char *op_name;
+	kvOperation eff_op = op;
 
 	if (!key) {
 		LM_WARN("kv-change: entry has NULL key, skipping log\n");
 		return;
 	}
 
-	switch (op) {
+	/* Same empty-value-Put -> delete classification as the EVI path, so the
+	 * log agrees with the index's REMOVE semantics on a TTL tombstone. */
+	if (op == kvOp_Put && nats_dl.kvEntry_ValueLen(entry) == 0)
+		eff_op = kvOp_Delete;
+
+	switch (eff_op) {
 		case kvOp_Put:    op_name = "put";    break;
 		case kvOp_Delete: op_name = "delete"; break;
 		default:          op_name = "purge";  break;

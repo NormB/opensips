@@ -446,6 +446,12 @@ static int _fetch_batch(proc_sub_state_t *ss, int budget_ms,
 			nats_dl.natsSubscription_Unsubscribe(ss->sub);
 			nats_dl.natsSubscription_Destroy(ss->sub);
 			ss->sub = NULL;
+			/* The sub is gone; any fetched-but-un-acked natsMsg still in
+			 * this handle's ref row now holds a dangling msg->sub.  Purge
+			 * before the recreate so a late ack can't deref a freed sub
+			 * (UAF).  The broker redelivers un-acked messages on the new
+			 * subscription. */
+			purge_msg_ref_row(ss->handle_idx);
 		}
 		ss->dirty = 1;
 		hstat_add(ss->h_ref, &ss->h_ref->fetch_errors, 1);
@@ -913,33 +919,14 @@ static void tear_down_retired_subs(void)
 		 * Reclaim the process-local msg-ref row for this handle.  After
 		 * the subscription is destroyed no more acks can arrive for it,
 		 * but messages that were pushed to the ring and not yet acked
-		 * still hold a live natsMsg* in g_msg_refs[handle_idx].slots[*].
-		 * Normally those are released + destroyed on the ack drain path
-		 * (release_msg_ref + nats_dl.natsMsg_Destroy); here we must walk
-		 * the row ourselves, destroy every in-use natsMsg, then free the
-		 * row's slots buffer (calloc'd in ensure_row) and zero the row.
-		 * handle_idx is monotonic and never reused, so leaving the row
-		 * populated would leak both the slots buffer and the libnats
-		 * messages for the lifetime of the process.
+		 * still hold a live natsMsg* in g_msg_refs[handle_idx].slots[*]
+		 * whose msg->sub now dangles.  purge_msg_ref_row destroys every
+		 * in-use natsMsg, frees the row's slots buffer (calloc'd in
+		 * ensure_row) and zeroes the row -- otherwise a later ack would
+		 * deref the freed subscription and both the slots buffer and the
+		 * libnats messages would leak for the process lifetime.
 		 */
-		if (ss->handle_idx < NATS_REGISTRY_MAX_HANDLES) {
-			msg_ref_row_t *row = &g_msg_refs[ss->handle_idx];
-			if (row->slots) {
-				uint32_t i;
-				for (i = 0; i < row->capacity; i++) {
-					msg_ref_slot_t *slot = &row->slots[i];
-					if (slot->in_use && slot->msg) {
-						nats_dl.natsMsg_Destroy(slot->msg);
-						slot->msg    = NULL;
-						slot->in_use = 0;
-					}
-				}
-				free(row->slots);
-			}
-			row->slots     = NULL;
-			row->capacity  = 0;
-			row->next_slot = 0;
-		}
+		purge_msg_ref_row(ss->handle_idx);
 
 		if (h) {
 			/* Publish the teardown completion so the reaper can
@@ -1117,6 +1104,12 @@ void nats_consumer_proc_main(int rank)
 					nats_dl.natsSubscription_Unsubscribe(ss->sub);
 					nats_dl.natsSubscription_Destroy(ss->sub);
 					ss->sub = NULL;
+					/* Old-connection subscription is dead; every fetched
+					 * natsMsg still held in this handle's ref row now has a
+					 * dangling msg->sub.  Purge before the rebuild so a late
+					 * ack can't deref the freed sub (UAF); JetStream
+					 * redelivers the un-acked messages on reconnect. */
+					purge_msg_ref_row(ss->handle_idx);
 				}
 				ss->dirty = 1;
 			}

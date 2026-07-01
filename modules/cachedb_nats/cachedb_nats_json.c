@@ -1339,6 +1339,24 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	json_buf[data_len] = '\0';
 
 	nats_dl.kvEntry_Destroy(entry);
+
+	/* Fail closed on an embedded NUL.  data_len is the authoritative
+	 * kvEntry_ValueLen, but the downstream merge (_update_apply_and_cas)
+	 * measures the doc with strlen -- a doc carrying an embedded NUL would
+	 * be truncated at the NUL, merged, and CAS-written back as a
+	 * structurally-valid but SHORT document, silently dropping every
+	 * contact after the NUL.  The read/query path already rejects a raw NUL
+	 * via _json_parse_guard; mirror that here rather than laundering a
+	 * poison doc into a valid-looking truncated one. */
+	if ((int)strlen(json_buf) != data_len) {
+		LM_ERR("update: stored doc for key '%s' has an embedded NUL "
+			"(value %d bytes, strlen %d) -- refusing to merge/writeback "
+			"a truncated document\n",
+			target_key, data_len, (int)strlen(json_buf));
+		free(json_buf);
+		return -1;
+	}
+
 	*out_json = json_buf;
 	return 0;
 }

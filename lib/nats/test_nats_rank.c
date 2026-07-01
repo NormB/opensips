@@ -21,7 +21,8 @@ struct rank_case {
 
 static const struct rank_case cases[] = {
 	{ PROC_MAIN,      0, "PROC_MAIN (0, attendant)" },
-	{ PROC_TIMER,     0, "PROC_TIMER (-1)" },
+	{ PROC_TIMER,     1, "PROC_TIMER (-1) -- must init: usrloc/dialog "
+	                     "expiry events are raised here" },
 	{ PROC_MODULE,    1, "PROC_MODULE (-2, HTTPD/MI)" },
 	{ PROC_TCP_MAIN,  0, "PROC_TCP_MAIN (-4, TLS holder)" },
 	{ -3,             0, "rank -3 (module-exported)" },

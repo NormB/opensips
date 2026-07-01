@@ -592,9 +592,15 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			 * destroy immediately — we don't need it after this. */
 			const char *vs = nats_dl.kvEntry_ValueString(entry);
 			long long parsed;
+			char cur_txt[64];
 			errno = 0;
 			parsed = vs ? strtoll(vs, NULL, 10) : 0;
 			last_rev = nats_dl.kvEntry_Revision(entry);
+			/* Snapshot the value text for diagnostics BEFORE destroying the
+			 * entry: kvEntry_ValueString returns a pointer INTO the entry's
+			 * own buffer, so logging vs after kvEntry_Destroy would be a
+			 * use-after-free read. */
+			snprintf(cur_txt, sizeof(cur_txt), "%s", vs ? vs : "(null)");
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			/* Counters are 32-bit from the script API; a broker value
@@ -602,7 +608,7 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			 * overflow/truncate below.  Reject rather than wrap. */
 			if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
 				LM_ERR("counter '%s' stored value out of 32-bit range "
-					"('%s'); refusing op\n", key_buf, vs ? vs : "(null)");
+					"('%s'); refusing op\n", key_buf, cur_txt);
 				return -1;
 			}
 			current = parsed;
