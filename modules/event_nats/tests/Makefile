@@ -8,7 +8,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_partial_alloc test_seq_cast_guard \
+TESTS = test_partial_alloc test_seq_cast_guard test_mi_seq_u64 \
         test_atomic_stats test_subscription_rebuild \
         test_child_init_degrade test_mi_command_collision \
         test_inbound_backpressure test_inbound_drop_stats

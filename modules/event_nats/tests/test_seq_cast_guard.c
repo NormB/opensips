@@ -96,28 +96,41 @@ int main(void)
 	ASSERT(js_call_made == 1 && observed_seq == 1,
 		"guarded: js_GetMsg called with seq=1");
 
-	/* CASE 6: assert the guard is present in the production source */
+	/* CASE 6: the negative/zero-seq guard now lives in the shared
+	 * mi_get_seq_u64() helper (which also widens seq to a full uint64); both
+	 * MI commands route seq through it and reject its -2 "invalid" return. */
 	FILE *f = fopen("../nats_jetstream.c", "r");
 	ASSERT(f != NULL, "open ../nats_jetstream.c");
 	if (f) {
 		char line[512];
-		int found_get = 0, found_del = 0;
-		int in_get_fn = 0, in_del_fn = 0;
+		int helper_rejects = 0, get_uses = 0, del_uses = 0;
+		int in_get_fn = 0, in_del_fn = 0, in_helper = 0;
 		while (fgets(line, sizeof(line), f)) {
-			if (strstr(line, "mi_nats_msg_get(") ) in_get_fn = 1;
+			if (strstr(line, "mi_get_seq_u64(const mi_params_t"))
+				in_helper = 1;
+			if (strstr(line, "mi_nats_msg_get(")) {
+				in_helper = 0; in_get_fn = 1;
+			}
 			if (strstr(line, "mi_nats_msg_delete(")) {
 				in_get_fn = 0; in_del_fn = 1;
 			}
-			if (strstr(line, "if (seq_int <= 0)")) {
-				if (in_get_fn) found_get = 1;
-				if (in_del_fn) found_del = 1;
-			}
+			/* helper rejects a non-positive seq on both the int path
+			 * (si <= 0) and the strtoull path (v == 0). */
+			if (in_helper &&
+			    (strstr(line, "si <= 0") || strstr(line, "v == 0")))
+				helper_rejects = 1;
+			if (in_get_fn && strstr(line, "mi_get_seq_u64(params"))
+				get_uses = 1;
+			if (in_del_fn && strstr(line, "mi_get_seq_u64(params"))
+				del_uses = 1;
 		}
 		fclose(f);
-		ASSERT(found_get,
-			"guard 'if (seq_int <= 0)' present in mi_nats_msg_get");
-		ASSERT(found_del,
-			"guard 'if (seq_int <= 0)' present in mi_nats_msg_delete");
+		ASSERT(helper_rejects,
+			"mi_get_seq_u64 rejects a non-positive seq before the cast");
+		ASSERT(get_uses,
+			"mi_nats_msg_get routes seq through mi_get_seq_u64");
+		ASSERT(del_uses,
+			"mi_nats_msg_delete routes seq through mi_get_seq_u64");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

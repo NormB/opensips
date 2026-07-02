@@ -28,6 +28,8 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <nats/nats.h>
 
 #include "../../mem/mem.h"
@@ -1007,6 +1009,43 @@ mi_response_t *mi_nats_consumer_delete(const mi_params_t *params,
 	return init_mi_result_ok();
 }
 
+/* Parse the "seq" MI param as a full 64-bit stream sequence.  JetStream
+ * sequences are uint64; try_get_mi_int_param would cap them at INT_MAX and
+ * wrap a larger value.  Accept a JSON string ("5000000000") parsed with
+ * strtoull for the full range, and keep the JSON-number int path for
+ * back-compat (values <= INT_MAX).  Returns 0 with *out set (>=1), -1 if the
+ * param is missing, -2 if present but not a positive integer. */
+static int mi_get_seq_u64(const mi_params_t *params, uint64_t *out)
+{
+	char *s = NULL;
+	int   slen = 0;
+
+	if (try_get_mi_string_param((mi_params_t *)params, "seq", &s, &slen) == 0
+			&& slen > 0) {
+		char buf[24], *endp;
+		unsigned long long v;
+		if (slen >= (int)sizeof(buf))
+			return -2;
+		memcpy(buf, s, slen);
+		buf[slen] = '\0';
+		errno = 0;
+		v = strtoull(buf, &endp, 10);
+		if (endp == buf || *endp != '\0' || errno == ERANGE || v == 0)
+			return -2;
+		*out = (uint64_t)v;
+		return 0;
+	}
+	{
+		int si;
+		if (try_get_mi_int_param((mi_params_t *)params, "seq", &si) < 0)
+			return -1;
+		if (si <= 0)
+			return -2;
+		*out = (uint64_t)si;
+		return 0;
+	}
+}
+
 /* ── nats_msg_get ───────────────────────────────────────────── */
 
 mi_response_t *mi_nats_msg_get(const mi_params_t *params,
@@ -1020,21 +1059,23 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 	mi_item_t *resp_obj;
 	char *stream_name;
 	int stream_name_len;
-	int seq_int;
+	uint64_t seq;
+	int seq_rc;
 	char name_buf[256];
 
 	if (try_get_mi_string_param(params, "stream",
 			&stream_name, &stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("missing 'stream' parameter"));
-	if (try_get_mi_int_param(params, "seq", &seq_int) < 0)
+	seq_rc = mi_get_seq_u64(params, &seq);
+	if (seq_rc == -1)
 		return init_mi_error(400, MI_SSTR("missing 'seq' parameter"));
+	if (seq_rc == -2)
+		return init_mi_error(400, MI_SSTR("seq must be a positive integer"));
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
 	if (_valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
-	if (seq_int <= 0)
-		return init_mi_error(400, MI_SSTR("seq must be >= 1"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -1042,12 +1083,13 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = nats_dl.js_GetMsg(&msg, js, name_buf, (uint64_t)seq_int, NULL, &jerr);
+	s = nats_dl.js_GetMsg(&msg, js, name_buf, seq, NULL, &jerr);
 	if (s != NATS_OK || !msg) {
 		if (jerr == JS_ERR_MSG_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("message not found"));
-		LM_ERR("nats_dl.js_GetMsg(%s, %d) failed: %s (jerr=%d)\n",
-			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_GetMsg(%s, %llu) failed: %s (jerr=%d)\n",
+			name_buf, (unsigned long long)seq,
+			nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(404, MI_SSTR("message not found"));
 	}
 
@@ -1067,7 +1109,7 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 				data, data_len) < 0)
 			goto error;
 	}
-	if (add_mi_number(resp_obj, MI_SSTR("sequence"), (double)seq_int) < 0)
+	if (add_mi_number(resp_obj, MI_SSTR("sequence"), (double)seq) < 0)
 		goto error;
 
 	nats_dl.natsMsg_Destroy(msg);
@@ -1089,21 +1131,23 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 	natsStatus s;
 	char *stream_name;
 	int stream_name_len;
-	int seq_int;
+	uint64_t seq;
+	int seq_rc;
 	char name_buf[256];
 
 	if (try_get_mi_string_param(params, "stream",
 			&stream_name, &stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("missing 'stream' parameter"));
-	if (try_get_mi_int_param(params, "seq", &seq_int) < 0)
+	seq_rc = mi_get_seq_u64(params, &seq);
+	if (seq_rc == -1)
 		return init_mi_error(400, MI_SSTR("missing 'seq' parameter"));
+	if (seq_rc == -2)
+		return init_mi_error(400, MI_SSTR("seq must be a positive integer"));
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
 	if (_valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
-	if (seq_int <= 0)
-		return init_mi_error(400, MI_SSTR("seq must be >= 1"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
@@ -1111,12 +1155,13 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
-	s = nats_dl.js_DeleteMsg(js, name_buf, (uint64_t)seq_int, NULL, &jerr);
+	s = nats_dl.js_DeleteMsg(js, name_buf, seq, NULL, &jerr);
 	if (s != NATS_OK) {
 		if (jerr == JS_ERR_MSG_NOT_FOUND || jerr == JS_ERR_STREAM_NOT_FOUND)
 			return init_mi_error(404, MI_SSTR("message not found"));
-		LM_ERR("nats_dl.js_DeleteMsg(%s, %d) failed: %s (jerr=%d)\n",
-			name_buf, seq_int, nats_dl.natsStatus_GetText(s), (int)jerr);
+		LM_ERR("nats_dl.js_DeleteMsg(%s, %llu) failed: %s (jerr=%d)\n",
+			name_buf, (unsigned long long)seq,
+			nats_dl.natsStatus_GetText(s), (int)jerr);
 		return init_mi_error(500, MI_SSTR("DeleteMsg failed"));
 	}
 
