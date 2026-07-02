@@ -300,15 +300,31 @@ modparam("cachedb_nats", "kv_replicas", 1)
 	<section id="param_kv_history" xreflabel="kv_history">
 	<title><varname>kv_history</varname> (integer)</title>
 	<para>
-		The number of value revisions to retain per key.  A higher value
-		allows <function>nats_kv_history</function> to return more historical
-		entries and enables the CAS retry loop in atomic counter operations
-		to succeed under higher write contention.  This parameter only takes
-		effect when the bucket is first created.
+		The number of value revisions to retain per key.  This parameter
+		only takes effect when the bucket is first created.
+	</para>
+	<para>
+		<emphasis role="bold">Keep this at 1 for registration
+		buckets.</emphasis>  Server-side auto-expiry (the per-message TTL
+		that removes an expired registration on time) only works when the
+		bucket keeps no old versions: deleting the current version of a
+		key that has history simply uncovers the previous version, so the
+		record appears to come back from the dead instead of expiring.
+		The module therefore disables native TTL on a history-keeping
+		bucket (with a startup warning) and relies on the periodic cleanup
+		scan alone — correct, but up to
+		<varname>nats_reap_interval</varname> seconds later.  See
+		<varname>nats_ttl_allow_history</varname> for the (discouraged)
+		override.
+	</para>
+	<para>
+		Raise this only if your script uses
+		<function>nats_kv_history</function> to inspect old versions of
+		keys and you accept scan-only expiry.
 	</para>
 	<para>
 		<emphasis>
-			Default value is <quote>5</quote>.
+			Default value is <quote>1</quote> (current version only).
 		</emphasis>
 	</para>
 	<example>
@@ -981,6 +997,120 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</para>
 	<para>
 		<emphasis>Default value is <quote>0</quote> (reaper required).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_expired_linger" xreflabel="nats_expired_linger">
+	<title><varname>nats_expired_linger</varname> (integer)</title>
+	<para>
+		How long, in seconds, an <emphasis>expired</emphasis> registration
+		record stays physically present in the bucket after it stops being
+		served.  This is a retention-policy knob with
+		<emphasis role="bold">zero effect on call routing</emphasis>: once
+		a contact's time is up (plus the <varname>nats_reap_grace</varname>
+		clock-skew margin) it is never used again, whatever this is set to.
+	</para>
+	<para>
+		<emphasis role="bold">0</emphasis> (the default) deletes expired
+		records as promptly as possible — in practice about 1 second after
+		expiry (the NATS server's minimum per-message TTL), or on the next
+		cleanup-scan pass.  A value such as <emphasis role="bold">30</emphasis>
+		keeps each expired record around for ~30 more seconds, which is
+		useful when troubleshooting registration problems (the record stays
+		visible to <literal>nats kv get</literal> and
+		<function>nats_kv_history</function>) and damps delete/re-create
+		churn from endpoints that flap around their expiry time.
+	</para>
+	<para>
+		Cost of raising it: bucket size — roughly
+		<literal>expired-records-per-second × linger</literal> extra
+		records resident at any time.  A re-registration during the linger
+		window simply overwrites the lingering record; phones are never
+		locked out by it.  Range 0–86400; out-of-range values refuse
+		startup.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>0</quote> (reclaim as soon as
+		possible).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_native_ttl" xreflabel="nats_native_ttl">
+	<title><varname>nats_native_ttl</varname> (integer)</title>
+	<para>
+		Master switch for server-side auto-expiry (the per-message TTL the
+		module attaches to registration writes on NATS ≥ 2.11).
+		<emphasis role="bold">1</emphasis> (the default) uses it whenever
+		the server and bucket support it, falling back to the cleanup scan
+		automatically when they do not.
+		<emphasis role="bold">0</emphasis> never sets message TTLs and
+		relies on the cleanup scan alone; expired records then persist up
+		to ~<varname>nats_reap_interval</varname> seconds longer, but
+		nothing else changes.
+	</para>
+	<para>
+		Use <emphasis role="bold">0</emphasis> as a diagnostic or emergency
+		lever — e.g. while investigating suspected NATS-server misbehaviour —
+		without rebuilding or reconfiguring anything else.  Setting this to
+		0 <emphasis>and</emphasis> disabling the cleanup scan
+		(<varname>nats_reap_interval</varname> &lt;= 0) leaves no expiry
+		mechanism at all and is refused at startup.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>1</quote> (use native TTL when
+		available).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_ttl_allow_history" xreflabel="nats_ttl_allow_history">
+	<title><varname>nats_ttl_allow_history</varname> (integer)</title>
+	<para>
+		Advanced.  Overrides the safety rule that disables server-side
+		auto-expiry on buckets that keep old record versions
+		(<varname>kv_history</varname> &gt; 1 — see that parameter for why
+		the rule exists).  On the NATS servers we tested (2.11.x),
+		auto-expiry on such buckets is both <emphasis>late</emphasis>
+		(deletion happens up to <varname>kv_marker_ttl</varname> seconds
+		after the deadline rather than on time) and can transiently
+		<emphasis>resurface an older version</emphasis> of a record.  The
+		module's other safeguards contain the damage, but the behaviour is
+		surprising, so it is off unless you opt in.
+	</para>
+	<para>
+		Only set this to 1 if you must combine
+		<function>nats_kv_history</function> usage with auto-expiry on the
+		same bucket <emphasis>and</emphasis> you have verified your NATS
+		server version handles per-message expiry on history-keeping
+		buckets correctly.  If in doubt, leave it 0 — the cleanup-scan
+		fallback is always correct, just less prompt.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>0</quote> (history-keeping
+		buckets get scan-only expiry).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_kv_marker_ttl" xreflabel="kv_marker_ttl">
+	<title><varname>kv_marker_ttl</varname> (integer)</title>
+	<para>
+		Lifetime, in seconds, of the <quote>this was deleted</quote> note
+		(the NATS <emphasis>delete marker</emphasis>) the server leaves in
+		the bucket when it auto-deletes an expired record, so that other
+		&osips; instances watching the bucket find out about the deletion.
+		The note self-destructs after this many seconds.  Applied when the
+		module creates the bucket.
+	</para>
+	<para>
+		Raise it if you run several instances against one bucket and an
+		instance can be disconnected for longer than the default at a time —
+		the note must still be there when it reconnects, or its in-memory
+		search index can briefly go stale (it self-heals, but noisily).
+		Lower it only if bucket tidiness matters; the notes are a few bytes
+		each.  A value below <varname>nats_reap_grace</varname> earns a
+		startup warning; minimum 1.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>30</quote> (seconds).</emphasis>
 	</para>
 	</section>
 

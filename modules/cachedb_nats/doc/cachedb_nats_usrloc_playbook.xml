@@ -55,7 +55,7 @@
 				<term>Single DC, single broker</term>
 				<listitem><para>
 					<varname>kv_replicas = 1</varname>,
-					<varname>kv_history = 3</varname>,
+					<varname>kv_history = 1</varname>,
 					File storage.  Use this for development and
 					small single-DC deployments.  Restart hydration
 					is fast (one round-trip per key).
@@ -113,17 +113,28 @@
 				usrloc workloads.
 			</para></listitem>
 			<listitem><para><emphasis>History:</emphasis>
-				<varname>kv_history = 3</varname> is enough to give
-				operators a short audit trail of recent revisions
-				and to support
-				<function>nats_kv_history</function> calls in
-				routing logic.  Higher values multiply storage
-				without measurable benefit for usrloc.
+				<varname>kv_history = 1</varname> — required for
+				on-time native expiry.  A bucket that keeps old
+				revisions makes an expired key roll back to a
+				previous version instead of disappearing, so the
+				module disables server-side auto-expiry on it and
+				falls back to the periodic cleanup scan (correct,
+				but up to <varname>nats_reap_interval</varname>
+				seconds late).  Use a history-keeping bucket only
+				when routing logic genuinely needs
+				<function>nats_kv_history</function>, and keep it
+				OFF the registration bucket if possible.
 			</para></listitem>
 			<listitem><para><emphasis>TTL:</emphasis>
-				<varname>kv_ttl = 0</varname> (no automatic
-				expiry).  AoR expiration is driven by usrloc's
-				timer process, not by bucket-level TTL.
+				<varname>kv_ttl = 0</varname> (no bucket-wide
+				max age — it would delete permanent contacts; the
+				module refuses to start otherwise).  Per-AoR
+				expiry is native: each registration write carries
+				its own server-side TTL, with the cleanup scan
+				(<varname>nats_reap_interval</varname>) as the
+				safety net.  To keep expired records readable for
+				a while (forensics), see
+				<varname>nats_expired_linger</varname>.
 			</para></listitem>
 			<listitem><para><emphasis>Max bytes / max age:</emphasis>
 				NATS defaults are typically appropriate.  For
