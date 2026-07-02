@@ -484,7 +484,22 @@ static void _watcher_loop(void)
 		/* ---- Event loop ----
 		 * Process live KV updates until a reconnect or disconnect
 		 * invalidates the current watcher and KV handle. */
+		unsigned orphan_poll = 0;
 		while (atomic_load(&_watcher_running)) {
+			/* Orphan watchdog (dedicated_watcher_proc=1): if the parent
+			 * died and PR_SET_PDEATHSIG didn't fire, the kernel reparents us
+			 * to PID 1.  The NATS_TIMEOUT arm below also checks this, but a
+			 * broker delivering a steady update stream never times out -- so
+			 * poll here too, rate-limited (every 256 iterations) to keep
+			 * getppid() off the per-event hot path.  No-op for the rank-1
+			 * pthread variant (getppid() returns the master forever). */
+			if ((++orphan_poll & 0xFF) == 0 && getppid() == 1) {
+				LM_NOTICE("watcher: parent gone (reparented to init); "
+					"exiting\n");
+				atomic_store(&_watcher_running, 0);
+				break;
+			}
+
 			/* Check for reconnect -- epoch changed means connection
 			 * was lost and restored; our KV handle and watcher are
 			 * stale. Break out for a full rebuild. */

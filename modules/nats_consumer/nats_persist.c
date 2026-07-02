@@ -795,6 +795,30 @@ static char *build_config_from_json(cJSON *obj)
 		if (!c->string)
 			continue;
 
+		/* Sanitize the KEY with the same reject applied to values below: the
+		 * key is spliced verbatim into the "key=value;key=value" bind-config
+		 * (the fallback append_kv at the bottom of the loop uses c->string
+		 * directly), so an unknown key from a tampered persist file like
+		 * "x;id=evil" would forge extra config fields.  A legitimate
+		 * serialiser only emits identifier-like keys. */
+		{
+			const unsigned char *k = (const unsigned char *)c->string;
+			size_t i;
+			int bad = 0;
+			for (i = 0; k[i]; i++) {
+				if (k[i] < 0x20 || k[i] == 0x7F ||
+						k[i] == ';' || k[i] == '=') {
+					LM_WARN("nats_persist: rejecting field with illegal "
+						"key byte 0x%02x at offset %zu\n",
+						k[i], i);
+					bad = 1;
+					break;
+				}
+			}
+			if (bad)
+				continue;
+		}
+
 		/* "type" is a derived serialized field -- skip, since the parser
 		 * infers durable vs ephemeral from the presence of either key. */
 		if (strcmp(c->string, "type") == 0)

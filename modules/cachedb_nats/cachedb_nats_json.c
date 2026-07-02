@@ -79,6 +79,12 @@ static nats_idx_entry *_lookup(const char *field, int flen,
 	char fv_buf[1024];
 	int fv_len;
 
+	/* Guard negative lengths before the size math: a negative flen/vlen
+	 * could keep fv_len under the ceiling below yet sign-extend to a huge
+	 * size_t in memcpy (OOB).  Mirrors the other fv-builders. */
+	if (flen < 0 || vlen < 0)
+		return NULL;
+
 	fv_len = flen + 1 + vlen;
 	if (fv_len >= (int)sizeof(fv_buf))
 		return NULL;
@@ -99,9 +105,12 @@ static int _lookup_shard(const char *field, int flen,
 	const char *val, int vlen)
 {
 	char fv_buf[1024];
-	int fv_len = flen + 1 + vlen;
+	int fv_len;
 	unsigned int b;
 
+	if (flen < 0 || vlen < 0)
+		return -1;
+	fv_len = flen + 1 + vlen;
 	if (fv_len >= (int)sizeof(fv_buf))
 		return -1;
 	memcpy(fv_buf, field, flen);

@@ -426,6 +426,20 @@ static int build_consumer_config(nats_handle_t *h, proc_sub_state_t *ss,
 	domain_c     = nats_str_to_cstr(&h->js_domain);
 	api_prefix_c = nats_str_to_cstr(&h->api_prefix);
 
+	/* `stream` is required and parser-guaranteed non-empty, so a NULL cstr
+	 * here means nats_str_to_cstr hit OOM (not an empty source).  Fail the
+	 * build rather than hand nats.c a NULL Stream downstream (so.Stream /
+	 * js_AddConsumer would then dereference or error on it).  Likewise a
+	 * durable consumer needs its durable name. */
+	if (!stream_c ||
+	    (h->type == NATS_CONSUMER_DURABLE && !durable_c)) {
+		LM_ERR("nats_sub_config: OOM building required consumer cstr "
+			"(stream%s)\n",
+			(h->type == NATS_CONSUMER_DURABLE && !durable_c)
+				? "/durable" : "");
+		goto fail;
+	}
+
 	/* Render sample_freq as a string -- nats.c expects a C string here,
 	 * e.g. "25" for 25% sampling.  Only set when the script supplied
 	 * a non-zero value; zero means "disabled / don't sample".
