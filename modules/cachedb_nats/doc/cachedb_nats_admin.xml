@@ -1155,10 +1155,16 @@ if (nats_kv_get("calls", "$ci", $var(state), $var(rev))) {
 	<para>Return values:
 		<emphasis role="bold">1</emphasis> CAS succeeded;
 		<emphasis role="bold">-1</emphasis> error (connection,
-		permissions, etc);
-		<emphasis role="bold">-2</emphasis> CAS mismatch -- the key's
+		permissions, malformed publish, etc — <emphasis>not</emphasis>
+		retryable);
+		<emphasis role="bold">-2</emphasis> CAS mismatch — the key's
 		current revision is not <emphasis>expected_rev</emphasis>; a
-		concurrent writer beat us.  In script,
+		concurrent writer beat us, so re-read the revision and retry.
+		The two are now cleanly separated: -2 is returned only for a
+		genuine revision conflict (the broker's
+		<emphasis>wrong last sequence</emphasis> / jsErrCode 10071),
+		while any other failure is -1, so a CAS retry loop cannot spin
+		on a non-retryable error.  In script,
 		<emphasis>retcode</emphasis> is FALSE for both -1 and -2; if
 		you need to distinguish them inspect <varname>$retcode</varname>
 		directly.

@@ -743,7 +743,10 @@ opensips-cli -x mi nats_reconnect
                         in [0 .. 10 years] (capped to prevent int64 overflow when
                         converted to nanoseconds); <varname>seq</varname> for
                         <varname>nats_msg_get</varname> and
-                        <varname>nats_msg_delete</varname> must be ≥ 1.
+                        <varname>nats_msg_delete</varname> must be ≥ 1 and may be
+                        supplied as a JSON number (up to 2^31-1) or, for stream
+                        sequences beyond that, as a decimal string — the full
+                        64-bit range is honoured.
                     </para>
                 </listitem>
                 <listitem>
@@ -907,10 +910,11 @@ opensips-cli -x mi nats_reconnect
             <para>
                 Fetch a single message from
                 <emphasis>stream</emphasis> by stream sequence number.
-                <emphasis>seq</emphasis> must be ≥ 1; the input
-                validator rejects ≤ 0 with a 400.  Returns the
-                payload, headers, subject, and broker timestamp as
-                JSON.
+                <emphasis>seq</emphasis> must be ≥ 1 (a non-positive or
+                non-numeric value is rejected with a 400) and is parsed as a
+                full 64-bit value — pass it as a decimal string for sequences
+                beyond 2^31-1.  Returns the payload, headers, subject, and
+                broker timestamp as JSON.
             </para>
         </section>
 
@@ -921,8 +925,9 @@ opensips-cli -x mi nats_reconnect
             <para>
                 Delete a specific message from
                 <emphasis>stream</emphasis> by stream sequence
-                number.  <emphasis>seq</emphasis> must be ≥ 1.
-                Equivalent to
+                number.  <emphasis>seq</emphasis> must be ≥ 1 and is parsed as a
+                full 64-bit value (pass a decimal string for sequences beyond
+                2^31-1).  Equivalent to
                 <command moreinfo="none">nats stream rmm</command>.
             </para>
         </section>
