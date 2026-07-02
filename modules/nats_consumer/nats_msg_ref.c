@@ -130,7 +130,7 @@ int ensure_row(uint16_t handle_idx, uint32_t capacity)
 /* Reserve a slot, stash the natsMsg, return the packed ack_token.
  * On failure (no free slot) returns 0 and sets *ok to 0. */
 uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
-                              natsMsg *m, int *ok)
+                              int ack_wait_ms, natsMsg *m, int *ok)
 {
 	msg_ref_row_t  *row;
 	msg_ref_slot_t *slot;
@@ -140,6 +140,9 @@ uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
 	if (ensure_row(handle_idx, ring_capacity) < 0)
 		return 0;
 	row = &g_msg_refs[handle_idx];
+	/* Record the handle's ack_wait so the orphan reaper can scale its TTL
+	 * above it (a slow-but-live worker within ack_wait must not be reaped). */
+	row->ack_wait_ms = ack_wait_ms;
 
 	/* Scan from next_slot for a free slot.  The ring and the ref
 	 * table are the same size by construction, so if the ring ever
@@ -263,13 +266,24 @@ int reap_orphan_msg_refs(void)
 
 	for (h = 0; h < NATS_REGISTRY_MAX_HANDLES; h++) {
 		msg_ref_row_t *row = &g_msg_refs[h];
+		long long ttl_us;
 		if (!row->slots)
 			continue;
+		/* Scale the orphan TTL above the handle's ack_wait so a slow-but-live
+		 * worker still within its ack_wait window is never reaped (the broker
+		 * has not yet redelivered).  Floor at the 120s default; use twice the
+		 * ack_wait when that is larger. */
+		ttl_us = NATS_MSG_REF_ORPHAN_TTL_US;
+		if (row->ack_wait_ms > 0) {
+			long long w = 2LL * (long long)row->ack_wait_ms * 1000LL;
+			if (w > ttl_us)
+				ttl_us = w;
+		}
 		for (i = 0; i < row->capacity; i++) {
 			msg_ref_slot_t *slot = &row->slots[i];
 			if (!slot->in_use)
 				continue;
-			if (now - slot->claimed_at_us <= NATS_MSG_REF_ORPHAN_TTL_US)
+			if (now - slot->claimed_at_us <= ttl_us)
 				continue;
 			if (slot->msg)
 				nats_dl.natsMsg_Destroy(slot->msg);

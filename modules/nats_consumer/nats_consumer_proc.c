@@ -600,7 +600,8 @@ static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
 	 * ack_wait, by which time workers will (hopefully) have
 	 * caught up on their ack backlog. */
 	ack_token = store_msg_ref(ss->handle_idx,
-		nats_ring_capacity(ss->ring), m, &ref_ok);
+		nats_ring_capacity(ss->ring),
+		ss->h_ref ? ss->h_ref->ack_wait_ms : 0, m, &ref_ok);
 	if (!ref_ok) {
 		/* msg-ref table exhausted: the message was fetched but
 		 * can't be tracked for ack, so leave it un-acked and let

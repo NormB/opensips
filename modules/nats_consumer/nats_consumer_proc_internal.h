@@ -123,6 +123,7 @@ typedef struct msg_ref_row {
 	uint32_t         capacity;     /* 0 == row not allocated yet */
 	msg_ref_slot_t  *slots;        /* [capacity] */
 	uint32_t         next_slot;    /* round-robin hint */
+	int              ack_wait_ms;  /* handle ack_wait; drives the orphan TTL */
 } msg_ref_row_t;
 
 /* How often the main loop scans for orphans (cheap, but no need every tick). */
@@ -139,7 +140,7 @@ int ensure_row(uint16_t handle_idx, uint32_t capacity);
 /* Stash a natsMsg under a fresh ack token; *ok is cleared (and 0
  * returned) on table exhaustion. */
 uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
-	natsMsg *m, int *ok);
+	int ack_wait_ms, natsMsg *m, int *ok);
 /* Redeem an ack token; NULL if stale (generation mismatch) or unset. */
 natsMsg *release_msg_ref(uint64_t token);
 /* Reclaim slots older than the orphan TTL; returns the reap count. */

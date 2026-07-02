@@ -33,7 +33,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_async_request_skeleton test_async_request_inflight \
                   test_header_propagation test_start_time_roundtrip \
                   test_rpc_subject test_fetch_async_timerfd \
-                  test_persist_cross_process test_msg_ref_teardown test_msg_ref_gen_epoch \
+                  test_persist_cross_process test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
                   test_ring_xproc_wakeup test_rpc_ipc_generation test_rpc_reply_pin \
                   test_rpc_inbox_auth test_registry_lookup_ref \
@@ -51,7 +51,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_async_request_skeleton test_async_request_inflight \
      test_header_propagation test_start_time_roundtrip \
      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
-     test_msg_ref_teardown test_msg_ref_gen_epoch test_ring_bounded_spin \
+     test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
@@ -309,6 +309,7 @@ check: all
 	./test_persist_cross_process
 	./test_msg_ref_teardown
 	./test_msg_ref_gen_epoch
+	./test_orphan_ttl_ackwait
 	./test_ring_bounded_spin
 	./test_registry_ring_ref_safety
 	./test_ring_xproc_wakeup
@@ -352,7 +353,7 @@ clean:
 	      test_async_request_skeleton test_async_request_inflight \
 	      test_header_propagation test_start_time_roundtrip \
 	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
-	      test_msg_ref_teardown test_msg_ref_gen_epoch test_ring_bounded_spin \
+	      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
 	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
 	      test_rpc_ipc_generation test_rpc_inbox_auth \
 	      test_registry_lookup_ref test_consumer_proc_boot_retry \
@@ -392,3 +393,6 @@ smoke-tls: ./test_tls_mgm_consumer_smoke.sh
 
 smoke-multi-instance: ./test_multi_instance_durable.sh
 	./test_multi_instance_durable.sh
+
+test_orphan_ttl_ackwait: test_orphan_ttl_ackwait.c
+	$(CC) -g -O0 -Wall -o $@ $<
