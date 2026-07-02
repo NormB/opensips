@@ -159,7 +159,27 @@ cache_raw_query("nats", "KV BUCKET INFO", $var(info));
 | Command | Description |
 |---------|-------------|
 | `nats_kv_status` | Bucket name, replicas, history, TTL, connection state |
-| `nats_cdb_stats` | Snapshot of `cas_retry`, `cas_exhausted`, `create_doc`, `index_miss_kv` counters (per-process slots, summed). Used by the playbook for alerting (`cas_exhausted > 0` = lost writes; sustained `index_miss_kv` > 0 = cross-instance churn). |
+| `nats_cdb_stats` | Snapshot of the counter set (`cas_retry`, `cas_exhausted`, `create_doc`, `index_miss_kv`, `rows_reaped`, `contacts_pruned`, ...) plus the `reap_last_*` gauges — bucket-wide registration totals (keys/AoRs/contacts/active/permanent/due + pass timestamp/duration) recorded by every reaper pass at zero extra broker cost. Poll THIS for registration-count monitoring. Alerting: `cas_exhausted > 0` = lost writes; sustained `index_miss_kv > 0` = cross-instance churn. |
+| `nats_reg_summary [domains=1]` | High-level registration totals from a bucket scan: AoRs, contacts by state (active = would be served / expired-but-stored / permanent), soonest expiry, optional per-domain table. One round-trip per AoR — interactive use; monitoring should poll the `reap_last_*` gauges instead. |
+| `nats_reg_list [filter]` | Per-AoR listing. Filter = `;`-separated `key=value`: `aor=<glob>`, `domain=<host>` (case-insensitive), `ua=`/`contact=` (substring), `state=active|expired|permanent|all`, `expiring_within=<s>`, `min_contacts=<n>`, `sort=aor|expiry|contacts|last_mod`, `desc=1`, `limit` (≤200), `offset`. Unknown keys refuse the command. Ties always break by AoR, so pagination is deterministic. |
+| `nats_reg_show <aor>` | Everything stored for one AoR: each contact with all attributes + computed state/expires_in, and the row's KV metadata (revision, created, row_exp, schema_version). |
+| `nats_stream_list [filter]` | JetStream streams on the connected server: name, messages, bytes, subjects, consumers, storage; KV backing streams also report their derived bucket name. Filter: `name=<glob>`, `kv=1` (KV buckets only), `limit`/`offset`. |
+| `nats_stream_info <stream>` | One stream's full config + state — the direct operator check of the TTL preconditions on a bucket's backing stream (`allow_msg_ttl`, `max_msgs_per_subject`, `subject_delete_marker_ttl_s`, `max_age_s`) plus messages/bytes/seqs/consumers. |
+| `nats_kv_keys [filter]` | LIVE keys of any KV bucket (delete markers never listed). Filter: `bucket=<name>` (default: the module's), `key=<glob>`, `detail=1` (revision/created/size for the returned page), `limit` (≤200)/`offset`. Read-only: buckets are bound, never created — a typo'd name errors instead of materializing a stream. |
+
+Why here and not `ul_dump`: in full-sharing-cachedb mode usrloc frees its
+in-memory records after every flush, so usrloc's own MI is empty by design —
+the KV bucket is the only truth, and these commands read it directly (no
+search index required).
+
+**Output formats:** every command above defaults to structured JSON. Add
+`format=csv` (RFC 4180, CRLF, header record) or `format=txt` (TAB-separated,
+`# `-prefixed header) — as a filter key on the list commands, or as a
+trailing parameter on `nats_reg_summary`/`nats_reg_show`/`nats_stream_info`
+(`nats_reg_show alice@example.com csv`). Options: `eol=lf`, `header=0`. The
+table rides as one `data` string inside the usual JSON-RPC envelope
+(`jq -r '.result.data'` yields clean CSV/text; counts stay as JSON
+siblings). Unknown format values are refused, never silently ignored.
 
 ## License
 

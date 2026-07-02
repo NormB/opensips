@@ -1885,6 +1885,29 @@ xlog("bucket info: $var(info)\n");
 
 	<section id="exported_mi" xreflabel="Exported MI Functions">
 	<title>Exported MI Functions</title>
+	<para>
+		The observability commands (<function>nats_reg_*</function>,
+		<function>nats_stream_*</function>, <function>nats_kv_keys</function>)
+		default to structured JSON output and can render their result table
+		as <emphasis>CSV</emphasis> (RFC 4180: CRLF records, header first,
+		quote-and-double escaping) or <emphasis>plain text</emphasis>
+		(TAB-separated lines, <quote># </quote>-prefixed header) instead:
+		pass <literal>format=csv</literal> / <literal>format=txt</literal>
+		as a filter key on the list commands, or as an optional trailing
+		parameter on <function>nats_reg_summary</function> /
+		<function>nats_reg_show</function> /
+		<function>nats_stream_info</function> (e.g.
+		<literal>nats_reg_show alice@example.com csv</literal>; the
+		parameter also accepts <literal>csv;eol=lf;header=0</literal>).
+		The formatted table is returned as a single <varname>data</varname>
+		string inside the usual JSON-RPC envelope — line endings survive
+		JSON escaping exactly, so
+		<literal>| jq -r '.result.data'</literal> yields clean CSV/text
+		while counts such as <varname>matched</varname> stay directly
+		accessible as JSON.  Options: <literal>eol=lf</literal> (default is
+		CRLF), <literal>header=0</literal>.  An unrecognized format value
+		refuses the command rather than silently falling back to JSON.
+	</para>
 
 	<section id="mi_nats_kv_status" xreflabel="nats_kv_status">
 	<title><function moreinfo="none">nats_kv_status</function></title>
@@ -1976,6 +1999,21 @@ xlog("bucket info: $var(info)\n");
 			churn worth investigating.
 		</para></listitem>
 	</itemizedlist>
+	<para>
+		[OBS] It also carries the <varname>contacts_pruned</varname> counter
+		(individual expired bindings removed by the reaper's survivor-writes;
+		<varname>rows_reaped</varname> counts whole rows) and the
+		<varname>reap_last_*</varname> gauges — bucket-wide registration
+		totals recorded by the reaper's periodic pass at zero extra broker
+		cost: <varname>reap_last_run</varname> (epoch) /
+		<varname>_ms</varname> / <varname>_keys</varname> /
+		<varname>_aors</varname> / <varname>_contacts</varname> /
+		<varname>_active</varname> / <varname>_permanent</varname> /
+		<varname>_due</varname>.  These refresh every
+		<varname>nats_reap_interval</varname> seconds and are the
+		recommended monitoring feed for registration counts (poll this, not
+		<function>nats_reg_summary</function>, on large buckets).
+	</para>
 	<example>
 	<title><function>nats_cdb_stats</function> MI call</title>
 	<programlisting format="linespecific">
@@ -1987,6 +2025,239 @@ xlog("bucket info: $var(info)\n");
     "index_miss_kv": 3
 }
 	</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_reg_summary" xreflabel="nats_reg_summary">
+	<title><function moreinfo="none">nats_reg_summary</function></title>
+	<para>
+		High-level registration totals, computed by scanning the KV bucket
+		(the source of truth — in full-sharing-cachedb mode usrloc's own
+		<function>ul_dump</function> is empty by design, because records are
+		freed from memory after every flush).  Reports AoR and contact
+		counts split by state: <emphasis>active</emphasis> (would be served:
+		unexpired, or within the <varname>nats_reap_grace</varname> margin),
+		<emphasis>expired</emphasis> (still stored — lingering per
+		<varname>nats_expired_linger</varname>, or awaiting cleanup) and
+		<emphasis>permanent</emphasis>, plus the soonest upcoming expiry and
+		scan cost.  With the optional <varname>domains</varname>=1 parameter
+		it adds a per-domain breakdown (the part after the last
+		<quote>@</quote> of each AoR, compared case-insensitively).
+	</para>
+	<para>
+		The scan costs one round-trip per stored AoR; on very large buckets
+		prefer the free <varname>reap_last_*</varname> gauges in
+		<function>nats_cdb_stats</function> for monitoring, and reserve this
+		command for interactive use.
+	</para>
+	<example>
+	<title><function>nats_reg_summary</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_summary domains=1
+{
+    "bucket": "opensips",
+    "aors": 1204,
+    "contacts": 1350,
+    "active_contacts": 1297,
+    "expired_contacts": 41,
+    "permanent_contacts": 12,
+    "soonest_expiry": 1783000123,
+    "soonest_expiry_in": 17,
+    "scanned_keys": 1205,
+    "other_docs": 1,
+    "scan_ms": 342,
+    "domains": [{
+        "domain": "example.com",
+        "aors": 980, "contacts": 1101, "active_contacts": 1080
+    }]
+}
+</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_reg_list" xreflabel="nats_reg_list">
+	<title><function moreinfo="none">nats_reg_list</function></title>
+	<para>
+		Per-AoR registration listing with filtering, sorting and pagination.
+		Takes one optional <varname>filter</varname> string of
+		<quote>;</quote>-separated <literal>key=value</literal> pairs:
+	</para>
+	<itemizedlist>
+		<listitem><para><literal>aor=&lt;glob&gt;</literal> — shell-style
+			wildcard over the AoR (e.g.
+			<literal>aor=*@example.com</literal>)</para></listitem>
+		<listitem><para><literal>domain=&lt;host&gt;</literal> —
+			case-insensitive exact match on the AoR's domain
+			part</para></listitem>
+		<listitem><para><literal>ua=&lt;substring&gt;</literal> /
+			<literal>contact=&lt;substring&gt;</literal> — substring match
+			over a contact's user-agent / contact URI</para></listitem>
+		<listitem><para><literal>state=active|expired|permanent|all</literal>
+			— rows having at least one contact in that state; default
+			<literal>active</literal></para></listitem>
+		<listitem><para><literal>expiring_within=&lt;secs&gt;</literal> —
+			rows whose next expiry is at most this far away</para></listitem>
+		<listitem><para><literal>min_contacts=&lt;n&gt;</literal> — rows
+			holding at least n stored contacts</para></listitem>
+		<listitem><para><literal>sort=aor|expiry|contacts|last_mod</literal>
+			(+ <literal>desc=1</literal>) — <literal>expiry</literal> puts
+			whatever dies next first; ties always break by AoR ascending, so
+			pagination is deterministic</para></listitem>
+		<listitem><para><literal>limit=&lt;n&gt;</literal> (default 50,
+			hard cap 200 — MI datagram size) and
+			<literal>offset=&lt;n&gt;</literal></para></listitem>
+	</itemizedlist>
+	<para>
+		An unknown key or malformed value refuses the whole command (a
+		mistyped filter must never silently list the wrong subset).
+	</para>
+	<example>
+	<title><function>nats_reg_list</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_list 'domain=example.com;sort=expiry;limit=2'
+{
+    "matched": 980, "returned": 2, "offset": 0,
+    "scanned_aors": 1204, "scan_ms": 358,
+    "aors": [{
+        "aor": "bob@example.com",
+        "contacts": 1, "active": 1, "expired": 0, "permanent": 0,
+        "expires_next": 1783000123, "expires_in": 17,
+        "last_mod": 1782996523
+    }, ...]
+}
+</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_reg_show" xreflabel="nats_reg_show">
+	<title><function moreinfo="none">nats_reg_show</function></title>
+	<para>
+		Full detail of one AoR: every stored contact with all its attributes
+		(contact URI, expires, q, callid, cseq, user-agent, socket, received,
+		path, flags, last_mod, ...), each annotated with its computed
+		<varname>state</varname> and <varname>expires_in</varname>, plus the
+		row's KV metadata (revision, created timestamp,
+		<varname>row_exp</varname>, <varname>schema_version</varname>) — the
+		support view for <quote>what exactly does the cluster believe about
+		this subscriber?</quote>.
+	</para>
+	<example>
+	<title><function>nats_reg_show</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_show alice@example.com
+{
+    "aor": "alice@example.com",
+    "key": "json_alice=40example.com",
+    "revision": 7, "created": 1782996520,
+    "row_exp": 1783000123, "schema_version": 1,
+    "contacts": [{
+        "id": "c2lwOmFsaWNlQDEwLjAuMC4x",
+        "contact": "sip:alice@10.0.0.1:5060",
+        "expires": 1783000123, "ua": "Yealink T54W",
+        "state": "active", "expires_in": 17, ...
+    }]
+}
+</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_stream_list" xreflabel="nats_stream_list">
+	<title><function moreinfo="none">nats_stream_list</function></title>
+	<para>
+		Lists the JetStream streams on the connected server: name, message
+		and byte counts, subject and consumer counts, storage type.  A KV
+		bucket's backing stream (<literal>KV_&lt;bucket&gt;</literal>) also
+		reports the derived <varname>kv_bucket</varname> name, so operators
+		can think in bucket terms.  Optional <varname>filter</varname>
+		string (<quote>;</quote>-separated <literal>key=value</literal>):
+		<literal>name=&lt;glob&gt;</literal>, <literal>kv=1</literal> (KV
+		backing streams only), <literal>limit</literal> (default 50, cap
+		200) and <literal>offset</literal>.  Results sort by name, so
+		pagination is deterministic.
+	</para>
+	<example>
+	<title><function>nats_stream_list</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_stream_list 'kv=1'
+{
+    "matched": 2, "returned": 2, "offset": 0,
+    "streams": [{
+        "name": "KV_opensips", "kv_bucket": "opensips",
+        "messages": 1204, "bytes": 612480,
+        "subjects": 1204, "consumers": 1, "storage": "file"
+    }, ...]
+}
+</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_stream_info" xreflabel="nats_stream_info">
+	<title><function moreinfo="none">nats_stream_info</function></title>
+	<para>
+		Full configuration and state of one stream — the direct operator
+		check of the native-expiry preconditions on a registration bucket's
+		backing stream: <varname>allow_msg_ttl</varname> must be true,
+		<varname>max_msgs_per_subject</varname> must be 1 and
+		<varname>max_age_s</varname> must be 0 for on-time per-key TTL (see
+		the <varname>kv_history</varname> parameter for why), with
+		<varname>subject_delete_marker_ttl_s</varname> showing the deletion
+		notes' lifetime.  State reports messages, bytes, first/last
+		sequence, subject count, deleted count and consumers.
+	</para>
+	<example>
+	<title><function>nats_stream_info</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_stream_info KV_opensips
+{
+    "name": "KV_opensips", "kv_bucket": "opensips",
+    "config": {
+        "subjects": ["$KV.opensips.&gt;"],
+        "storage": "file", "retention": "limits", "replicas": 1,
+        "max_msgs_per_subject": 1, "max_age_s": 0,
+        "allow_msg_ttl": true, "subject_delete_marker_ttl_s": 30
+    },
+    "state": {
+        "messages": 1204, "bytes": 612480,
+        "first_seq": 88213, "last_seq": 91240,
+        "subjects": 1204, "deleted": 0, "consumers": 1
+    }
+}
+</programlisting>
+	</example>
+	</section>
+
+	<section id="mi_nats_kv_keys" xreflabel="nats_kv_keys">
+	<title><function moreinfo="none">nats_kv_keys</function></title>
+	<para>
+		Lists the LIVE keys of a KV bucket — server-side delete markers are
+		never listed, so what this returns is what a reader can actually
+		Get.  Optional <varname>filter</varname> string:
+		<literal>bucket=&lt;name&gt;</literal> (default: the module's
+		<varname>kv_bucket</varname>), <literal>key=&lt;glob&gt;</literal>,
+		<literal>detail=1</literal> (adds revision / created / value size
+		for each RETURNED key — one extra round-trip per key, bounded by
+		the limit cap), <literal>limit</literal> (default 50, cap 200) and
+		<literal>offset</literal>.  Keys sort by name.
+	</para>
+	<para>
+		Read-only by construction: the bucket is <emphasis>bound</emphasis>,
+		never created, so a mistyped bucket name returns
+		<quote>no such bucket</quote> instead of materializing an empty
+		stream on the server.
+	</para>
+	<example>
+	<title><function>nats_kv_keys</function> MI call</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_kv_keys 'key=json_alice*;detail=1'
+{
+    "bucket": "opensips", "live_keys": 1204,
+    "matched": 1, "returned": 1, "offset": 0,
+    "keys": [{
+        "key": "json_alice=40example.com",
+        "revision": 7, "created": 1782996520, "size": 402
+    }]
+}
+</programlisting>
 	</example>
 	</section>
 
