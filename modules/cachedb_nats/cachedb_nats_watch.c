@@ -433,43 +433,44 @@ static void _watcher_loop(void)
 			continue;
 		}
 
-		/* index_resync_on_reconnect (default 1): rebuild the JSON
-		 * index in full from KV. The query path has stale-entry
-		 * self-heal, so operators may opt out of the O(N) rebuild
-		 * for hot-reconnect topologies and accept a brief window
-		 * where queries may evict a few stale entries before the
-		 * index converges. */
-		{
-			if (index_resync_on_reconnect)
-				nats_json_index_rebuild(kv, fts_json_prefix);
-			else
-				LM_DBG("watcher: index_resync_on_reconnect=0; "
-					"skipping post-reconnect rebuild and "
-					"deferring to lazy self-heal\n");
-		}
-
-		/* ---- Create kvWatcher ----
-		 * Set UpdatesOnly so we only receive mutations after the
-		 * current revision (the full state was already loaded via
-		 * the index_rebuild above). */
+		/* ---- Create the kvWatcher BEFORE the snapshot rebuild ----
+		 * UpdatesOnly delivers only mutations from the subscribe point
+		 * onward.  Subscribing FIRST means any Put/Delete that lands during
+		 * the (potentially slow, O(N)) rebuild below is captured in the
+		 * watcher's pending queue and applied by the consume loop after the
+		 * index swap -- closing the (snapshot, subscribe) window that would
+		 * otherwise drop those mutations from the FTS index until the next
+		 * reconnect.  The overlap (a key present in both the snapshot and a
+		 * buffered update) is idempotent: _entry_add_key dedups on the
+		 * interned key and the remove paths are membership-gated.
+		 *
+		 * Create into a local handle, then publish it atomically -- libnats
+		 * wants a plain kvWatcher**, so we cannot pass &_watcher (_Atomic). */
 		nats_dl.kvWatchOptions_Init(&opts);
 		opts.UpdatesOnly = true;
-
-		/* Create into a local handle, then publish it atomically.
-		 * libnats wants a plain kvWatcher**, so we cannot pass
-		 * &_watcher (it is _Atomic). */
 		w = NULL;
 		s = nats_dl.kvStore_WatchMulti(&w, kv,
 			_watch_patterns, _num_patterns, &opts);
-
 		if (s != NATS_OK) {
 			LM_ERR("watcher: kvStore_WatchMulti failed: %s, "
 				"retrying in 2s\n", nats_dl.natsStatus_GetText(s));
 			sleep(2);
 			continue;
 		}
-
 		atomic_store(&_watcher, w);
+
+		/* index_resync_on_reconnect (default 1): rebuild the JSON index in
+		 * full from KV, now that the watcher above is already capturing
+		 * concurrent mutations.  The query path has stale-entry self-heal, so
+		 * operators may opt out of the O(N) rebuild for hot-reconnect
+		 * topologies and accept a brief window where queries may evict a few
+		 * stale entries before the index converges. */
+		if (index_resync_on_reconnect)
+			nats_json_index_rebuild(kv, fts_json_prefix);
+		else
+			LM_DBG("watcher: index_resync_on_reconnect=0; "
+				"skipping post-reconnect rebuild and "
+				"deferring to lazy self-heal\n");
 
 		/* Count every (re)build after the initial one as a restart:
 		 * the loop only re-enters here after a reconnect/disconnect tore
