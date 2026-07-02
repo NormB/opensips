@@ -75,6 +75,8 @@
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
 #include "cachedb_nats_ttl.h"      /* nats_kv_key_to_subject(), NATS_KV_OP_DEL — P9 reaper CAS-delete */
+#include "cachedb_nats_reg.h"      /* [OBS] registration MI + reap-pass gauges */
+#include "cachedb_nats_kvobs.h"    /* [KVOBS] generic stream/KV introspection MI */
 #include "cachedb_nats_reaper.h"   /* _reap_interval_guard() — P9 reaper host gate */
 #include "../../lib/nats/nats_pool.h"
 #include "../../timer.h"
@@ -457,6 +459,47 @@ static const mi_export_t mi_cmds[] = {
 	},
 	{"nats_map_migrate", 0, 0, 0, {
 		{mi_nats_map_migrate, {0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	/* [OBS] registration observability — usrloc's own MI is empty by
+	 * design in full-sharing-cachedb mode; the KV bucket is the truth. */
+	{"nats_reg_summary", 0, 0, 0, {
+		{mi_nats_reg_summary, {0}},
+		{mi_nats_reg_summary, {"domains", 0}},
+		{mi_nats_reg_summary, {"domains", "format", 0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	{"nats_reg_list", 0, 0, 0, {
+		{mi_nats_reg_list, {0}},
+		{mi_nats_reg_list, {"filter", 0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	{"nats_reg_show", 0, 0, 0, {
+		{mi_nats_reg_show, {"aor", 0}},
+		{mi_nats_reg_show, {"aor", "format", 0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	/* [KVOBS] generic stream/KV introspection (read-only; buckets are
+	 * bound, never created). */
+	{"nats_stream_list", 0, 0, 0, {
+		{mi_nats_stream_list, {0}},
+		{mi_nats_stream_list, {"filter", 0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	{"nats_stream_info", 0, 0, 0, {
+		{mi_nats_stream_info, {"stream", 0}},
+		{mi_nats_stream_info, {"stream", "format", 0}},
+		{EMPTY_MI_RECIPE}},
+		{0}
+	},
+	{"nats_kv_keys", 0, 0, 0, {
+		{mi_nats_kv_keys, {0}},
+		{mi_nats_kv_keys, {"filter", 0}},
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
@@ -1138,8 +1181,15 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	 * operator's retention window -- without the linger term the reaper
 	 * would reclaim rows the TTL path was told to keep. */
 	const int slack = nats_reap_grace + nats_expired_linger;
+	/* [OBS/D-OBS-2] pass gauges: the scan below Gets every prefixed key
+	 * anyway, so bucket-wide registration totals are free here.  "active"
+	 * uses grace only (visibility semantics), independent of the slack. */
+	long g_keys = 0, g_aors = 0, g_contacts = 0, g_active = 0,
+	     g_perm = 0, g_due = 0;
+	struct timespec g_t0, g_t1;
 
 	(void)ticks; (void)param;
+	clock_gettime(CLOCK_MONOTONIC, &g_t0);
 
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -1170,7 +1220,7 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		const char *key = keys.Keys[i];
 		kvEntry *e = NULL;
 		const char *val;
-		int vlen, n_surv = 0, plen = 0, p_all_same = 0;
+		int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
 		int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
 		uint64_t rev;
 		char *proj;
@@ -1180,11 +1230,28 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		/* only our usrloc rows; never touch another consumer's keys. */
 		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
 			continue;
+		g_keys++;
 		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
 			continue;                     /* mid-delete / vanished -> skip */
 		val = nats_dl.kvEntry_ValueString(e);
 		vlen = nats_dl.kvEntry_ValueLen(e);
 		rev = nats_dl.kvEntry_Revision(e);
+
+		/* [OBS] pass gauges (visibility semantics: grace only); n_before
+		 * feeds the contacts_pruned tally in the survivors branch. */
+		n_before = 0;
+		{
+			struct reg_row_info g_ri;
+			if (val && vlen > 0 &&
+			    _reg_row_scan(val, vlen, now, nats_reap_grace,
+					NULL, 0, NULL, 0, &g_ri) == 0) {
+				g_aors++;
+				g_contacts += g_ri.n_contacts;
+				g_active   += g_ri.n_active;
+				g_perm     += g_ri.n_perm;
+				n_before = g_ri.n_contacts;
+			}
+		}
 
 		/* cheap due-gate: skip permanent / not-yet-due rows without a
 		 * full reprojection (row_exp == min contact expiry). */
@@ -1192,6 +1259,7 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			nats_dl.kvEntry_Destroy(e);
 			continue;
 		}
+		g_due++;
 		proj = _reap_project_survivors(val, vlen, now, slack,
 			&n_surv, &plen, &p_row_exp, &p_all_same);
 		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
@@ -1216,6 +1284,10 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 					p_row_exp, n_surv, p_all_same, slack,
 					&newrev) == 0) {
 				NATS_CDB_STATS_INC(rows_reaped);
+				/* [OBS] bindings physically removed by this survivor-write */
+				if (n_before > n_surv)
+					NATS_CDB_STATS_ADD(contacts_pruned,
+						n_before - n_surv);
 				reaped++;
 			}
 			/* CAS conflict / error: a concurrent writer won; retry next tick */
@@ -1223,6 +1295,20 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		free(proj);
 	}
 	nats_dl.kvKeysList_Destroy(&keys);
+
+	/* [OBS/D-OBS-2] publish the pass gauges (single writer: this process) */
+	clock_gettime(CLOCK_MONOTONIC, &g_t1);
+	NATS_CDB_STATS_SET(reap_last_run, (unsigned long)time(NULL));
+	NATS_CDB_STATS_SET(reap_last_ms,
+		(g_t1.tv_sec - g_t0.tv_sec) * 1000
+		+ (g_t1.tv_nsec - g_t0.tv_nsec) / 1000000);
+	NATS_CDB_STATS_SET(reap_last_keys, g_keys);
+	NATS_CDB_STATS_SET(reap_last_aors, g_aors);
+	NATS_CDB_STATS_SET(reap_last_contacts, g_contacts);
+	NATS_CDB_STATS_SET(reap_last_active, g_active);
+	NATS_CDB_STATS_SET(reap_last_permanent, g_perm);
+	NATS_CDB_STATS_SET(reap_last_due, g_due);
+
 	if (reaped)
 		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
 }

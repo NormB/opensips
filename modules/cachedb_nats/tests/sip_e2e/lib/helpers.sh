@@ -195,6 +195,19 @@ probe_binding() {
     fi
 }
 
+# [FMT] extract the raw .result.data blob from an MI JSON reply (csv/txt
+# formats ride as ONE string field; JSON escaping preserves CR/LF exactly).
+mi_data() {
+    printf '%s' "$1" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    sys.stdout.write(d.get("result", {}).get("data", ""))
+except Exception:
+    pass
+'
+}
+
 # ── log assertions ──────────────────────────────────────────────
 log_contains() {
     grep -q -- "$1" "$WORKDIR/opensips.log"

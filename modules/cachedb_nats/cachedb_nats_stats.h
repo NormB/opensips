@@ -95,6 +95,25 @@ typedef struct _nats_cdb_stats {
 	 * survivors.  The authoritative expiry mechanism; counts actual reclaims,
 	 * not scan passes. */
 	_Atomic unsigned long rows_reaped;
+	/* [OBS/D-OBS-2]: expired contacts pruned out of surviving rows by the
+	 * reaper's survivor-writes (rows_reaped counts rows; this counts the
+	 * individual bindings removed). */
+	_Atomic unsigned long contacts_pruned;
+	/* [OBS/D-OBS-2] last-reap-pass GAUGES (stores, not increments): the
+	 * reaper already Gets every key each pass, so recording bucket totals
+	 * here gives monitoring a registration time series every
+	 * nats_reap_interval seconds at zero extra broker load.  Written only
+	 * by the timer process' slot, so the cross-slot SUM used by the MI
+	 * emission still yields the plain value.  "active" mirrors the read
+	 * filter (expires==0 or expires+grace>now [D-OBS-4]). */
+	_Atomic unsigned long reap_last_run;        /* epoch of last pass       */
+	_Atomic unsigned long reap_last_ms;         /* pass duration            */
+	_Atomic unsigned long reap_last_keys;       /* prefixed keys enumerated */
+	_Atomic unsigned long reap_last_aors;       /* usrloc rows seen         */
+	_Atomic unsigned long reap_last_contacts;   /* stored contacts          */
+	_Atomic unsigned long reap_last_active;     /* would-be-served contacts */
+	_Atomic unsigned long reap_last_permanent;  /* permanent contacts       */
+	_Atomic unsigned long reap_last_due;        /* rows past their slack    */
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
@@ -138,6 +157,21 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 #define NATS_CDB_STATS_INC(field) do { \
 	nats_cdb_stats_t *_s = nats_cdb_stats_slot(); \
 	if (_s) atomic_fetch_add_explicit(&_s->field, 1, \
+		memory_order_relaxed); \
+} while (0)
+
+/* [OBS] add N at once (reaper contact-prune tallies). */
+#define NATS_CDB_STATS_ADD(field, n) do { \
+	nats_cdb_stats_t *_s = nats_cdb_stats_slot(); \
+	if (_s) atomic_fetch_add_explicit(&_s->field, (unsigned long)(n), \
+		memory_order_relaxed); \
+} while (0)
+
+/* [OBS/D-OBS-2] gauge STORE (last-reap-pass observations; one writer --
+ * the timer process -- so a plain relaxed store is exact). */
+#define NATS_CDB_STATS_SET(field, v) do { \
+	nats_cdb_stats_t *_s = nats_cdb_stats_slot(); \
+	if (_s) atomic_store_explicit(&_s->field, (unsigned long)(v), \
 		memory_order_relaxed); \
 } while (0)
 

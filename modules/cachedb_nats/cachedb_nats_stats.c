@@ -129,6 +129,36 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("rows_reaped"),
 		NATS_CDB_STATS_SUM(rows_reaped)) < 0)
 		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("contacts_pruned"),
+		NATS_CDB_STATS_SUM(contacts_pruned)) < 0)
+		goto error;
+	/* [OBS/D-OBS-2] last-reap-pass gauges: a free registration time series
+	 * refreshed every nats_reap_interval seconds (0s across the board until
+	 * the first pass). */
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_run"),
+		NATS_CDB_STATS_SUM(reap_last_run)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_ms"),
+		NATS_CDB_STATS_SUM(reap_last_ms)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_keys"),
+		NATS_CDB_STATS_SUM(reap_last_keys)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_aors"),
+		NATS_CDB_STATS_SUM(reap_last_aors)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_contacts"),
+		NATS_CDB_STATS_SUM(reap_last_contacts)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_active"),
+		NATS_CDB_STATS_SUM(reap_last_active)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_permanent"),
+		NATS_CDB_STATS_SUM(reap_last_permanent)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_last_due"),
+		NATS_CDB_STATS_SUM(reap_last_due)) < 0)
+		goto error;
 
 	return resp;
 
