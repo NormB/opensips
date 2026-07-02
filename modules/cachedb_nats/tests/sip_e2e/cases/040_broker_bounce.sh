@@ -7,14 +7,27 @@
 # down without touching the suite-level broker.
 case_begin "040_broker_bounce"
 
-if ! command -v nats-server >/dev/null 2>&1; then
+# Resolve nats-server robustly.  On Debian it installs to /usr/sbin, which is
+# often NOT on a non-login shell's PATH, so a bare `command -v nats-server`
+# spuriously reports it missing.  Honour an explicit BOUNCE_NATS_BIN override,
+# then search PATH and the usual absolute locations.
+if [ -z "${BOUNCE_NATS_BIN:-}" ]; then
+    for _cand in nats-server /usr/sbin/nats-server /usr/local/bin/nats-server \
+                 /usr/bin/nats-server /usr/local/sbin/nats-server; do
+        if command -v "$_cand" >/dev/null 2>&1; then
+            BOUNCE_NATS_BIN="$(command -v "$_cand")"
+            break
+        fi
+    done
+fi
+if [ -z "${BOUNCE_NATS_BIN:-}" ]; then
     check "nats-server available for disposable broker" fail \
         "skipping — install nats-server for this case"
     return 0
 fi
+export BOUNCE_NATS_BIN
 
 BOUNCE_NATS_PORT=4322
-BOUNCE_NATS_BIN="nats-server"
 BOUNCE_NATS_JS="$WORKDIR/bounce_jsdir"
 mkdir -p "$BOUNCE_NATS_JS"
 
