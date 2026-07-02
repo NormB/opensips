@@ -55,6 +55,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
+#include "cachedb_nats_ttl.h"   /* nats_kv_put_row + enum ttl_outcome (CAS classify) */
 #include "../../lib/nats/nats_str.h"
 #include "../../mi/mi.h"
 #include "../../mi/item.h"
@@ -640,8 +641,7 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
                      str *value, int *expected_rev)
 {
 	kvStore *kv;
-	natsStatus s;
-	uint64_t new_rev;
+	uint64_t new_rev = 0;
 	char bucket_buf[NATS_NATIVE_KEY_BUF];
 	char key_buf[NATS_NATIVE_KEY_BUF];
 	char val_buf[NATS_NATIVE_VAL_BUF];
@@ -692,20 +692,35 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	s = nats_dl.kvStore_UpdateString(&new_rev, kv, key_buf, val_ptr,
-		(uint64_t)*expected_rev);
-	if (val_heap) pkg_free(val_ptr);
+	/* Route the CAS through nats_kv_put_row (js_PublishMsg with
+	 * ExpectLastSubjectSeq == *expected_rev -- byte-for-byte the optimistic
+	 * check kvStore_UpdateString(rev) performs) rather than
+	 * kvStore_UpdateString itself.  js_PublishMsg returns the numeric
+	 * jsErrCode inline, so we can distinguish a genuine revision conflict
+	 * (10071 -> TTL_RETRY -> -2, the caller re-reads and retries) from a
+	 * generic/transient failure (-1, not retryable).  The old path collapsed
+	 * every NATS_ERR into -2, so a script CAS loop could spin on a
+	 * non-retryable error.  ttl=0: a plain CAS update, no per-message TTL.
+	 * got_entry=1 / value_len=1: an existing (non-marker) row updated at rev. */
+	{
+		jsCtx *js = nats_pool_get_js();
+		enum ttl_outcome o = nats_kv_put_row(js, kv,
+			bucket_buf[0] ? bucket_buf : kv_bucket, key_buf,
+			val_ptr, value->len > 0 ? value->len : 0,
+			/*got_entry=*/1, /*value_len=*/1,
+			(uint64_t)*expected_rev, /*msg_ttl_ms=*/0, &new_rev);
+		if (val_heap) pkg_free(val_ptr);
 
-	if (s == NATS_ERR || s == NATS_MISMATCH) {
-		/* nats.c returns NATS_ERR with "wrong last sequence" on mismatch */
-		LM_DBG("CAS mismatch for '%s' (expected rev %d)\n",
-			key_buf, *expected_rev);
-		return -2;
-	}
-	if (s != NATS_OK) {
-		LM_ERR("kvStore_UpdateString failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
-		return -1;
+		if (o == TTL_RETRY) {
+			LM_DBG("CAS mismatch for '%s' (expected rev %d)\n",
+				key_buf, *expected_rev);
+			return -2;
+		}
+		if (o != TTL_DONE) {
+			LM_ERR("kv update CAS failed for '%s' (outcome %d)\n",
+				key_buf, (int)o);
+			return -1;
+		}
 	}
 
 	LM_DBG("nats_kv_update '%s' rev=%llu (was %d)\n",
