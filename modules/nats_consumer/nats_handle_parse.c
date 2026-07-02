@@ -142,11 +142,17 @@ static int parse_int(const char *s, int len, int *out)
 static int parse_uint64(const char *s, int len, uint64_t *out)
 {
 	char buf[32];
-	char *end;
+	char *end, *q;
 	unsigned long long v;
 	if (len <= 0 || len >= (int)sizeof(buf)) return -1;
 	memcpy(buf, s, len);
 	buf[len] = '\0';
+	/* strtoull silently wraps a negative ("-1" -> UINT64_MAX) with no errno.
+	 * For an unsigned config field that is a typo/adversarial value, not a
+	 * huge count -- reject a leading sign (after optional whitespace). */
+	q = buf;
+	while (*q == ' ' || *q == '\t') q++;
+	if (*q == '-' || *q == '+') return -1;
 	errno = 0;
 	v = strtoull(buf, &end, 10);
 	if (errno != 0 || *end != '\0') return -1;

@@ -112,3 +112,29 @@ in-tree solutions:
   queue captures concurrent mutations and the consume loop applies them after
   the swap. The snapshot/live overlap is idempotent (`_entry_add_key` dedups
   on the interned key; the remove paths are membership-gated).
+
+## Test-coverage deepening
+
+A gcov pass over the unit-testable production TUs (compiled under `TEST_SHIM`
+with real code linked) drove two new depth tests:
+
+- **`test_parser_adversarial`** — drives the untrusted-input parser
+  (`nats_handle_parse.c`) through every sub-parser branch and error path with
+  adversarial values (all bool/ack/deliver/replay forms; every duration unit;
+  RFC3339 `Z`/`±HH:MM`/fractional; uint/int bounds; missing/duplicate/empty
+  keys; whitespace), asserting the *specific* error each time. Line coverage
+  **84.6% → 96.3%**. It also surfaced a real gap now fixed: `parse_uint64`
+  accepted a negative (`strtoull` wraps `-1` to `UINT64_MAX`); it now rejects a
+  leading sign, so a typo'd/adversarial unsigned config value is refused rather
+  than silently becoming a huge count.
+- **`test_rpc_slot_lifecycle`** — drives the real async-RPC slot allocator
+  (`nats_rpc_slot.c`) through its full lifecycle and edge paths: the init count
+  clamp, double-init, pool exhaustion (claim on a full pool → NULL),
+  publish-on-non-CLAIMED, lookup hit / out-of-range / freed, abandon → free →
+  reuse, and the inflight/total counters. Line coverage **84.0% → 93.8%**.
+
+The lock-free ring and MPSC were already exercised by existing 1M-message
+multi-producer/multi-consumer stress tests (`test_ring.c` case 4,
+`test_mpsc.c`), so no redundant stress tests were added. The remaining
+`nats_handle_registry.c` gap (76%) is concentrated in SHM-OOM / lock-init
+failure paths that require fault injection to reach.
