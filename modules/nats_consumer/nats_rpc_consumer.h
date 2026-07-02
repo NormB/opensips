@@ -27,8 +27,9 @@
  * persistent libnats subscription on
  * `_INBOX.opensips.<consumer_pid>.>`, drain the worker -> consumer
  * IPC queue and publish for each entry, and on each reply land
- * the payload into the corresponding SHM slot + signal the
- * worker's pre-allocated wake_fd.
+ * the payload into the corresponding SHM slot and store its state
+ * DELIVERED; the worker observes it on its next private-timerfd poll
+ * (no fd is signalled).
  *
  * The libnats subscription callback runs on a libnats internal
  * thread inside the consumer process.  That context is known

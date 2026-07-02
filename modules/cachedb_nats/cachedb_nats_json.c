@@ -71,7 +71,8 @@ extern int   nats_enable_search_index;
  * Builds the composite "field:value" string in a stack buffer, then calls
  * _find_entry() to locate the hash table entry.  Returns the entry (whose
  * ->keys / ->num_keys describe the matching document set) or NULL if no
- * documents contain this field:value pair.  Caller must hold g_idx->lock.
+ * documents contain this field:value pair.  Caller must hold the entry's
+ * shard lock.
  */
 static nats_idx_entry *_lookup(const char *field, int flen,
 	const char *val, int vlen)
@@ -602,7 +603,8 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
  * with the running result using _intersect_keys(), implementing AND
  * semantics.  After all filters are applied, the matched documents are
  * fetched from the NATS KV store, parsed into cdb_row_t structs via
- * cdb_json_to_dict(), and appended to @res.
+ * _safe_json_to_dict() (which guards then calls cdb_json_to_dict()), and
+ * appended to @res.
  *
  * Only CDB_OP_EQ with string values is supported.  Results may be capped
  * by the fts_max_results module parameter.
@@ -1485,9 +1487,10 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
  * empty seed JSON is created via kvStore_CreateString so that a first
  * cdbf.update behaves as upsert — required by usrloc full-sharing-cachedb
  * mode whose cdb_flush_urecord assumes upsert semantics. Fetches the
- * document from NATS KV, applies each field update from @pairs via
- * _json_apply_pair(), and writes the modified JSON back using a
- * compare-and-swap (CAS) loop to handle concurrent modifications. After
+ * document from NATS KV, applies every field update from @pairs in a
+ * single pass via _apply_pairs_one_pass(), and writes the modified JSON
+ * back using a compare-and-swap (CAS) loop to handle concurrent
+ * modifications. After
  * a successful CAS, the index is updated by removing and re-adding the
  * document.
  *

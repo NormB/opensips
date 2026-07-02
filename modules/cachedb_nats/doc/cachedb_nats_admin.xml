@@ -943,7 +943,7 @@ modparam("cachedb_nats", "max_reconnect", 30)
 
 	<section id="func_nats_request" xreflabel="nats_request()">
 	<title>
-		<function moreinfo="none">nats_request(subject, payload, timeout_ms, result_pvar)</function>
+		<function moreinfo="none">nats_cdb_request(subject, payload, timeout_ms, result_pvar)</function>
 	</title>
 	<para>
 		Performs a synchronous NATS request/reply operation.  Publishes
@@ -962,7 +962,11 @@ modparam("cachedb_nats", "max_reconnect", 30)
 		decision services.
 	</para>
 	<para>
-		This function can be used from any route.
+		Because the call blocks the worker for the full round-trip
+		or timeout, it is restricted to routes off the SIP request
+		path: it may be used only from the onreply, local, startup,
+		timer, and event routes.  It is <emphasis>not</emphasis>
+		callable from the request, branch, or failure routes.
 	</para>
 	<para>Parameters:</para>
 	<itemizedlist>
@@ -1006,11 +1010,11 @@ modparam("cachedb_nats", "max_reconnect", 30)
 		<listitem><para><emphasis role="bold">-2</emphasis> — timeout, no reply received within the effective <emphasis>timeout_ms</emphasis>.</para></listitem>
 	</itemizedlist>
 	<example>
-	<title><function>nats_request</function> usage</title>
+	<title><function>nats_cdb_request</function> usage</title>
 	<programlisting format="linespecific">
 ...
 $var(req) = "{\"user\":\"" + $fU + "\",\"domain\":\"" + $fd + "\"}";
-nats_request("auth.check", $var(req), 2000, $var(reply));
+nats_cdb_request("auth.check", $var(req), 2000, $var(reply));
 if ($retcode == 1) {
     xlog("auth service replied: $var(reply)\n");
 } else if ($retcode == -2) {
@@ -1512,17 +1516,27 @@ if ($retcode == 1) {
 			busy-waiting.
 		</para></listitem>
 		<listitem><para>
-			<emphasis role="bold">Rebuild index:</emphasis>
+			<emphasis role="bold">Create watcher:</emphasis>
 			acquires a fresh KV handle from the pool and calls
-			<function>nats_json_index_rebuild</function> to repopulate the
-			search index from the current bucket contents.  This is the
-			crash-recovery path that ensures the index is consistent after
-			any disconnect.
+			<function>kvStore_WatchMulti</function> with the configured
+			key patterns (and <varname>UpdatesOnly</varname>) to create a
+			<emphasis>kvWatcher</emphasis> handle.  The subscription is
+			created <emphasis>before</emphasis> the snapshot rebuild below
+			so that any put/delete landing during the (potentially slow,
+			O(N)) rebuild is captured in the watcher's pending queue and
+			applied afterwards — closing the (snapshot, subscribe) window
+			that would otherwise drop those mutations from the index until
+			the next reconnect.
 		</para></listitem>
 		<listitem><para>
-			<emphasis role="bold">Create watcher:</emphasis>
-			calls <function>kvStore_WatchMulti</function> with the configured
-			key patterns to create a <emphasis>kvWatcher</emphasis> handle.
+			<emphasis role="bold">Rebuild index:</emphasis>
+			calls <function>nats_json_index_rebuild</function> to repopulate
+			the search index from the current bucket contents.  This is the
+			crash-recovery path that keeps the index consistent after a
+			disconnect.  It is gated by
+			<varname>index_resync_on_reconnect</varname> (default on); when
+			that parameter is 0 the post-reconnect rebuild is skipped in
+			favour of the query-path lazy self-heal.
 		</para></listitem>
 		<listitem><para>
 			<emphasis role="bold">Process updates:</emphasis>

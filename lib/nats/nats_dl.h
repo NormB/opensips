@@ -55,7 +55,8 @@
  *
  * Lifecycle
  *   nats_dl_load(libnats_path) is called once per process from
- *   nats_pool_init().  Subsequent calls are no-ops (idempotent).
+ *   nats_pool_register() (on first registration).  Subsequent calls are
+ *   no-ops (idempotent).
  *   nats_dl_unload() is called once at lib/nats teardown.
  */
 

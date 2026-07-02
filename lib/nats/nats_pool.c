@@ -24,8 +24,9 @@
  * @brief Shared NATS connection pool for OpenSIPS modules.
  *
  * This library provides a single shared NATS connection per OpenSIPS worker
- * process, used by both event_nats.so and cachedb_nats.so.  It is compiled
- * as libnats_pool.a and statically linked into each module via misclibs=.
+ * process, used by event_nats.so, cachedb_nats.so, and nats_consumer.so.  It
+ * is compiled as the shared library libnats_pool.so and linked into each
+ * module via -lnats_pool (resolved at load time through an $ORIGIN rpath).
  *
  * ## Thread model
  *
@@ -82,8 +83,8 @@
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
 /* This is a shared library (lib/nats), not a loadable module.
- * Compiled as libnats_pool.a and linked into event_nats.so
- * and cachedb_nats.so via misclibs= in their Makefiles. */
+ * Compiled as libnats_pool.so and linked into event_nats.so,
+ * cachedb_nats.so, and nats_consumer.so via -lnats_pool ($ORIGIN rpath). */
 
 /* ----------------------------------------------------------------
  * Shared pool configuration (shm, set pre-fork in mod_init)

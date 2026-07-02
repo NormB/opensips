@@ -46,14 +46,21 @@
  *     FREE  -- slot is idle, may be claimed by a worker
  *     CLAIMED -- worker has CAS'd the slot, is filling out_*
  *     INFLIGHT -- worker has IPC'd to consumer, awaiting reply
- *     DELIVERED -- consumer has copied reply, signaled eventfd
+ *     DELIVERING -- consumer has pinned the claim (CAS from
+ *                  INFLIGHT) and is writing reply_*; while pinned
+ *                  the worker treats the slot as not-ready and
+ *                  never abandons/frees it
+ *     DELIVERED -- consumer finished writing reply_* and published
+ *                  the reply (store from DELIVERING)
  *     ABANDONED -- worker resume timed out; consumer must drop
  *                  any late reply landing on this slot_idx
  *
- *   FREE ->CLAIMED is a CAS by the worker; every other transition
- *   is done with the slot owned exclusively by either the worker
- *   or the consumer.  No mutex is needed because each role only
- *   reads the other's fields after observing the state
+ *   FREE ->CLAIMED is a CAS by the worker; the consumer's
+ *   INFLIGHT -> DELIVERING -> DELIVERED sequence is a claim-pin
+ *   (only the consumer transitions out of DELIVERING).  Every other
+ *   transition is done with the slot owned exclusively by either
+ *   the worker or the consumer.  No mutex is needed because each
+ *   role only reads the other's fields after observing the state
  *   transition that publishes them (acquire/release pairing).
  */
 
@@ -68,11 +75,10 @@
 
 /*
  * Hard ceiling on simultaneous in-flight async nats_request calls
- * across ALL workers in this OpenSIPS instance.  Each slot consumes
- * one eventfd at mod_init.  Default 1024 fits comfortably under
- * typical RLIMIT_NOFILE (1024 soft / 4096 hard on most distros).
- * Raise via the modparam if you have headroom and need higher
- * concurrency.
+ * across ALL workers in this OpenSIPS instance.  Each slot is pure
+ * SHM (no per-slot fd; the wake mechanism is a per-call
+ * worker-private timerfd poll).  Default 64.  Raise via the
+ * modparam if you need higher async-RPC concurrency.
  */
 #ifndef NATS_RPC_SLOT_COUNT
 #define NATS_RPC_SLOT_COUNT 64
@@ -111,9 +117,12 @@ enum {
  *   * worker writes out_* fields, then transitions CLAIMED -> INFLIGHT
  *     with release ordering on `state`.  Consumer observes INFLIGHT
  *     with acquire and reads out_*.
- *   * consumer writes reply_* fields, then transitions INFLIGHT ->
- *     DELIVERED with release.  Worker observes DELIVERED with
- *     acquire and reads reply_*.
+ *   * consumer CAS's INFLIGHT -> DELIVERING (acq_rel) to pin the
+ *     claim, re-validates the generation, writes reply_* fields,
+ *     then transitions DELIVERING -> DELIVERED with release.
+ *     Worker observes DELIVERED with acquire and reads reply_*;
+ *     while DELIVERING it treats the slot as not-ready and never
+ *     abandons/frees it (only the consumer leaves DELIVERING).
  *   * timed-out worker transitions INFLIGHT -> ABANDONED with release.
  *     A late reply from consumer that observes ABANDONED drops the
  *     payload without writing it; consumer never transitions
@@ -142,8 +151,9 @@ typedef struct nats_rpc_slot {
 	char     out_headers[NATS_RING_HEADERS_MAX];
 	uint16_t out_headers_len;
 
-	/* Reply data (consumer -> worker).  Populated only when state
-	 * transitions to DELIVERED. */
+	/* Reply data (consumer -> worker).  Written by the consumer
+	 * while DELIVERING; safe for the worker to read once state is
+	 * DELIVERED. */
 	char     reply_subject[NATS_RING_SUBJECT_MAX];
 	uint32_t reply_subject_len;
 	char     reply_data[NATS_RING_PAYLOAD_MAX];
@@ -174,10 +184,9 @@ typedef struct nats_rpc_slot {
 /*
  * Module-init / module-destroy hooks.  Both are called from
  * nats_consumer.c::mod_init / mod_destroy.  init() allocates the
- * SHM array AND the eventfd pool (in main, pre-fork) so every
- * child inherits the fds.  destroy() closes the fds and frees the
- * SHM.  Returns 0 on success, -1 on failure (SHM exhausted,
- * eventfd_create failure, fd-limit hit).
+ * SHM slot array (in main, pre-fork) so every child inherits the
+ * shared mapping.  destroy() frees the SHM.  init() returns 0 on
+ * success, -1 on SHM allocation failure.
  */
 int  nats_rpc_slot_init(void);
 void nats_rpc_slot_destroy(void);
@@ -199,9 +208,10 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void);
 int nats_rpc_slot_publish(nats_rpc_slot_t *s);
 
 /*
- * Worker resume: transition INFLIGHT -> ABANDONED if the slot
- * hasn't been DELIVERED yet.  Returns the observed state.
- * Idempotent on ABANDONED. */
+ * Worker resume: CAS INFLIGHT -> ABANDONED.  Only fires while the
+ * slot is still INFLIGHT; a DELIVERING (claim pinned by consumer)
+ * or DELIVERED slot is left untouched and its state returned.
+ * Returns the observed state.  Idempotent on ABANDONED. */
 int nats_rpc_slot_abandon(nats_rpc_slot_t *s);
 
 /*

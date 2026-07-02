@@ -30,7 +30,7 @@
  *
  * The index is populated at startup by scanning the KV bucket, and kept
  * in sync via a NATS KV watcher that receives real-time updates on a
- * background thread.  Access is protected by a pthread mutex.
+ * background thread.  Access is protected by a sharded SHM lock set.
  *
  * Key types:
  *   nats_idx_entry   — one hash bucket entry mapping a "field:value" to keys
@@ -42,11 +42,13 @@
  *
  * Thread safety:
  *   All index operations (add, remove, query, rebuild) acquire the
- *   nats_search_idx.lock mutex.  The KV watcher thread calls
- *   nats_json_index_add() and nats_json_index_remove() as documents
- *   change, while OpenSIPS worker processes call nats_cache_query()
- *   and nats_cache_update() from routing scripts.  The mutex ensures
- *   mutual exclusion between these concurrent accesses.
+ *   nats_search_idx.shard_locks (a SHM-backed gen_lock_set_t): whole-
+ *   index ops take all shards, single-field ops take only the owning
+ *   shard.  The KV watcher thread calls nats_json_index_add() and
+ *   nats_json_index_remove() as documents change, while OpenSIPS worker
+ *   processes call nats_cache_query() and nats_cache_update() from
+ *   routing scripts.  The shard locks ensure mutual exclusion between
+ *   these concurrent accesses.
  */
 
 #ifndef CACHEDB_NATS_JSON_H
@@ -175,13 +177,14 @@ typedef struct _nats_search_idx {
 /*
  * Initialize the search index data structure.
  *
- * Allocates the global nats_search_idx, zeroes all bucket pointers,
- * and initializes the mutex.  Must be called from child_init (post-fork,
- * before any index operations).
+ * Allocates the global nats_search_idx and its bucket array in SHM
+ * (shared across all workers), zeroes all bucket pointers, and
+ * initialises the sharded SHM lock set.  Must be called once pre-fork
+ * from mod_init, before any index operations.
  *
- * @return  0 on success, -1 on allocation or mutex init failure.
+ * @return  0 on success, -1 on SHM allocation or lock_set init failure.
  *
- * Thread safety: NOT thread-safe.  Call once per process from child_init.
+ * Thread safety: NOT thread-safe.  Call once pre-fork from mod_init.
  */
 int nats_json_index_init(void);
 
@@ -197,7 +200,7 @@ int nats_json_index_init(void);
  *                documents).  Pass NULL or "" to index all keys.
  * @return        0 on success, -1 on error.
  *
- * Thread safety: Acquires the index mutex internally.
+ * Thread safety: Acquires the per-shard SHM locks internally.
  */
 int nats_json_index_build(kvStore *kv, const char *prefix);
 
@@ -212,7 +215,7 @@ int nats_json_index_build(kvStore *kv, const char *prefix);
  * @param prefix  Key prefix filter (same semantics as index_build).
  * @return        0 on success, -1 on error.
  *
- * Thread safety: Acquires the index mutex internally.
+ * Thread safety: Acquires the per-shard SHM locks internally.
  */
 int nats_json_index_rebuild(kvStore *kv, const char *prefix);
 
@@ -220,8 +223,10 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix);
  * Add a JSON document to the search index.
  *
  * Parses the JSON string and creates index entries for each top-level
- * field:value pair.  If the key already exists in the index, the old
- * entries are removed first (update semantics).
+ * field:value pair.  Adding an already-indexed key is idempotent
+ * (duplicate keys are de-duped per entry); stale (field:value) entries
+ * are pruned separately via nats_json_index_remove_fields on the update
+ * path.
  *
  * Called by the KV watcher thread when a key is created or updated.
  *
@@ -230,7 +235,7 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix);
  * @param json_len  Length of json_str in bytes.
  * @return          0 on success, -1 on parse error or allocation failure.
  *
- * Thread safety: Acquires the index mutex internally.
+ * Thread safety: Acquires the per-shard SHM locks internally.
  */
 int nats_json_index_add(const char *key, const char *json_str, int json_len);
 
@@ -243,7 +248,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
  * @param key  Document key string to remove.
  * @return     0 on success (or key not found — idempotent), -1 on error.
  *
- * Thread safety: Acquires the index mutex internally.
+ * Thread safety: Acquires the per-shard SHM locks internally.
  */
 int nats_json_index_remove(const char *key);
 
@@ -317,8 +322,8 @@ void nats_json_index_destroy(void);
  * @param res     Output: result set with matching document rows.
  * @return        0 on success (res may have 0 rows), -1 on error.
  *
- * Thread safety: Acquires the index mutex for the lookup phase.
- *                KV fetches happen outside the mutex.
+ * Thread safety: Acquires the per-shard SHM locks for the lookup phase.
+ *                KV fetches happen outside the locks.
  */
 int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
                      cdb_res_t *res);
@@ -335,8 +340,8 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
  * @param pairs       Dictionary of field-value pairs to set.
  * @return            0 on success, -1 on error.
  *
- * Thread safety: Acquires the index mutex for lookup; KV operations
- *                happen outside the mutex.
+ * Thread safety: Acquires the per-shard SHM locks for lookup; KV
+ *                operations happen outside the locks.
  */
 int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
                       const cdb_dict_t *pairs);
@@ -351,8 +356,8 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
  * @return  Pointer to the global nats_search_idx instance.
  *
  * Thread safety: The returned pointer is stable after child_init.
- *                Callers must acquire the index mutex before accessing
- *                index contents.
+ *                Callers must acquire the relevant per-shard SHM locks
+ *                before accessing index contents.
  */
 nats_search_idx *nats_json_get_index(void);
 

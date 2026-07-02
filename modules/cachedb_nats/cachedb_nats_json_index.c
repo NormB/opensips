@@ -424,7 +424,7 @@ static int _parse_json_fields(const char *json, int len,
  *
  * Hashes @fv to select a bucket, then walks the singly-linked chain of
  * entries in that bucket comparing both length and content.  Returns the
- * matching entry or NULL.  Must be called with g_idx->lock held.
+ * matching entry or NULL.  Must be called with the entry's shard lock held.
  */
 static nats_idx_entry *_find_entry_in(nats_search_idx *idx,
 	const char *fv, int fv_len)
@@ -451,7 +451,7 @@ nats_idx_entry *_find_entry(const char *fv, int fv_len)
  * First tries _find_entry(); if the entry does not exist, allocates a new
  * nats_idx_entry, copies the "field:value" string, pre-allocates the key
  * array (initial capacity 8), and inserts the entry at the head of the
- * bucket's chain.  Must be called with g_idx->lock held.
+ * bucket's chain.  Must be called with the entry's shard lock held.
  *
  * Returns the entry pointer, or NULL on allocation failure.
  */
@@ -532,10 +532,11 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 /**
  * _entry_add_key() — Append a document key to an entry's key list.
  *
- * The key list is a dynamic array of strdup'd strings.  Duplicates are
- * detected by a linear scan and silently ignored.  When the array is full
- * it is doubled in size via realloc (geometric growth: 8 -> 16 -> 32 ...).
- * Must be called with g_idx->lock held.
+ * The key list is a dynamic array of interned SHM key pointers (refcount
+ * released, not freed).  Duplicates are detected by a linear pointer-compare
+ * scan and silently ignored.  When the array is full it is doubled in size
+ * (geometric growth: 8 -> 16 -> 32 ...).  Must be called with the entry's
+ * shard lock held.
  *
  * Returns 0 on success, -1 on allocation failure.
  */
@@ -622,10 +623,12 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
 /**
  * _entry_remove_key() — Remove a document key from an entry's key list.
  *
- * Performs a linear scan for @key.  When found, frees the string and fills
- * the gap by moving the last element into the vacated slot (swap-remove).
- * This is O(n) in the key count but avoids a memmove and keeps the array
- * compact.  Must be called with g_idx->lock held.
+ * Performs a linear scan for @key.  When found, releases the interned key's
+ * refcount (the SHM string is freed only when no entry still references it)
+ * and fills the gap by moving the last element into the vacated slot
+ * (swap-remove).  This is O(n) in the key count but avoids a memmove and
+ * keeps the array compact.  Returns 1 if the key was removed, 0 if not
+ * found.  Must be called with the entry's shard lock held.
  */
 static int _entry_remove_key(nats_idx_entry *e, const char *key)
 {
@@ -661,9 +664,10 @@ static int _entry_remove_key(nats_idx_entry *e, const char *key)
 /**
  * _free_entry() — Free a single index entry and all its owned memory.
  *
- * Releases the field_value string, every strdup'd key in the key array,
- * the key array itself, and finally the entry struct.  Safe to call with
- * a NULL pointer (no-op).
+ * Releases the interned refcount on every key, then frees the single
+ * entry blob (the field_value bytes and any inline keys[] are freed with
+ * it; a keys[] array grown to a separate allocation is freed first).
+ * Safe to call with a NULL pointer (no-op).
  */
 static void _free_entry(nats_idx_entry *e)
 {
@@ -706,7 +710,7 @@ typedef struct _idx_add_ctx {
  *
  * Invoked by _parse_json_fields() for every top-level string field in a
  * JSON document.  Builds the composite "field:value" lookup key into a
- * stack buffer, then calls _get_or_create_entry() + _entry_add_key() to
+ * stack buffer, then calls _get_or_create_entry_in() + _entry_add_key() to
  * record the association between this field:value pair and the document's
  * KV key (carried in ctx->doc_key).
  */
@@ -749,10 +753,10 @@ static void _index_field_cb(const char *field, int flen,
 /**
  * nats_json_index_init() — Allocate and initialise the global search index.
  *
- * Allocates the nats_search_idx struct (heap, not SHM — the index is
- * process-local), zeroes the bucket array, and initialises the protecting
- * mutex.  Must be called once per OpenSIPS worker process before any
- * index_add / query / update operations.
+ * Allocates the nats_search_idx struct and its bucket array in SHM
+ * (shared across all workers), zeroes the bucket array, and initialises
+ * the sharded SHM lock set.  Must be called once pre-fork from mod_init
+ * before any index_add / query / update operations.
  *
  * Returns 0 on success, -1 on failure.
  */
@@ -1564,10 +1568,11 @@ static int _index_add_into(nats_search_idx *target, const char *key,
 /**
  * nats_json_index_remove() — Remove a document from the index by its KV key.
  *
- * Acquires the mutex and walks every bucket/entry in the hash table,
+ * Acquires all shard locks and walks every bucket/entry in the hash table,
  * calling _entry_remove_key() to strip the document key from each entry's
  * key list.  This is O(entries * keys_per_entry) but is acceptable because
- * remove is infrequent compared to queries.  Decrements the document count.
+ * remove is infrequent compared to queries.  Decrements the document count
+ * only if the key was actually indexed (guards against going negative).
  *
  * Returns 0 on success, -1 if parameters are NULL or index is uninitialised.
  */
@@ -1685,13 +1690,16 @@ int nats_json_index_remove_fields(const char *key,
 }
 
 /**
- * nats_json_index_rebuild() — Clear the index and rebuild from KV data.
+ * nats_json_index_rebuild() — Rebuild the index from KV data via a shadow swap.
  *
- * Acquires the mutex, walks every bucket and frees all entries (clearing
- * the entire hash table), resets the document counter, then releases the
- * lock and calls nats_json_index_build() to re-scan the KV store.  Used
- * when the index may have drifted from the KV contents (e.g. after a
- * NATS reconnect or an MI rebuild command).
+ * Builds a FRESH shadow index from a full KV re-scan (_rebuild_snapshot_cb ->
+ * _index_add_into on a thread-local shadow), then — holding all shard locks —
+ * atomically swaps the shadow's buckets and document count into the live
+ * index, releasing the locks before freeing the old buckets.  Readers
+ * therefore never observe a half-cleared or half-built index (the reason this
+ * is a shadow swap rather than a clear-in-place rebuild).  Used when the index
+ * may have drifted from the KV contents (e.g. after a NATS reconnect or an MI
+ * rebuild command).
  *
  * Returns the number of documents re-indexed, or -1 on error.
  */
@@ -1825,10 +1833,10 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 /**
  * nats_json_index_destroy() — Tear down the global index and free all memory.
  *
- * Acquires the mutex, walks every bucket, frees all entries and their key
- * lists, then destroys the mutex and frees the nats_search_idx struct.
- * Sets g_idx to NULL so subsequent calls are safe no-ops.  Called during
- * OpenSIPS worker shutdown.
+ * Acquires all shard locks, walks every bucket, frees all entries and their
+ * key lists, then destroys the shard lock set and frees the nats_search_idx
+ * struct.  Sets g_idx to NULL so subsequent calls are safe no-ops.  Called
+ * during OpenSIPS worker shutdown.
  */
 void nats_json_index_destroy(void)
 {

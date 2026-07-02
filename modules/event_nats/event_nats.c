@@ -39,13 +39,16 @@
  *   handles reconnection automatically.
  *
  * Rank filtering:
- *   NATS initializes in SIP workers (UDP and TCP, rank >= 1) and the
- *   HTTPD/MI process (PROC_MODULE).  Attendant (PROC_MAIN), timer
- *   (PROC_TIMER), and TCP-main (PROC_TCP_MAIN) processes skip
- *   initialization -- they do not handle SIP routing and TCP-main holds
- *   TLS/OpenSSL state in isolation post-refactor.  Module-exported
- *   processes (negative rank) self-initialize and are not driven by
- *   child_init().
+ *   NATS initializes in SIP workers (UDP and TCP, rank >= 1), the
+ *   HTTPD/MI process (PROC_MODULE), and the timer process (PROC_TIMER).
+ *   The timer raises a large class of subscribable events in-process
+ *   (usrloc/dialog EXPIRY, tm/dialog timeouts) and the raise callback
+ *   runs in whatever process fires the event, so the timer MUST have a
+ *   connection or those publishes are dropped.  Only the attendant
+ *   (PROC_MAIN) and TCP-main (PROC_TCP_MAIN) skip initialization -- they
+ *   do not handle SIP routing and TCP-main holds TLS/OpenSSL state in
+ *   isolation post-refactor.  Module-exported processes (negative rank)
+ *   self-initialize and are not driven by child_init().
  *
  *   The admission rule is centralized in lib/nats/nats_pool_should_init().
  *

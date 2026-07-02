@@ -36,28 +36,26 @@
  * ~2 000 msgs/sec; the batch path at fetch_batch=256 reaches
  * ~89 000 msgs/sec.
  *
- * Cross-process eventfd note:
+ * Cross-process wait note:
  *   The ring carries an eventfd that the consumer process writes
  *   to on push.  Worker fd-tables do not share that fd (it was
  *   created post-fork in whichever process allocated the ring),
  *   so poll(2) on it is undefined.  Both nats_fetch and
- *   nats_fetch_batch fall back to a 5 ms usleep tick; once
- *   cross-process eventfd plumbing is in place a smarter wait can
- *   replace it without changing the API.
+ *   nats_fetch_batch block on the cross-process futex wait
+ *   nats_ring_wait() (its wake_seq lives in SHM), retrying the pop
+ *   on each wake -- sub-ms latency at low rates, no overhead at
+ *   high rates because the first pop hits.
  *
- * Async path: short-circuits on ring hit; otherwise registers the
- * per-handle ring eventfd with the reactor and yields.  The resume
- * callback drains the eventfd counter, tries one more pop, and either
- * populates the current-message state (success) or reports empty (the
- * broker fed us nothing in this window).
+ * Async path: short-circuits on ring hit; otherwise creates a
+ * worker-private timerfd, registers it with the reactor, and yields.
+ * The resume callback drains the timerfd tick counter, tries one more
+ * pop, and either populates the current-message state (success) or,
+ * once its own per-call deadline expires, reports empty (the broker
+ * fed us nothing in this window).
  *
- * LIMITATION:
- *   The async timeout_ms argument is accepted but not fully enforced
- *   by an independent timer -- the OpenSIPS async framework's
- *   timeout_s field is in seconds and we feed it (timeout_ms+999)/1000
- *   for the worst-case upper bound.  Sub-second precision for the
- *   "no message arrived" timeout path is on the roadmap; it requires
- *   allocating a per-fetch timerfd.
+ * The async timeout_ms deadline is enforced per-call in the resume
+ * (p->deadline_us, CLOCK_MONOTONIC microseconds), independent of the
+ * OpenSIPS async core, so it has sub-second precision.
  */
 
 #include <string.h>
@@ -134,10 +132,10 @@ void nats_fetch_clear_batch(void)
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
-/* Drain the eventfd counter to rearm the reactor.  The ring signals
- * exactly once per empty->non-empty edge so a single read suffices;
- * if the counter is already zero (spurious wake / eventfd saturated)
- * we silently ignore EAGAIN. */
+/* Drain the tick counter of the worker-private timerfd used by the
+ * async resume paths, so the next tick wakes the reactor.  A single
+ * read returns (and resets) the accumulated expiration count; if the
+ * counter is already zero (spurious wake) we silently ignore EAGAIN. */
 static inline void evfd_drain(int fd)
 {
 	uint64_t sink;

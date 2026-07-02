@@ -52,11 +52,11 @@
             <para>
                 The <emphasis>event_nats</emphasis> module has no mandatory
                 dependency on any other &osips; module.  The shared NATS
-                connection pool (<filename>lib/nats/nats_pool</filename>) is
-                compiled directly into the module shared object
-                (<filename>event_nats.so</filename>) via the
-                <varname>misclibs</varname> build mechanism; no separate
-                connection module is required.
+                connection pool is built as the shared library
+                (<filename>libnats_pool.so</filename>) and linked into the
+                module via <varname>-lnats_pool</varname> (resolved at load
+                time through an $ORIGIN rpath, and installed alongside the
+                module .so files); no separate connection module is required.
             </para>
             <para>
                 When TLS is used, the <emphasis>tls_mgm</emphasis>
@@ -79,13 +79,18 @@
             <itemizedlist>
                 <listitem>
                     <para>
-                        <emphasis>nats.c</emphasis> v3.13 or later
+                        <emphasis>nats.c</emphasis> with the per-key KV TTL API
                         (<filename>libnats.so</filename>) — the official C
                         client library for NATS, available from
                         <ulink url="https://github.com/nats-io/nats.c">
-                        github.com/nats-io/nats.c</ulink>.  Build nats.c with
-                        the same OpenSSL installation used by &osips; to avoid
-                        symbol conflicts at runtime.
+                        github.com/nats-io/nats.c</ulink>.  All NATS modules
+                        link the shared <filename>lib/nats</filename> pool,
+                        which requires the per-key KV TTL API
+                        (<emphasis>kvStore_CreateStringWithTTL</emphasis>, nats.c
+                        PR #1000); an older libnats is detected at build time
+                        and the NATS modules are skipped with a clear message.
+                        Build nats.c with the same OpenSSL installation used by
+                        &osips; to avoid symbol conflicts at runtime.
                     </para>
                 </listitem>
             </itemizedlist>
@@ -212,11 +217,18 @@ modparam("event_nats", "reconnect_wait", 1000)
             <para>
                 Maximum number of connection attempts made during
                 <function>child_init()</function> startup before the worker
-                process gives up and fails to initialize.  If the NATS server
-                is not reachable within
+                stops waiting for the broker.  If the NATS server is not
+                reachable within
                 <varname>max_reconnect</varname> * <varname>reconnect_wait</varname>
-                milliseconds, <function>child_init()</function> returns
-                <varname>-1</varname> and the worker process exits.
+                milliseconds, <function>child_init()</function> logs a warning
+                and starts in a <emphasis>degraded</emphasis> state (it returns
+                <varname>0</varname>, not <varname>-1</varname>): the &osips;
+                worker boots and routes calls normally while NATS publishes
+                fail cleanly and are counted in
+                <varname>nats_stats-&gt;failed</varname> until the broker
+                becomes reachable.  Returning <varname>-1</varname> here would
+                be fatal to the whole &osips; instance, so it is deliberately
+                avoided.
             </para>
             <para>
                 This limit applies only to the <emphasis>startup</emphasis>
@@ -842,9 +854,8 @@ opensips-cli -x mi nats_reconnect
             </title>
             <para>
                 Return a JSON array of consumer summaries (name,
-                durable flag, deliver-policy, ack-policy, current
-                pending count) for every consumer attached to
-                <emphasis>stream</emphasis>.
+                num_pending, num_ack_pending) for every consumer attached
+                to <emphasis>stream</emphasis>.
             </para>
         </section>
 
@@ -853,10 +864,9 @@ opensips-cli -x mi nats_reconnect
                 <function moreinfo="none">nats_js_consumer_info(stream, consumer)</function>
             </title>
             <para>
-                Return the full per-consumer metadata: filter subject,
-                deliver / ack policy, configured caps, and run-time
-                state (delivered count, ack floor, pending count,
-                redelivered count, num waiting pulls).
+                Return the per-consumer metadata: deliver / ack policy,
+                and run-time state (delivered count, ack floor, pending
+                count, redelivered count, num waiting pulls).
             </para>
         </section>
 
@@ -913,8 +923,8 @@ opensips-cli -x mi nats_reconnect
                 <emphasis>seq</emphasis> must be ≥ 1 (a non-positive or
                 non-numeric value is rejected with a 400) and is parsed as a
                 full 64-bit value — pass it as a decimal string for sequences
-                beyond 2^31-1.  Returns the payload, headers, subject, and
-                broker timestamp as JSON.
+                beyond 2^31-1.  Returns the subject, payload (data), and
+                stream sequence number as JSON.
             </para>
         </section>
 
@@ -1092,10 +1102,10 @@ modparam("event_nats", "max_reconnect",   60)
         <itemizedlist>
             <listitem>
                 <para>
-                    <emphasis>UDP SIP workers</emphasis> (rank 1 through
-                    <varname>udp_workers_no</varname>) — NATS is initialized.
-                    These are the processes that handle SIP request routing
-                    and fire EVI events; they must be able to publish.
+                    <emphasis>SIP workers</emphasis> (UDP and TCP,
+                    rank &gt;= 1) — NATS is initialized.  These are the
+                    processes that handle SIP request routing and fire EVI
+                    events; they must be able to publish.
                 </para>
             </listitem>
             <listitem>
@@ -1110,35 +1120,40 @@ modparam("event_nats", "max_reconnect",   60)
             </listitem>
             <listitem>
                 <para>
-                    <emphasis>TCP / WSS receiver processes</emphasis> (ranks
-                    above <varname>udp_workers_no</varname>, excluding
-                    <varname>PROC_MODULE</varname>) — NATS is
-                    <emphasis>not</emphasis> initialized.  These processes
-                    run the OpenSSL stack for WebSocket-Secure (WSS) and SIP
-                    over TLS.  The nats.c library creates internal I/O threads
-                    at connection time that may call OpenSSL functions
-                    concurrently, which conflicts with the &osips; TLS
-                    module's management of OpenSSL shared state and leads to
-                    heap corruption.  Excluding TCP/WSS receiver ranks avoids
-                    this conflict entirely.
+                    <emphasis>Timer process</emphasis>
+                    (<varname>PROC_TIMER</varname>) — NATS is initialized.
+                    The timer raises a large class of subscribable events
+                    in-process (usrloc/dialog contact/AoR expiry, tm and
+                    dialog timeouts).  The EVI raise callback runs in
+                    whatever process fires the event, so the timer must
+                    hold a connection or every timer-driven publish is
+                    dropped.
+                </para>
+            </listitem>
+            <listitem>
+                <para>
+                    <emphasis>Attendant</emphasis>
+                    (<varname>PROC_MAIN</varname>) and
+                    <emphasis>TCP-main</emphasis>
+                    (<varname>PROC_TCP_MAIN</varname>) — NATS is
+                    <emphasis>not</emphasis> initialized.  Neither handles
+                    SIP routing, and TCP-main holds the &osips; TLS module's
+                    OpenSSL state in isolation.  Module-exported processes
+                    (negative rank, e.g. the consumer process) self-initialize
+                    and are not driven by <function>child_init()</function>.
                 </para>
             </listitem>
         </itemizedlist>
-        <para>
-            This design means that call-processing events originating in TCP
-            or WSS worker contexts are still published to NATS — the EVI
-            subsystem delivers events asynchronously through the UDP worker
-            pool, which holds valid NATS connections.
-        </para>
         <example>
-            <title>Effect of rank filtering in a mixed UDP/WSS deployment</title>
+            <title>Effect of rank filtering in a mixed UDP/TCP deployment</title>
             <programlisting format="linespecific">
 # opensips.cfg
-children = 8          # 8 UDP SIP workers (ranks 1-8) — NATS initialized
-tcp_workers = 4       # 4 TCP/WSS receivers — NATS NOT initialized
+children = 8          # 8 UDP SIP workers (rank &gt;= 1) — NATS initialized
+tcp_workers = 4       # 4 TCP SIP workers (rank &gt;= 1) — NATS initialized
 
-# The MI process (PROC_MODULE) also gets a NATS connection.
-# Total NATS connections from this instance: 9 (8 UDP + 1 MI).
+# The MI process (PROC_MODULE) and the timer (PROC_TIMER) also get a
+# NATS connection; only the attendant (PROC_MAIN) and TCP-main
+# (PROC_TCP_MAIN) are skipped.
             </programlisting>
         </example>
     </section><!-- /rank-filtering -->

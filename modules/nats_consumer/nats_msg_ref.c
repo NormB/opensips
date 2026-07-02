@@ -73,12 +73,14 @@
  * object so any per-handle capacity is honoured.
  */
 
-/* Reclaim a msg-ref slot if it has been outstanding longer than this: a
- * worker that died after popping a message but before acking would
- * otherwise leak its slot forever.  Generously larger than any reasonable
- * JetStream ack_wait (default 30s) so a slow-but-live worker still within
- * its ack_wait is never reaped; the broker has long since redelivered an
- * orphan this old, so its original ack would be rejected anyway. */
+/* Reclaim a msg-ref slot if it has been outstanding longer than the
+ * effective orphan TTL: a worker that died after popping a message but
+ * before acking would otherwise leak its slot forever.  This value is the
+ * FLOOR; the reaper uses max(this, 2 * the row's ack_wait_ms) so a
+ * slow-but-live worker still within a large ack_wait is never reaped (see
+ * reap_orphan_msg_refs).  Generously larger than any reasonable JetStream
+ * ack_wait (default 30s); the broker has long since redelivered an orphan
+ * this old, so its original ack would be rejected anyway. */
 #define NATS_MSG_REF_ORPHAN_TTL_US   (120LL * 1000000LL)
 
 

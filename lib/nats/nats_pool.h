@@ -291,10 +291,13 @@ int nats_pool_get_reconnect_epoch(void);
  * NATS is initialized in:
  *   - SIP workers (UDP and TCP workers, rank >= 1)
  *   - HTTPD/MI process (rank == PROC_MODULE, -2)
+ *   - Timer (rank == PROC_TIMER, -1) — the timer process raises a large
+ *     class of subscribable events in-process (usrloc/dialog EXPIRY, tm/
+ *     dialog timeouts); event_nats' raise runs in the raising process, so
+ *     the timer must be able to publish to NATS
  *
  * NATS is NOT initialized in:
  *   - Attendant (rank == PROC_MAIN, 0)
- *   - Timer (rank == PROC_TIMER, -1)
  *   - TCP-main (rank == PROC_TCP_MAIN, -4) — holds TLS/OpenSSL state
  *     in a single process post-refactor, and does not handle SIP routing
  *   - Module-exported processes (negative rank, self-initialize)
@@ -345,24 +348,21 @@ extern int nats_pool_kv_op_timeout_ms;
 /*
  * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
  *
- * Replaces every "user[:pass]@" segment that appears in the authority
- * section after a "scheme://" prefix with four ASCII asterisks
- * followed by '@'.  Handles comma-separated lists of URLs.  URLs
+ * Replaces every "user[:pass]@" segment with the literal string
+ * "[redacted]" followed by '@'.  The segment is scrubbed whether or not it
+ * follows a "scheme://" prefix (a scheme-less "user:pass@host" token still
+ * carries credentials).  Handles comma-separated lists of URLs.  URLs
  * without userinfo are copied unchanged.  Always NUL-terminates @out
  * unless out_sz == 0.
- *
- * (Inline asterisk strings are avoided in this doc-comment because
- *  a literal slash-star sequence inside a slash-star block trips
- *  gcc's -Wcomment "nested comment" warning under -Werror.)
  *
  * @param url      Source URL string.  May be NULL.
  * @param out      Destination buffer.  Must be non-NULL if out_sz > 0.
  * @param out_sz   Size of @out in bytes.  If 0, no write is performed.
  *
- * Examples (REDACTED == four asterisks):
- *   nats://user:pass@h:4222         becomes  nats://REDACTED@h:4222
+ * Examples:
+ *   nats://user:pass@h:4222         becomes  nats://[redacted]@h:4222
  *   nats://h:4222                   unchanged
- *   nats://h1,nats://u:p@h2         becomes  nats://h1,nats://REDACTED@h2
+ *   nats://h1,nats://u:p@h2         becomes  nats://h1,nats://[redacted]@h2
  *
  * Thread safety: Pure function on caller-provided memory; safe anywhere.
  */

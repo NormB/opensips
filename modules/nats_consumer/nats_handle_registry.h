@@ -94,12 +94,13 @@ typedef struct nats_handle {
 	str durable;                        /* SHM-owned, empty for ephemeral */
 	nats_consumer_type_e type;
 
-	/* Monotonic bind-order index, assigned atomically inside
-	 * nats_registry_bind.  Valid range: [0, NATS_REGISTRY_MAX_HANDLES).
+	/* Recyclable per-handle index, allocated from a free-slot pool
+	 * (index_used[]) inside nats_registry_bind and returned to the pool
+	 * on reap.  Valid range: [0, NATS_REGISTRY_MAX_HANDLES).
 	 * Used to pack (handle_idx, slot_idx, generation) into an ack token
 	 * so the consumer process can look up the stored natsMsg* without
-	 * a hash.  Stable for the lifetime of the handle; not reused after
-	 * unbind within a single opensips run. */
+	 * a hash.  Stable for the lifetime of the handle; reused by a later
+	 * bind once this handle has been reaped. */
 	uint16_t index;
 
 	/* filters */
@@ -198,7 +199,7 @@ typedef struct nats_handle {
 	 *   ensure_failures        = consecutive ensure_subscription_for_handle
 	 *                            calls that returned -1.  Reset to 0 on
 	 *                            the first success.
-	 *   ensure_next_retry_at   = monotonic-seconds gate (time(NULL))
+	 *   ensure_next_retry_at   = wall-clock-seconds gate (time(NULL))
 	 *                            below which the next reconcile tick
 	 *                            skips this handle.  0 = retry immediately
 	 *                            (clean handles, freshly bound handles).

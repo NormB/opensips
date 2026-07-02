@@ -35,7 +35,7 @@
  * MI commands:
  *   nats_status    — connection state and server info
  *   nats_stats     — publish/ack counters
- *   nats_reconnect — force a reconnection (drain + reconnect)
+ *   nats_reconnect — informational; confirms nats.c auto-reconnect is active
  */
 
 #ifndef _NATS_STATS_H_
@@ -151,8 +151,8 @@ void nats_stats_destroy(void);
 /*
  * MI handler: "nats_status"
  *
- * Returns a JSON object with connection state, server URLs, and
- * the current reconnect epoch.
+ * Returns a JSON object with the server info, connection state (yes/no),
+ * and JetStream mode (enabled/disabled).
  *
  * @param params     MI parameters (unused).
  * @param async_hdl  Async handler (unused — this command is synchronous).
@@ -180,15 +180,16 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
 /*
  * MI handler: "nats_reconnect"
  *
- * Forces the NATS connection to drain and reconnect.  Useful for
- * maintenance or to pick up new cluster topology.
+ * Informational only: returns a status string confirming that nats.c's
+ * built-in auto-reconnect is active.  It performs no drain and no
+ * reconnect; a true manual reconnect would require signaling the worker
+ * process and is not implemented.
  *
  * @param params     MI parameters (unused).
  * @param async_hdl  Async handler (unused — this command is synchronous).
  * @return           MI response tree, or NULL on error.
  *
- * Thread safety: Safe to call from the MI process.  The actual drain/
- *                reconnect is serialized by nats.c internally.
+ * Thread safety: Safe to call from the MI process.
  */
 mi_response_t *mi_nats_reconnect(const mi_params_t *params,
     struct mi_handler *async_hdl);

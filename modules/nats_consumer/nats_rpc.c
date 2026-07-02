@@ -867,9 +867,10 @@ void nats_rpc_cur_set_from_buffers(uint32_t handle_idx,
  * context that tolerates blocking a worker for the full timeout).
  * Calling from a UDP/TCP SIP request_route stalls that worker's entire
  * SIP pipeline until the RPC returns -- avoid.  A non-blocking async
- * variant is on the roadmap (it requires bridging nats.c callbacks
- * onto an eventfd because nats.c runs them on a library-internal
- * thread that cannot touch OpenSIPS APIs).
+ * variant exists: async(nats_request(...)) dispatches to
+ * w_nats_request_async, which routes the publish/reply through the
+ * consumer process (the only libnats-safe context) and yields the
+ * worker on a per-call private timerfd.  See nats_rpc_async.c.
  *
  * The function clears the per-worker staged-header table on every
  * exit path so a timeout does not leak stage bytes into the next

@@ -206,11 +206,15 @@
             <itemizedlist>
                 <listitem>
                     <para>
-                        <emphasis>nats.c</emphasis> v3.13 or later
+                        <emphasis>nats.c</emphasis> with the per-key KV TTL API
                         (<filename>libnats.so</filename>) — the official
-                        C client library for NATS.  The multi-subject
-                        filter and pull-consumer APIs used here require
-                        v3.13 at minimum.
+                        C client library for NATS.  This module uses the
+                        multi-subject filter and pull-consumer APIs, and all
+                        NATS modules link the shared <filename>lib/nats</filename>
+                        pool, which requires the per-key KV TTL API
+                        (<emphasis>kvStore_CreateStringWithTTL</emphasis>, nats.c
+                        PR #1000).  An older libnats is detected at build time
+                        and the NATS modules are skipped with a clear message.
                     </para>
                 </listitem>
                 <listitem>
@@ -798,7 +802,7 @@ route[on_reply] {
         } else {
             xlog("L_WARN", "rpc id=$nats_request_id reply id mismatch\n");
         }
-    } else if ($retcode == 0) {
+    } else if ($retcode == -1) {
         xlog("L_WARN", "rpc id=$nats_request_id timed out\n");
     }
 }
@@ -887,16 +891,20 @@ route {
                 </listitem>
             </itemizedlist>
             <para>
-                Return values:
+                Return values (no path returns <varname>0</varname> — a
+                0 return from a script-callable cmd terminates the
+                calling route via <emphasis>ACT_FL_EXIT</emphasis>):
                 <varname>1</varname> on success,
-                <varname>0</varname> on empty-after-timeout,
-                <varname>-1</varname> on handle-not-found or transient
-                error,
+                <varname>-1</varname> when no message arrived within the
+                budget (not an error; script may retry),
                 <varname>-2</varname> when the underlying NATS connection
                 is down (the consumer process surfaces this so scripts
                 can distinguish transport failure from empty ring; call
                 <function>nats_last_error()</function> for the human
-                string).
+                string),
+                <varname>-3</varname> when the handle id is not found or
+                is retiring,
+                <varname>-6</varname> on internal error.
             </para>
             <para>
                 Also exported as an async command; see
@@ -912,9 +920,10 @@ route {
                 Non-blocking variant of <function>nats_fetch()</function>
                 for use inside <function>async(...)</function> launcher
                 statements.  The worker yields immediately after the
-                call and is resumed by the ring's eventfd when a message
-                arrives, or by a reactor timer when
-                <emphasis>timeout_ms</emphasis> expires.
+                call; a worker-private timerfd registered with the
+                reactor polls the ring on each tick and resumes the
+                worker when a message arrives, or once the per-call
+                <emphasis>timeout_ms</emphasis> deadline expires.
             </para>
             <example>
                 <title>Async fetch + ack in a request route</title>
@@ -949,8 +958,9 @@ route[ON_MSG] {
             <para>
                 <emphasis>opts</emphasis> is a semicolon-separated
                 <literal>k=v</literal> string recognizing
-                <literal>count</literal> (default 16),
-                <literal>expires</literal> (duration, default 100ms;
+                <literal>count</literal> (default 1),
+                <literal>expires</literal> (duration, default 0 =
+                non-blocking;
                 accepts a bare integer interpreted as ms, or a
                 suffix of <literal>ms</literal> / <literal>s</literal>
                 / <literal>m</literal> / <literal>h</literal> /
@@ -971,7 +981,9 @@ route[ON_MSG] {
             </para>
             <para>
                 When <varname>expires</varname> is positive, the
-                call waits in 5 ms ticks until the requested
+                call blocks on the cross-process ring futex
+                (<function>nats_ring_wait</function>) in slices of up
+                to 100 ms until the requested
                 <varname>count</varname> is reached or the deadline
                 expires.  This wait is bounded by the
                 worker's request-route processing budget; do not
@@ -1430,7 +1442,7 @@ route {
 route[on_reply] {
     if ($retcode == 1) {
         xlog("L_INFO", "rpc id=$nats_request_id reply=$nats_data()\n");
-    } else if ($retcode == 0) {
+    } else if ($retcode == -1) {
         xlog("L_WARN", "rpc id=$nats_request_id timed out\n");
     }
 }
@@ -1529,7 +1541,8 @@ opensips-cli -x mi nats_consumer_unbind id=jobs
                 List all registered handles with their bind-time
                 configuration and current runtime counters
                 (pulls_requested, msgs_delivered, acks, naks, terms,
-                redeliveries, last_error_code, last_error_msg).
+                redeliveries, poisoned, fetch_skips_full,
+                backpressure_drops, fetch_errors, ring_depth).
             </para>
             <para>
                 Each handle entry also carries two backoff-state

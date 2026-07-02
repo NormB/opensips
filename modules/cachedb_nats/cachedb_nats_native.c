@@ -1366,14 +1366,15 @@ static int nats_map_compose(char *out, int out_size, const str *key,
 }
 
 /**
- * build_map_key() — Construct a composite "key:subkey" string in a buffer.
+ * build_map_key() — compose the new-format map subject enc(key).enc(subkey).
  *
- * Concatenates key, the NATS_MAP_SEP separator (':'), and subkey into buf,
- * then null-terminates.  The buffer must be large enough for
- * key->len + 1 + subkey->len + 1 bytes (content + separator + NUL).
+ * Delegates to nats_map_compose(), which hex-escapes both components
+ * (NATS_MAP_SEP = '.') so neither can contain a raw separator; the encoding
+ * may expand each byte up to 3 chars, so the required buffer size is not a
+ * simple key->len + subkey->len sum.  The ':'-separated concatenation is the
+ * legacy layout, now built only by build_map_key_legacy().
  *
- * If subkey is NULL or empty, the function falls back to copying just the
- * key via nats_str_to_buf().
+ * If subkey is NULL or empty, only enc(key) is written.
  *
  * Returns: 0 on success, -1 if inputs are invalid or the buffer is too small.
  */
@@ -1605,13 +1606,17 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
  * nats_cache_map_set() — Store key-value pairs under composite keys.
  *
  * Implements the cachedb map_set callback.  Each pair in the input dict
- * is stored as a separate NATS KV entry with a constructed composite key:
+ * is stored as a separate NATS KV entry under a composed, hex-escaped
+ * subject (nats_map_compose):
  *
- *   - With subkey:    "key:subkey:pair_name" = value
- *   - Without subkey: "key:pair_name" = value
+ *   - With subkey:    enc(key).enc("subkey:pair_name") = value
+ *   - Without subkey: enc(key).enc(pair_name)          = value
  *
- * The key:subkey construction allows hash-map semantics on top of flat
- * NATS KV.  Values are converted to strings (CDB_STR used directly,
+ * The ':' between subkey and pair name is preserved only as an escaped data
+ * byte inside the encoded field, so map_get returns the identical field
+ * name.  This composed layout gives hash-map semantics on top of flat NATS
+ * KV.  Each pair is written unconditionally (kvStore_PutString — no read /
+ * merge / CAS).  Values are converted to strings (CDB_STR used directly,
  * CDB_INT32 formatted via snprintf).
  *
  * Returns: 0 on success, -1 on error (including partial failures).
@@ -1747,12 +1752,13 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
  *
  * Implements the cachedb map_remove callback.  Two modes of operation:
  *
- *   - Single removal (subkey provided): Constructs "key:subkey" and deletes
- *     that single NATS KV entry.
+ *   - Single removal (subkey provided): deletes the new-format entry
+ *     enc(key).enc(subkey) (and, while nats_map_legacy_read is set, the
+ *     legacy "key:subkey" entry too).
  *
- *   - Prefix removal (no subkey): Lists all keys in the bucket, filters for
- *     those starting with "key:", and deletes each matching entry.  This
- *     effectively removes the entire "hash map" associated with the key.
+ *   - Prefix removal (no subkey): a server-side filtered list "enc(key).>"
+ *     deletes the entire map without scanning the whole bucket (plus, while
+ *     nats_map_legacy_read is set, a legacy raw "key:" full-scan pass).
  *
  * Deletion of non-existent keys is treated as success (idempotent).
  *

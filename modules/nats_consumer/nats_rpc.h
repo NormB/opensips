@@ -53,8 +53,10 @@
  *                                The sync shape blocks the worker for
  *                                up to timeout_ms; the async shape
  *                                yields to the reactor on a per-call
- *                                eventfd while a libnats subscription
- *                                thread waits for the reply.  On
+ *                                worker-private timerfd while the
+ *                                consumer process publishes the
+ *                                request and awaits the reply on its
+ *                                persistent inbox subscription.  On
  *                                success the reply populates the
  *                                per-worker current-message state so
  *                                the script can read $nats_data,
@@ -87,8 +89,8 @@
  *                                  -5  per-worker in-flight cap
  *                                      reached -- async only.
  *                                  -6  internal error (oom,
- *                                      format failure, missing
- *                                      eventfd, etc.).
+ *                                      timerfd create/arm failure,
+ *                                      slot publish failure, etc.).
  */
 
 #ifndef NATS_RPC_H
@@ -146,10 +148,11 @@ int w_nats_request (struct sip_msg *msg, str *subject, str *payload,
  *   bare        nats_request(...)            -> w_nats_request    (sync)
  *   wrapped in  async(nats_request(...), rt) -> w_nats_request_async
  *
- * The async entry point bridges the worker onto an eventfd and yields
- * for the duration of the round trip; the publish + reply-inbox
- * subscription runs in the consumer process (the only libnats-safe
- * context).  Both entry points share the same script surface. */
+ * The async entry point yields the worker on a per-call private
+ * timerfd for the duration of the round trip; the publish +
+ * reply-inbox subscription runs in the consumer process (the only
+ * libnats-safe context).  Both entry points share the same script
+ * surface. */
 int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
                          str *subject, str *payload, int *timeout_ms);
 

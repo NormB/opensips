@@ -46,12 +46,11 @@
  * mapped by every child via the standard OpenSIPS shm_mem
  * mechanism so workers and the consumer process share one view.
  *
- * The eventfds inside each slot are created in main as well, so
- * fork() carries them into every child's fd table at the same
- * numeric fd value (POSIX file-descriptor inheritance).  Workers
- * write to slot->wake_fd to wake themselves on the empty -> non-
- * empty edge (handled in the resume function); the consumer
- * process writes to the same fd to deliver replies.
+ * There is no per-slot fd: the wake mechanism is a per-call
+ * worker-private timerfd poll (see nats_rpc_slot.h).  The consumer
+ * publishes a reply by writing reply_* and storing the slot state
+ * DELIVERED; the worker learns of it on its next timerfd tick by
+ * reading slot->state.  No fd is signalled from either side.
  */
 static nats_rpc_slot_t *g_slots;
 static uint32_t         g_slot_total;
@@ -159,9 +158,9 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 				memory_order_relaxed);
 			/* Zero out the carry-over reply / outbound fields
 			 * so a recycled slot looks pristine to the next
-			 * caller.  state, slot_idx, wake_fd, epoch are
-			 * left as-is (slot_idx + wake_fd are immutable;
-			 * epoch is overwritten by the caller). */
+			 * caller.  state, slot_idx and epoch are left
+			 * as-is (slot_idx is immutable; epoch is
+			 * overwritten by the caller). */
 			s->corr_id_len            = 0;
 			s->corr_id[0]             = '\0';
 			s->out_subject_len        = 0;

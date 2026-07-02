@@ -28,14 +28,14 @@
  * outbound publish data out of the SHM slot, and calls
  * natsConnection_PublishMsg with reply-to set to the consumer's
  * persistent inbox subject (the libnats-callback path then
- * delivers the reply back into the slot and wakes the worker via
- * the slot's pre-allocated eventfd).
+ * delivers the reply back into the slot; the worker picks it up
+ * on its next private-timerfd poll).
  *
  * Implementation mirrors nats_ack_ipc:
  *
  *   * Bounded SHM ring sized at init time.
- *   * Single SHM spinlock around head/tail advance and the
- *     slot-byte write.
+ *   * Lock-free bounded MPSC (nats_mpsc.c): CAS head reservation +
+ *     per-cell generation, no lock.
  *   * eventfd inherited by all children at fork() so the
  *     consumer process's reactor wakes on the empty -> non-empty
  *     edge.
@@ -71,7 +71,7 @@ typedef struct nats_rpc_ipc_msg {
 	uint32_t generation;     /* slot generation captured at enqueue */
 } nats_rpc_ipc_msg_t;
 
-/* Allocate the SHM-backed queue + eventfd + spinlock.  Called
+/* Allocate the SHM-backed lock-free MPSC queue + eventfd.  Called
  * from mod_init (pre-fork) so the eventfd is inherited by every
  * child process.  Returns 0 on success, -1 on failure. */
 int nats_rpc_ipc_init(void);

@@ -35,11 +35,9 @@
  * empty -> non-empty edge; the consumer drains everything visible on
  * wake.
  *
- * Concurrency: a single SHM spinlock guards the head/tail advance
- * plus the slot write.  This is fine: acks are rare compared to the
- * data-plane and the critical section is a handful of stores.
- * A future change can replace this with a lock-free variant if
- * profiling shows it matters.
+ * Concurrency: lock-free bounded MPSC (head/tail-CAS + per-cell
+ * generation, via nats_mpsc.c).  Producers reserve a cell with a
+ * single CAS and never take a lock or block on the consumer.
  */
 
 #ifndef NATS_ACK_IPC_H
@@ -72,8 +70,8 @@ typedef enum {
 } nats_ack_action_e;
 
 /* Public message format used by both producer (worker) and consumer
- * (consumer process).  Fits in one cache line so the whole slot write
- * is a single store-after-lock sequence. */
+ * (consumer process).  Fits in one cache line so a producer publishes
+ * it with a single memcpy + release-store into its reserved cell. */
 typedef struct nats_ack_ipc_msg {
 	uint64_t ack_token;        /* handle_idx:16 | slot_idx:32 | gen:16 */
 	uint32_t action;           /* nats_ack_action_e -- 32 bits for ABI */
@@ -88,9 +86,9 @@ typedef struct nats_ack_ipc_slot {
 	uint8_t  _pad[7];
 } nats_ack_ipc_slot_t;
 
-/* Allocate the SHM-backed queue, the eventfd, and the protecting
- * spinlock.  Called from mod_init (pre-fork) so the eventfd is
- * inherited by every child process.
+/* Allocate the SHM-backed lock-free MPSC queue and its eventfd.
+ * Called from mod_init (pre-fork) so the eventfd is inherited by
+ * every child process.
  * Returns 0 on success, -1 on SHM exhaustion / eventfd failure. */
 int nats_ack_ipc_init(void);
 

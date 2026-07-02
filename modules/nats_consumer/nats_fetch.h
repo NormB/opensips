@@ -115,8 +115,9 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms);
 const char *nats_last_error(void);
 
 /* Script-callable: async fetch.  Short-circuits to success if the
- * ring has data already; otherwise registers the ring eventfd with
- * the async reactor and yields the worker. */
+ * ring has data already; otherwise registers a worker-private timerfd
+ * with the async reactor and yields the worker, polling the ring on
+ * each tick until a message arrives or the deadline expires. */
 int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
                        str *id, int *timeout_ms);
 

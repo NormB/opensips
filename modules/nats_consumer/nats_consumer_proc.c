@@ -1215,8 +1215,10 @@ void nats_consumer_proc_main(int rank)
 		 *     against our libnats connection with reply-to
 		 *     pointing back at our persistent inbox.  Replies
 		 *     land in on_inbox_reply (running on the libnats
-		 *     thread, also in this process) which writes
-		 *     reply_* + signals the slot's wake_fd. */
+		 *     thread, also in this process) which writes reply_*
+		 *     and stores the slot state DELIVERED; the worker
+		 *     observes it on its next private-timerfd poll (no fd
+		 *     is signalled). */
 		{
 			int rpcs = nats_rpc_consumer_drain_ipc();
 			if (rpcs > 0)

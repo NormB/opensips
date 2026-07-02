@@ -30,7 +30,8 @@
  * Key constants:
  *   NATS_KEY_BUF_SIZE   — maximum key buffer for null-termination
  *   NATS_VAL_BUF_SIZE   — maximum value buffer for null-termination
- *   NATS_CAS_RETRIES    — CAS retry limit for atomic counters
+ *   NATS_CAS_RETRIES    — legacy/unused; the operative CAS retry limit is
+ *                         the nats_cas_retries modparam (default 10)
  *
  * Key externs:
  *   kv_bucket, kv_replicas, kv_history, kv_ttl — bucket parameters
@@ -57,8 +58,9 @@ extern char *kv_bucket;
 extern int   kv_replicas;
 
 /* Number of historical revisions to retain per key.
- * Default: 1 (current value only).  Higher values enable
- * nats_kv_history() to retrieve past revisions. */
+ * Default: 5 (retains the last 5 revisions).  Higher values let
+ * nats_kv_history() return more past revisions; 1 keeps only the
+ * current value. */
 extern int   kv_history;
 
 /* Bucket-wide TTL in seconds.  Default: 0 (no expiration).
@@ -77,11 +79,12 @@ extern int   kv_ttl;
  * size are heap-allocated instead. */
 #define NATS_VAL_BUF_SIZE   4096
 
-/* Maximum number of compare-and-swap retries for atomic counter
- * operations (nats_cache_add, nats_cache_sub).  Each retry reads
- * the current value, computes the new value, and attempts a CAS
- * update.  If all retries fail (due to concurrent writers), the
- * operation returns -1. */
+/* Legacy/unused default CAS retry count.  The operative retry limit for
+ * atomic counter operations (nats_cache_add, nats_cache_sub) is the
+ * nats_cas_retries modparam (default 10), read at runtime; this macro is
+ * retained only for historical reference.  Each retry reads the current
+ * value, computes the new value, and attempts a CAS update.  If all retries
+ * fail (due to concurrent writers), the operation returns -1. */
 #define NATS_CAS_RETRIES    3
 
 /* Reject keys NATS KV cannot represent as a subject token: control

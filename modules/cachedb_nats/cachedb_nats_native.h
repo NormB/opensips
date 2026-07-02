@@ -60,9 +60,9 @@ mi_response_t *mi_nats_map_migrate(const mi_params_t *params,
  * @param payload     Request payload string.
  * @param timeout_ms  Pointer to timeout value in milliseconds.  If the
  *                    responder does not reply within this window, the
- *                    function returns -1.
+ *                    function returns -2.
  * @param result_var  Pseudo-variable spec to store the response payload.
- * @return            1 on success (response received), -1 on error or
+ * @return            1 on success (response received), -1 on error, -2 on
  *                    timeout.  (OpenSIPS script convention: 1 = success.)
  *
  * Thread safety: Safe from OpenSIPS worker process context.
@@ -141,8 +141,9 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
  * CacheDB raw_query implementation for NATS KV.
  *
  * Parses the query string for supported commands:
- *   - "keys <prefix>"  — list all keys matching the prefix
- *   - "purge <key>"    — permanently remove a key and its history
+ *   - "KV KEYS"          — list all keys in the bucket
+ *   - "KV PURGE <key>"   — permanently remove a key and its history
+ *   - "KV BUCKET INFO"   — return bucket statistics
  *
  * @param con             cachedb connection.
  * @param attr            Raw query command string.

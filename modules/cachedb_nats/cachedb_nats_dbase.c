@@ -525,7 +525,8 @@ int nats_cache_remove_unsupported(cachedb_con *con, str *attr, const str *key)
  *      update fails with a CAS conflict — retry from step 1.
  *
  * If the key does not exist yet, kvStore_CreateString is used instead
- * (initial value = delta).  Retries up to NATS_CAS_RETRIES times.
+ * (initial value = delta).  Retries up to the nats_cas_retries modparam
+ * (default 10) times.
  *
  * @param con      cachedb connection handle.
  * @param attr     Counter key (OpenSIPS str).
@@ -601,7 +602,8 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 	/* CAS retry loop: each iteration reads the current value and
 	 * attempts a conditional write.  On conflict (another process
 	 * updated the key between our read and write), we re-read and
-	 * try again, up to NATS_CAS_RETRIES times. Sleep with jittered
+	 * try again, up to the nats_cas_retries modparam (default 10) times.
+	 * Sleep with jittered
 	 * exponential backoff between attempts to avoid hot-spinning
 	 * the broker under contention. */
 	int attempt = 0;
@@ -746,9 +748,11 @@ int nats_cache_sub(cachedb_con *con, str *attr, int val, int expires,
 /**
  * nats_cache_get_counter() — read a numeric counter value from the KV store.
  *
- * Retrieves the value for the given key and parses it as an integer using
- * atoi().  The value is expected to be a decimal string written by
- * nats_cache_counter_op() (via nats_cache_add / nats_cache_sub).
+ * Retrieves the value for the given key and parses it strictly via
+ * nats_counter_parse(): a non-numeric or out-of-32-bit-range stored value
+ * is rejected with -1 rather than silently coerced to 0.  The value is a
+ * decimal string written by nats_cache_counter_op() (via nats_cache_add /
+ * nats_cache_sub).
  *
  * @param con   cachedb connection handle.
  * @param attr  Counter key (OpenSIPS str).

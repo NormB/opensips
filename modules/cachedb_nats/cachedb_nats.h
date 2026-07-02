@@ -176,8 +176,8 @@ int nats_cache_remove_unsupported(cachedb_con *con, str *attr, const str *key);
 /*
  * Atomic add to a counter stored as an integer value.
  *
- * Uses compare-and-swap (CAS) with up to NATS_CAS_RETRIES attempts
- * to handle concurrent updates.
+ * Uses compare-and-swap (CAS) with up to the nats_cas_retries modparam
+ * (default 10) attempts to handle concurrent updates.
  *
  * @param con      cachedb connection.
  * @param attr     Key string.
@@ -215,7 +215,7 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val);
 /*
  * Execute a raw query against the KV store.
  *
- * Supports commands like "keys <prefix>" and "purge <key>".
+ * Supports commands "KV KEYS", "KV PURGE <key>", and "KV BUCKET INFO".
  * Implemented in cachedb_nats_native.c.
  *
  * @param con             cachedb connection.
@@ -228,10 +228,11 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val);
 int nats_cache_raw_query_impl(cachedb_con *con, str *attr, cdb_raw_entry ***reply, int expected_kv_no, int *reply_no);
 
 /*
- * Get a JSON document from the KV store and return as map columns.
+ * Retrieve all fields of a map from the KV store.
  *
- * Retrieves the raw JSON value, parses it, and populates cdb_res_t
- * with one row whose columns correspond to the JSON object fields.
+ * Lists the composite keys enc(key).enc(field) via a server-side filter
+ * and appends one result row per field (each row holds a single
+ * field -> value pair); no JSON document is parsed.
  * Implemented in cachedb_nats_native.c.
  *
  * @param con   cachedb connection.
@@ -242,10 +243,11 @@ int nats_cache_raw_query_impl(cachedb_con *con, str *attr, cdb_raw_entry ***repl
 int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res);
 
 /*
- * Set fields in a JSON document stored in the KV store.
+ * Set fields of a map in the KV store.
  *
- * Reads the existing document (or starts with {}), merges the provided
- * key-value pairs, and writes back.  Uses CAS for consistency.
+ * Writes each provided key-value pair unconditionally as a separate KV
+ * entry under a composed, hex-escaped subject enc(key).enc(field)
+ * (kvStore_PutString — no read/merge/CAS).
  * Implemented in cachedb_nats_native.c.
  *
  * @param con     cachedb connection.

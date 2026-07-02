@@ -37,9 +37,11 @@
  * The thread follows a four-step loop:
  *
  *   1. Wait for NATS connectivity (poll nats_pool_is_connected).
- *   2. Acquire a fresh KV handle and rebuild the search index
- *      from the full bucket contents (crash-recovery path).
- *   3. Create a kvWatcher on the bucket (with optional key pattern).
+ *   2. Acquire a fresh KV handle and create a kvWatcher on the bucket
+ *      (UpdatesOnly, with optional key pattern).
+ *   3. Rebuild the search index from the full bucket contents
+ *      (crash-recovery path), with the watcher already buffering any
+ *      concurrent mutations.
  *   4. Process live nats_dl.kvWatcher_Next() updates until disconnect or
  *      reconnect-epoch change, then loop back to step 1.
  *
@@ -338,10 +340,11 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
  * four-step self-healing loop:
  *
  *   1. Block until NATS connectivity is established (500ms poll).
- *   2. Obtain a fresh KV handle from the pool and rebuild the
- *      JSON full-text search index from the complete bucket state.
- *   3. Create a kvWatcher with the configured key pattern (or
- *      watch all keys if no pattern is set).
+ *   2. Obtain a fresh KV handle from the pool and create a kvWatcher
+ *      with the configured key pattern (or watch all keys if no pattern
+ *      is set).
+ *   3. Rebuild the JSON full-text search index from the complete bucket
+ *      state, with the watcher already buffering concurrent mutations.
  *   4. Process live updates from nats_dl.kvWatcher_Next() in a tight loop.
  *      On reconnect-epoch change or disconnect, break out and
  *      restart from step 1 to get a fresh KV handle and index.

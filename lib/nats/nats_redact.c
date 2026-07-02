@@ -82,11 +82,8 @@ static const char *redact_one(const char *url, char **dst, size_t *rem)
 	}
 
 	/* Copy the prefix (scheme + authority slashes), the redaction
-	 * mask, '@', and the rest of the host portion through
-	 * url_end.  (Inline scheme://STARS@host examples are avoided in
-	 * this comment because gcc's -Wcomment treats a slash-asterisk
-	 * inside a block comment as a possible nested-comment opener
-	 * and -Werror promotes the warning.) */
+	 * mask (NATS_REDACT_MASK, "[redacted]"), '@', and the rest of the
+	 * host portion through url_end. */
 	{
 		size_t prefix_n = (size_t)(authority - url);   /* through scheme + "//" */
 		size_t mask_n   = sizeof(NATS_REDACT_MASK) - 1;  /* redaction mask */

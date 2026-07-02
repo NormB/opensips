@@ -67,7 +67,7 @@ static void mod_destroy(void);
 /* w_nats_consumer_bind() -- script wrapper for the bind API.
  *
  * Same parse + register sequence as the MI command's mi_consumer_bind
- * (nats_mi.c:81), expressed as a cmd_export so operators can write the
+ * (nats_mi.c), expressed as a cmd_export so operators can write the
  * canonical OpenSIPS pattern:
  *
  *     startup_route {
