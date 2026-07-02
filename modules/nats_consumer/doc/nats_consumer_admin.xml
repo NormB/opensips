@@ -854,6 +854,55 @@ route {
                 deployments don't need it.
             </para>
         </section>
+
+        <section id="param_async_rpc_slots">
+            <title><varname>async_rpc_slots</varname> (integer)</title>
+            <para>
+                Size of the SHM slot pool that backs in-flight
+                <function>async</function>
+                <function>nats_request()</function> calls across all SIP
+                workers.  Each concurrent async RPC occupies one slot for its
+                lifetime; when the pool is exhausted a new call fails (-5) and
+                the script can retry or shed load.  Clamped to the range
+                1..65536.
+            </para>
+            <para>
+                <emphasis>Default value is <quote>64</quote>.</emphasis>
+            </para>
+        </section>
+
+        <section id="param_async_rpc_poll_ms">
+            <title><varname>async_rpc_poll_ms</varname> (integer)</title>
+            <para>
+                Poll interval, in milliseconds, of the per-call
+                worker-private timerfd that the async
+                <function>nats_request()</function> resume uses to check its
+                SHM slot for the reply.  Lower values reduce reply latency at
+                the cost of more timer wake-ups per in-flight call; the value
+                is clamped to the range 1..1000.
+            </para>
+            <para>
+                <emphasis>Default value is <quote>1</quote>
+                (millisecond).</emphasis>
+            </para>
+        </section>
+
+        <section id="param_reconnect_wait_ms">
+            <title><varname>reconnect_wait_ms</varname> (integer)</title>
+            <para>
+                Delay, in milliseconds, between reconnect attempts for the
+                consumer process's connection to the broker.  A value of
+                <emphasis role="bold">0</emphasis> uses the shared
+                <filename>lib/nats</filename> pool default.  Other
+                connection-level parameters are owned by
+                <emphasis>event_nats</emphasis> (see
+                <varname>nats_transport</varname> above).
+            </para>
+            <para>
+                <emphasis>Default value is <quote>0</quote> (use the pool
+                default).</emphasis>
+            </para>
+        </section>
     </section><!-- /parameters -->
 
     <!-- ============================================================ -->

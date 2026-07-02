@@ -934,6 +934,88 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</example>
 	</section>
 
+	<section id="param_nats_reap_interval" xreflabel="nats_reap_interval">
+	<title><varname>nats_reap_interval</varname> (integer)</title>
+	<para>
+		Period, in seconds, of the reaper timer that CAS-prunes expired
+		bindings from the bucket.  The NATS server's own per-message TTL
+		is an opportunistic optimisation that can be lost on update
+		(nats-io #1994 / &osips; #6959), so this periodic prune is what
+		actually guarantees an expired binding is physically reclaimed.
+		A value <emphasis role="bold">&gt; 0</emphasis> registers the
+		timer; a value <emphasis role="bold">&lt;= 0</emphasis> disables
+		it (TTL-only) and is refused at startup unless
+		<varname>nats_unsafe_ttl_only</varname> is also set.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>30</quote> (seconds).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_reap_grace" xreflabel="nats_reap_grace">
+	<title><varname>nats_reap_grace</varname> (integer)</title>
+	<para>
+		Clock-skew slack, in seconds, applied to every expiry decision
+		(the write-side expiry hygiene, the read-side filter and the
+		reaper).  A binding is treated as expired only once it is more
+		than <varname>nats_reap_grace</varname> seconds past its TTL, so
+		a node whose clock leads its peers never deletes or hides another
+		node's still-live registration.  Set this to at least the real
+		maximum clock skew between the nodes sharing the bucket.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>5</quote> (seconds).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_unsafe_ttl_only" xreflabel="nats_unsafe_ttl_only">
+	<title><varname>nats_unsafe_ttl_only</varname> (integer)</title>
+	<para>
+		Operator acknowledgement that running with the reaper disabled
+		(<varname>nats_reap_interval</varname> &lt;= 0) is intentional and
+		that the associated TTL-loss risk (nats-io #1994 / &osips; #6959,
+		where a server-side per-message TTL can be dropped on update) is
+		accepted.  Without this flag a non-positive
+		<varname>nats_reap_interval</varname> hard-fails module
+		initialisation rather than silently leaving expiries unreclaimed.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>0</quote> (reaper required).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_nats_max_value_size" xreflabel="nats_max_value_size">
+	<title><varname>nats_max_value_size</varname> (integer)</title>
+	<para>
+		Maximum stored value size, in bytes, for a usrloc row.  An
+		oversize row is detected before the CAS write and the offending
+		contact's save fails cleanly — never a silent truncation or
+		corruption.  Set this to the deployment's real per-message cap
+		(and no larger than the stream's <varname>max_msg_size</varname>).
+		A value <emphasis role="bold">&lt;= 0</emphasis> disables the guard.
+	</para>
+	<para>
+		<emphasis>Default value is <quote>1048576</quote> (1 MiB, the
+		NATS <varname>max_payload</varname> default).</emphasis>
+	</para>
+	</section>
+
+	<section id="param_kv_op_timeout_ms" xreflabel="kv_op_timeout_ms">
+	<title><varname>kv_op_timeout_ms</varname> (integer)</title>
+	<para>
+		Per-operation timeout, in milliseconds, for KV get/put/update
+		calls issued from a SIP worker (e.g. the usrloc read/write path),
+		so a slow-but-connected broker cannot block a worker for the full
+		library default.  A value <emphasis role="bold">&lt;= 0</emphasis>
+		uses the <filename>lib/nats</filename> pool default (no extra
+		per-operation cap).
+	</para>
+	<para>
+		<emphasis>Default value is <quote>0</quote> (use the pool
+		default).</emphasis>
+	</para>
+	</section>
+
 
 	</section>
 
