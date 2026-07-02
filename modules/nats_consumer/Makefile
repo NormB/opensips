@@ -9,6 +9,10 @@ ifeq ($(NATS_FOUND),)
 $(info [skip] nats_consumer.so — libnats C client not detected (install libnats-dev or set LOCALBASE))
 .PHONY: all clean install modules
 all clean install modules: ; @true
+else ifneq ($(NATS_HAS_KV_TTL),yes)
+$(info [skip] nats_consumer.so — libnats too old: missing the per-key KV TTL API kvStore_CreateStringWithTTL (nats.c PR #1000); install a newer nats.c (e.g. to /usr/local + ldconfig) or set LOCALBASE)
+.PHONY: all clean install modules
+all clean install modules: ; @true
 else
 
 auto_gen=
@@ -24,6 +28,6 @@ include ../../Makefile.modules
 # Appended AFTER Makefile.modules so it survives the `LDFLAGS:=$(MOD_LDFLAGS)`
 # reassignment that happens inside Makefile.modules.  LDFLAGS is deferred in
 # the $(NAME) link rule, so late edits still reach the linker.
-LDFLAGS += -Wl,-rpath,'$$ORIGIN'
+LDFLAGS += -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,'$$ORIGIN/../../lib/nats'
 
 endif
