@@ -20,14 +20,25 @@ on:
       rtpp-tag:
         required: false
         type: string
-        default: debian_12-slim
+        default: debian_13-slim
+      pipcache-repo:
+        required: false
+        type: string
+        default: ghcr.io/sippy/b2bua/sippy-wheelset:latest
 
 jobs:
+  get_container_platforms:
+    name: Get Container Platforms
+    uses: sippy/cimagic/.github/workflows/GetContainerPlatforms.yml@v3
+    with:
+      image: ${{ inputs.rtpp-repo }}-${{ inputs.rtpp-tag }}
+
   set_env:
     name: Set Environment
+    needs: get_container_platforms
     runs-on: ubuntu-latest
     env:
-      BASE_IMAGE: ${{ inputs.rtpp-repo }}-${{ inputs.rtpp-tag }}
+      RAW_PLATFORMS: ${{ needs.get_container_platforms.outputs.platforms }}
     outputs:
       platforms: ${{ steps.set-env.outputs.platforms }}
       build-matrix: ${{ steps.set-env.outputs.build-matrix }}
@@ -42,9 +53,8 @@ jobs:
       id: set-env
       run: |
         BUILD_OS="`echo ${{ inputs.rtpp-tag }} | sed 's|-.*|| ; s|_|:|g'`"
-        PLATFORMS="`docker manifest inspect ${{ env.BASE_IMAGE }} | \
-          jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture)\(if .platform.variant != null then "/\(.platform.variant)" else "" end)"' | \
-          sort -u | grep -v unknown | BUILD_OS="${BUILD_OS}" ./scripts/build/get-arch-buildargs.rtp.io fltplatforms | paste -sd ','`"
+        PLATFORMS="`echo "${RAW_PLATFORMS}" | tr ',' '\n' | \
+          BUILD_OS="${BUILD_OS}" ./scripts/build/get-arch-buildargs.rtp.io fltplatforms | paste -sd ','`"
         BUILD_MATRIX="`echo ${PLATFORMS} | tr ',' '\n'  | jq -R . | jq -s . | tr '\n' ' '`"
         GIT_BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
         GIT_BRANCH="${GIT_BRANCH#refs/tags/}"
@@ -81,6 +91,7 @@ jobs:
       packages: write
     env:
       BASE_IMAGE: ${{ inputs.rtpp-repo }}-${{ inputs.rtpp-tag }}
+      PIPCACHE_IMAGE: ${{ inputs.pipcache-repo }}-${{ inputs.rtpp-tag }}
       BUILD_OS: ${{ needs.set_env.outputs.build-os }}
       PLATFORMS: ${{ needs.set_env.outputs.platforms }}
       BUILD_IMAGE: ${{ needs.set_env.outputs.build-image }}
@@ -154,6 +165,7 @@ jobs:
         file: ./docker/Dockerfile.rtp.io
         build-args: |
           BASE_IMAGE=${{ env.BASE_IMAGE }}
+          PIPCACHE_IMAGE=${{ env.PIPCACHE_IMAGE }}
           BUILD_OS=${{ env.BUILD_OS }}
           LLVM_VER=${{ inputs.llvm-version }}
           LLVM_VER_OLD=${{ inputs.llvm-version-old }}
@@ -177,6 +189,7 @@ jobs:
         platform: ${{ fromJSON(needs.set_env.outputs.build-matrix) }}
     env:
       BASE_IMAGE: ${{ inputs.rtpp-repo }}-${{ inputs.rtpp-tag }}
+      PIPCACHE_IMAGE: ${{ inputs.pipcache-repo }}-${{ inputs.rtpp-tag }}
       BUILD_OS: ${{ needs.set_env.outputs.build-os }}
 
     steps:
@@ -229,6 +242,7 @@ jobs:
         file: ./docker/Dockerfile.rtp.io
         build-args: |
           BASE_IMAGE=${{ env.BASE_IMAGE }}
+          PIPCACHE_IMAGE=${{ env.PIPCACHE_IMAGE }}
           BUILD_OS=${{ env.BUILD_OS }}
           LLVM_VER=${{ inputs.llvm-version }}
           LLVM_VER_OLD=${{ inputs.llvm-version-old }}
@@ -282,10 +296,13 @@ jobs:
           echo "TEST_SET_MIGHTFAIL=early_cancel_lost100,early_cancel" >> $GITHUB_ENV
         fi
 
+    - name: Pull ${{ env.TARGETPLATFORM }} image
+      run: docker pull --platform ${TARGETPLATFORM} ${BUILD_IMAGE}
+
     - name: Test ${{ env.TARGETPLATFORM }}
       run: |
-        docker pull ${BUILD_IMAGE}
-        docker run --platform ${TARGETPLATFORM} --env TEST_SET_MIGHTFAIL --name test --cap-add=SYS_PTRACE \
+        docker run --platform ${TARGETPLATFORM} --env TEST_SET_MIGHTFAIL \
+         --name test --cap-add=SYS_PTRACE \
          --privileged --sysctl net.ipv6.conf.all.disable_ipv6=0 ${BUILD_IMAGE}
       timeout-minutes: 3
 
