@@ -59,5 +59,9 @@ endif
 # too-old libnats with an actionable message instead of failing obscurely.
 # NATS_HAS_KV_TTL := yes iff the detected libnats declares the API.
 ifeq ($(NATS_FOUND),yes)
-NATS_HAS_KV_TTL := $(shell printf '#include <nats/nats.h>\nvoid *_osips_nats_ttl_probe(void){ return (void *)&kvStore_CreateStringWithTTL; }\n' | $(CC) $(NATS_CFLAGS) -fsyntax-only -x c - >/dev/null 2>&1 && echo yes)
+# NOTE: keep this line free of any literal '#'.  make treats '#' as a comment
+# even inside $(shell ...), so an '#include' here makes older make (4.2, the
+# Ubuntu 20.04 CI) swallow the closing ')' -> "unterminated call to function
+# 'shell'".  We force the header with -include instead of an in-source #include.
+NATS_HAS_KV_TTL := $(shell printf 'void *_osips_nats_ttl_probe(void){ return (void *)&kvStore_CreateStringWithTTL; }\n' | $(CC) $(NATS_CFLAGS) -include nats/nats.h -fsyntax-only -x c - >/dev/null 2>&1 && echo yes)
 endif

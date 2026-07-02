@@ -10,7 +10,7 @@ $(info [skip] event_nats.so — libnats C client not detected (install libnats-d
 .PHONY: all clean install modules
 all clean install modules: ; @true
 else ifneq ($(NATS_HAS_KV_TTL),yes)
-$(info [skip] event_nats.so — libnats too old: missing the per-key KV TTL API kvStore_CreateStringWithTTL (nats.c PR #1000); install a newer nats.c (e.g. to /usr/local + ldconfig) or set LOCALBASE)
+$(info [skip] event_nats.so — libnats too old: missing the per-key KV TTL API kvStore_CreateStringWithTTL (nats.c PR 1000); install a newer nats.c (e.g. to /usr/local + ldconfig) or set LOCALBASE)
 .PHONY: all clean install modules
 all clean install modules: ; @true
 else
