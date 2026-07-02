@@ -95,8 +95,8 @@ int main(void)
 		const char *src = "../cachedb_nats_dbase.c";
 		ASSERT(file_contains(src, "cur_txt"),
 			"counter op snapshots the value text into cur_txt before destroy");
-		ASSERT(file_contains(src, "out of 32-bit range"),
-			"counter op still guards the out-of-range case");
+		ASSERT(file_contains(src, "nats_counter_parse"),
+			"counter op still guards the value (via nats_counter_parse)");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

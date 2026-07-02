@@ -534,6 +534,33 @@ int nats_cache_remove_unsupported(cachedb_con *con, str *attr, const str *key)
  * @param new_val  [out] Receives the new counter value on success (may be NULL).
  * @return  0 on success, -1 on error or CAS exhaustion.
  */
+/* Strictly parse a stored counter value: a pure (optionally signed,
+ * whitespace-padded) base-10 integer within the 32-bit range.  Returns 0 and
+ * sets *out on success; -1 if the value is non-numeric, carries trailing
+ * garbage, or is out of range -- a corrupt/hostile broker value.  A NULL value
+ * (the counter does not exist yet) parses as 0, the create path.  strtoll alone
+ * is not enough: it returns 0 with no error for a non-numeric value like "abc",
+ * which would silently RESET the counter to `delta` instead of rejecting it. */
+static int nats_counter_parse(const char *s, long long *out)
+{
+	char *endp;
+	long long v;
+
+	if (!s) { *out = 0; return 0; }
+	errno = 0;
+	v = strtoll(s, &endp, 10);
+	if (endp == s)                       /* no digits consumed */
+		return -1;
+	while (*endp == ' ' || *endp == '\t' || *endp == '\n' || *endp == '\r')
+		endp++;
+	if (*endp != '\0')                   /* trailing garbage after the number */
+		return -1;
+	if (errno == ERANGE || v < INT_MIN || v > INT_MAX)
+		return -1;
+	*out = v;
+	return 0;
+}
+
 static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 	int expires, int *new_val)
 {
@@ -591,24 +618,22 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			/* kvEntry lifecycle: extract value + revision, then
 			 * destroy immediately — we don't need it after this. */
 			const char *vs = nats_dl.kvEntry_ValueString(entry);
-			long long parsed;
+			long long parsed = 0;
 			char cur_txt[64];
-			errno = 0;
-			parsed = vs ? strtoll(vs, NULL, 10) : 0;
+			/* Parse WHILE the entry is alive (vs points into it), then
+			 * snapshot the text for diagnostics before destroying it --
+			 * logging vs after kvEntry_Destroy would be a use-after-free.
+			 * nats_counter_parse rejects a non-numeric / out-of-32-bit-range
+			 * value rather than silently treating "abc" as 0 (which would
+			 * reset the counter) or wrapping an over-range value. */
+			int bad = nats_counter_parse(vs, &parsed) < 0;
 			last_rev = nats_dl.kvEntry_Revision(entry);
-			/* Snapshot the value text for diagnostics BEFORE destroying the
-			 * entry: kvEntry_ValueString returns a pointer INTO the entry's
-			 * own buffer, so logging vs after kvEntry_Destroy would be a
-			 * use-after-free read. */
 			snprintf(cur_txt, sizeof(cur_txt), "%s", vs ? vs : "(null)");
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
-			/* Counters are 32-bit from the script API; a broker value
-			 * outside that range is corrupt or hostile and would
-			 * overflow/truncate below.  Reject rather than wrap. */
-			if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
-				LM_ERR("counter '%s' stored value out of 32-bit range "
-					"('%s'); refusing op\n", key_buf, cur_txt);
+			if (bad) {
+				LM_ERR("counter '%s' stored value is not a valid 32-bit "
+					"integer ('%s'); refusing op\n", key_buf, cur_txt);
 				return -1;
 			}
 			current = parsed;
@@ -781,12 +806,13 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 	 * than silently truncated. */
 	{
 		const char *val_str = nats_dl.kvEntry_ValueString(entry);
-		long long parsed;
-		errno = 0;
-		parsed = val_str ? strtoll(val_str, NULL, 10) : 0;
-		if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
-			LM_ERR("counter '%s' value out of 32-bit range ('%s')\n",
-				key_buf, val_str ? val_str : "(null)");
+		long long parsed = 0;
+		/* Reject a non-numeric / out-of-32-bit-range stored value rather than
+		 * silently returning 0 (strtoll's result for "abc") or a truncated
+		 * int.  Parse while the entry is alive; val_str points into it. */
+		if (nats_counter_parse(val_str, &parsed) < 0) {
+			LM_ERR("counter '%s' value is not a valid 32-bit integer "
+				"('%s')\n", key_buf, val_str ? val_str : "(null)");
 			nats_dl.kvEntry_Destroy(entry);
 			return -1;
 		}
