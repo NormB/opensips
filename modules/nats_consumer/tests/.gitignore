@@ -18,6 +18,7 @@ test_request_route_restriction
 test_ring
 test_ring_bounded_spin
 test_msg_ref_teardown
+test_msg_ref_gen_epoch
 test_registry_ring_ref_safety
 test_rpc_subject
 test_fetch_async_timerfd

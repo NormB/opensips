@@ -33,7 +33,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_async_request_skeleton test_async_request_inflight \
                   test_header_propagation test_start_time_roundtrip \
                   test_rpc_subject test_fetch_async_timerfd \
-                  test_persist_cross_process test_msg_ref_teardown \
+                  test_persist_cross_process test_msg_ref_teardown test_msg_ref_gen_epoch \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
                   test_ring_xproc_wakeup test_rpc_ipc_generation test_rpc_reply_pin \
                   test_rpc_inbox_auth test_registry_lookup_ref \
@@ -51,7 +51,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_async_request_skeleton test_async_request_inflight \
      test_header_propagation test_start_time_roundtrip \
      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
-     test_msg_ref_teardown test_ring_bounded_spin \
+     test_msg_ref_teardown test_msg_ref_gen_epoch test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
@@ -259,6 +259,13 @@ test_persist_cross_process: test_persist_cross_process.c
 test_msg_ref_teardown: test_msg_ref_teardown.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
+# Generation epoch across handle-index reuse: a persistent per-index seed
+# keeps generations monotonic over row free/realloc so a stale ack token from
+# a prior bind cannot mis-ack a reused index/slot.  Self-contained model +
+# source-wiring assertion on ../nats_msg_ref.c.
+test_msg_ref_gen_epoch: test_msg_ref_gen_epoch.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
 # Bounded-spin bail-out in nats_ring_pop: #includes ../nats_ring.c so it
 # can forge a stalled-producer state (head>tail, slot unpublished) and a
 # SIGALRM watchdog proves pop returns instead of spinning forever.
@@ -301,6 +308,7 @@ check: all
 	./test_fetch_async_timerfd
 	./test_persist_cross_process
 	./test_msg_ref_teardown
+	./test_msg_ref_gen_epoch
 	./test_ring_bounded_spin
 	./test_registry_ring_ref_safety
 	./test_ring_xproc_wakeup
@@ -344,7 +352,7 @@ clean:
 	      test_async_request_skeleton test_async_request_inflight \
 	      test_header_propagation test_start_time_roundtrip \
 	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
-	      test_msg_ref_teardown test_ring_bounded_spin \
+	      test_msg_ref_teardown test_msg_ref_gen_epoch test_ring_bounded_spin \
 	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
 	      test_rpc_ipc_generation test_rpc_inbox_auth \
 	      test_registry_lookup_ref test_consumer_proc_boot_retry \

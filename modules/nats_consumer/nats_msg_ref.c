@@ -88,9 +88,24 @@ static unsigned long g_msg_ref_orphans_reaped;
 
 msg_ref_row_t g_msg_refs[NATS_REGISTRY_MAX_HANDLES];
 
+/*
+ * Per-index generation seed, persisted ACROSS a row free so a re-allocated
+ * row (same handle_idx rebound after unbind) does not restart generations at
+ * 0.  The ack token packs a 16-bit generation that only disambiguates slot
+ * reuse within one incarnation; without a persistent seed a stale un-acked
+ * token from a previous bind of the same index could collide with a new
+ * incarnation's slot generation and mis-ack a different message.  purge saves
+ * (max slot generation + 1) here; ensure_row seeds every slot of a fresh row
+ * from it, so a new incarnation's generations are strictly greater than any a
+ * stale token can carry.  Zero for a never-used index (identical to the old
+ * behaviour for the common no-reuse case).
+ */
+static uint16_t g_row_gen_seed[NATS_REGISTRY_MAX_HANDLES];
+
 int ensure_row(uint16_t handle_idx, uint32_t capacity)
 {
 	msg_ref_row_t *row;
+	uint32_t i;
 	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
 		return -1;
 	row = &g_msg_refs[handle_idx];
@@ -105,6 +120,10 @@ int ensure_row(uint16_t handle_idx, uint32_t capacity)
 	}
 	row->capacity  = capacity;
 	row->next_slot = 0;
+	/* Seed generations from the persisted per-index value so a stale token
+	 * from a prior incarnation of this index cannot match a new slot. */
+	for (i = 0; i < capacity; i++)
+		row->slots[i].generation = g_row_gen_seed[handle_idx];
 	return 0;
 }
 
@@ -206,14 +225,21 @@ void purge_msg_ref_row(uint16_t handle_idx)
 		return;
 	row = &g_msg_refs[handle_idx];
 	if (row->slots) {
+		uint16_t maxg = g_row_gen_seed[handle_idx];
 		for (i = 0; i < row->capacity; i++) {
 			msg_ref_slot_t *slot = &row->slots[i];
+			if (slot->generation > maxg)
+				maxg = slot->generation;
 			if (slot->in_use && slot->msg) {
 				nats_dl.natsMsg_Destroy(slot->msg);
 				slot->msg    = NULL;
 				slot->in_use = 0;
 			}
 		}
+		/* Persist a seed strictly above every generation this incarnation
+		 * used, so a stale ack token cannot match a slot after the index is
+		 * rebound (see g_row_gen_seed).  Saved before free(). */
+		g_row_gen_seed[handle_idx] = (uint16_t)(maxg + 1);
 		free(row->slots);
 	}
 	row->slots     = NULL;
