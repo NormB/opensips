@@ -3,12 +3,15 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * P5 / TTL-SOLUTION-SPEC.md §2.3 [TREV-12]: TTL computation, units, boundary.
+ * P5 / TTL-SOLUTION-SPEC.md §2.3 [TREV-12] + TTL-HISTORY-FIX-SPEC.md D3
+ * [HREV-3]: TTL computation, units, boundary.
  *
- *   ttl_seconds = row_exp - now + nats_reap_grace
- *   - ttl_seconds <= 0 (already expired / within grace): set NO TTL and publish
- *     NO value — purge the key instead (§2.5).  Modeled here as a 0 ms sentinel
- *     ("purge signal").  Avoids the server's MsgTTL < 1000 ms rejection.
+ *   ttl_seconds = row_exp - now + slack   (slack = grace [+ linger, HREV-3])
+ *   - ttl_seconds <= 0 (already expired / within slack): FLOOR to the server's
+ *     1000 ms minimum so the row physically self-expires ~1 s after the write.
+ *     The old "0 ms purge signal" contract is DELETED [RC-6]: no caller ever
+ *     implemented the purge, so 0 silently meant "no TTL at all" and an
+ *     expired-at-write row lingered until a reaper pass.
  *   - else jsPubOptions.MsgTTL = ttl_seconds * 1000 (ms), invariant MsgTTL %
  *     1000 == 0 (we only ever set whole seconds [TREV-12]).
  * Units across the three layers for one logical 30 s: stream config
@@ -16,7 +19,9 @@
  * is whole s — a transposition is caught by MsgTTL % 1000 == 0.
  *
  *   gcc -DTTLCALC_CURRENT ... -> unit-transposed: MsgTTL = ttl_seconds (forgets
- *                               *1000) and no purge sentinel => RED.
+ *                               *1000) and no floor => RED.
+ *   gcc -DTTLFLOOR_CURRENT ...-> pre-HREV-3: ttl<=0 returns the 0 "purge
+ *                               signal" (i.e. no TTL is set) => RED.
  *   gcc ...                  -> the FIXED computation => GREEN.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_ttl_compute_boundary test_ttl_compute_boundary.c
@@ -31,7 +36,7 @@ static int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace)
 {
 	return row_exp - now + (int64_t)grace;
 }
-/* MsgTTL in ms; 0 = "purge signal" (no value publish).  Whole seconds only. */
+/* MsgTTL in ms; whole seconds only; <=0 floors to the 1 s server minimum. */
 static int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 {
 #ifdef TTLCALC_CURRENT
@@ -39,7 +44,11 @@ static int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 #else
 	int64_t ms;
 	if (ttl_seconds <= 0)
-		return 0;                                  /* purge signal */
+#ifdef TTLFLOOR_CURRENT
+		return 0;                                  /* pre-HREV-3 "purge signal" */
+#else
+		return 1000;                               /* HREV-3: floor to 1 s min */
+#endif
 	/* overflow-safe: cap before *1000 (real epochs never reach this). */
 	if (ttl_seconds > 9223372036854775LL)
 		ttl_seconds = 9223372036854775LL;
@@ -82,9 +91,11 @@ int main(void)
 	CHECK(_ttl_msgttl_ms(3617) % 1000 == 0, "arbitrary s ms still %1000==0");
 	EQ(_ttl_msgttl_ms(3600), 3600000, "1 h => 3600000 ms");
 
-	printf("[§2.3] boundary: ttl<=0 => 0 ms purge signal (no MsgTTL<1000):\n");
-	EQ(_ttl_msgttl_ms(0), 0, "0 s => 0 (purge signal, not 0 ms TTL)");
-	EQ(_ttl_msgttl_ms(-5), 0, "negative => 0 (purge signal)");
+	printf("[HREV-3] boundary: ttl<=0 => FLOOR to the 1 s server minimum "
+	       "(an expired-at-write row self-expires, never written TTL-less):\n");
+	EQ(_ttl_msgttl_ms(0), 1000, "0 s => 1000 ms (floored, not a no-TTL write)");
+	EQ(_ttl_msgttl_ms(-5), 1000, "negative => 1000 ms (floored)");
+	CHECK(_ttl_msgttl_ms(-5) % 1000 == 0, "floored value keeps %1000==0");
 
 	printf("[§2.3] no overflow at large/post-2038 expiries:\n");
 	EQ(_ttl_msgttl_ms(2147483647LL), 2147483647000LL, "INT32_MAX s => *1000 fits int64");

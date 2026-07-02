@@ -2,6 +2,7 @@
 *.d
 test_js_pending_cap
 test_kv_op_timeout
+test_kv_ttl_probe_matrix
 test_nats_ca_dir
 test_nats_dl
 test_nats_pool_fixes

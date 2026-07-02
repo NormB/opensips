@@ -56,7 +56,8 @@
 extern char *fts_json_prefix;
 extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
-extern int   nats_reap_grace;    /* defined in cachedb_nats.c (max-skew S) */
+extern int   nats_reap_grace;      /* defined in cachedb_nats.c (max-skew S) */
+extern int   nats_expired_linger;  /* [HREV-3] physical-retention window     */
 extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
 extern int   nats_enable_search_index;
 /* kv_bucket is declared in cachedb_nats_dbase.h (included above) */
@@ -1242,13 +1243,22 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 
 	s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 	if (s == NATS_NOT_FOUND) {
-		/* First-insert path: build a {"<filter-field>":"<filter-val>"}
-		 * seed and CreateString it atomically. Only run when the filter
-		 * carries a string identity we can stamp into the doc; otherwise
-		 * we couldn't make the new doc indexable / discoverable. */
+		/* First-insert path [HREV-2]: build a {"<filter-field>":"<filter
+		 * -val>"} seed purely as the MERGE BASE -- it is NOT written.  The
+		 * pre-HREV-2 flow CreateString'd it here, which left an un-TTL'd
+		 * seed revision at the bottom of the key's history; on a
+		 * history-keeping bucket the key then rolled back to that immortal
+		 * seed when the TTL'd head expired [RC-2].  Instead, *out_rev = 0
+		 * (JetStream sequences are 1-based, so 0 unambiguously means "no
+		 * prior message") routes the single CAS write in
+		 * nats_kv_write_row_cas to a create that carries the row's TTL.
+		 * Atomicity is unchanged: a concurrent create simply makes that
+		 * create fail its precondition and the outer loop re-fetches.
+		 * Only run when the filter carries a string identity we can stamp
+		 * into the doc; otherwise we couldn't make the new doc indexable /
+		 * discoverable. */
 		char *seed = NULL;
 		int seed_len = 0;
-		uint64_t create_rev = 0;
 
 		if (!row_filter->val.is_str) {
 			LM_ERR("cannot insert: filter for key '%s' has no "
@@ -1264,30 +1274,9 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 			return -1;
 		}
 
-		s = nats_dl.kvStore_CreateString(&create_rev, ncon->kv, target_key, seed);
-		if (s == NATS_OK) {
-			*out_json = seed;       /* hand off ownership */
-			*out_rev = create_rev;
-			NATS_CDB_STATS_INC(create_doc);
-			return 0;
-		}
-		/* Most likely a race lost (key created by another writer
-		 * between our Get and our Create). Free the seed and let
-		 * the next iteration re-Get the now-existing doc. Hard
-		 * failures (network, etc.) will recur on the next Get and
-		 * be surfaced there. */
-		LM_DBG("seed CreateString lost race or failed for '%s': %s\n",
-			target_key, nats_dl.natsStatus_GetText(s));
-		free(seed);
-		/* A timeout / connection error is not a lost race -- bail
-		 * instead of looping (the re-Get would just fail too). */
-		if (!nats_cas_should_retry(s)) {
-			LM_WARN("seed create failed for '%s' (%s); not a "
-				"conflict -- bailing\n", target_key,
-				nats_dl.natsStatus_GetText(s));
-			return -1;
-		}
-		return 1;
+		*out_json = seed;       /* hand off ownership (merge base only) */
+		*out_rev = 0;           /* the "no prior message" sentinel      */
+		return 0;
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
@@ -1403,12 +1392,14 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 
 	/* P2.7 [REV-21] (SPEC §4.1 step 4): skew-safe write hygiene — drop a
 	 * contact THIS update set/unset whose own expires is already past
-	 * now + nats_reap_grace, before recomputing row_exp.  Untouched
-	 * merged-in contacts are never considered (no collateral delete). */
+	 * now + slack, before recomputing row_exp.  Untouched merged-in
+	 * contacts are never considered (no collateral delete).  The slack is
+	 * grace + linger [HREV-3]: a lingering contact must survive a
+	 * concurrent sibling's row rewrite. */
 	{
 		char *hygiened = _row_drop_expired_own(new_json,
 			(int)strlen(new_json), pairs, time(NULL),
-			nats_reap_grace, NULL);
+			nats_reap_grace + nats_expired_linger, NULL);
 		if (!hygiened) {
 			LM_ERR("write hygiene failed for key '%s'\n", target_key);
 			free(new_json);
@@ -1462,8 +1453,11 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * the registration worker keeps the index authoritative inline. */
 	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
 		new_json, (int)strlen(new_json), rev,
-		f_row_exp, f_n_contacts, f_all_same, nats_reap_grace, &new_rev);
+		f_row_exp, f_n_contacts, f_all_same,
+		nats_reap_grace + nats_expired_linger, &new_rev);
 	if (rc == 0) {
+		if (rev == 0)                 /* [HREV-2] first-insert create landed */
+			NATS_CDB_STATS_INC(create_doc);
 		/* Targeted index update: remove the key from only the entries it
 		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
 		nats_json_index_remove_fields(target_key, json_buf, old_len);
@@ -1483,14 +1477,15 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
  *
  * Identifies the target document either by primary key (is_pk flag on the
  * filter) or by index lookup (same mechanism as nats_cache_query, but only
- * the first match is used). When neither path finds an existing doc, an
- * empty seed JSON is created via kvStore_CreateString so that a first
- * cdbf.update behaves as upsert — required by usrloc full-sharing-cachedb
- * mode whose cdb_flush_urecord assumes upsert semantics. Fetches the
- * document from NATS KV, applies every field update from @pairs in a
- * single pass via _apply_pairs_one_pass(), and writes the modified JSON
- * back using a compare-and-swap (CAS) loop to handle concurrent
- * modifications. After
+ * the first match is used). When neither path finds an existing doc, a seed
+ * JSON is synthesized IN MEMORY as the merge base (rev==0, nothing written
+ * [HREV-2]) so that a first cdbf.update behaves as upsert — required by
+ * usrloc full-sharing-cachedb mode whose cdb_flush_urecord assumes upsert
+ * semantics; the single CAS write then CREATES the full row, carrying its
+ * per-message TTL. Otherwise fetches the document from NATS KV. Applies
+ * every field update from @pairs in a single pass via
+ * _apply_pairs_one_pass(), and writes the modified JSON back using a
+ * compare-and-swap (CAS) loop to handle concurrent modifications. After
  * a successful CAS, the index is updated by removing and re-adding the
  * document.
  *

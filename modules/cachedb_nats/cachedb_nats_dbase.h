@@ -58,9 +58,10 @@ extern char *kv_bucket;
 extern int   kv_replicas;
 
 /* Number of historical revisions to retain per key.
- * Default: 5 (retains the last 5 revisions).  Higher values let
- * nats_kv_history() return more past revisions; 1 keeps only the
- * current value. */
+ * Default: 1 (current value only) [HREV-1] -- required for native per-key
+ * TTL expiry (history>1 makes an expired key roll back to an older
+ * revision instead of disappearing).  Raise only for nats_kv_history()
+ * consumers, accepting reaper-only (scan-based) expiry. */
 extern int   kv_history;
 
 /* Bucket-wide TTL in seconds.  Default: 0 (no expiration).

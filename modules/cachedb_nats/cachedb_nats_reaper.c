@@ -37,10 +37,15 @@ enum reap_action _reap_row_action(int n_live_survivors)
 	return (n_live_survivors > 0) ? REAP_WRITE_SURVIVORS : REAP_DELETE_EMPTY;
 }
 
-/* (F2 [PREV-26/REV-2]) reaper-off guard. */
-int _reap_interval_guard(int interval, int unsafe_ttl_only)
+/* (F2 [PREV-26/REV-2], extended [D6/HREV-6]) reaper-off guard.  With the
+ * reaper off (interval<=0), nats_unsafe_ttl_only=1 only suffices while the
+ * native-TTL path (nats_native_ttl) is still on; both mechanisms off leaves
+ * nothing to expire records and is refused unconditionally. */
+int _reap_interval_guard(int interval, int unsafe_ttl_only, int native_ttl)
 {
 	if (interval > 0)
 		return 0;
+	if (!native_ttl)
+		return -1;
 	return unsafe_ttl_only ? 0 : -1;
 }

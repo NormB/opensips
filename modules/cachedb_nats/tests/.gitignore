@@ -1,5 +1,6 @@
 *.o
 sip_e2e/bench_register
+sip_e2e/kvctl
 
 # Compiled test binaries: every test_*.c builds an extensionless test_* binary.
 # Ignore those, but keep the sources, shell runners and python helpers tracked.

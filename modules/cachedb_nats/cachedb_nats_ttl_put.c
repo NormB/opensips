@@ -22,6 +22,9 @@
 #include "cachedb_nats_ttl.h"
 #include "cachedb_nats_dbase.h"         /* nats_cas_should_retry (legacy fallback) */
 
+extern int nats_native_ttl;             /* [D6] master switch (cachedb_nats.c) */
+extern int nats_ttl_allow_history;      /* [D6] history-gate override          */
+
 /* natsStatus -> ttl_pub_status, so the classifier stays free of nats.h coupling. */
 static enum ttl_pub_status _pub_status(natsStatus s)
 {
@@ -118,14 +121,23 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	return _ttl_classify(_pub_status(s), je);
 }
 
-/* The §2.0 usrloc-row write entry point.  Both writers (registration update +
- * reaper survivor-write) go through this; no caller calls kvStore_UpdateString
- * on the row path directly.  Resolves per-message-TTL capability (probing +
- * enabling AllowMsgTTL once per connection epoch, latch via _ttl_cap_next),
+/* The §2.0 usrloc-row write entry point.  All writers (registration update,
+ * first insert, reaper survivor-write) go through this; no caller calls
+ * kvStore_UpdateString on the row path directly.  Resolves per-message-TTL
+ * capability (probing + enabling AllowMsgTTL once per connection epoch, latch
+ * via _ttl_cap_next) gated behind the nats_native_ttl master switch [D6],
  * computes ttl_ms from eligibility (§5), publishes with re-asserted TTL via
  * nats_kv_put_row when supported, and falls back to the legacy CAS write
  * (identical to pre-P8 behaviour) on a <2.11 / TTL-disabled / not-yet-probed
- * broker.  Returns 0 = committed, 1 = CAS conflict (caller re-reads + retries),
+ * broker or nats_native_ttl=0.
+ *
+ * `rev == 0` is the "no prior message" sentinel [HREV-2] (JetStream sequences
+ * are 1-based): the write routes to a CREATE that carries the row's TTL
+ * (kvStore_CreateStringWithTTL via the NO_MESSAGE predicate, or
+ * kvStore_CreateString on the legacy path).  `rev > 0` CAS-updates at that
+ * revision (a live doc or a marker rev [REV-27]).
+ *
+ * Returns 0 = committed, 1 = CAS conflict (caller re-reads + retries),
  * -1 = fatal/fail-the-save.  *out_rev set on success. */
 int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	const char *json, int json_len, uint64_t rev,
@@ -139,9 +151,30 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	/* probe once per connection epoch: detect AllowMsgTTL capability + latch
 	 * the result.  The bucket is created with AllowMsgTTL natively via
 	 * kvConfig.LimitMarkerTTL (nats_pool_get_kv), so this is now a read-only
-	 * capability check -- no js_UpdateStream retrofit. */
-	if (cap == TTL_CAP_UNPROBED) {
-		int r = nats_pool_kv_supports_ttl(bucket);
+	 * capability check -- no js_UpdateStream retrofit.  Skipped entirely when
+	 * the operator switched the TTL path off (nats_native_ttl=0 [D6]). */
+	if (nats_native_ttl && cap == TTL_CAP_UNPROBED) {
+		int64_t mmps = 0;
+		int r = nats_pool_kv_supports_ttl(bucket, &mmps);
+		/* [HREV-1] the history rule: per-message TTL misbehaves on a
+		 * history-keeping stream (late removal + revision rollback,
+		 * verified on 2.11.10) -- refuse it there unless the operator
+		 * explicitly opted in via nats_ttl_allow_history. */
+		if (r == 1 && !_kv_ttl_history_ok(mmps, nats_ttl_allow_history)) {
+			LM_WARN("cachedb_nats: bucket '%s' keeps %lld versions per key "
+				"(MaxMsgsPerSubject=%lld); per-message TTL disabled -- "
+				"expired keys would roll back to older revisions. The "
+				"reaper remains authoritative; set kv_history=1 and "
+				"recreate the bucket for on-time native expiry\n",
+				bucket, (long long)mmps, (long long)mmps);
+			r = 0;
+		} else if (r == 1 && _kv_history_ttl_warn(mmps)) {
+			LM_WARN("cachedb_nats: nats_ttl_allow_history=1 -- using "
+				"per-message TTL on history-keeping bucket '%s' "
+				"(MaxMsgsPerSubject=%lld): expiry may be late and older "
+				"revisions can transiently resurface\n",
+				bucket, (long long)mmps);
+		}
 		if (r >= 0) {                          /* r<0 transient: stay UNPROBED */
 			cap = _ttl_cap_next(TTL_CAP_UNPROBED,
 				r == 1 ? TTL_EV_SETUP_OK : TTL_EV_SETUP_FAIL);
@@ -149,7 +182,7 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 		}
 	}
 
-	if (cap == TTL_CAP_SUPPORTED) {
+	if (nats_native_ttl && cap == TTL_CAP_SUPPORTED) {
 		int64_t ttl_ms = 0;
 		enum ttl_outcome o;
 		jsCtx *js = nats_pool_get_js();
@@ -158,10 +191,11 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 			ttl_ms = _ttl_msgttl_ms(
 				_ttl_seconds(row_exp, (int64_t)time(NULL), grace));
 
-		/* got_entry=1: the caller wrote this after reading the row at `rev`
-		 * (a live doc, or a seed re-created over an empty marker [R4]). */
+		/* got_entry = (rev != 0) [HREV-2]: rev==0 resolves to NO_MESSAGE and
+		 * the TTL-carrying create; rev>0 means the caller read the row at
+		 * `rev` (a live doc, or a seed re-built over an empty marker [R4]). */
 		o = nats_kv_put_row(js, kv, bucket, key, json, json_len,
-			1, json_len, rev, ttl_ms, out_rev);
+			rev != 0, json_len, rev, ttl_ms, out_rev);
 		if (o == TTL_DONE)
 			return 0;
 		if (o == TTL_RETRY)
@@ -174,8 +208,14 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	}
 
 	/* Legacy CAS write -- byte-for-byte the pre-P8 path; the ONLY allowed
-	 * kvStore_UpdateString on the usrloc row path (gated on TTL unavailable). */
-	s = nats_dl.kvStore_UpdateString(&nr, kv, key, json, rev);
+	 * kvStore_UpdateString on the usrloc row path (gated on TTL unavailable).
+	 * rev==0 (first insert [HREV-2]) creates instead; a lost create race is
+	 * a retryable conflict exactly like a revision mismatch (mirrors the
+	 * add/sub split in cachedb_nats_dbase.c). */
+	if (rev == 0)
+		s = nats_dl.kvStore_CreateString(&nr, kv, key, json);
+	else
+		s = nats_dl.kvStore_UpdateString(&nr, kv, key, json, rev);
 	if (s == NATS_OK) {
 		if (out_rev)
 			*out_rev = nr;

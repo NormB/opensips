@@ -20,11 +20,28 @@
  *       10166 TTL disabled                   -> TTL_LATCH_OFF
  *       conn-down                            -> TTL_FAIL_SAVE
  *
+ * TTL-HISTORY-FIX-SPEC.md D2 [HREV-2] adds the nats_kv_write_row_cas ROUTING
+ * on top (the caller of nats_kv_put_row):
+ *
+ *   - rev == 0 (no prior message; JetStream sequences are 1-based, so 0 is
+ *     an unambiguous sentinel)         -> got_entry=0 -> NO_MESSAGE -> the
+ *     TTL-carrying create (kvStore_CreateStringWithTTL) -- previously DEAD
+ *     CODE because got_entry was hardcoded to 1 [RC-3]
+ *   - rev > 0 (live doc or marker rev) -> got_entry=1 -> CAS publish
+ *   - nats_native_ttl == 0             -> never the TTL branch, regardless of
+ *     the capability latch: legacy path (rev==0 -> CreateString,
+ *     rev>0 -> UpdateString)
+ *   - cap UNSUPPORTED                  -> same legacy split
+ *
  *   gcc -DPUT_CURRENT ... -> a plausible-wrong _pub_status that does NOT special-
  *                            case connection-down (maps timeouts to JS_ERR), so a
  *                            broker-down create returns RETRY (spins) not
  *                            FAIL_SAVE => RED.
- *   gcc ...               -> the fixed mapping => GREEN.
+ *   gcc -DROWCAS_CURRENT ..-> pre-HREV-2 routing: got_entry hardcoded 1 (a
+ *                            rev==0 first insert is CAS-published at seq 0,
+ *                            never the TTL-carrying create) and no
+ *                            nats_native_ttl check => RED.
+ *   gcc ...               -> the fixed mapping/routing => GREEN.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_ttl_put_decision test_ttl_put_decision.c
  */
@@ -91,6 +108,42 @@ static enum ttl_outcome put_decision(int subj_ok, int got_entry, int value_len,
 	return _ttl_classify(_pub_status(pub_s), pub_jerr);
 }
 
+/* ─── D2 [HREV-2]: carried copy of the nats_kv_write_row_cas ROUTING ───
+ * Which write primitive the row write resolves to, given the read revision,
+ * the TTL master switch and the capability latch.  (The outcome mapping of
+ * the chosen primitive is covered by put_decision above.) */
+enum row_route {
+	ROUTE_TTL_CREATE = 0,   /* kvStore_CreateStringWithTTL (NO_MESSAGE)   */
+	ROUTE_TTL_PUBLISH = 1,  /* js_PublishMsg CAS w/ MsgTTL (LAST_SEQ)     */
+	ROUTE_LEGACY_CREATE = 2,/* kvStore_CreateString (no TTL support)      */
+	ROUTE_LEGACY_UPDATE = 3,/* kvStore_UpdateString (no TTL support)      */
+};
+enum ttl_cap { TTL_CAP_UNPROBED = 0, TTL_CAP_SUPPORTED = 1,
+               TTL_CAP_UNSUPPORTED = 2 };
+
+static enum row_route write_row_cas_route(uint64_t rev, int native_ttl,
+	enum ttl_cap cap)
+{
+	uint64_t cas = 0;
+#ifdef ROWCAS_CURRENT
+	(void)native_ttl;                    /* pre-D6: no master switch */
+	if (cap == TTL_CAP_SUPPORTED) {
+		/* pre-HREV-2: got_entry hardcoded to 1 */
+		return _ttl_cas_predicate(1, 0, rev, 0, &cas) == TTL_CAS_NO_MESSAGE
+			? ROUTE_TTL_CREATE : ROUTE_TTL_PUBLISH;
+	}
+	return ROUTE_LEGACY_UPDATE;          /* pre-HREV-2: Update only */
+#else
+	if (native_ttl && cap == TTL_CAP_SUPPORTED) {
+		/* HREV-2: got_entry derived from the rev==0 sentinel */
+		return _ttl_cas_predicate(rev != 0, 0, rev, 0, &cas)
+				== TTL_CAS_NO_MESSAGE
+			? ROUTE_TTL_CREATE : ROUTE_TTL_PUBLISH;
+	}
+	return rev == 0 ? ROUTE_LEGACY_CREATE : ROUTE_LEGACY_UPDATE;
+#endif
+}
+
 static int fails = 0;
 static const char *NM[] = {"DONE","RETRY","LATCH_OFF","ASSERT_BUG","FAIL_SAVE"};
 static void expect(const char *what, enum ttl_outcome got, enum ttl_outcome want)
@@ -126,6 +179,36 @@ int main(void)
 	       put_decision(1, 1, 80, NATS_OK, NATS_ERR, 10166), TTL_LATCH_OFF);
 	expect("present: publish broker-down",
 	       put_decision(1, 1, 80, NATS_OK, NATS_CONNECTION_CLOSED, 0), TTL_FAIL_SAVE);
+
+	{
+		static const char *RN[] = {"TTL_CREATE","TTL_PUBLISH",
+		                           "LEGACY_CREATE","LEGACY_UPDATE"};
+		enum row_route r;
+		printf("[HREV-2] write_row_cas routing (rev==0 sentinel + master switch):\n");
+
+		#define RCHECK(what, got, want) do { r = (got); \
+			if (r == (want)) printf("  ok:   %-42s => %s\n", what, RN[r]); \
+			else { printf("  FAIL: %-42s => %s (want %s)\n", what, RN[r], RN[want]); fails++; } \
+		} while (0)
+
+		RCHECK("first insert (rev=0), TTL supported",
+		       write_row_cas_route(0, 1, TTL_CAP_SUPPORTED), ROUTE_TTL_CREATE);
+		RCHECK("live doc (rev=7), TTL supported",
+		       write_row_cas_route(7, 1, TTL_CAP_SUPPORTED), ROUTE_TTL_PUBLISH);
+		RCHECK("marker rev (rev=3), TTL supported",
+		       write_row_cas_route(3, 1, TTL_CAP_SUPPORTED), ROUTE_TTL_PUBLISH);
+		RCHECK("first insert, nats_native_ttl=0",
+		       write_row_cas_route(0, 0, TTL_CAP_SUPPORTED), ROUTE_LEGACY_CREATE);
+		RCHECK("live doc, nats_native_ttl=0",
+		       write_row_cas_route(7, 0, TTL_CAP_SUPPORTED), ROUTE_LEGACY_UPDATE);
+		RCHECK("first insert, cap UNSUPPORTED",
+		       write_row_cas_route(0, 1, TTL_CAP_UNSUPPORTED), ROUTE_LEGACY_CREATE);
+		RCHECK("live doc, cap UNSUPPORTED",
+		       write_row_cas_route(7, 1, TTL_CAP_UNSUPPORTED), ROUTE_LEGACY_UPDATE);
+		RCHECK("first insert, cap UNPROBED (transient)",
+		       write_row_cas_route(0, 1, TTL_CAP_UNPROBED), ROUTE_LEGACY_CREATE);
+		#undef RCHECK
+	}
 
 	if (fails) { printf("\nFAILED (%d)\n", fails); return 1; }
 	printf("\n=== ALL PASS (fails=0) ===\n");

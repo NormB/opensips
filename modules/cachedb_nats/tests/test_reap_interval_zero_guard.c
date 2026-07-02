@@ -13,7 +13,12 @@
  * explicitly acknowledges the risk with nats_unsafe_ttl_only=1 (which logs an
  * LM_WARN quoting #6959/#1994).  Default is reaper-authoritative.
  *
- *   _reap_interval_guard(interval, unsafe_ttl_only): 0 = ok to start, -1 = refuse.
+ *   _reap_interval_guard(interval, unsafe_ttl_only, native_ttl):
+ *       0 = ok to start, -1 = refuse.
+ *   D6 [HREV-6] extension: the unsafe ack only covers reaper-off while the
+ *   native-TTL path (nats_native_ttl) is still on; with BOTH mechanisms off
+ *   there is nothing left to expire records and startup is refused
+ *   unconditionally.
  *
  *   gcc -DRIVAL_CURRENT ... -> no guard (interval 0 silently accepted) => RED.
  *   gcc ...                -> the FIXED guard => GREEN.
@@ -23,14 +28,20 @@
 #include <stdio.h>
 
 /* ─── carried copy of the production helper (cachedb_nats_reaper.c) ─── */
-static int _reap_interval_guard(int interval, int unsafe_ttl_only)
+static int _reap_interval_guard(int interval, int unsafe_ttl_only,
+	int native_ttl)
 {
 #ifdef RIVAL_CURRENT
-	(void)interval; (void)unsafe_ttl_only; return 0;   /* no guard */
+	(void)interval; (void)unsafe_ttl_only; (void)native_ttl;
+	return 0;                                          /* no guard */
 #else
 	if (interval > 0)
 		return 0;                       /* a real reaper interval: ok */
-	/* interval <= 0 means reaper-off: refuse unless explicitly acked. */
+	/* interval <= 0 means reaper-off: with native TTL ALSO off there is no
+	 * expiry mechanism at all -- refuse regardless of the ack [D6]. */
+	if (!native_ttl)
+		return -1;
+	/* reaper-off, TTL-only: refuse unless explicitly acked. */
 	return unsafe_ttl_only ? 0 : -1;
 #endif
 }
@@ -48,16 +59,22 @@ int main(void)
 #endif
 
 	printf("[REV-2/PREV-26] a real reaper interval starts:\n");
-	CHECK(_reap_interval_guard(30, 0) == 0, "interval 30 => ok");
-	CHECK(_reap_interval_guard(1, 0) == 0, "interval 1 => ok");
+	CHECK(_reap_interval_guard(30, 0, 1) == 0, "interval 30 => ok");
+	CHECK(_reap_interval_guard(1, 0, 1) == 0, "interval 1 => ok");
 
 	printf("[REV-2/PREV-26] reaper-off (interval<=0) is REFUSED by default:\n");
-	CHECK(_reap_interval_guard(0, 0) == -1, "interval 0, no ack => REFUSED");
-	CHECK(_reap_interval_guard(-1, 0) == -1, "negative interval, no ack => refused");
+	CHECK(_reap_interval_guard(0, 0, 1) == -1, "interval 0, no ack => REFUSED");
+	CHECK(_reap_interval_guard(-1, 0, 1) == -1, "negative interval, no ack => refused");
 
 	printf("[REV-2] reaper-off allowed ONLY with the explicit unsafe ack:\n");
-	CHECK(_reap_interval_guard(0, 1) == 0, "interval 0 + nats_unsafe_ttl_only=1 => allowed (with WARN)");
-	CHECK(_reap_interval_guard(30, 1) == 0, "a real interval is unaffected by the ack");
+	CHECK(_reap_interval_guard(0, 1, 1) == 0, "interval 0 + nats_unsafe_ttl_only=1 => allowed (with WARN)");
+	CHECK(_reap_interval_guard(30, 1, 1) == 0, "a real interval is unaffected by the ack");
+
+	printf("[D6/HREV-6] the ack cannot bless a NO-mechanism config:\n");
+	CHECK(_reap_interval_guard(0, 1, 0) == -1,
+	      "reaper off + ack + nats_native_ttl=0 => refused (nothing expires records)");
+	CHECK(_reap_interval_guard(0, 0, 0) == -1, "everything off, no ack => refused");
+	CHECK(_reap_interval_guard(30, 0, 0) == 0, "reaper on covers nats_native_ttl=0");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
 	return fails ? 1 : 0;

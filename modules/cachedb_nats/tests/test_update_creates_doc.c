@@ -21,6 +21,20 @@
  *   _json_apply_pair()   — already covered by test_update_nested_dict, used
  *                          here to verify the seed → apply → final flow.
  *
+ * TTL-HISTORY-FIX-SPEC.md D2 [HREV-2] REWORK: the first-insert path no
+ * longer WRITES the seed.  The old flow (Get NOT_FOUND -> CreateString(seed)
+ * -> CAS-update at the create's revision) left an un-TTL'd seed revision at
+ * the bottom of the key's history; on a history-keeping bucket the key then
+ * ROLLED BACK to that immortal seed when the TTL'd head expired [RC-2, spec
+ * §0 E1].  Now _update_fetch_or_seed returns the seed purely as the merge
+ * base with rev==0 (JetStream sequences are 1-based, so 0 is unambiguous
+ * "no prior message") and the single CAS write creates the FULL row with its
+ * TTL.  The fetch decision skeleton below locks that contract:
+ *
+ *   gcc -DSEEDWRITE_CURRENT ... -> pre-HREV-2: NOT_FOUND writes the seed and
+ *                                  returns the create's revision => RED.
+ *   gcc ...                     -> seedless: no write, rev==0 => GREEN.
+ *
  * Build:
  *   gcc -g -O0 -fsanitize=address -Wall -o test_update_creates_doc \
  *     test_update_creates_doc.c
@@ -128,6 +142,33 @@ static char *_build_seed_doc(const char *field, int flen,
 
 static int g_fails;
 
+/* ─── D2 [HREV-2]: carried copy of the _update_fetch_or_seed decision ───
+ * Models what the fetch step does per kvStore_Get outcome.  @wrote_seed
+ * reports whether a standalone seed write was issued (the RC-2 bug). */
+enum fetch_kind { FETCH_NOT_FOUND, FETCH_MARKER, FETCH_LIVE };
+static int fetch_or_seed_decision(enum fetch_kind k, uint64_t entry_rev,
+	uint64_t *out_rev, int *wrote_seed)
+{
+	*wrote_seed = 0;
+	switch (k) {
+	case FETCH_NOT_FOUND:
+#ifdef SEEDWRITE_CURRENT
+		*wrote_seed = 1;             /* pre-HREV-2: CreateString(seed) */
+		*out_rev = 1;                /* the create's revision          */
+#else
+		*out_rev = 0;                /* HREV-2: merge base only, rev==0 */
+#endif
+		return 0;
+	case FETCH_MARKER:
+		*out_rev = entry_rev;        /* CAS at the marker rev [REV-27] */
+		return 0;
+	case FETCH_LIVE:
+		*out_rev = entry_rev;
+		return 0;
+	}
+	return -1;
+}
+
 static void check(const char *label, const char *got, const char *expected)
 {
 	if (!got) {
@@ -193,6 +234,43 @@ int main(void)
 		fprintf(stderr, "  ok: F: seed parses as JSON object -> %s\n", out);
 	}
 	free(out);
+
+	/* G. [HREV-2] first insert issues NO standalone seed write and returns
+	 *    the rev==0 "no prior message" sentinel; marker/live paths keep
+	 *    returning the real revision (CAS targets unchanged). */
+	{
+		uint64_t rev = 99;
+		int wrote = 99;
+
+		fetch_or_seed_decision(FETCH_NOT_FOUND, 0, &rev, &wrote);
+		if (wrote != 0) {
+			fprintf(stderr, "FAIL: G: first insert wrote a standalone seed "
+				"(the RC-2 immortal-seed bug)\n");
+			g_fails++;
+		} else
+			fprintf(stderr, "  ok: G: first insert -> no seed write\n");
+		if (rev != 0) {
+			fprintf(stderr, "FAIL: G: first insert rev=%llu, want the 0 "
+				"sentinel\n", (unsigned long long)rev);
+			g_fails++;
+		} else
+			fprintf(stderr, "  ok: G: first insert -> rev==0 sentinel\n");
+
+		fetch_or_seed_decision(FETCH_MARKER, 42, &rev, &wrote);
+		if (rev != 42 || wrote != 0) {
+			fprintf(stderr, "FAIL: G: marker path must CAS at the marker "
+				"rev with no seed write\n");
+			g_fails++;
+		} else
+			fprintf(stderr, "  ok: G: marker path -> CAS at marker rev, no write\n");
+
+		fetch_or_seed_decision(FETCH_LIVE, 7, &rev, &wrote);
+		if (rev != 7 || wrote != 0) {
+			fprintf(stderr, "FAIL: G: live path must CAS at the entry rev\n");
+			g_fails++;
+		} else
+			fprintf(stderr, "  ok: G: live path -> CAS at entry rev\n");
+	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

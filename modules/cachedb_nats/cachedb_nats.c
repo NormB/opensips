@@ -116,7 +116,12 @@ static struct cachedb_url *nats_cdb_urls = NULL;
 /* module parameters -- non-static, accessed from cachedb_nats_dbase.c */
 char *kv_bucket = "opensips";
 int kv_replicas = 3;
-int kv_history = 5;
+/* [HREV-1] history default 1: per-message TTL (native expiry) is only safe
+ * on a bucket that keeps NO old revisions -- on a history-keeping bucket an
+ * expired key ROLLS BACK to an older revision instead of disappearing
+ * (verified on nats-server 2.11.10).  Raise only for nats_kv_history()
+ * consumers, accepting reaper-only (scan-based) expiry. */
+int kv_history = 1;
 int kv_ttl = 0;
 /* Multi-instance index coordination knobs.
  *
@@ -210,6 +215,33 @@ int   nats_reap_interval = 30;
  * accepted.  Without it, a non-positive interval HARD-FAILS mod_init rather than
  * silently leaving expiries unreclaimed. */
 int   nats_unsafe_ttl_only = 0;
+
+/* [HREV-3/D6] Physical retention of a row past its logical expiry
+ * (expires + nats_reap_grace), in seconds.  0 = reclaim ASAP (the native TTL
+ * floors to the server's 1 s minimum); e.g. 30 keeps an expired registration
+ * readable in the bucket for ~30 s (forensics / churn damping).  Added to
+ * every physical-reclamation cutoff (TTL computation, reaper due-gate +
+ * projection, write hygiene) and NEVER to the read filter -- an expired
+ * contact is not served, lingering or not.  Range 0..86400. */
+int   nats_expired_linger = 0;
+
+/* [D6] Master switch for the per-message-TTL fast path.  1 = use it whenever
+ * the broker/bucket support it; 0 = never set message TTLs (reaper-only
+ * expiry) -- a diagnostic / emergency lever, orthogonal to the capability
+ * latch (the latch handles *can't*, this handles *won't*). */
+int   nats_native_ttl = 1;
+
+/* [HREV-1/D6] Acknowledged override of the MaxMsgsPerSubject==1 probe
+ * requirement: use per-message TTL on a history-keeping bucket anyway.
+ * Verified on 2.11.10 that removal is then late (~kv_marker_ttl) and the
+ * subject can transiently roll back to an older revision -- default OFF. */
+int   nats_ttl_allow_history = 0;
+
+/* [D6] SubjectDeleteMarkerTTL / kvConfig.LimitMarkerTTL at bucket creation,
+ * seconds (was the hardcoded NATS_KV_MARKER_TTL_NS = 30 s).  Bounds how long
+ * a server-placed delete marker lingers (the watcher's observability
+ * window); on history>1 buckets it also bounds the E3 removal delay. */
+int   kv_marker_ttl = 30;
 
 /* [REV-5] Max serialized KV value (one AoR row holds all its contacts), in
  * bytes.  All contacts of an AoR share one message; NATS caps message size
@@ -344,6 +376,10 @@ static const param_export_t params[] = {
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
 	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
 	{"nats_unsafe_ttl_only",    INT_PARAM,         &nats_unsafe_ttl_only},
+	{"nats_expired_linger",     INT_PARAM,         &nats_expired_linger},
+	{"nats_native_ttl",         INT_PARAM,         &nats_native_ttl},
+	{"nats_ttl_allow_history",  INT_PARAM,         &nats_ttl_allow_history},
+	{"kv_marker_ttl",           INT_PARAM,         &kv_marker_ttl},
 	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
@@ -537,6 +573,31 @@ static int mod_init(void)
 		       kv_ttl);
 		return -1;
 	}
+
+	/* [D6/HREV-6] validate the new operator params -- fail loudly at boot,
+	 * never misbehave silently at runtime. */
+	if (_linger_guard(nats_expired_linger) != 0) {
+		LM_ERR("cachedb_nats: nats_expired_linger=%d out of range (0..86400); "
+		       "large retention wants a different tool than this module\n",
+		       nats_expired_linger);
+		return -1;
+	}
+	if (_marker_ttl_guard(kv_marker_ttl) != 0) {
+		LM_ERR("cachedb_nats: kv_marker_ttl=%d invalid -- delete-marker TTL "
+		       "must be >= 1 s (the server minimum)\n", kv_marker_ttl);
+		return -1;
+	}
+	if (kv_marker_ttl < nats_reap_grace)
+		LM_WARN("cachedb_nats: kv_marker_ttl=%d s is below nats_reap_grace="
+			"%d s; a clock-skewed sibling instance may miss deletion "
+			"markers entirely\n", kv_marker_ttl, nats_reap_grace);
+	/* [D6] push the marker lifetime to the pool BEFORE any bucket exists;
+	 * kvConfig.LimitMarkerTTL is a creation-time stream property. */
+	nats_pool_set_marker_ttl_ns((int64_t)kv_marker_ttl * 1000000000LL);
+	if (nats_ttl_allow_history && kv_history == 1)
+		LM_DBG("nats_ttl_allow_history=1 is a no-op with kv_history=1; the "
+			"override only matters for pre-existing history-keeping "
+			"buckets\n");
 
 	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
 	 * pool's connect path can look up the "nats" client domain.  No
@@ -751,11 +812,19 @@ static int mod_init(void)
 	 * runs regardless of enable_search_index.  A non-positive interval disables
 	 * it (TTL-only) and is REFUSED unless nats_unsafe_ttl_only acknowledges the
 	 * #1994/#6959 TTL-loss risk. */
-	if (_reap_interval_guard(nats_reap_interval, nats_unsafe_ttl_only) < 0) {
-		LM_ERR("nats_reap_interval=%d disables the reaper (TTL-only), which "
-			"loses TTL on update (#1994/#6959) and leaves expired bindings "
-			"unreclaimed; set nats_reap_interval>0, or nats_unsafe_ttl_only=1 "
-			"to accept the risk\n", nats_reap_interval);
+	if (_reap_interval_guard(nats_reap_interval, nats_unsafe_ttl_only,
+			nats_native_ttl) < 0) {
+		if (!nats_native_ttl && nats_reap_interval <= 0)
+			LM_ERR("nats_native_ttl=0 with the reaper disabled "
+				"(nats_reap_interval=%d) leaves no expiry mechanism at "
+				"all -- expired bindings would never be reclaimed; "
+				"re-enable one of them\n", nats_reap_interval);
+		else
+			LM_ERR("nats_reap_interval=%d disables the reaper (TTL-only), "
+				"which loses TTL on update (#1994/#6959) and leaves expired "
+				"bindings unreclaimed; set nats_reap_interval>0, or "
+				"nats_unsafe_ttl_only=1 to accept the risk\n",
+				nats_reap_interval);
 		return -1;
 	}
 	if (nats_reap_interval > 0) {
@@ -836,7 +905,7 @@ static int child_init(int rank)
 	 * WARN (not refuse) so a generic cachedb_nats TTL-cache user is not broken;
 	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
 	if (rank == 1) {
-		int64_t maxage_ns = 0;
+		int64_t maxage_ns = 0, mmps = 0;
 		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
 				_kv_legacy_bucket_maxage_warn(maxage_ns)) {
 			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
@@ -844,6 +913,22 @@ static int child_init(int rank)
 				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
 				"recreate it with MaxAge=0 (kv_ttl=0) and migrate [REV-25].\n",
 				kv_bucket, (long long)maxage_ns);
+		}
+		/* [HREV-1/D1.4]: surface a PRE-EXISTING history-keeping bucket once
+		 * at startup -- per-message TTL is disabled on it (probe gate) and
+		 * the reaper is the only expiry mechanism, i.e. physical cleanup is
+		 * up to nats_reap_interval late.  WARN (not refuse): reaper-only is
+		 * correct, just less prompt; the remedy is the documented migration. */
+		if (nats_pool_bucket_mmps(kv_bucket, &mmps) == 0 &&
+				_kv_history_ttl_warn(mmps)) {
+			LM_WARN("cachedb_nats: stream KV_%s keeps %lld versions per key "
+				"(MaxMsgsPerSubject=%lld); per-message TTL disabled%s -- the "
+				"reaper (cleanup scan) is the only expiry mechanism. Set "
+				"kv_history=1 and recreate/update the bucket for on-time "
+				"native expiry [HREV-1].\n",
+				kv_bucket, (long long)mmps, (long long)mmps,
+				nats_ttl_allow_history ?
+					" unless nats_ttl_allow_history overrides" : "");
 		}
 	}
 
@@ -1049,6 +1134,10 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	natsStatus s;
 	time_t now;
 	int i, prefix_len, reaped = 0;
+	/* [HREV-3] physical-reclamation slack: the skew margin plus the
+	 * operator's retention window -- without the linger term the reaper
+	 * would reclaim rows the TTL path was told to keep. */
+	const int slack = nats_reap_grace + nats_expired_linger;
 
 	(void)ticks; (void)param;
 
@@ -1099,11 +1188,11 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 
 		/* cheap due-gate: skip permanent / not-yet-due rows without a
 		 * full reprojection (row_exp == min contact expiry). */
-		if (_reap_row_due_json(val, vlen, now, nats_reap_grace) == 0) {
+		if (_reap_row_due_json(val, vlen, now, slack) == 0) {
 			nats_dl.kvEntry_Destroy(e);
 			continue;
 		}
-		proj = _reap_project_survivors(val, vlen, now, nats_reap_grace,
+		proj = _reap_project_survivors(val, vlen, now, slack,
 			&n_surv, &plen, &p_row_exp, &p_all_same);
 		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
 		if (!proj)
@@ -1124,7 +1213,7 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			 * reaper defers index convergence to the watcher (no index code). */
 			uint64_t newrev = 0;
 			if (nats_kv_write_row_cas(kv, kv_bucket, key, proj, plen, rev,
-					p_row_exp, n_surv, p_all_same, nats_reap_grace,
+					p_row_exp, n_surv, p_all_same, slack,
 					&newrev) == 0) {
 				NATS_CDB_STATS_INC(rows_reaped);
 				reaped++;

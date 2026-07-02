@@ -1112,10 +1112,21 @@ int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
 }
 
 /* P8 Phase A [TTL-SOLUTION §2.4 / TREV-4]: SubjectDeleteMarkerTTL applied at
- * bucket creation via kvConfig.LimitMarkerTTL (nats.c PR #1000).  30s bounds the
- * server-placed delete marker's lifetime so the watcher can drop the index entry
- * (§4) without the marker lingering.  Mirrors the module's NATS_TTL_MARKER_NS. */
+ * bucket creation via kvConfig.LimitMarkerTTL (nats.c PR #1000).  The default
+ * 30s bounds the server-placed delete marker's lifetime so the watcher can
+ * drop the index entry (§4) without the marker lingering.  [D6/HREV-6] the
+ * value is now operator-tunable: the module's kv_marker_ttl modparam is
+ * pushed here via nats_pool_set_marker_ttl_ns() at mod_init, BEFORE any
+ * bucket creation. */
 #define NATS_KV_MARKER_TTL_NS  (30LL * 1000000000LL)
+
+static int64_t _marker_ttl_ns = NATS_KV_MARKER_TTL_NS;
+
+void nats_pool_set_marker_ttl_ns(int64_t ns)
+{
+	if (ns > 0)
+		_marker_ttl_ns = ns;
+}
 
 /* P8 Phase A: read-only per-message-TTL capability probe.  The bucket is created
  * with AllowMsgTTL natively via kvConfig.LimitMarkerTTL (see nats_pool_get_kv),
@@ -1123,11 +1134,19 @@ int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
  * and hence no _marshalPlacement(strlen(NULL)) crash to work around.  Just reads
  * the bound stream's config and reports capability.
  *
- *   return  1: AllowMsgTTL enabled and MaxAge==0 -> SUPPORTED
+ * [HREV-1] the probe additionally REPORTS the stream's MaxMsgsPerSubject via
+ * @out_mmps (nullable): per-message TTL misbehaves on history-keeping streams
+ * (late removal + revision rollback, verified on 2.11.10), but the single
+ * tested history rule (_kv_ttl_history_ok + the nats_ttl_allow_history
+ * override) lives in the MODULE -- this probe stays mechanical so there is
+ * exactly one implementation of the policy.
+ *
+ *   return  1: AllowMsgTTL enabled and MaxAge==0 -> stream-level SUPPORTED
+ *              (the caller still applies the history rule to *out_mmps)
  *           0: not available (pre-existing bucket created without it, or
  *              MaxAge!=0) -> UNSUPPORTED, fall back to reaper-only expiry
  *          -1: transient (no JS / GetStreamInfo failed) -> leave UNPROBED, retry */
-int nats_pool_kv_supports_ttl(const char *bucket)
+int nats_pool_kv_supports_ttl(const char *bucket, int64_t *out_mmps)
 {
 	char stream[160];
 	jsStreamInfo *si = NULL;
@@ -1146,6 +1165,9 @@ int nats_pool_kv_supports_ttl(const char *bucket)
 			nats_dl.jsStreamInfo_Destroy(si);
 		return -1;
 	}
+
+	if (out_mmps)
+		*out_mmps = (int64_t)si->Config->MaxMsgsPerSubject;
 
 	/* [R7 pair, §3] bucket MaxAge MUST be 0: a non-zero MaxAge overrides
 	 * per-message TTL and expires permanent contacts.  Refuse TTL here too. */
@@ -1168,6 +1190,34 @@ int nats_pool_kv_supports_ttl(const char *bucket)
 	 * to get per-key TTL; until then the reaper remains authoritative. */
 	LM_INFO("NATS pool: stream %s has no AllowMsgTTL (pre-existing bucket); "
 		"per-message TTL off, reaper remains authoritative\n", stream);
+	nats_dl.jsStreamInfo_Destroy(si);
+	return 0;
+}
+
+/* [HREV-1/D1.4] read the bound bucket's backing-stream MaxMsgsPerSubject
+ * (the KV history depth) for the module's startup surfacing.  Mirrors
+ * nats_pool_bucket_maxage_ns.  0 = ok (*out_mmps filled), -1 = unavailable. */
+int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps)
+{
+	char stream[160];
+	jsStreamInfo *si = NULL;
+	jsErrCode jerr = 0;
+	natsStatus s;
+
+	if (!_js || !bucket || !out_mmps)
+		return -1;
+	snprintf(stream, sizeof(stream), "KV_%s", bucket);
+
+	s = nats_dl.js_GetStreamInfo(&si, _js, stream, NULL, &jerr);
+	if (s != NATS_OK || !si || !si->Config) {
+		LM_WARN("NATS pool: GetStreamInfo(%s) failed (%s, jerr=%d); cannot "
+			"read bucket MaxMsgsPerSubject\n", stream,
+			nats_dl.natsStatus_GetText(s), jerr);
+		if (si)
+			nats_dl.jsStreamInfo_Destroy(si);
+		return -1;
+	}
+	*out_mmps = (int64_t)si->Config->MaxMsgsPerSubject;
 	nats_dl.jsStreamInfo_Destroy(si);
 	return 0;
 }
@@ -1248,8 +1298,9 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 			 * AllowMsgTTL + auto-expiring delete markers natively at creation
 			 * via kvConfig.LimitMarkerTTL (nats.c PR #1000), replacing the
 			 * post-create js_UpdateStream retrofit.  Inert until a write sets a
-			 * per-message TTL, so it is safe for all of this module's buckets. */
-			kvCfg.LimitMarkerTTL = NATS_KV_MARKER_TTL_NS;
+			 * per-message TTL, so it is safe for all of this module's buckets.
+			 * [D6] lifetime = kv_marker_ttl (nats_pool_set_marker_ttl_ns). */
+			kvCfg.LimitMarkerTTL = _marker_ttl_ns;
 
 		s = nats_dl.js_CreateKeyValue(&kv, _js, &kvCfg);
 		if (s != NATS_OK) {

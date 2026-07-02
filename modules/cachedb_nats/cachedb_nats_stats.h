@@ -31,8 +31,9 @@
  *                      sub calls. Bumped once per failed kvStore_Update.
  *   cas_exhausted    — total cdbf calls that ran out of nats_cas_retries
  *                      and dropped the write.
- *   create_doc       — total times nats_cache_update synthesized a seed
- *                      document and CreateString'd it (insert path).
+ *   create_doc       — total first-insert documents created by
+ *                      nats_cache_update (the rev==0 create landing
+ *                      [HREV-2]; formerly the standalone seed write).
  *   index_miss_kv    — query/update found a key in the in-memory index
  *                      but the KV store said NOT_FOUND. Flags index
  *                      staleness, typically from a sibling-instance delete.

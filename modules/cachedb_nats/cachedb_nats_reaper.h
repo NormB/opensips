@@ -39,9 +39,11 @@
 #include <stdint.h>
 #include <time.h>
 
-/* (§4.3A [REV-1]) A row is a reap candidate iff row_exp != 0 && row_exp + grace
- * <= now.  row_exp == 0 is permanent and is NEVER due; the +grace (= S, max
- * skew) margin keeps the reaper from purging within S of an expiry. */
+/* (§4.3A [REV-1]) A row is a reap candidate iff row_exp != 0 && row_exp + slack
+ * <= now.  row_exp == 0 is permanent and is NEVER due.  The slack the caller
+ * passes is nats_reap_grace + nats_expired_linger [HREV-3]: the skew margin
+ * keeps the reaper from purging within S of an expiry, the linger keeps it
+ * from defeating the operator's physical-retention window. */
 int _reap_row_due(int64_t row_exp, time_t now, int grace);
 
 /* (§4.3A [REV-16/31]) What the reaper does with a due row after pruning its
@@ -52,9 +54,11 @@ enum reap_action {
 };
 enum reap_action _reap_row_action(int n_live_survivors);
 
-/* (F2 [PREV-26/REV-2]) nats_reap_interval guard.  Returns 0 to start, -1 to
- * refuse: interval <= 0 (reaper-off, TTL-only) is unsupported unless the
- * operator explicitly sets nats_unsafe_ttl_only (which LM_WARNs #6959/#1994). */
-int _reap_interval_guard(int interval, int unsafe_ttl_only);
+/* (F2 [PREV-26/REV-2], extended [D6/HREV-6]) nats_reap_interval guard.
+ * Returns 0 to start, -1 to refuse: interval <= 0 (reaper-off, TTL-only) is
+ * unsupported unless the operator explicitly sets nats_unsafe_ttl_only (which
+ * LM_WARNs #6959/#1994) -- and never supported with nats_native_ttl=0, which
+ * would leave no expiry mechanism at all. */
+int _reap_interval_guard(int interval, int unsafe_ttl_only, int native_ttl);
 
 #endif /* CACHEDB_NATS_REAPER_H */

@@ -44,13 +44,16 @@ int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace)
 	return row_exp - now + (int64_t)grace;
 }
 
-/* (§2.3 [TREV-12]) MsgTTL in ms; 0 = purge signal. */
+/* (§2.3 [TREV-12] / [HREV-3]) MsgTTL in ms; <=0 floors to the 1 s server
+ * minimum so an already-expired-at-write row still self-expires instead of
+ * being written TTL-less (the old "0 = purge signal" contract was never
+ * implemented by any caller and silently meant "no TTL", RC-6). */
 int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 {
 	int64_t ms;
 
 	if (ttl_seconds <= 0)
-		return 0;                              /* purge signal */
+		return 1000;                           /* HREV-3: floor to 1 s min */
 	/* overflow-safe: cap before *1000 (real epochs never reach this). */
 	if (ttl_seconds > 9223372036854775LL)
 		ttl_seconds = 9223372036854775LL;
@@ -111,6 +114,41 @@ const char *_ttl_delete_op(int purge)
 int _kv_ttl_guard(int kv_ttl)
 {
 	return (kv_ttl == 0) ? 0 : -1;
+}
+
+/* [D6/HREV-6] nats_expired_linger range guard: negative is meaningless,
+ * > 1 day is almost certainly a typo'd epoch pasted into the config. */
+int _linger_guard(int linger)
+{
+	return (linger >= 0 && linger <= 86400) ? 0 : -1;
+}
+
+/* [D6/HREV-6] kv_marker_ttl guard: the server's floor for marker TTLs is
+ * 1 s; 0/negative would ask for markers that never/instantly vanish. */
+int _marker_ttl_guard(int marker_ttl)
+{
+	return (marker_ttl >= 1) ? 0 : -1;
+}
+
+/* [HREV-1] per-message TTL is only safe on a stream that keeps NO old
+ * revisions (MaxMsgsPerSubject == 1): on a history-keeping stream a TTL'd
+ * head is removed late (~LimitMarkerTTL) and the subject then ROLLS BACK to
+ * the previous revision instead of expiring (verified on 2.11.10, spec §0
+ * E1/E3).  mmps==0 is the server's "unlimited" -- history-keeping, refuse.
+ * The operator may override with nats_ttl_allow_history=1 (fail-open is
+ * their explicit call; the WARN below still fires). */
+int _kv_ttl_history_ok(int64_t mmps, int allow_history)
+{
+	if (mmps == 1)
+		return 1;
+	return allow_history ? 1 : 0;
+}
+
+/* [HREV-1] startup WARN policy: ANY history-keeping stream warns, override
+ * or not -- the operator must always learn expiry semantics are degraded. */
+int _kv_history_ttl_warn(int64_t mmps)
+{
+	return mmps != 1;
 }
 
 /* P11b [REV-25 / §5.3 REV-7]: policy for a PRE-EXISTING bucket whose backing

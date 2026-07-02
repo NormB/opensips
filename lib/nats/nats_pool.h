@@ -228,12 +228,17 @@ int  nats_pool_ttl_cap(void);
 void nats_pool_ttl_cap_set(int cap);
 
 /*
- * P8 [R5 / TTL-SOLUTION-SPEC.md §3]: enable per-message TTL (AllowMsgTTL +
- * SubjectDeleteMarkerTTL) on a KV bucket's backing stream, idempotently.
- * Returns 1 = enabled/already, 0 = unavailable (latch UNSUPPORTED, reaper-only),
- * -1 = transient (leave UNPROBED, retry).  The caller drives the latch from this.
+ * P8 [R5 / TTL-SOLUTION-SPEC.md §3] + [HREV-1]: read-only per-message-TTL
+ * capability probe over the bucket's backing stream.
+ * Returns 1 = stream-level available (AllowMsgTTL, MaxAge==0), 0 = unavailable
+ * (latch UNSUPPORTED, reaper-only), -1 = transient (leave UNPROBED, retry).
+ * Fills *out_mmps (nullable) with the stream's MaxMsgsPerSubject so the
+ * CALLER can apply the history rule (per-message TTL misbehaves on
+ * history-keeping streams: late removal + revision rollback) -- the policy
+ * lives module-side (_kv_ttl_history_ok + nats_ttl_allow_history), keeping a
+ * single tested implementation.
  */
-int nats_pool_kv_supports_ttl(const char *bucket);
+int nats_pool_kv_supports_ttl(const char *bucket, int64_t *out_mmps);
 
 /*
  * P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
@@ -242,6 +247,20 @@ int nats_pool_kv_supports_ttl(const char *bucket);
  * 0 on success (*out_ns set), -1 if the stream info is unavailable.
  */
 int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns);
+
+/*
+ * [HREV-1/D1.4]: read the bound bucket's backing-stream MaxMsgsPerSubject
+ * (the KV history depth) into *out_mmps, for startup surfacing of a
+ * PRE-EXISTING history-keeping bucket.  0 on success, -1 if unavailable.
+ */
+int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps);
+
+/*
+ * [D6]: set the SubjectDeleteMarkerTTL (kvConfig.LimitMarkerTTL) applied when
+ * this pool CREATES a KV bucket, in ns.  Call at mod_init, before any bucket
+ * exists; <=0 is ignored (keeps the 30 s default).
+ */
+void nats_pool_set_marker_ttl_ns(int64_t ns);
 
 /*
  * Returns non-zero once any module has registered the pool

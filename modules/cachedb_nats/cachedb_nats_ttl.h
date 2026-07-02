@@ -41,12 +41,16 @@
  * ineligible (plain CAS + reaper). */
 int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry);
 
-/* (§2.3) ttl_seconds = row_exp - now + grace. */
+/* (§2.3) ttl_seconds = row_exp - now + slack.  The slack a call site passes
+ * is nats_reap_grace + nats_expired_linger [HREV-3]: grace is the clock-skew
+ * correctness margin, linger the operator's physical-retention policy.  The
+ * read filter is the one consumer that must stay grace-only (visibility is
+ * never lingered). */
 int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace);
 
-/* (§2.3 [TREV-12]) jsPubOptions.MsgTTL in milliseconds.  Returns 0 — the
- * "purge signal" (publish NO value, purge the key instead) — when ttl_seconds
- * <= 0, which also avoids the server's MsgTTL < 1000 ms rejection.  Otherwise
+/* (§2.3 [TREV-12] / [HREV-3]) jsPubOptions.MsgTTL in milliseconds.  Floors
+ * ttl_seconds <= 0 to 1000 ms (the server minimum) so an expired-at-write
+ * row self-expires instead of being written TTL-less; otherwise
  * whole-seconds * 1000 (invariant: result % 1000 == 0), overflow-safe. */
 int64_t _ttl_msgttl_ms(int64_t ttl_seconds);
 
@@ -112,6 +116,19 @@ int _kv_ttl_guard(int kv_ttl);
  * is warranted (non-zero), 0 if clean (MaxAge==0). */
 int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns);
 
+/* [D6/HREV-6] mod_init guards for the new operator params: 0 ok, -1 refuse. */
+int _linger_guard(int linger);          /* nats_expired_linger: 0..86400 */
+int _marker_ttl_guard(int marker_ttl);  /* kv_marker_ttl: >= 1 s          */
+
+/* [HREV-1] per-message-TTL history gate: TTL is only safe on a stream with
+ * MaxMsgsPerSubject == 1 (history>1 => late removal + revision rollback,
+ * verified 2.11.10).  @mmps = bound stream MaxMsgsPerSubject (0=unlimited);
+ * @allow_history = nats_ttl_allow_history override.  1 = TTL usable, 0 =
+ * refuse (reaper-only).  _kv_history_ttl_warn: 1 = emit the startup WARN
+ * (any history-keeping stream, override or not). */
+int _kv_ttl_history_ok(int64_t mmps, int allow_history);
+int _kv_history_ttl_warn(int64_t mmps);
+
 /* [TREV-8] Per-message-TTL capability — operational, "by attempt", latched per
  * connection.  SUPPORTED once the AllowMsgTTL setup succeeds and no 10166 seen;
  * a 10166 (or setup failure) latches UNSUPPORTED (plain CAS + reaper); a
@@ -155,10 +172,15 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	int got_entry, int value_len, uint64_t entry_rev,
 	int64_t msg_ttl_ms, uint64_t *out_rev);
 
-/* The §2.0 write entry point both writers use: resolve TTL capability, compute
- * eligibility-gated ttl_ms, publish via nats_kv_put_row (re-asserting TTL) or
- * fall back to the legacy CAS write.  0 = done, 1 = CAS conflict (re-read +
- * retry), -1 = fail.  *out_rev set on success. */
+/* The §2.0 write entry point every row writer uses: resolve TTL capability
+ * (behind the nats_native_ttl master switch [D6]), compute eligibility-gated
+ * ttl_ms, publish via nats_kv_put_row (re-asserting TTL) or fall back to the
+ * legacy CAS write.  rev==0 is the "no prior message" sentinel [HREV-2]
+ * (JetStream sequences are 1-based): the write becomes a CREATE carrying the
+ * row's TTL; rev>0 CAS-updates at that revision.  @grace is the physical-
+ * reclamation slack, nats_reap_grace + nats_expired_linger [HREV-3].
+ * 0 = done, 1 = CAS conflict (re-read + retry), -1 = fail.  *out_rev set on
+ * success. */
 int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	const char *json, int json_len, uint64_t rev,
 	int64_t row_exp, int n_contacts, int all_same, int grace,

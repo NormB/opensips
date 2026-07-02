@@ -12,7 +12,7 @@ TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_p
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
         test_js_pending_cap test_pool_refcount \
         test_kv_op_timeout test_reconnect_jitter \
-        test_ping_liveness test_async_first_connect
+        test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -122,6 +122,7 @@ check: all
 	./test_reconnect_jitter
 	./test_ping_liveness
 	./test_async_first_connect
+	./test_kv_ttl_probe_matrix
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the
@@ -141,6 +142,10 @@ check-tsan: $(TESTS_TSAN_SAFE)
 # child_init for the whole max_reconnect budget.
 test_async_first_connect: test_async_first_connect.c
 	$(CC) $(CFLAGS) -o $@ $<
+
+# [HREV-1] composed per-message-TTL probe decision matrix (carried copies).
+test_kv_ttl_probe_matrix: test_kv_ttl_probe_matrix.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
 clean:
 	rm -f $(TESTS)
