@@ -627,7 +627,7 @@ static int _entry_add_key(nats_idx_entry *e, const char *key)
  * This is O(n) in the key count but avoids a memmove and keeps the array
  * compact.  Must be called with g_idx->lock held.
  */
-static void _entry_remove_key(nats_idx_entry *e, const char *key)
+static int _entry_remove_key(nats_idx_entry *e, const char *key)
 {
 	int   i;
 	char *interned;
@@ -637,7 +637,7 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 	 * pointer compare.  This adds an extra acquire+release per call
 	 * but eliminates the strcmp per stored key. */
 	interned = nats_intern_acquire(key, klen);
-	if (!interned) return;
+	if (!interned) return 0;
 
 	for (i = 0; i < e->num_keys; i++) {
 		if (e->keys[i] == interned) {
@@ -650,11 +650,12 @@ static void _entry_remove_key(nats_idx_entry *e, const char *key)
 			e->num_keys--;
 			if (i < e->num_keys)
 				e->keys[i] = e->keys[e->num_keys];
-			return;
+			return 1;   /* removed */
 		}
 	}
 	/* Not found: release our extra acquire to balance refcount. */
 	nats_intern_release(interned);
+	return 0;
 }
 
 /**
@@ -1172,6 +1173,7 @@ have_blob:
 
 	p   = blob;
 	off = 0;
+	int removed_any = 0;
 	for (i = 0; i < n_fv && off < blob_len; i++) {
 		int flen = (int)strlen(p);
 		unsigned int fb = _hash(p, flen);
@@ -1181,7 +1183,7 @@ have_blob:
 		_idx_lock_shard(g_idx, fs);
 		e = _find_entry_in(g_idx, p, flen);
 		if (e)
-			_entry_remove_key(e, key);
+			removed_any |= _entry_remove_key(e, key);
 		_idx_unlock_shard(g_idx, fs);
 
 		off += flen + 1;
@@ -1189,8 +1191,9 @@ have_blob:
 	}
 	free(blob);
 
-	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
-		memory_order_relaxed);
+	if (removed_any)
+		atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+			memory_order_relaxed);
 	LM_DBG("removed key '%s' via revmap (%d field entries)\n", key, n_fv);
 	return 0;
 }
@@ -1578,15 +1581,20 @@ int nats_json_index_remove(const char *key)
 
 	_idx_lock_all(g_idx);
 
+	int removed_any = 0;
 	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
 		for (e = g_idx->buckets[b]; e; e = e->next)
-			_entry_remove_key(e, key);
+			removed_any |= _entry_remove_key(e, key);
 	}
 
 	_idx_unlock_all(g_idx);
 
-	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
-		memory_order_relaxed);
+	/* Decrement only if the key was actually indexed: removing a
+	 * never-indexed key (e.g. the seed-create path, or a duplicate remove)
+	 * must not drive num_documents negative. */
+	if (removed_any)
+		atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+			memory_order_relaxed);
 
 	/* Drop any reverse-map record so it can't go stale. */
 	nats_rev_remove(key);
@@ -1614,6 +1622,7 @@ int nats_json_index_count(void)
  * stays live across this entire call sequence. */
 typedef struct {
 	const char *doc_key;
+	int         removed_any;   /* set if any field entry actually held the key */
 } _idx_remove_ctx;
 
 static void _index_remove_field_cb(const char *field, int flen,
@@ -1639,7 +1648,7 @@ static void _index_remove_field_cb(const char *field, int flen,
 	_idx_lock_shard(g_idx, shard);
 	e = _find_entry_in(g_idx, fv_buf, fv_len);
 	if (e)
-		_entry_remove_key(e, rctx->doc_key);
+		rctx->removed_any |= _entry_remove_key(e, rctx->doc_key);
 	_idx_unlock_shard(g_idx, shard);
 }
 
@@ -1653,13 +1662,17 @@ int nats_json_index_remove_fields(const char *key,
 		return 0;
 
 	ctx.doc_key = key;
+	ctx.removed_any = 0;
 	rc = _parse_json_fields(json_str, json_len, _index_remove_field_cb,
 		&ctx);
 	if (rc < 0)
 		return -1;
 
-	atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
-		memory_order_relaxed);
+	/* Only decrement if the key was actually indexed under one of these
+	 * fields -- a remove of a never-indexed key must not go negative. */
+	if (ctx.removed_any)
+		atomic_fetch_sub_explicit(&g_idx->num_documents, 1,
+			memory_order_relaxed);
 
 	/* The doc's fv set is changing (this is the remove half of an
 	 * update); drop the old reverse-map record -- the add half re-puts
