@@ -208,6 +208,48 @@ except Exception:
 '
 }
 
+# [DOCX] raw REGISTER over nc: full control of the To-domain (AoR),
+# Contact URI, Expires and User-Agent -- sipsak can't set an arbitrary To
+# domain (it would try to resolve it), and the docbook examples use
+# realistic AoRs like alice@example.com with device UAs.  rc 0 on 200 OK.
+raw_register() {
+    # raw_register <user> <domain> <contact_uri> <expires> <ua> [sip_port]
+    local user=$1 dom=$2 curi=$3 expires=$4 ua=$5 port=${6:-$SIP_PORT_A}
+    local tag="$$${RANDOM}"
+    local out="$WORKDIR/rawreg_${user}_${tag}.out"
+    printf 'REGISTER sip:%s:%s SIP/2.0\r\nVia: SIP/2.0/UDP %s:5097;rport;branch=z9hG4bKr%s\r\nMax-Forwards: 10\r\nFrom: <sip:%s@%s>;tag=%s\r\nTo: <sip:%s@%s>\r\nCall-ID: reg-%s@%s\r\nCSeq: 2 REGISTER\r\nContact: <%s>\r\nExpires: %s\r\nUser-Agent: %s\r\nContent-Length: 0\r\n\r\n' \
+        "$SIP_HOST" "$port" \
+        "$SIP_HOST" "$tag" \
+        "$user" "$dom" "$tag" \
+        "$user" "$dom" \
+        "$tag" "$SIP_HOST" \
+        "$curi" "$expires" "$ua" \
+        | timeout 3 nc -u -w 2 "$SIP_HOST" "$port" > "$out" 2>&1
+    grep -q "SIP/2.0 200" "$out"
+}
+
+# [DOCX] MI call with NAMED params (JSON-RPC params object), the same shape
+# opensips-cli sends for key=value arguments.  mi_named <port> <method>
+# [k=v ...]; values are sent as strings (MI coerces int params).
+mi_named() {
+    local port=$1; shift
+    local method=$1; shift
+    local params="" first=1 kv k v
+    if [ $# -gt 0 ]; then
+        params=',"params":{'
+        for kv in "$@"; do
+            k=${kv%%=*}; v=${kv#*=}
+            [ $first -eq 1 ] || params="${params},"
+            first=0
+            v=$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            params="${params}\"${k}\":\"${v}\""
+        done
+        params="${params}}"
+    fi
+    printf '%s' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\"${params}}" \
+        | timeout 3 nc -u -w 2 127.0.0.1 "$port"
+}
+
 # ── log assertions ──────────────────────────────────────────────
 log_contains() {
     grep -q -- "$1" "$WORKDIR/opensips.log"

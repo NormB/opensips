@@ -1908,6 +1908,17 @@ xlog("bucket info: $var(info)\n");
 		CRLF), <literal>header=0</literal>.  An unrecognized format value
 		refuses the command rather than silently falling back to JSON.
 	</para>
+	<para>
+		The examples below show a small sample deployment (two subscribers
+		of <literal>example.com</literal>: alice with a Yealink and a
+		Zoiper contact, bob with a Grandstream) against the default
+		<literal>opensips</literal> bucket.  <emphasis>Every example
+		invocation is executed verbatim against a live broker by the
+		sip_e2e suite</emphasis> (case <literal>096_docbook_examples</literal>,
+		which registers exactly this population and asserts the stable
+		parts of these outputs) — timestamp, sequence and size fields
+		naturally vary.
+	</para>
 
 	<section id="mi_nats_kv_status" xreflabel="nats_kv_status">
 	<title><function moreinfo="none">nats_kv_status</function></title>
@@ -1942,7 +1953,7 @@ xlog("bucket info: $var(info)\n");
 	<example>
 	<title><function>nats_kv_status</function> MI call</title>
 	<programlisting format="linespecific">
-## opensipsctl mi nats_kv_status
+## opensips-cli -x mi nats_kv_status
 {
     "bucket": "opensips",
     "replicas": 3,
@@ -2017,12 +2028,29 @@ xlog("bucket info: $var(info)\n");
 	<example>
 	<title><function>nats_cdb_stats</function> MI call</title>
 	<programlisting format="linespecific">
-## opensipsctl mi nats_cdb_stats
+## opensips-cli -x mi nats_cdb_stats
 {
-    "cas_retry": 142,
+    "cas_retry": 0,
     "cas_exhausted": 0,
-    "create_doc": 5034,
-    "index_miss_kv": 3
+    "create_doc": 2,
+    "index_miss_kv": 0,
+    "fastfail_rejected": 0,
+    "op_failed": 0,
+    "watcher_restarts": 0,
+    "watcher_handle_leaks": 0,
+    "nul_fields_rejected": 0,
+    "poison_values_rejected": 0,
+    "value_oversize_rejected": 0,
+    "rows_reaped": 0,
+    "contacts_pruned": 0,
+    "reap_last_run": 1783008230,
+    "reap_last_ms": 9,
+    "reap_last_keys": 2,
+    "reap_last_aors": 2,
+    "reap_last_contacts": 3,
+    "reap_last_active": 3,
+    "reap_last_permanent": 0,
+    "reap_last_due": 0
 }
 	</programlisting>
 	</example>
@@ -2056,20 +2084,31 @@ xlog("bucket info: $var(info)\n");
 ## opensips-cli -x mi nats_reg_summary domains=1
 {
     "bucket": "opensips",
-    "aors": 1204,
-    "contacts": 1350,
-    "active_contacts": 1297,
-    "expired_contacts": 41,
-    "permanent_contacts": 12,
-    "soonest_expiry": 1783000123,
-    "soonest_expiry_in": 17,
-    "scanned_keys": 1205,
-    "other_docs": 1,
-    "scan_ms": 342,
+    "aors": 2,
+    "contacts": 3,
+    "active_contacts": 3,
+    "expired_contacts": 0,
+    "permanent_contacts": 0,
+    "soonest_expiry": 1783008325,
+    "soonest_expiry_in": 118,
+    "scanned_keys": 2,
+    "other_docs": 0,
+    "scan_ms": 14,
     "domains": [{
         "domain": "example.com",
-        "aors": 980, "contacts": 1101, "active_contacts": 1080
+        "aors": 2, "contacts": 3, "active_contacts": 3
     }]
+}
+</programlisting>
+	</example>
+	<example>
+	<title><function>nats_reg_summary</function> as CSV</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_summary domains=1 format=csv
+{
+    "bucket": "opensips", ...,
+    "format": "csv",
+    "data": "scope,domain,aors,contacts,active,expired,permanent\r\ntotal,,2,3,3,0,0\r\ndomain,example.com,2,3,3,,\r\n"
 }
 </programlisting>
 	</example>
@@ -2116,14 +2155,30 @@ xlog("bucket info: $var(info)\n");
 	<programlisting format="linespecific">
 ## opensips-cli -x mi nats_reg_list 'domain=example.com;sort=expiry;limit=2'
 {
-    "matched": 980, "returned": 2, "offset": 0,
-    "scanned_aors": 1204, "scan_ms": 358,
+    "matched": 2, "returned": 2, "offset": 0,
+    "scanned_aors": 2, "scan_ms": 12,
     "aors": [{
+        "aor": "alice@example.com",
+        "contacts": 2, "active": 2, "expired": 0, "permanent": 0,
+        "expires_next": 1783008325, "expires_in": 118,
+        "last_mod": 1783008207
+    }, {
         "aor": "bob@example.com",
         "contacts": 1, "active": 1, "expired": 0, "permanent": 0,
-        "expires_next": 1783000123, "expires_in": 17,
-        "last_mod": 1782996523
-    }, ...]
+        "expires_next": 1783011805, "expires_in": 3598,
+        "last_mod": 1783008207
+    }]
+}
+</programlisting>
+	</example>
+	<example>
+	<title><function>nats_reg_list</function> as CSV (find every Yealink)</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_list 'ua=Yealink;format=csv'
+{
+    "matched": 1, "returned": 1, "offset": 0, ...,
+    "format": "csv",
+    "data": "aor,contacts,active,expired,permanent,expires_next,expires_in,last_mod\r\nalice@example.com,2,2,0,0,1783008325,118,1783008207\r\n"
 }
 </programlisting>
 	</example>
@@ -2148,14 +2203,30 @@ xlog("bucket info: $var(info)\n");
 {
     "aor": "alice@example.com",
     "key": "json_alice=40example.com",
-    "revision": 7, "created": 1782996520,
-    "row_exp": 1783000123, "schema_version": 1,
+    "revision": 2, "created": 1783008207,
+    "row_exp": 1783008325, "schema_version": 1,
     "contacts": [{
-        "id": "c2lwOmFsaWNlQDEwLjAuMC4x",
+        "id": "c2lwOmFsaWNlQDEwLjAuMC4xOjUwNjA=",
         "contact": "sip:alice@10.0.0.1:5060",
-        "expires": 1783000123, "ua": "Yealink T54W",
-        "state": "active", "expires_in": 17, ...
+        "expires": 1783011805, "ua": "Yealink T54W",
+        "state": "active", "expires_in": 3598, ...
+    }, {
+        "id": "c2lwOmFsaWNlQDEwLjAuMC4yOjUwNjA=",
+        "contact": "sip:alice@10.0.0.2:5060",
+        "expires": 1783008325, "ua": "Zoiper 5",
+        "state": "active", "expires_in": 118, ...
     }]
+}
+</programlisting>
+	</example>
+	<example>
+	<title><function>nats_reg_show</function> as CSV</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_reg_show alice@example.com csv
+{
+    "aor": "alice@example.com", ..., "revision": 2,
+    "format": "csv",
+    "data": "aor,id,contact,state,expires,expires_in,q,cseq,callid,ua,sock,received,path,flags,cflags,last_mod\r\nalice@example.com,...,sip:alice@10.0.0.1:5060,active,...\r\n..."
 }
 </programlisting>
 	</example>
@@ -2180,12 +2251,12 @@ xlog("bucket info: $var(info)\n");
 	<programlisting format="linespecific">
 ## opensips-cli -x mi nats_stream_list 'kv=1'
 {
-    "matched": 2, "returned": 2, "offset": 0,
+    "matched": 1, "returned": 1, "offset": 0,
     "streams": [{
         "name": "KV_opensips", "kv_bucket": "opensips",
-        "messages": 1204, "bytes": 612480,
-        "subjects": 1204, "consumers": 1, "storage": "file"
-    }, ...]
+        "messages": 2, "bytes": 1044,
+        "subjects": 2, "consumers": 1, "storage": "file"
+    }]
 }
 </programlisting>
 	</example>
@@ -2217,10 +2288,21 @@ xlog("bucket info: $var(info)\n");
         "allow_msg_ttl": true, "subject_delete_marker_ttl_s": 30
     },
     "state": {
-        "messages": 1204, "bytes": 612480,
-        "first_seq": 88213, "last_seq": 91240,
-        "subjects": 1204, "deleted": 0, "consumers": 1
+        "messages": 2, "bytes": 1044,
+        "first_seq": 1, "last_seq": 3,
+        "subjects": 2, "deleted": 1, "consumers": 1
     }
+}
+</programlisting>
+	</example>
+	<example>
+	<title><function>nats_stream_info</function> as plain text (cut/awk-ready)</title>
+	<programlisting format="linespecific">
+## opensips-cli -x mi nats_stream_info KV_opensips txt
+{
+    "name": "KV_opensips", "kv_bucket": "opensips",
+    "format": "txt",
+    "data": "# field\tvalue\r\nname\tKV_opensips\r\nkv_bucket\topensips\r\nstorage\tfile\r\n...\r\nallow_msg_ttl\t1\r\nsubject_delete_marker_ttl_s\t30\r\n..."
 }
 </programlisting>
 	</example>
@@ -2250,11 +2332,11 @@ xlog("bucket info: $var(info)\n");
 	<programlisting format="linespecific">
 ## opensips-cli -x mi nats_kv_keys 'key=json_alice*;detail=1'
 {
-    "bucket": "opensips", "live_keys": 1204,
+    "bucket": "opensips", "live_keys": 2,
     "matched": 1, "returned": 1, "offset": 0,
     "keys": [{
         "key": "json_alice=40example.com",
-        "revision": 7, "created": 1782996520, "size": 402
+        "revision": 2, "created": 1783008207, "size": 731
     }]
 }
 </programlisting>

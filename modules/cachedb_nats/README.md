@@ -181,6 +181,12 @@ table rides as one `data` string inside the usual JSON-RPC envelope
 (`jq -r '.result.data'` yields clean CSV/text; counts stay as JSON
 siblings). Unknown format values are refused, never silently ignored.
 
+**Documentation guarantee:** every `## opensips-cli -x mi ...` example in
+the admin docbook is extracted mechanically and executed verbatim against a
+live broker by sip_e2e case `096_docbook_examples` (which registers the
+documented sample population and asserts the stable parts of each shown
+output) — a docbook example that stops working fails the suite.
+
 ## License
 
 GPL-2.0 (matching OpenSIPS)
