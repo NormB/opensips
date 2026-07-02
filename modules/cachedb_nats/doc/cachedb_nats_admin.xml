@@ -110,19 +110,32 @@
 		<itemizedlist>
 			<listitem>
 			<para>
-				<emphasis>nats.c v3.13 or later</emphasis> (<emphasis>libnats.so</emphasis>):
+				<emphasis>nats.c with the per-key KV TTL API</emphasis>
+				(<emphasis>libnats.so</emphasis>):
 			</para>
 			<para>
 				The official C client library for NATS, available at
 				<emphasis>https://github.com/nats-io/nats.c</emphasis>.
 				Build with CMake and install to a standard library path (e.g.
-				<emphasis>/usr/local/lib/libnats.so</emphasis>).  Version 3.13 or
-				later is required for JetStream KV support.
+				<emphasis>/usr/local/lib/libnats.so</emphasis>, then run
+				<emphasis>ldconfig</emphasis>).  This module requires a nats.c
+				that provides the per-key KV TTL API
+				(<emphasis>kvStore_CreateStringWithTTL</emphasis>, nats.c PR
+				#1000) — not merely JetStream KV support.  The exact release
+				matters less than the capability: an older libnats that predates
+				that API will be <emphasis>detected at build time</emphasis> and
+				the NATS modules will be skipped with a clear message
+				("libnats too old: missing the per-key KV TTL API ... install a
+				newer nats.c e.g. to /usr/local + ldconfig, or set LOCALBASE")
+				rather than failing with an obscure compile error.  pkg-config
+				(<emphasis>libnats.pc</emphasis>) or <emphasis>LOCALBASE</emphasis>
+				is used to locate the headers.
 			</para>
 			<para>
-				For TLS connections, nats.c must be built against OpenSSL.  The
-				same OpenSSL installation used by &osips; must be present at
-				runtime to avoid library version conflicts.
+				For TLS connections, nats.c must be built against OpenSSL (CMake
+				<emphasis>-DNATS_BUILD_WITH_TLS=ON</emphasis>).  The same OpenSSL
+				installation used by &osips; must be present at runtime to avoid
+				library version conflicts.
 			</para>
 			</listitem>
 			<listitem>
