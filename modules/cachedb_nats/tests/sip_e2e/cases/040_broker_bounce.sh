@@ -64,6 +64,7 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
     -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
     -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
+    -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$BOUNCE_CFG"
 
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \

@@ -224,6 +224,39 @@ register_one() {
         > "$WORKDIR/sipsak_${user}_${port}.out" 2>&1
 }
 
+# Register an ADDITIONAL contact for an AoR: same To/From user, different
+# Contact URI (distinct port) -- usrloc keys contacts by their URI, so this
+# lands as a second binding on the same row.  Multi-contact rows with
+# DIFFERING expiries are the TTL-ineligible path (a min-derived row TTL
+# would tombstone the still-live contacts), served by the reaper [REV-6/F6].
+register_contact() {
+    # register_contact <user> <contact_port> <expires> [sip_port]
+    local user=$1; local cport=$2; local expires=$3; local port=${4:-$SIP_PORT_A}
+    sipsak -U -C "sip:${user}@${SIP_HOST}:${cport}" \
+        -s "sip:${user}@${SIP_HOST}:${port}" \
+        -x "$expires" \
+        > "$WORKDIR/sipsak_${user}_c${cport}.out" 2>&1
+}
+
+# Decoded headers of the CURRENT (last-per-subject) stream message backing
+# an AoR's KV row.  Lets a case assert the Nats-TTL header is present
+# (TTL-eligible write) or absent (ineligible mixed-expiry write) -- the
+# actual on-broker outcome of the _ttl_eligible decision.
+kv_last_headers() {
+    local subj="\$KV.${KV_BUCKET}.$(kv_aor_key "$1")"
+    n req "\$JS.API.STREAM.MSG.GET.KV_${KV_BUCKET}" \
+        "{\"last_by_subj\":\"$subj\"}" 2>/dev/null \
+        | python3 -c '
+import sys, json, base64
+try:
+    d = json.load(sys.stdin)
+    h = d.get("message", {}).get("hdrs", "")
+    print(base64.b64decode(h).decode(errors="replace") if h else "")
+except Exception:
+    print("")
+'
+}
+
 # Register N users in parallel, blocking until all return.
 register_n_parallel() {
     # register_n_parallel <prefix> <count> [port] [start]

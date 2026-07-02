@@ -45,6 +45,7 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@DEDICATED_WATCHER@@|1|g" \
     -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
     -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
+    -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$ORPHAN_CFG"
 
 # Start opensips directly (no wrapper traps).  Keep stdout / stderr
