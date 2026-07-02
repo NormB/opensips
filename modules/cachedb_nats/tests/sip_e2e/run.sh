@@ -45,7 +45,8 @@ cleanup() {
     [ -n "$OPENSIPS_PID_B" ] && kill "$OPENSIPS_PID_B" 2>/dev/null
     [ -n "${BOUNCE_NATS_PID:-}" ] && kill "$BOUNCE_NATS_PID" 2>/dev/null
     wait 2>/dev/null
-    nats --server "$NATS_URL" kv del "$KV_BUCKET" -f >/dev/null 2>&1 || true
+    [ -n "${KVCTL:-}" ] && "$KVCTL" rm "$NATS_URL" "$KV_BUCKET" >/dev/null 2>&1 || \
+        nats --server "$NATS_URL" kv del "$KV_BUCKET" -f >/dev/null 2>&1 || true
     if [ "${SUITE_FAIL:-0}" -eq 0 ]; then
         rm -rf "$WORKDIR"
     else
@@ -64,6 +65,15 @@ need() {
 }
 need nats; need sipsak; need nc
 
+# kvctl creates buckets the way the module does (AllowMsgTTL via
+# kvConfig.LimitMarkerTTL) -- the nats CLI on this host is too old for
+# per-message TTL and would create buckets that latch native TTL off.
+if ! make -C "$HERE" kvctl >/dev/null 2>&1 || [ ! -x "$HERE/kvctl" ]; then
+    echo "kvctl build failed (needs a libnats with the PR #1000 KV TTL API)"
+    exit 77
+fi
+KVCTL="$HERE/kvctl"
+
 if [ ! -x "$OPENSIPS_BIN" ]; then
     echo "opensips binary not found at $OPENSIPS_BIN"
     exit 77
@@ -80,9 +90,9 @@ if ! nats --server "$NATS_URL" server check connection \
     exit 77
 fi
 
-# Fresh bucket for this run.
-nats --server "$NATS_URL" kv add "$KV_BUCKET" --history=3 --replicas=1 \
-    >/dev/null 2>&1 || true
+# Fresh bucket for this run -- history=1 [HREV-1] + marker TTL, exactly the
+# shape nats_pool_get_kv creates, so native per-key TTL is exercised.
+"$KVCTL" mk "$NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 >/dev/null 2>&1 || true
 
 # Derive the cachedb_url form (nats:<group>://host:port/) from NATS_URL.
 NATS_HOSTPORT="${NATS_URL#nats://}"
@@ -119,6 +129,8 @@ render_cfg() {
         -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
         -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
         -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
+        -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
+        -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 

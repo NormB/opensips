@@ -43,7 +43,7 @@ done
 
 # Start a separate opensips instance pointed at the disposable broker
 BOUNCE_NATS_URL="nats://127.0.0.1:${BOUNCE_NATS_PORT}"
-nats --server "$BOUNCE_NATS_URL" kv add "$KV_BUCKET" --history=3 --replicas=1 \
+"$KVCTL" mk "$BOUNCE_NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 \
     >/dev/null 2>&1 || true
 
 BOUNCE_SIP_PORT=5076
@@ -62,6 +62,8 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
     -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
     -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
+    -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
+    -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
     "${HERE}/opensips.cfg.in" > "$BOUNCE_CFG"
 
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \

@@ -44,8 +44,11 @@ kv_clear() {
     # bucket-name-keyed and survives a delete+recreate because libnats
     # transparently re-resolves on the next op (we exercise this in the
     # broker_bounce case so we know it works).
-    n kv del "$KV_BUCKET" -f >/dev/null 2>&1 || true
-    n kv add "$KV_BUCKET" --history=3 --replicas=1 >/dev/null 2>&1 || true
+    # kvctl (not the nats CLI) so the recreated bucket keeps the module's
+    # shape: history=1 [HREV-1] + AllowMsgTTL via LimitMarkerTTL.
+    : "${KVCTL:?run.sh must export KVCTL}"
+    "$KVCTL" rm "$NATS_URL" "$KV_BUCKET" >/dev/null 2>&1 || true
+    "$KVCTL" mk "$NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 >/dev/null 2>&1 || true
 }
 
 kv_get_raw() {
@@ -53,7 +56,10 @@ kv_get_raw() {
 }
 
 kv_keys() {
-    n kv ls "$KV_BUCKET" 2>/dev/null | grep -v '^Keys' | grep -v '^$' || true
+    # LIVE keys only, via a marker-aware libnats (kvctl ls) -- the 0.1.6
+    # nats CLI predates delete markers and lists an expired, marker'd key
+    # as if it were live.
+    "$KVCTL" ls "$NATS_URL" "$KV_BUCKET" 2>/dev/null || true
 }
 
 # ── MI over UDP datagram ────────────────────────────────────────
@@ -102,15 +108,14 @@ mi_cdb_stats() {
 # always returns empty AORs.  The truth lives in the KV bucket, so we
 # count the JSON-prefixed keys that cachedb_nats writes per AoR.
 kv_aor_count() {
-    n kv ls "$KV_BUCKET" 2>/dev/null \
-        | grep -c '^json_' \
-        || echo 0
+    # grep -c always prints a count (0 included); swallow only the exit
+    # status -- an `|| echo 0` here double-printed ("0\n0") on empty.
+    kv_keys | grep -c '^json_' || true
 }
 
-# Look for a specific AoR's KV doc.  Returns the raw JSON (or empty).
-# The doc key is fts_json_prefix ("json_") + _kv_encode_key(aor),
-# which encodes '@' as =40 etc.
-kv_aor_get() {
+# Encoded KV key for an AoR: fts_json_prefix ("json_") +
+# _kv_encode_key(aor), which encodes '@' as =40 etc.
+kv_aor_key() {
     local aor=$1
     local enc
     enc=$(printf '%s' "$aor" | python3 -c '
@@ -137,7 +142,57 @@ print("".join(out), end="")
             }
         }')
     fi
-    n kv get "$KV_BUCKET" "json_${enc}" --raw 2>/dev/null
+    printf 'json_%s' "$enc"
+}
+
+# Look for a specific AoR's KV doc.  Returns the raw JSON (or empty).
+kv_aor_get() {
+    n kv get "$KV_BUCKET" "$(kv_aor_key "$1")" --raw 2>/dev/null
+}
+
+# Revision count of an AoR's KV key (nats kv history data lines).  The CLI
+# renders a box-drawing table, so match the Op column values, not line
+# starts.
+kv_aor_revisions() {
+    n kv history "$KV_BUCKET" "$(kv_aor_key "$1")" 2>/dev/null \
+        | grep -cE ' (PUT|DEL|PURGE) ' || true
+}
+
+# Poll until the AoR's doc is physically ABSENT from the bucket (Get fails
+# AND the key is not listed).  wait_kv_gone <aor> <timeout_s>; rc 0 = gone.
+wait_kv_gone() {
+    local aor=$1 timeout=$2
+    local end=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        if [ -z "$(kv_aor_get "$aor")" ] && \
+           ! kv_keys | grep -qxF "$(kv_aor_key "$aor")"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# SIP-level visibility probe [HREV-3]: MESSAGE runs lookup("location") in
+# the cfg -- 202 = live binding, 404 = none.  Prints "202", "404" or "none".
+# Hand-rolled over nc: this host's sipsak segfaults in MESSAGE mode, and the
+# raw datagram keeps the probe deterministic (reply arrives on the same
+# socket, exactly like the mi_at helper).
+probe_binding() {
+    local user=$1; local port=${2:-$SIP_PORT_A}
+    local tag="$$${RANDOM}"
+    local out="$WORKDIR/probe_${user}_${tag}.out"
+    printf 'MESSAGE sip:%s@%s:%s SIP/2.0\r\nVia: SIP/2.0/UDP %s:5098;rport;branch=z9hG4bK%s\r\nMax-Forwards: 10\r\nFrom: <sip:probe@%s>;tag=%s\r\nTo: <sip:%s@%s:%s>\r\nCall-ID: probe-%s@%s\r\nCSeq: 1 MESSAGE\r\nContent-Length: 0\r\n\r\n' \
+        "$user" "$SIP_HOST" "$port" \
+        "$SIP_HOST" "$tag" \
+        "$SIP_HOST" "$tag" \
+        "$user" "$SIP_HOST" "$port" \
+        "$tag" "$SIP_HOST" \
+        | timeout 3 nc -u -w 2 "$SIP_HOST" "$port" > "$out" 2>&1
+    if grep -q "SIP/2.0 202" "$out"; then echo 202
+    elif grep -q "SIP/2.0 404" "$out"; then echo 404
+    else echo none
+    fi
 }
 
 # ── log assertions ──────────────────────────────────────────────
@@ -158,10 +213,14 @@ wait_for_log() {
 # ── SIP REGISTER via sipsak ─────────────────────────────────────
 register_one() {
     # register_one <user> <expires> [port]  -> sipsak exit code
+    # NB: sipsak's Expires flag is -x (default 15).  -e is "ending number of
+    # the appendix to the user name" -- the original helper passed the
+    # expiry through -e, so every REGISTER silently went out with
+    # Expires: 15; invisible until the TTL cases timed actual expiry.
     local user=$1; local expires=${2:-3600}; local port=${3:-$SIP_PORT_A}
     sipsak -U -C "sip:${user}@${SIP_HOST}:${port}" \
         -s "sip:${user}@${SIP_HOST}:${port}" \
-        -e "$expires" -t 1 -O 1 \
+        -x "$expires" \
         > "$WORKDIR/sipsak_${user}_${port}.out" 2>&1
 }
 

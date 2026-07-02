@@ -96,6 +96,8 @@ render_cfg() {
         -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX}|g" \
         -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS}|g" \
         -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER}|g" \
+        -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
+        -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 

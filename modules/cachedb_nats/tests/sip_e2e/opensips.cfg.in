@@ -61,7 +61,11 @@ loadmodule "cachedb_nats.so"
 modparam("cachedb_nats", "cachedb_url",     "@@CACHEDB_URL@@")
 modparam("cachedb_nats", "kv_bucket",       "@@KV_BUCKET@@")
 modparam("cachedb_nats", "kv_replicas",     1)
-modparam("cachedb_nats", "kv_history",      3)
+modparam("cachedb_nats", "kv_history",      1)
+# [HREV-3/D6] physical retention past logical expiry; 0 = reclaim ASAP.
+modparam("cachedb_nats", "nats_expired_linger", @@EXPIRED_LINGER@@)
+# reaper cadence; TTL cases shrink it so reaper-only reclamation is testable.
+modparam("cachedb_nats", "nats_reap_interval",  @@REAP_INTERVAL@@)
 modparam("cachedb_nats", "fts_json_prefix", "json_")
 modparam("cachedb_nats", "enable_search_index",   @@ENABLE_INDEX@@)
 modparam("cachedb_nats", "index_buckets",         @@INDEX_BUCKETS@@)
@@ -86,6 +90,9 @@ modparam("usrloc", "nat_bflag",        "NAT")
 modparam("usrloc", "use_domain",       1)
 
 loadmodule "registrar.so"
+# TTL e2e cases register with Expires: 3; without this the default
+# min_expires=60 silently raises them and every expiry wait times out.
+modparam("registrar", "min_expires", 0)
 modparam("registrar", "tcp_persistent_flag", "TCP_PERSISTENT")
 
 ####### routes ###################################################
@@ -112,6 +119,18 @@ route {
 
     if (is_method("OPTIONS")) {
         sl_send_reply(200, "OK");
+        exit;
+    }
+
+    # visibility probe for the TTL e2e cases: MESSAGE looks the AoR up.
+    # 202 = a live binding exists; 404 = none (expired contacts are never
+    # served, whatever nats_expired_linger keeps physically stored).
+    if (is_method("MESSAGE")) {
+        if (!lookup("location")) {
+            sl_send_reply(404, "Not Found");
+            exit;
+        }
+        sl_send_reply(202, "Binding Exists");
         exit;
     }
 
