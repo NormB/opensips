@@ -746,8 +746,8 @@ route[got_reply] {
                 <emphasis>Auto-stage behaviour.</emphasis> When the
                 modparam is non-empty, every
                 <function>nats_request</function> call stages
-                <varname><emphasis>&lt;header-name&gt;</emphasis>:
-                &lt;uuid&gt;</varname> onto the outbound natsMsg
+                <varname>&lt;header-name&gt;: &lt;uuid&gt;</varname>
+                onto the outbound natsMsg
                 <emphasis>iff</emphasis> the script has not
                 already staged the same header explicitly via
                 <function>nats_hdr_set</function>.  A deliberate
@@ -1240,7 +1240,7 @@ timer_route[drain, 1] {
                 On success the reply populates the script-visible
                 state: <varname>$nats_data</varname>,
                 <varname>$nats_subject</varname>,
-                <varname>$nats_hdr(<emphasis>Name</emphasis>)</varname>,
+                <varname>$nats_hdr(Name)</varname>,
                 <varname>$nats_reply_to</varname>.  The
                 <varname>$nats_request_id</varname> pvar holds the
                 UUIDv7 used as the correlation id and is also
