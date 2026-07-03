@@ -117,8 +117,8 @@ jobs:
 
       - name: Build NATS module .o files (needed by lib/nats unit tests)
         run: |
-          # The lib/nats unit tests link against ../nats_redact.o and
-          # ../nats_validate.o.  We compile those translation units
+          # The lib/nats unit tests link against ../nats_redact.o,
+          # ../nats_validate.o and ../nats_rank.o.  We compile those TUs
           # here so the test Makefile's link rule can resolve them
           # without requiring a full opensips build.
           set -eu
@@ -132,6 +132,8 @@ jobs:
             -c lib/nats/nats_redact.c   -o lib/nats/nats_redact.o
           ${CC:-cc} ${SAN_CFLAGS} ${common_defs} \
             -c lib/nats/nats_validate.c -o lib/nats/nats_validate.o
+          ${CC:-cc} ${SAN_CFLAGS} ${common_defs} \
+            -c lib/nats/nats_rank.c     -o lib/nats/nats_rank.o
 
       - name: lib/nats unit tests
         run: |
