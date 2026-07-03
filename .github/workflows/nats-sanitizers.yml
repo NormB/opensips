@@ -29,6 +29,7 @@ on:
       - 'lib/nats/**'
       - 'modules/event_nats/**'
       - 'modules/cachedb_nats/**'
+      - 'modules/cachedb_nats_fts/**'
       - 'modules/nats_consumer/**'
       - '.github/workflows/nats-sanitizers.yml'
   pull_request:
@@ -36,6 +37,7 @@ on:
       - 'lib/nats/**'
       - 'modules/event_nats/**'
       - 'modules/cachedb_nats/**'
+      - 'modules/cachedb_nats_fts/**'
       - 'modules/nats_consumer/**'
       - '.github/workflows/nats-sanitizers.yml'
   workflow_dispatch:
