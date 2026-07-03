@@ -304,12 +304,10 @@ void nats_handle_free(nats_handle_t *h)
 
 	/* Tear down the SHM ring.  Subscription cleanup happens in the
 	 * consumer process (process-local pointer), not here. */
-#ifndef TEST_SHIM
 	if (h->ring) {
 		nats_ring_destroy(h->ring);
 		h->ring = NULL;
 	}
-#endif
 
 	shm_free(h);
 }
@@ -350,37 +348,13 @@ int nats_registry_bind(nats_handle_t *h)
 	h->created_at = time(NULL);
 	h->last_used_at = 0;
 
-	/* Allocate the SHM ring that the consumer process will push into
-	 * and SIP workers will pop from.  Under TEST_SHIM (unit tests) the
-	 * ring would require eventfd and atomic SHM allocation which the
-	 * pthread shim does not provide, so we skip it there.
-	 *
-	 * Respect the per-handle ring_capacity override (the parser has
-	 * already validated that it is a power of two >= 2 or zero).
-	 * A zero value means "use the module default". */
-#ifndef TEST_SHIM
-	if (!h->ring) {
-		uint32_t cap = h->ring_capacity ? h->ring_capacity
-		                                : NATS_HANDLE_RING_CAPACITY;
-		h->ring = nats_ring_create(cap);
-		if (!h->ring) {
-			LM_ERR("handle ring create failed for id='%.*s' "
-				"(capacity=%u)\n",
-				h->id.len, h->id.s, (unsigned)cap);
-			/* leave the rlock in place -- nats_handle_free()
-			 * frees it either way.  The caller still owns h. */
-			return -2;
-		}
-	}
-#endif
-
 	lock_start_write(b->lock);
 
 	for (cur = b->head; cur; cur = cur->next) {
 		if (str_eq(&cur->id, &h->id)) {
 			lock_stop_write(b->lock);
-			/* caller still owns h on duplicate -- no index was
-			 * consumed, and nats_handle_free() frees the rlock/ring */
+			/* caller still owns h on duplicate -- no index or ring
+			 * was consumed; nats_handle_free() frees the rlock */
 			return -1;
 		}
 	}
@@ -395,6 +369,41 @@ int nats_registry_bind(nats_handle_t *h)
 			NATS_REGISTRY_MAX_HANDLES);
 		return -3;
 	}
+
+	/* Allocate the SHM ring that the consumer process will push into
+	 * and SIP workers will pop from.  This runs LAST, after the
+	 * duplicate check and index reservation: the ring can be ~1.2 GB
+	 * at the maximum ring_capacity, and allocating it before
+	 * validation let every rejected MI bind churn a giant SHM
+	 * alloc/free pair (fragmentation / DoS surface).  It stays inside
+	 * the bucket write lock so a racing duplicate bind cannot slip in
+	 * between the check and the insert; binds are rare MI operations
+	 * and the alloc is memory-only, so the hold time is acceptable.
+	 *
+	 * Under TEST_SHIM (unit tests) the shim links a counting fake for
+	 * nats_ring_create/destroy (the real ring needs eventfd + SHM
+	 * atomics the pthread shim does not provide), so the call itself
+	 * stays visible to ordering tests.
+	 *
+	 * Respect the per-handle ring_capacity override (the parser has
+	 * already validated that it is a power of two >= 2 or zero).
+	 * A zero value means "use the module default". */
+	if (!h->ring) {
+		uint32_t cap = h->ring_capacity ? h->ring_capacity
+		                                : NATS_HANDLE_RING_CAPACITY;
+		h->ring = nats_ring_create(cap);
+		if (!h->ring) {
+			registry_index_free((uint16_t)assigned_index);
+			lock_stop_write(b->lock);
+			LM_ERR("handle ring create failed for id='%.*s' "
+				"(capacity=%u)\n",
+				h->id.len, h->id.s, (unsigned)cap);
+			/* leave the rlock in place -- nats_handle_free()
+			 * frees it either way.  The caller still owns h. */
+			return -2;
+		}
+	}
+
 	h->index = (uint16_t)assigned_index;
 
 	h->next = b->head;

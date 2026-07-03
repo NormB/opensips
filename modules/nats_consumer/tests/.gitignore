@@ -56,3 +56,4 @@ test_sub_identity_match
 test_orphan_ttl_ackwait
 test_parser_adversarial
 test_rpc_slot_lifecycle
+test_registry_ring_alloc_order

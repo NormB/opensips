@@ -66,4 +66,14 @@ void       test_lock_destroy_rw(rw_lock_t *l);
 /* ── silence the core str.h include that pulls in lib/str2const.h ── */
 /* We still need str.h -- it's a plain header with no core dep. */
 
+/* ── nats_ring fakes ─────────────────────────────────────────── */
+/* The registry allocates/frees each handle's SHM ring through
+ * nats_ring_create()/nats_ring_destroy().  Unit tests link these
+ * counting fakes instead of ../nats_ring.c (the real ring needs
+ * eventfd + SHM atomics), so ordering contracts like "a rejected
+ * duplicate bind must not allocate a ring" are observable. */
+
+extern int test_ring_creates;    /* nats_ring_create() calls  */
+extern int test_ring_destroys;   /* nats_ring_destroy() calls */
+
 #endif /* NATS_CONSUMER_TEST_SHIM_H */

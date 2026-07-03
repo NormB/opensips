@@ -22,6 +22,7 @@ SLOTLIFE_SRCS := test_rpc_slot_lifecycle.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
 IDXRECYCLE_SRCS := test_registry_index_recycle.c $(SHIM) ../nats_handle_registry.c
+RINGORDER_SRCS := test_registry_ring_alloc_order.c $(SHIM) ../nats_handle_registry.c
 MPSC_SRCS    := test_mpsc.c $(SHIM) ../nats_mpsc.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
@@ -41,7 +42,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_parser_adversarial test_rpc_slot_lifecycle \
                   test_rpc_inbox_auth test_registry_lookup_ref \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
-                  test_registry_index_recycle test_ring_push_bounded_spin \
+                  test_registry_index_recycle test_registry_ring_alloc_order test_ring_push_bounded_spin \
                   test_pool_self_register test_msg_ref_orphan_reap \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
@@ -58,7 +59,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
-     test_registry_index_recycle test_ring_push_bounded_spin \
+     test_registry_index_recycle test_registry_ring_alloc_order test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
@@ -150,6 +151,11 @@ test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.
 # reap, so duplicate/failed binds can't exhaust the index space.
 test_registry_index_recycle: $(IDXRECYCLE_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(IDXRECYCLE_SRCS) $(LDFLAGS)
+
+# P0.7: bind must validate (duplicate/id/index-cap) BEFORE allocating the
+# per-handle SHM ring — a rejected MI bind must not churn a giant alloc.
+test_registry_ring_alloc_order: $(RINGORDER_SRCS) test_shim.h ../nats_handle_registry.h
+	$(CC) $(CFLAGS) -o $@ $(RINGORDER_SRCS) $(LDFLAGS)
 
 # Retired handle that never got a subscription is marked sub_torn_down via
 # foreach_retired so the reaper frees it (its ring no longer leaks).
@@ -331,6 +337,7 @@ check: all
 	./test_consumer_proc_boot_retry
 	./test_rpc_subject_validation
 	./test_registry_index_recycle
+	./test_registry_ring_alloc_order
 	./test_ring_push_bounded_spin
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap
