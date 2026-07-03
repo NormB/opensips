@@ -17,8 +17,7 @@ with an in-process JSON full-text search index and live KV change watching.
 - Standard cachedb operations: get, set, remove, add (atomic increment), sub, get_counter
 - Atomic counter operations using CAS (compare-and-swap) with configurable retry
 - JSON document storage with in-process full-text search index
-- Live index updates via KV watcher thread (no polling)
-- `nats_cdb_request()` — synchronous NATS request/reply (RPC pattern)
+- Live index updates via the dedicated KV-watcher process (no polling)
 - `nats_kv_history()` — retrieve key version history as JSON array
 - Raw query commands: `KV KEYS`, `KV PURGE <key>`, `KV BUCKET INFO`
 - Map operations: get/set/remove with composite `key:subkey` addressing
@@ -48,20 +47,9 @@ full string.  Long defaults split across `<br>` breaks.
 
 ## Script Functions
 
-### `nats_cdb_request(subject, payload, timeout_ms, result_pvar)`
-
-Synchronous NATS request/reply. Sends `payload` to `subject`, waits up to `timeout_ms`
-for a reply, stores it in `result_pvar`.  It blocks the worker for the full RTT/timeout,
-so it is callable only off the SIP request path (onreply/local/startup/timer/event routes).
-
-Returns: 1 (success), -1 (error), -2 (timeout)
-
-```
-nats_cdb_request("auth.check", "$var(json)", 2000, $var(reply));
-if ($retcode == 1) {
-    xlog("reply: $var(reply)\n");
-}
-```
+> Synchronous NATS request/reply from script is provided by the
+> **nats_consumer** module (`nats_request`, with header and async
+> support); the duplicate this module once carried was removed.
 
 ### `nats_kv_history(key, result_pvar)`
 

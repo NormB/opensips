@@ -183,7 +183,26 @@ echo "    external subscriber caught: ${sub_count} message(s)"
 reg_count=$(grep -c "nats_pool_register: NATS pool: registered by" "${OPS_LOG}" || echo 0)
 [ "${reg_count}" = "1" ] || fail "expected exactly 1 pool registrant, saw ${reg_count}"
 
+# P0.3 single-owner MI: with all three modules co-loaded, the JS
+# observability commands must be registered exactly once (cachedb_nats
+# owns them) and must respond over MI; the log must show no duplicate
+# MI registration.
+mi_resp=$(mi_call nats_stream_list)
+echo "${mi_resp}" | grep -q '"jsonrpc"'     || fail "nats_stream_list MI did not respond; reply: ${mi_resp}"
+echo "${mi_resp}" | grep -qi '"error"'     && fail "nats_stream_list MI errored; reply: ${mi_resp}"
+echo "  ok: MI nats_stream_list responds (single owner)"
+
+mi_resp=$(mi_call nats_stream_info "{\"stream\":\"${STREAM}\"}")
+echo "${mi_resp}" | grep -q "${STREAM}"     || fail "nats_stream_info did not return stream ${STREAM}; reply: ${mi_resp}"
+echo "  ok: MI nats_stream_info responds (single owner)"
+
+if grep -qiE "already registered|command .* registered twice" "${OPS_LOG}"; then
+    fail "duplicate MI registration found in log:
+$(grep -iE 'already registered|registered twice' "${OPS_LOG}")"
+fi
+echo "  ok: no duplicate-MI-registration errors in log"
+
 [ "${ok}" = "4" ] || fail "only ${ok}/4 module markers passed; relevant log:
 $(grep -E '\[x8\]|nats_pool|nats_consumer|cachedb_nats:' "${OPS_LOG}" | tail -40)"
 
-pass "three-module e2e (cachedb+event+consumer) green; shared pool single-registrant; external sub saw publish"
+pass "three-module e2e (cachedb+event+consumer) green; shared pool single-registrant; MI single-owner; external sub saw publish"

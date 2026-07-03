@@ -48,13 +48,8 @@
 mi_response_t *mi_nats_account_info(const mi_params_t *params,
     struct mi_handler *async_hdl);
 
-/* Stream management */
-mi_response_t *mi_nats_stream_list(const mi_params_t *params,
-    struct mi_handler *async_hdl);
-
-mi_response_t *mi_nats_stream_info(const mi_params_t *params,
-    struct mi_handler *async_hdl);
-
+/* Stream management (mutating admin only -- the read-only
+ * nats_stream_list/info MI commands are owned by cachedb_nats) */
 mi_response_t *mi_nats_stream_create(const mi_params_t *params,
     struct mi_handler *async_hdl);
 

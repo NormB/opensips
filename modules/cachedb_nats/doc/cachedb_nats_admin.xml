@@ -57,11 +57,6 @@
 				<varname>enable_search_index = 0</varname>.
 			</para></listitem>
 			<listitem><para>
-				<emphasis role="bold">nats_cdb_request()</emphasis> —
-				synchronous NATS request/reply (RPC), callable only off the SIP
-				request path (it blocks the worker for the full RTT/timeout).
-			</para></listitem>
-			<listitem><para>
 				<emphasis role="bold">nats_kv_history()</emphasis> —
 				retrieves the full version history of a KV key as a JSON array.
 			</para></listitem>
@@ -514,53 +509,6 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 		This mirrors OpenSSL's
 		<function>SSL_CTX_load_verify_locations(NULL, dir)</function>
 		semantics.
-	</para>
-	</section>
-
-	<section id="param_nats_request_max_reply" xreflabel="nats_request_max_reply">
-	<title><varname>nats_request_max_reply</varname> (integer)</title>
-	<para>
-		Maximum number of bytes accepted in a NATS request/reply
-		response from <function>nats_cdb_request()</function>.  Caps the
-		per-call <function>pkg_malloc()</function> in the worker so a
-		malicious or misbehaving responder cannot exhaust the
-		per-worker package memory pool by returning an oversized
-		reply.  Replies whose declared length exceeds this bound are
-		rejected with an <emphasis>LM_ERR</emphasis> and
-		<function>nats_cdb_request()</function> returns <emphasis>-1</emphasis>.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>65536</quote> (64 KB).
-		</emphasis>
-	</para>
-	<example>
-	<title>Raise the cap for an application that returns large blobs</title>
-	<programlisting format="linespecific">
-modparam("cachedb_nats", "nats_request_max_reply", 262144)
-	</programlisting>
-	</example>
-	</section>
-
-	<section id="param_nats_request_default_timeout_ms"
-	         xreflabel="nats_request_default_timeout_ms">
-	<title><varname>nats_request_default_timeout_ms</varname> (integer)</title>
-	<para>
-		Default timeout (milliseconds) used by
-		<function>nats_cdb_request()</function> when the script call
-		passes <emphasis>0</emphasis> or a negative value as the
-		timeout argument.  Any positive caller-supplied timeout is
-		clamped to the range
-		<emphasis>[10, 30000]</emphasis> ms; values above the upper
-		bound trigger a one-shot <emphasis>LM_WARN</emphasis>.
-		Tightened from &quot;no default&quot; to a fast-fail value
-		so a misconfigured caller cannot block a SIP worker for the
-		full upper-clamp duration.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>500</quote> (ms).
-		</emphasis>
 	</para>
 	</section>
 
@@ -1065,92 +1013,6 @@ modparam("cachedb_nats", "max_reconnect", 30)
 
 	<section id="exported_functions" xreflabel="Exported Functions">
 	<title>Exported Functions</title>
-
-	<section id="func_nats_request" xreflabel="nats_request()">
-	<title>
-		<function moreinfo="none">nats_cdb_request(subject, payload, timeout_ms, result_pvar)</function>
-	</title>
-	<para>
-		Performs a synchronous NATS request/reply operation.  Publishes
-		<emphasis>payload</emphasis> to the NATS subject
-		<emphasis>subject</emphasis> and waits up to
-		<emphasis>timeout_ms</emphasis> milliseconds for a reply.  When a
-		reply arrives the payload is stored in
-		<emphasis>result_pvar</emphasis>.
-	</para>
-	<para>
-		This function implements the standard NATS request/reply pattern:
-		the sender publishes to a subject and includes a unique reply-to
-		inbox.  A responding service publishes to that inbox.  This is
-		suitable for synchronous RPC calls to external services such as
-		authentication validators, fraud scoring engines, or routing
-		decision services.
-	</para>
-	<para>
-		Because the call blocks the worker for the full round-trip
-		or timeout, it is restricted to routes off the SIP request
-		path: it may be used only from the onreply, local, startup,
-		timer, and event routes.  It is <emphasis>not</emphasis>
-		callable from the request, branch, or failure routes.
-	</para>
-	<para>Parameters:</para>
-	<itemizedlist>
-		<listitem><para>
-			<emphasis role="bold">subject</emphasis> (string) —
-			NATS subject to send the request to.  May contain &osips;
-			pseudo-variables.
-		</para></listitem>
-		<listitem><para>
-			<emphasis role="bold">payload</emphasis> (string) —
-			Request payload, typically a JSON string.  May contain
-			pseudo-variables.
-		</para></listitem>
-		<listitem><para>
-			<emphasis role="bold">timeout_ms</emphasis> (integer) —
-			Maximum wait time in milliseconds.  If no reply is received
-			within this window the function returns -2.  Values
-			<emphasis>&lt;= 0</emphasis> are replaced by
-			<varname>nats_request_default_timeout_ms</varname>
-			(default 500); positive values are clamped to
-			<emphasis>[10, 30000]</emphasis> ms.
-		</para></listitem>
-		<listitem><para>
-			<emphasis role="bold">result_pvar</emphasis> (writable pvar) —
-			Pseudo-variable to receive the reply payload string.
-			Reply size is capped by
-			<varname>nats_request_max_reply</varname> (default 64 KB);
-			oversized replies are rejected.
-		</para></listitem>
-	</itemizedlist>
-	<para>
-		When the underlying NATS connection pool is in disconnected
-		state, the function fast-fails with <emphasis>-1</emphasis>
-		without attempting the publish, rather than blocking the
-		worker for the full <emphasis>timeout_ms</emphasis>.
-	</para>
-	<para>Return values:</para>
-	<itemizedlist>
-		<listitem><para><emphasis role="bold">1</emphasis> — reply received successfully.</para></listitem>
-		<listitem><para><emphasis role="bold">-1</emphasis> — error (NATS pool disconnected, connection failure, publish error, or reply over <varname>nats_request_max_reply</varname>).</para></listitem>
-		<listitem><para><emphasis role="bold">-2</emphasis> — timeout, no reply received within the effective <emphasis>timeout_ms</emphasis>.</para></listitem>
-	</itemizedlist>
-	<example>
-	<title><function>nats_cdb_request</function> usage</title>
-	<programlisting format="linespecific">
-...
-$var(req) = "{\"user\":\"" + $fU + "\",\"domain\":\"" + $fd + "\"}";
-nats_cdb_request("auth.check", $var(req), 2000, $var(reply));
-if ($retcode == 1) {
-    xlog("auth service replied: $var(reply)\n");
-} else if ($retcode == -2) {
-    xlog("auth service timed out\n");
-    sl_send_reply(503, "Service Unavailable");
-    exit;
-}
-...
-	</programlisting>
-	</example>
-	</section>
 
 	<section id="func_nats_kv_history" xreflabel="nats_kv_history()">
 	<title>

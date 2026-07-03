@@ -4,3 +4,4 @@ test_partial_alloc
 test_seq_cast_guard
 test_subscription_rebuild
 test_mi_seq_u64
+test_mi_single_owner

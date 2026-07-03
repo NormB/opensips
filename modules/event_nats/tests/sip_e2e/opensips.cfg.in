@@ -51,7 +51,6 @@ modparam("cachedb_nats", "kv_bucket", "TESTKV")
 modparam("cachedb_nats", "kv_watch", "*")
 modparam("cachedb_nats", "kv_watch", "json.>")
 modparam("cachedb_nats", "fts_json_prefix", "json.")
-modparam("cachedb_nats", "nats_request_default_timeout_ms", 1000)
 
 loadmodule "nats_consumer.so"
 

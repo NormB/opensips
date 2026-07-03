@@ -158,16 +158,11 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	{ "nats_stream_list", 0, 0, 0, {
-		{mi_nats_stream_list, {0}},
-		{EMPTY_MI_RECIPE}},
-		{0}
-	},
-	{ "nats_stream_info", 0, 0, 0, {
-		{mi_nats_stream_info, {"stream", 0}},
-		{EMPTY_MI_RECIPE}},
-		{0}
-	},
+	/* The read-only JS observability commands (nats_stream_list,
+	 * nats_stream_info) are owned by cachedb_nats (richer variants:
+	 * filter/pagination/format support) -- registering them here too
+	 * made whichever module loaded first silently win (P0.3).  This
+	 * module keeps only the MUTATING JetStream admin commands below. */
 	{ "nats_stream_create", 0, 0, 0, {
 		{mi_nats_stream_create, {"name", "subjects", 0}},
 		{mi_nats_stream_create, {"name", "subjects", "replicas", 0}},

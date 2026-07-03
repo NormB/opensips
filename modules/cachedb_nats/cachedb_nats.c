@@ -31,8 +31,9 @@
  *     mapped to KV put/get/delete/create/purge operations.
  *   - JSON full-text search via raw_query ("search:term") and the
  *     cachedb query/update/map_get/map_set/map_remove extensions.
- *   - Native script functions: nats_request() for synchronous NATS
- *     request/reply, and nats_kv_history() for key version history.
+ *   - Native script functions: nats_kv_* KV primitives and
+ *     nats_kv_history() for key version history.  (Synchronous NATS
+ *     request/reply from script is owned by the nats_consumer module.)
  *   - A self-healing KV watcher thread (cachedb_nats_watch.c) that
  *     keeps the JSON search index in sync with live KV mutations and
  *     raises E_NATS_KV_CHANGE EVI events.
@@ -93,8 +94,6 @@ static void _nats_cdb_periodic_resync(unsigned int ticks, void *param);
 static void _nats_cdb_reaper_tick(unsigned int ticks, void *param);   /* P9 reaper host */
 
 /* script function wrappers (implementations in cachedb_nats_native.c) */
-static int w_nats_request_wrap(struct sip_msg *msg, str *subject, str *payload,
-                               int *timeout, pv_spec_t *result);
 static int w_nats_kv_history_wrap(struct sip_msg *msg, str *key,
                                   pv_spec_t *result);
 static int w_nats_kv_get_wrap(struct sip_msg *msg, str *bucket, str *key,
@@ -173,18 +172,6 @@ static struct tls_mgm_binds tls_api;
  * convention requires a different separator. */
 char *fts_json_prefix = "json_";
 int   fts_max_results = 100;
-
-/* Maximum bytes accepted in a NATS request/reply response.  Caps
- * the per-call pkg_malloc in w_nats_request so a malicious or
- * misbehaving responder can't exhaust per-worker pkg memory by
- * sending an oversized reply.  Default 65536 (64 KB). */
-int   nats_request_max_reply = 65536;
-
-/* Default timeout for nats_request when the script call passes 0 or
- * a negative timeout argument.  Tightened from "no default" to
- * 500 ms so a misconfigured caller can no longer block a SIP worker
- * for the upper-clamp duration of 30 seconds. */
-int   nats_request_default_timeout_ms = 500;
 
 /* Compare-and-swap retry count for atomic counter increments
  * (nats_cache_add) and JSON field updates (nats_cache_update).
@@ -364,8 +351,6 @@ static const param_export_t params[] = {
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	{"fts_max_results", INT_PARAM,               &fts_max_results},
-	{"nats_request_max_reply", INT_PARAM,        &nats_request_max_reply},
-	{"nats_request_default_timeout_ms", INT_PARAM, &nats_request_default_timeout_ms},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
 	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
@@ -384,20 +369,9 @@ static const param_export_t params[] = {
 };
 
 static const cmd_export_t cmds[] = {
-	/* Synchronous NATS request/reply.  Named nats_cdb_request (not
-	 * nats_request) to avoid colliding with the nats_consumer module's own
-	 * nats_request, and restricted to routes OFF the SIP request path:
-	 * this call blocks the worker for the full RTT/timeout, so it must not
-	 * run from request/failure/branch routes.  (Mirrors nats_consumer's
-	 * sync-RPC route policy.) */
-	{"nats_cdb_request", (cmd_function)w_nats_request_wrap, {
-		{CMD_PARAM_STR, 0, 0},   /* subject */
-		{CMD_PARAM_STR, 0, 0},   /* payload */
-		{CMD_PARAM_INT, 0, 0},   /* timeout */
-		{CMD_PARAM_VAR, 0, 0},   /* result pvar */
-		{0, 0, 0}},
-	ONREPLY_ROUTE | LOCAL_ROUTE | STARTUP_ROUTE |
-	TIMER_ROUTE | EVENT_ROUTE},
+	/* Synchronous NATS request/reply from script is provided ONLY by
+	 * the nats_consumer module (headers + async support); this module's
+	 * duplicate request/reply export was removed (P0.3). */
 	{"nats_kv_history", (cmd_function)w_nats_kv_history_wrap, {
 		{CMD_PARAM_STR, 0, 0},   /* key */
 		{CMD_PARAM_VAR, 0, 0},   /* result pvar */
@@ -1259,27 +1233,6 @@ static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
 
 	if (reaped)
 		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
-}
-
-/**
- * w_nats_request_wrap() -- Script wrapper for nats_request().
- *
- * Thin wrapper that delegates to w_nats_request() in cachedb_nats_native.c.
- * Performs a synchronous NATS request/reply: sends a message to the given
- * subject, waits up to timeout milliseconds for a reply, and stores the
- * reply payload in the specified pseudo-variable.
- *
- * @param msg      Current SIP message context.
- * @param subject  NATS subject for the request.
- * @param payload  Request payload (typically JSON).
- * @param timeout  Reply timeout in milliseconds.
- * @param result   Pseudo-variable to store the reply payload.
- * @return         1 on success, -1 on error (OpenSIPS script convention).
- */
-static int w_nats_request_wrap(struct sip_msg *msg, str *subject,
-                               str *payload, int *timeout, pv_spec_t *result)
-{
-	return w_nats_request(msg, subject, payload, timeout, result);
 }
 
 /**

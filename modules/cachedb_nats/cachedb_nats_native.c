@@ -24,9 +24,6 @@
  * This file provides extended NATS functionality that goes beyond the standard
  * cachedb get/set/remove interface:
  *
- *   - Request/reply RPC:  Synchronous NATS request/reply pattern for
- *     microservice-style calls from OpenSIPS script (w_nats_request).
- *
  *   - KV history:  Retrieves the full version history of a NATS KV key
  *     and returns it as a JSON array (w_nats_kv_history).
  *
@@ -79,183 +76,12 @@
  * nats_map_legacy_read is enabled; nats_map_migrate rewrites them. */
 #define NATS_MAP_SEP_LEGACY ':'
 
-/* defined in cachedb_nats.c — caps the per-call pkg_malloc in
- * w_nats_request to bound resource usage when a remote responder
- * sends an oversized reply. */
-extern int nats_request_max_reply;
-
-/* defined in cachedb_nats.c — default request timeout when caller
- * passes 0 or negative.  Bounded by NATS_REQUEST_MIN_TIMEOUT_MS and
- * the existing 30 s upper clamp. */
-extern int nats_request_default_timeout_ms;
-
-/* Floor for any positive caller-supplied timeout.  Below this the
- * cnats library's behavior is undefined and a 0 ms timeout is
- * effectively "give up before the request leaves the host." */
-#define NATS_REQUEST_MIN_TIMEOUT_MS  10
-
-/* Ceiling for any caller-supplied timeout.  A SIP worker holding the
- * w_nats_request call cannot service other traffic until the request
- * either replies or times out, so the upper bound has to keep the
- * worker available for SIP work even when the responder is wedged.
- * 30 s matches OpenSIPS's default fr_timer for in-flight transactions
- * -- a request that hasn't replied in that window is dead from the
- * caller's perspective. */
-#define NATS_REQUEST_MAX_TIMEOUT_MS  30000
-
 /* nats_str_to_buf() was consolidated into lib/nats/nats_str.h as
  * nats_str_to_buf() -- see P3-63. */
 
-/* ================================================================== */
-/*               Script function: nats_request                        */
-/* ================================================================== */
-
-/**
- * Synchronous NATS request/reply (RPC pattern).
- *
- * Script usage:
- *   nats_request("auth.check", "$var(payload)", 2000, $var(reply));
- *
- * Returns:
- *   1  success (reply stored in result_var)
- *  -1  error
- *  -2  timeout
- */
-int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
-                   int *timeout_ms, pv_spec_t *result_var)
-{
-	natsConnection *nc;
-	natsMsg *reply = NULL;
-	natsStatus s;
-	char subj_buf[NATS_NATIVE_KEY_BUF];
-	char pay_buf[NATS_NATIVE_VAL_BUF];
-	char *pay_ptr = pay_buf;
-	int pay_heap = 0;
-	int reply_len;
-	char *reply_copy;
-	pv_value_t val;
-
-	if (!subject || !payload || !timeout_ms || !result_var) {
-		LM_ERR("null parameter\n");
-		return -1;
-	}
-
-	nc = nats_pool_get();
-	if (!nc) {
-		LM_ERR("no NATS connection available\n");
-		return -1;
-	}
-
-	/* Fast-fail if the pool is currently disconnected.  cnats would
-	 * otherwise block this SIP worker for up to 30 s waiting for a
-	 * reconnect that may not come in time. */
-	if (!nats_pool_is_connected()) {
-		LM_DBG("nats_request: pool disconnected, fast-failing\n");
-		return -1;
-	}
-
-	/* Normalize the caller-supplied timeout into a sane range.
-	 *   - <= 0:                                substitute the configured default
-	 *   - 1..NATS_REQUEST_MIN_TIMEOUT_MS-1:    clamp up to MIN (cnats
-	 *                                          behavior under tiny
-	 *                                          timeouts is impl-defined)
-	 *   - > NATS_REQUEST_MAX_TIMEOUT_MS:       clamp down to MAX
-	 *   - in-range:                            unchanged
-	 *
-	 * Use a local variable for the effective timeout so we don't
-	 * mutate the caller's pvar in-place (which the old code did). */
-	int eff = *timeout_ms;
-	if (eff <= 0) eff = nats_request_default_timeout_ms;
-	if (eff < NATS_REQUEST_MIN_TIMEOUT_MS)
-		eff = NATS_REQUEST_MIN_TIMEOUT_MS;
-	if (eff > NATS_REQUEST_MAX_TIMEOUT_MS) {
-		static int warned = 0;
-		if (!warned) {
-			LM_WARN("nats_request timeout %d ms clamped to %d ms\n",
-				eff, NATS_REQUEST_MAX_TIMEOUT_MS);
-			warned = 1;
-		}
-		eff = NATS_REQUEST_MAX_TIMEOUT_MS;
-	}
-
-	/* null-terminate subject */
-	if (nats_str_to_buf(subject, subj_buf, sizeof(subj_buf)) < 0)
-		return -1;
-
-	/* null-terminate payload (use heap for large payloads).
-	 * Guard the source descriptor: a corrupted str with a negative
-	 * length would underflow the (size_t) cast below and an empty/NULL
-	 * payload must not be fed to memcpy. Treat NULL/empty as "". */
-	if (payload->len < 0) {
-		LM_ERR("nats_request: negative payload length (%d)\n",
-			payload->len);
-		return -1;
-	}
-	if (!payload->s || payload->len == 0) {
-		pay_buf[0] = '\0';
-	} else if ((size_t)payload->len < sizeof(pay_buf)) {
-		memcpy(pay_buf, payload->s, payload->len);
-		pay_buf[payload->len] = '\0';
-	} else {
-		pay_ptr = pkg_malloc(payload->len + 1);
-		if (!pay_ptr) {
-			LM_ERR("no more pkg memory for payload (%d bytes)\n",
-				payload->len);
-			return -1;
-		}
-		memcpy(pay_ptr, payload->s, payload->len);
-		pay_ptr[payload->len] = '\0';
-		pay_heap = 1;
-	}
-
-	s = nats_dl.natsConnection_RequestString(&reply, nc, subj_buf,
-		pay_ptr, eff);
-
-	if (pay_heap)
-		pkg_free(pay_ptr);
-
-	if (s == NATS_TIMEOUT) {
-		LM_DBG("nats_request to '%s' timed out (%dms)\n",
-			subj_buf, eff);
-		return -2;
-	}
-	if (s != NATS_OK) {
-		LM_ERR("nats_request to '%s' failed: %s\n",
-			subj_buf, nats_dl.natsStatus_GetText(s));
-		return -1;
-	}
-
-	/* copy reply data before destroying message — but cap the size
-	 * first to bound peer-controlled allocation. */
-	reply_len = nats_dl.natsMsg_GetDataLength(reply);
-	if (reply_len < 0 || reply_len > nats_request_max_reply) {
-		LM_ERR("nats_request to '%s' rejected: reply size %d "
-			"exceeds nats_request_max_reply=%d\n",
-			subj_buf, reply_len, nats_request_max_reply);
-		nats_dl.natsMsg_Destroy(reply);
-		return -1;
-	}
-	reply_copy = pkg_malloc(reply_len + 1);
-	if (!reply_copy) {
-		LM_ERR("no more pkg memory for reply (%d bytes)\n", reply_len);
-		nats_dl.natsMsg_Destroy(reply);
-		return -1;
-	}
-	memcpy(reply_copy, nats_dl.natsMsg_GetData(reply), reply_len);
-	reply_copy[reply_len] = '\0';
-	nats_dl.natsMsg_Destroy(reply);
-
-	/* set result variable */
-	memset(&val, 0, sizeof(val));
-	val.flags = PV_VAL_STR;
-	val.rs.s = reply_copy;
-	val.rs.len = reply_len;
-	pv_set_value(msg, result_var, 0, &val);
-	pkg_free(reply_copy);
-
-	LM_DBG("nats_request to '%s' got %d-byte reply\n", subj_buf, reply_len);
-	return 1;
-}
+/* The synchronous request/reply script function was removed (P0.3):
+ * the nats_consumer module's request/reply export is the single owner
+ * (headers + async support). */
 
 /* ================================================================== */
 /*               Script function: nats_kv_history                     */
@@ -479,7 +305,7 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	}
 
 	/* Copy the value out of the kvEntry into worker-local memory before
-	 * destroying the entry — same defensive pattern as w_nats_request.
+	 * destroying the entry — defensive copy-before-destroy pattern.
 	 * Every current OpenSIPS pvar setter copies PV_VAL_STR data, so the
 	 * existing inline use was safe today, but the explicit copy keeps
 	 * us robust if any future module-defined pvar setter forgets to. */

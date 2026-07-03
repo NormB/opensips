@@ -1,5 +1,6 @@
-# 022 — JetStream MI: create a stream via MI, then nats_stream_info
-# shows it.  Exercises nats_stream_create + nats_stream_info.
+# 022 — JetStream MI: create a stream via MI (event_nats, mutating
+# admin), then nats_stream_info (cachedb_nats, the observability
+# owner per P0.3) shows it.  Exercises the cross-module MI split.
 case_begin "022_mi_stream_create_info"
 
 # Pre-clean (idempotent - stream may not exist)
@@ -15,7 +16,7 @@ else
 fi
 
 sleep 1
-info_resp=$(mi event_nats:nats_stream_info MITEST)
+info_resp=$(mi cachedb_nats:nats_stream_info MITEST)
 if echo "$info_resp" | grep -q '"result"' && \
    echo "$info_resp" | grep -q 'MITEST\|mi.test'; then
     check "nats_stream_info shows the new stream" ok

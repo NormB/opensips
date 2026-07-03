@@ -49,28 +49,6 @@ mi_response_t *mi_nats_map_migrate(const mi_params_t *params,
 		struct mi_handler *async);
 
 /*
- * Script function: nats_request(subject, payload, timeout_ms, $result)
- *
- * Sends a NATS request (request-reply pattern) and waits synchronously
- * for a response up to the specified timeout.  The response payload is
- * stored in the given pseudo-variable.
- *
- * @param msg         SIP message context (provided by OpenSIPS).
- * @param subject     NATS subject to send the request to.
- * @param payload     Request payload string.
- * @param timeout_ms  Pointer to timeout value in milliseconds.  If the
- *                    responder does not reply within this window, the
- *                    function returns -2.
- * @param result_var  Pseudo-variable spec to store the response payload.
- * @return            1 on success (response received), -1 on error, -2 on
- *                    timeout.  (OpenSIPS script convention: 1 = success.)
- *
- * Thread safety: Safe from OpenSIPS worker process context.
- */
-int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
-                   int *timeout_ms, pv_spec_t *result_var);
-
-/*
  * Script function: nats_kv_history(key, $result)
  *
  * Retrieves the revision history for a KV key and stores it as a JSON

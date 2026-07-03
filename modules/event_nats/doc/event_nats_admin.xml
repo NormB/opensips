@@ -780,28 +780,15 @@ opensips-cli -x mi nats_reconnect
             </para>
         </section>
 
-        <section id="mi_nats_stream_list">
-            <title><function moreinfo="none">nats_stream_list</function></title>
-            <para>
-                Return a JSON array of stream summaries (name,
-                message count, byte count, consumer count, replica
-                count) for every stream visible to this account.
-                Takes no parameters.
-            </para>
-        </section>
-
-        <section id="mi_nats_stream_info">
-            <title>
-                <function moreinfo="none">nats_stream_info(stream)</function>
-            </title>
-            <para>
-                Return the full JetStream stream metadata: configured
-                subjects, retention / storage / replicas, current state
-                (first/last sequence, byte count), and cluster info
-                including replica lag.  <emphasis>stream</emphasis> is
-                the stream name.
-            </para>
-        </section>
+        <para>
+            The read-only stream observability commands
+            (<function>nats_stream_list</function>,
+            <function>nats_stream_info</function>) are provided by the
+            <emphasis>cachedb_nats</emphasis> module, whose variants
+            support filtering, pagination and selectable output
+            formats.  This module exports only the mutating stream
+            admin commands below.
+        </para>
 
         <section id="mi_nats_stream_create">
             <title>

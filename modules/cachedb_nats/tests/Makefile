@@ -24,7 +24,7 @@ EXTRA :=
 
 # (1) Built WITHOUT a sanitizer (structural / source-pattern / behavioural tests
 #     that don't need ASan, plus those wrapped by the CI TSan job).
-NOASAN := test_reply_size_cap test_disconnected_fastfail test_timeout_normalize \
+NOASAN := test_disconnected_fastfail \
           test_index_stale_recovery test_resync_modparams test_enable_search_index \
           test_dedicated_watcher_proc test_intern_wiring test_entry_blob_combine \
           test_watch_null_key_guard test_sink_emit_string test_allops_fastfail \
@@ -77,8 +77,8 @@ test_index_partial_snapshot: ../cachedb_nats_json_index.c ../cachedb_nats_intern
 # AddressSanitizer trips.  TSan has no UAF detection, so the buggy
 # arm completes silently and the assertion fails.  Skip both under
 # TSan -- the regression they catch is an ASan-only contract.
-TESTS_TSAN_SAFE = test_json_escape test_reply_size_cap \
-                  test_disconnected_fastfail test_timeout_normalize \
+TESTS_TSAN_SAFE = test_json_escape \
+                  test_disconnected_fastfail \
                   test_cas_backoff test_index_stale_recovery \
                   test_kv_key_encode test_resync_modparams \
                   test_enable_search_index test_dedicated_watcher_proc \

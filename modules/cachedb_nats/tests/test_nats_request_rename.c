@@ -3,15 +3,22 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Regression test: cachedb_nats exported a script function named
- * "nats_request" with ALL_ROUTES -- a blocking synchronous NATS
- * request/reply (up to a 30s timeout) callable from request_route, where
- * it wedges a SIP worker.  It also collided by name with the
- * nats_consumer module's own (route-restricted) "nats_request".
+ * Single-owner test for the script-level NATS request/reply function.
  *
- * Fix: rename cachedb's export to "nats_cdb_request" (de-conflict) and
- * drop ALL_ROUTES for a mask that excludes the SIP request path, matching
- * nats_consumer's sync-RPC policy.
+ * History: cachedb_nats once exported a script function named
+ * "nats_request" (blocking sync request/reply) that collided with the
+ * nats_consumer module's route-restricted export of the same name.  A
+ * first fix renamed cachedb's export to "nats_cdb_request", but that
+ * left a duplicate implementation and a duplicate GLOBAL SYMBOL
+ * (w_nats_request) defined in two modules designed to co-load.  P0.3
+ * removed cachedb_nats's copy entirely: nats_consumer's nats_request
+ * is strictly more capable (headers + async) and is the single owner.
+ *
+ * This test asserts the deletion held:
+ *   - cachedb_nats exports NO request/reply script function;
+ *   - cachedb_nats defines NO w_nats_request symbol;
+ *   - the deleted function's tuning modparams went with it;
+ *   - nats_consumer still exports "nats_request" (the owner).
  *
  * Source-pattern test; run from the tests/ directory.
  *
@@ -32,53 +39,39 @@ static int g_fails;
 static int file_contains(const char *path, const char *needle)
 {
 	FILE *f = fopen(path, "r");
-	if (!f) { fprintf(stderr, "cannot open %s\n", path); return 0; }
-	char line[2048];
-	int hit = 0;
-	while (fgets(line, sizeof(line), f))
-		if (strstr(line, needle)) { hit = 1; break; }
-	fclose(f);
-	return hit;
-}
-
-/* Return 1 if, within `span` lines after the line registering command
- * `cmd` (matched as `{"cmd",`), the text `needle` appears. */
-static int near_registration(const char *path, const char *cmd,
-	const char *needle, int span)
-{
-	FILE *f = fopen(path, "r");
 	if (!f) return 0;
 	char line[2048];
-	char marker[128];
-	snprintf(marker, sizeof(marker), "{\"%s\",", cmd);
-	int countdown = -1, hit = 0;
+	int found = 0;
 	while (fgets(line, sizeof(line), f)) {
-		if (countdown < 0 && strstr(line, marker))
-			countdown = span;
-		if (countdown >= 0) {
-			if (strstr(line, needle)) { hit = 1; break; }
-			if (countdown-- == 0) countdown = -1;
-		}
+		if (strstr(line, needle)) { found = 1; break; }
 	}
 	fclose(f);
-	return hit;
+	return found;
 }
 
 int main(void)
 {
-	const char *src = "../cachedb_nats.c";
+	/* cachedb_nats's copy is gone -- script export and symbol */
+	ASSERT(!file_contains("../cachedb_nats.c", "\"nats_cdb_request\""),
+		"cachedb_nats no longer exports nats_cdb_request");
+	ASSERT(!file_contains("../cachedb_nats.c", "w_nats_request"),
+		"cachedb_nats.c has no w_nats_request reference");
+	ASSERT(!file_contains("../cachedb_nats_native.c", "w_nats_request"),
+		"cachedb_nats_native.c no longer defines w_nats_request");
+	ASSERT(!file_contains("../cachedb_nats_native.h", "w_nats_request"),
+		"cachedb_nats_native.h no longer declares w_nats_request");
 
-	ASSERT(!file_contains(src, "{\"nats_request\","),
-		"cachedb_nats no longer exports 'nats_request' (collision gone)");
-	ASSERT(file_contains(src, "{\"nats_cdb_request\","),
-		"cachedb_nats exports the renamed 'nats_cdb_request'");
+	/* the deleted function's tuning modparams went with it */
+	ASSERT(!file_contains("../cachedb_nats.c", "nats_request_max_reply"),
+		"nats_request_max_reply modparam removed");
+	ASSERT(!file_contains("../cachedb_nats.c",
+		"nats_request_default_timeout_ms"),
+		"nats_request_default_timeout_ms modparam removed");
 
-	/* The renamed export must NOT be ALL_ROUTES, and must carry a
-	 * SIP-request-path-excluding mask (ONREPLY/LOCAL/STARTUP/TIMER/EVENT). */
-	ASSERT(!near_registration(src, "nats_cdb_request", "ALL_ROUTES", 8),
-		"nats_cdb_request is not callable from ALL_ROUTES");
-	ASSERT(near_registration(src, "nats_cdb_request", "ONREPLY_ROUTE", 8),
-		"nats_cdb_request uses a restricted (non-request-path) route mask");
+	/* nats_consumer remains the single owner of nats_request */
+	ASSERT(file_contains("../../nats_consumer/nats_consumer.c",
+		"\"nats_request\""),
+		"nats_consumer still exports nats_request (single owner)");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

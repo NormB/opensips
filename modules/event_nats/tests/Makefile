@@ -10,7 +10,7 @@ ASAN    := -fsanitize=address
 
 TESTS = test_partial_alloc test_seq_cast_guard test_mi_seq_u64 \
         test_atomic_stats test_subscription_rebuild \
-        test_child_init_degrade test_mi_command_collision \
+        test_child_init_degrade test_mi_command_collision test_mi_single_owner \
         test_inbound_backpressure test_inbound_drop_stats
 
 # Tests safe to run under ThreadSanitizer.
@@ -20,7 +20,7 @@ TESTS = test_partial_alloc test_seq_cast_guard test_mi_seq_u64 \
 # the test, not a regression.
 TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
                   test_subscription_rebuild test_child_init_degrade \
-                  test_mi_command_collision test_inbound_backpressure \
+                  test_mi_command_collision test_mi_single_owner test_inbound_backpressure \
                   test_inbound_drop_stats
 
 all: $(TESTS)
@@ -45,6 +45,11 @@ test_child_init_degrade: test_child_init_degrade.c
 # Source-pattern: event_nats's JetStream-admin MI commands are renamed
 # nats_js_consumer_* so they don't collide with nats_consumer's commands.
 test_mi_command_collision: test_mi_command_collision.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+# P0.3 source-pattern: cachedb_nats owns the read-only JS observability
+# MI (nats_stream_list/info); event_nats keeps only mutating admin.
+test_mi_single_owner: test_mi_single_owner.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 # Source-pattern: the inbound callback does one combined shm_malloc and

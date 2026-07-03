@@ -3,8 +3,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Regression test: hot-path NATS calls (w_nats_request,
- * nats_evi_raise, w_nats_publish) must check nats_pool_is_connected()
+ * Regression test: hot-path NATS calls (nats_evi_raise,
+ * w_nats_publish) must check nats_pool_is_connected()
  * before invoking the cnats blocking call.  The pool's nats_pool_get()
  * returns a live natsConnection pointer even when the underlying
  * connection is disconnected -- cnats lets the request hang until
@@ -79,10 +79,9 @@ int main(void)
 {
 	int n;
 
-	n = grep_in_function("../cachedb_nats_native.c", "w_nats_request",
-		"nats_pool_is_connected");
-	ASSERT(n >= 1,
-		"w_nats_request checks nats_pool_is_connected before request");
+	/* (cachedb_nats's request/reply function was removed in P0.3 —
+	 * nats_consumer owns nats_request and has its own fast-fail test,
+	 * test_request_fastfail.) */
 
 	/* P3-66: nats_evi_raise and w_nats_publish share the publish path via
 	 * nats_publish_checked(), which does the connection fast-fail.  Assert
