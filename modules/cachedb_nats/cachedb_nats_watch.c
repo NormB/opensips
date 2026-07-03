@@ -72,23 +72,11 @@
 /* Module-scope params defined in cachedb_nats.c. */
 extern int index_resync_on_reconnect;
 
-/*
- * EVI support: OpenSIPS 4.x provides evi_publish_event(), evi_raise_event(),
- * etc. in evi/evi.h and evi/evi_params.h.  We conditionally include them
- * and fall back to logging stubs if the headers are not present at build
- * time.  The Makefile does not yet set HAVE_EVI; flip it once the module
- * compiles inside the full OpenSIPS tree.
- */
-#ifdef HAVE_EVI
+/* EVI support (evi_publish_event / evi_raise_event).  The Makefile
+ * always defines HAVE_EVI for this module, so the former #ifdef guards
+ * and standalone-stub arm were dead and have been removed. */
 #include "../../evi/evi.h"
 #include "../../evi/evi_params.h"
-#define EVI_AVAILABLE 1
-#else
-/* Stub types so the rest of the file compiles stand-alone */
-typedef int event_id_t;
-#define EVI_ERROR (-1)
-#define EVI_AVAILABLE 0
-#endif
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats_watch.h"
@@ -142,7 +130,6 @@ static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
  * Flow:  watcher proc → shm_malloc + copy → ipc_dispatch_rpc → worker raises EVI → shm_free
  */
 
-#ifdef HAVE_EVI
 /**
  * IPC event struct -- carries KV change data from the watcher proc to a worker.
  * Single allocation with flexible array for key + value strings.
@@ -223,7 +210,6 @@ err:
 done:
 	shm_free(ev);
 }
-#endif /* HAVE_EVI */
 
 /**
  * _raise_kv_change_event() -- Dispatch a KV change to the EVI subsystem.
@@ -238,7 +224,6 @@ done:
  */
 static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 {
-#ifdef HAVE_EVI
 	struct kv_change_ipc_event *ev;
 	const char *key;
 	const char *val = NULL;
@@ -302,31 +287,6 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 		LM_ERR("ipc_dispatch_rpc failed for KV change event\n");
 		shm_free(ev);
 	}
-#else
-	/* EVI not available at build time -- log the change instead */
-	const char *key = nats_dl.kvEntry_Key(entry);
-	const char *op_name;
-	kvOperation eff_op = op;
-
-	if (!key) {
-		LM_WARN("kv-change: entry has NULL key, skipping log\n");
-		return;
-	}
-
-	/* Same empty-value-Put -> delete classification as the EVI path, so the
-	 * log agrees with the index's REMOVE semantics on a TTL tombstone. */
-	if (op == kvOp_Put && nats_dl.kvEntry_ValueLen(entry) == 0)
-		eff_op = kvOp_Delete;
-
-	switch (eff_op) {
-		case kvOp_Put:    op_name = "put";    break;
-		case kvOp_Delete: op_name = "delete"; break;
-		default:          op_name = "purge";  break;
-	}
-
-	LM_DBG("KV change (EVI unavailable): key=%s op=%s rev=%llu\n",
-		key, op_name, (unsigned long long)nats_dl.kvEntry_Revision(entry));
-#endif /* HAVE_EVI */
 }
 
 /* ------------------------------------------------------------------ */

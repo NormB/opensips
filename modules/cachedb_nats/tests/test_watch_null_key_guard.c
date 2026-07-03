@@ -99,10 +99,11 @@ int main(void)
 	fprintf(stderr, "  kvEntry_Key(entry) sites: total=%d guarded=%d\n",
 		total, guarded);
 
-	/* The three documented call sites must all be present and all
-	 * guarded.  (If a future refactor adds another, this asserts it is
-	 * guarded too.) */
-	ASSERT(total >= 3, "all three kvEntry_Key(entry) call sites present");
+	/* Both call sites (EVI dispatch + index update; the third lived in
+	 * the dead non-EVI fallback arm removed with the always-true
+	 * HAVE_EVI guards, P1.4) must be present and guarded.  (If a
+	 * future refactor adds another, this asserts it is guarded too.) */
+	ASSERT(total >= 2, "both kvEntry_Key(entry) call sites present");
 	ASSERT(guarded == total,
 		"every kvEntry_Key(entry) call site has an 'if (!key)' NULL guard");
 

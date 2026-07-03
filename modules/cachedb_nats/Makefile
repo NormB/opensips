@@ -24,7 +24,6 @@ NAME=cachedb_nats.so
 LIBS    += -L../../lib/nats -lnats_pool
 
 # EVI support for E_NATS_KV_CHANGE events (KV watcher -> OpenSIPS scripts)
-DEFS += -DHAVE_EVI
 
 # pthread for KV watcher thread
 LIBS += -lpthread

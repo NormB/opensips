@@ -82,9 +82,7 @@
 #include "../../lib/nats/nats_pool.h"
 #include "../../timer.h"
 
-#ifdef HAVE_EVI
 #include "../../evi/evi.h"
-#endif
 
 /* module lifecycle */
 static int mod_init(void);
@@ -148,12 +146,6 @@ int kv_ttl = 0;
  */
 int index_resync_on_reconnect = 1;
 
-/* map_legacy_read (default 1): keep serving and cleaning up map entries
- * written in the legacy ':' separated format (a full-bucket scan).  The new
- * '.' separated, hex-escaped format is read with an exact server-side
- * filter.  After running the nats_map_migrate MI command, operators set this
- * to 0 so map_get / map_remove become pure O(matches) operations. */
-int nats_map_legacy_read = 1;
 int index_resync_interval_secs = 0;
 
 /* NATS server URL(s) -- overrides cachedb_url host when set.  TLS
@@ -343,7 +335,6 @@ static const param_export_t params[] = {
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
-	{"map_legacy_read",             INT_PARAM,    &nats_map_legacy_read},
 	/* Shared lib/nats shutdown drain timeout, ms.  Merged by MAX across
 	 * modules (see nats_pool_drain_timeout_setter), not last-writer-wins. */
 	{"cdb_drain_timeout_ms",        INT_PARAM|USE_FUNC_PARAM,
@@ -419,11 +410,6 @@ static const mi_export_t mi_cmds[] = {
 	},
 	{"nats_cdb_stats", 0, 0, 0, {
 		{mi_nats_cdb_stats, {0}},
-		{EMPTY_MI_RECIPE}},
-		{0}
-	},
-	{"nats_map_migrate", 0, 0, 0, {
-		{mi_nats_map_migrate, {0}},
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
@@ -850,7 +836,6 @@ static int mod_init(void)
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once)
 	 * so it exists before startup_route's subscribe_event() and before
 	 * the dedicated watcher process forks. */
-#ifdef HAVE_EVI
 	{
 		extern event_id_t evi_kv_change_id;
 		str evi_name = str_init("E_NATS_KV_CHANGE");
@@ -858,7 +843,6 @@ static int mod_init(void)
 		if (evi_kv_change_id == EVI_ERROR)
 			LM_WARN("cannot register E_NATS_KV_CHANGE event\n");
 	}
-#endif
 
 	LM_INFO("cachedb_nats: bucket=%s replicas=%d history=%d ttl=%d\n",
 		kv_bucket, kv_replicas, kv_history, kv_ttl);

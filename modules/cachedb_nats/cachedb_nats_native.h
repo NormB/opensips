@@ -43,11 +43,6 @@
 #include "../../pvar.h"
 #include "../../mi/mi.h"
 
-/* MI handler: "nats_map_migrate" — rewrite legacy ':' map keys into the new
- * '.'-separated hex-escaped format in place.  Idempotent. */
-mi_response_t *mi_nats_map_migrate(const mi_params_t *params,
-		struct mi_handler *async);
-
 /*
  * Script function: nats_kv_history(key, $result)
  *

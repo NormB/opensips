@@ -88,9 +88,6 @@ char *kv_bucket = "testbucket";
 int kv_replicas = 1;
 int kv_history = 1;
 int kv_ttl = 0;
-int nats_map_legacy_read = 0;
-int nats_request_max_reply = 8192;
-int nats_request_default_timeout_ms = 500;
 
 int validate_kv_key(const str *s)
 { return (s && s->s && s->len > 0) ? 0 : -1; }

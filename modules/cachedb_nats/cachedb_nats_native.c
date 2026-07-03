@@ -71,10 +71,6 @@
  * hex-escaped (nats_map_encode) so they never contain a raw '.', keeping the
  * structure unambiguous and letting users put any byte in a key/field. */
 #define NATS_MAP_SEP    '.'
-/* Legacy separator (':') used by map entries written before the format
- * change.  Reads fall back to a legacy scan for these while
- * nats_map_legacy_read is enabled; nats_map_migrate rewrites them. */
-#define NATS_MAP_SEP_LEGACY ':'
 
 /* nats_str_to_buf() was consolidated into lib/nats/nats_str.h as
  * nats_str_to_buf() -- see P3-63. */
@@ -1104,11 +1100,6 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
 /*                       Map operations                               */
 /* ================================================================== */
 
-/* Enable the legacy (':' separated) read/scan fall-back.  Default on so an
- * upgrade keeps serving map entries written in the old format; operators set
- * it to 0 after running nats_map_migrate, which makes map_get / map_remove
- * pure O(matches) server-side-filtered operations.  Defined in cachedb_nats.c. */
-extern int nats_map_legacy_read;
 
 /* nats_map_encode() — hex-escape a map key/field component into a single
  * NATS subject token.  Bytes outside the subject-safe set [0-9A-Za-z-_/\]
@@ -1232,8 +1223,7 @@ static int nats_map_compose(char *out, int out_size, const str *key,
  * Delegates to nats_map_compose(), which hex-escapes both components
  * (NATS_MAP_SEP = '.') so neither can contain a raw separator; the encoding
  * may expand each byte up to 3 chars, so the required buffer size is not a
- * simple key->len + subkey->len sum.  The ':'-separated concatenation is the
- * legacy layout, now built only by build_map_key_legacy().
+ * simple key->len + subkey->len sum.
  *
  * If subkey is NULL or empty, only enc(key) is written.
  *
@@ -1257,28 +1247,6 @@ static int build_map_key(char *buf, size_t buf_size,
 
 	return nats_map_compose(buf, (int)buf_size, key,
 		subkey->s, subkey->len) < 0 ? -1 : 0;
-}
-
-/* Build the legacy (':' separated, unescaped) composite key for compat
- * reads/removes and migration: "key:subkey" or just "key".  Returns 0 / -1. */
-static int build_map_key_legacy(char *buf, size_t buf_size,
-                                const str *key, const str *subkey)
-{
-	int total;
-
-	if (!key || !key->s || key->len <= 0)
-		return -1;
-	if (!subkey || !subkey->s || subkey->len <= 0)
-		return nats_str_to_buf(key, buf, buf_size);
-
-	total = key->len + 1 + subkey->len;
-	if ((size_t)(total + 1) > buf_size)
-		return -1;
-	memcpy(buf, key->s, key->len);
-	buf[key->len] = NATS_MAP_SEP_LEGACY;
-	memcpy(buf + key->len + 1, subkey->s, subkey->len);
-	buf[total] = '\0';
-	return 0;
 }
 
 /* _map_add_row() — fetch full_key's value and append a result row whose
@@ -1348,10 +1316,6 @@ static int _map_add_row(cdb_res_t *res, kvStore *kv, const char *full_key,
  * map's keys -- O(matches), not O(total bucket keys).  Each matched key's
  * suffix is decoded back to the field name.
  *
- * While nats_map_legacy_read is enabled (the default, for upgrade compat),
- * a second pass also scans for the legacy raw "key:" prefix and returns
- * those entries verbatim.  That pass is O(total keys); operators disable it
- * (and reclaim the full speed-up) after running nats_map_migrate.
  *
  * Returns: 0 on success (even if no keys match), -1 on error.
  */
@@ -1424,38 +1388,7 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 	} else if (s != NATS_NOT_FOUND) {
 		LM_ERR("map_get: KeysWithFilters failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
-		/* fall through to the legacy pass rather than hard-failing */
-	}
-
-	/* ---- legacy compat: raw "key:" prefix scan over all keys ---- */
-	if (nats_map_legacy_read && (size_t)key->len + 2 <= sizeof(filter)) {
-		char lprefix[NATS_NATIVE_KEY_BUF];
-		int lp_len;
-
-		if ((size_t)key->len + 2 <= sizeof(lprefix)) {
-			memcpy(lprefix, key->s, key->len);
-			lprefix[key->len]     = NATS_MAP_SEP_LEGACY;
-			lprefix[key->len + 1] = '\0';
-			lp_len = key->len + 1;
-
-			memset(&keys, 0, sizeof(keys));
-			s = nats_dl.kvStore_Keys(&keys, ncon->kv, NULL);
-			if (s == NATS_OK) {
-				for (i = 0; i < keys.Count; i++) {
-					const char *k = keys.Keys[i];
-					int klen = (int)strlen(k);
-					if (klen <= lp_len ||
-							strncmp(k, lprefix, lp_len) != 0)
-						continue;
-					_map_add_row(res, ncon->kv, k,
-						k + lp_len, klen - lp_len);
-				}
-				nats_dl.kvKeysList_Destroy(&keys);
-			} else if (s != NATS_NOT_FOUND) {
-				LM_DBG("map_get legacy scan: %s\n",
-					nats_dl.natsStatus_GetText(s));
-			}
-		}
+		return -1;
 	}
 
 	LM_DBG("map_get for '%.*s': %d entries\n", key->len, key->s,
@@ -1525,14 +1458,15 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 			if (!pair->key.name.s || pair->key.name.len <= 0)
 				continue;
 
-			/* raw field = subkey ':' pair_name */
+			/* raw field = subkey ':' pair_name (the ':' is data
+			 * inside the field; nats_map_compose hex-escapes it) */
 			if ((size_t)(subkey->len + 1 + pair->key.name.len) >=
 					sizeof(field)) {
 				LM_ERR("composite map field too long\n");
 				return -1;
 			}
 			memcpy(field, subkey->s, subkey->len);
-			field[subkey->len] = NATS_MAP_SEP_LEGACY;
+			field[subkey->len] = ':';
 			memcpy(field + subkey->len + 1, pair->key.name.s,
 				pair->key.name.len);
 			flen = subkey->len + 1 + pair->key.name.len;
@@ -1613,13 +1547,11 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
  *
  * Implements the cachedb map_remove callback.  Two modes of operation:
  *
- *   - Single removal (subkey provided): deletes the new-format entry
- *     enc(key).enc(subkey) (and, while nats_map_legacy_read is set, the
- *     legacy "key:subkey" entry too).
+ *   - Single removal (subkey provided): deletes the entry
+ *     enc(key).enc(subkey).
  *
  *   - Prefix removal (no subkey): a server-side filtered list "enc(key).>"
- *     deletes the entire map without scanning the whole bucket (plus, while
- *     nats_map_legacy_read is set, a legacy raw "key:" full-scan pass).
+ *     deletes the entire map without scanning the whole bucket.
  *
  * Deletion of non-existent keys is treated as success (idempotent).
  *
@@ -1661,21 +1593,8 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 			return -1;
 		}
 		LM_DBG("map_remove: deleted '%s'\n", map_key);
-
-		/* ...and the legacy "key:subkey" if compat reads are enabled. */
-		if (nats_map_legacy_read) {
-			char legacy_key[NATS_MAP_KEY_BUF];
-			if (build_map_key_legacy(legacy_key, sizeof(legacy_key),
-					key, subkey) == 0) {
-				s = nats_dl.kvStore_Delete(ncon->kv, legacy_key);
-				if (s != NATS_OK && s != NATS_NOT_FOUND)
-					LM_DBG("map_remove: legacy delete '%s': %s\n",
-						legacy_key, nats_dl.natsStatus_GetText(s));
-			}
-		}
 	} else {
-		/* prefix remove: new-format server-side filter "enc(key).>", plus
-		 * the legacy raw "key:" full scan while compat reads are enabled. */
+		/* prefix remove: server-side filter "enc(key).>" */
 		kvKeysList keys;
 		char enc_prefix[NATS_MAP_KEY_BUF];
 		char filter[NATS_MAP_KEY_BUF];
@@ -1714,153 +1633,8 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 			LM_ERR("map_remove: KeysWithFilters failed: %s\n",
 				nats_dl.natsStatus_GetText(s));
 		}
-
-		if (nats_map_legacy_read) {
-			char lprefix[NATS_NATIVE_KEY_BUF];
-			int lp_len;
-
-			if ((size_t)key->len + 2 <= sizeof(lprefix)) {
-				memcpy(lprefix, key->s, key->len);
-				lprefix[key->len]     = NATS_MAP_SEP_LEGACY;
-				lprefix[key->len + 1] = '\0';
-				lp_len = key->len + 1;
-
-				memset(&keys, 0, sizeof(keys));
-				s = nats_dl.kvStore_Keys(&keys, ncon->kv, NULL);
-				if (s == NATS_OK) {
-					for (i = 0; i < keys.Count; i++) {
-						int klen = (int)strlen(keys.Keys[i]);
-						if (klen <= lp_len ||
-								strncmp(keys.Keys[i], lprefix, lp_len) != 0)
-							continue;
-						s = nats_dl.kvStore_Delete(ncon->kv, keys.Keys[i]);
-						if (s != NATS_OK && s != NATS_NOT_FOUND)
-							LM_WARN("map_remove: legacy delete '%s': %s\n",
-								keys.Keys[i],
-								nats_dl.natsStatus_GetText(s));
-					}
-					nats_dl.kvKeysList_Destroy(&keys);
-				} else if (s != NATS_NOT_FOUND) {
-					LM_DBG("map_remove legacy scan: %s\n",
-						nats_dl.natsStatus_GetText(s));
-				}
-			}
-		}
 	}
 
 	return 0;
 }
 
-/**
- * mi_nats_map_migrate() — rewrite legacy ':' map keys into the new
- * '.'-separated, hex-escaped format, in place.
- *
- * Any key containing ':' is a legacy map entry (validate_kv_key forbids ':'
- * in non-map keys, and the new format hex-escapes ':' so new keys never
- * carry a raw one).  For each, split on the FIRST ':' into map-key + field,
- * recompose as enc(map-key).enc(field), copy the value across, and delete
- * the old key.  Idempotent: re-running migrates only the entries still in
- * the legacy format.  After a clean run operators can set
- * map_legacy_read=0 to drop the O(total keys) compat scans.
- *
- * Returns { scanned, migrated, skipped, failed }.
- */
-mi_response_t *mi_nats_map_migrate(const mi_params_t *params,
-		struct mi_handler *async)
-{
-	kvStore *kv;
-	kvKeysList keys;
-	natsStatus s;
-	int i;
-	unsigned long scanned = 0, migrated = 0, skipped = 0, failed = 0;
-	mi_response_t *resp;
-	mi_item_t *obj;
-
-	(void)params;
-	(void)async;
-
-	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
-	if (!kv)
-		return init_mi_error(503, MI_SSTR("NATS KV unavailable"));
-
-	memset(&keys, 0, sizeof(keys));
-	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
-	if (s != NATS_OK && s != NATS_NOT_FOUND)
-		return init_mi_error(500, MI_SSTR("kvStore_Keys failed"));
-
-	if (s == NATS_OK) {
-		for (i = 0; i < keys.Count; i++) {
-			const char *k = keys.Keys[i];
-			const char *colon = strchr(k, NATS_MAP_SEP_LEGACY);
-			char newkey[NATS_MAP_KEY_BUF];
-			str mkey;
-			const char *field;
-			int field_len;
-			kvEntry *e = NULL;
-			const char *val;
-			int vlen;
-			char *valbuf;
-			uint64_t rev;
-
-			scanned++;
-			if (!colon)
-				continue;             /* not a legacy map key */
-
-			mkey.s   = (char *)k;
-			mkey.len = (int)(colon - k);
-			field     = colon + 1;
-			field_len = (int)strlen(field);
-			if (mkey.len <= 0) { skipped++; continue; }
-
-			if (nats_map_compose(newkey, sizeof(newkey), &mkey,
-					field, field_len) < 0) {
-				LM_WARN("map_migrate: '%s' too long to re-encode; skipped\n", k);
-				skipped++;
-				continue;
-			}
-
-			if (nats_dl.kvStore_Get(&e, kv, k) != NATS_OK) {
-				failed++;
-				continue;
-			}
-			val  = nats_dl.kvEntry_ValueString(e);
-			vlen = nats_dl.kvEntry_ValueLen(e);
-			if (vlen < 0) vlen = 0;
-			valbuf = pkg_malloc((size_t)vlen + 1);
-			if (!valbuf) {
-				nats_dl.kvEntry_Destroy(e);
-				failed++;
-				continue;
-			}
-			if (val && vlen > 0)
-				memcpy(valbuf, val, vlen);
-			valbuf[vlen] = '\0';
-			nats_dl.kvEntry_Destroy(e);
-
-			if (nats_dl.kvStore_PutString(&rev, kv, newkey, valbuf) != NATS_OK) {
-				pkg_free(valbuf);
-				failed++;
-				continue;
-			}
-			pkg_free(valbuf);
-			(void)nats_dl.kvStore_Delete(kv, k);
-			migrated++;
-			LM_DBG("map_migrate: '%s' -> '%s'\n", k, newkey);
-		}
-		nats_dl.kvKeysList_Destroy(&keys);
-	}
-
-	resp = init_mi_result_object(&obj);
-	if (!resp)
-		return NULL;
-	if (add_mi_number(obj, MI_SSTR("scanned"),  (double)scanned)  < 0 ||
-	    add_mi_number(obj, MI_SSTR("migrated"), (double)migrated) < 0 ||
-	    add_mi_number(obj, MI_SSTR("skipped"),  (double)skipped)  < 0 ||
-	    add_mi_number(obj, MI_SSTR("failed"),   (double)failed)   < 0) {
-		free_mi_response(resp);
-		return NULL;
-	}
-	LM_INFO("map_migrate: scanned=%lu migrated=%lu skipped=%lu failed=%lu\n",
-		scanned, migrated, skipped, failed);
-	return resp;
-}

@@ -56,11 +56,7 @@
  * undercount under N=8 threads).  The two hot counters (published,
  * failed) are cache-line aligned so per-worker increments do not
  * thrash a shared 64-byte line shared with cooler counters.
- *
- * NOTE: The `connected` field below is no longer read or written
- * anywhere; the canonical connection-status accessor is
- * nats_pool_is_connected() in lib/nats.  Field retained for ABI
- * compatibility; consider removing in a future cleanup.
+
  */
 /* Per-process upper bound for the SHM stats table.
  *
@@ -90,14 +86,10 @@
  * One cacheline per slot keeps the bump path off any other
  * worker's hot lines. */
 typedef struct _nats_stats {
-    volatile int connected;             /* DEPRECATED -- see nats_pool_is_connected() */
-
     _Atomic unsigned long published;
     _Atomic unsigned long failed;
     _Atomic unsigned long evi_published;
     _Atomic unsigned long script_published;
-    _Atomic unsigned long reconnects;   /* DEPRECATED -- never bumped; MI
-                                         * reports nats_pool_get_reconnect_epoch() */
     _Atomic unsigned long js_ack_ok;
     _Atomic unsigned long js_ack_failed;
 } __attribute__((aligned(64))) nats_stats_t;
