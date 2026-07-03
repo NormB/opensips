@@ -1446,15 +1446,12 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		}
 	}
 
-	/* P8 [§2.0]: write back through the one row-write helper -- re-asserts
-	 * Nats-TTL on a >=2.11 broker (per-message TTL), falls back to the legacy
-	 * CAS write otherwise.  CAS predicate is `rev` (the revision we read).
+	/* [§2.0]: write back through the one row-write helper (CAS publish,
+	 * conflict-classified).  CAS predicate is `rev` (the revision we read).
 	 * Index maintenance stays HERE (R8): the reaper defers to the watcher, but
 	 * the registration worker keeps the index authoritative inline. */
 	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
-		new_json, (int)strlen(new_json), rev,
-		f_row_exp, f_n_contacts, f_all_same,
-		nats_reap_grace + nats_expired_linger, &new_rev);
+		new_json, (int)strlen(new_json), rev, &new_rev);
 	if (rc == 0) {
 		if (rev == 0)                 /* [HREV-2] first-insert create landed */
 			NATS_CDB_STATS_INC(create_doc);

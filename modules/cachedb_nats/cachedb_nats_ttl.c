@@ -19,55 +19,15 @@
  */
 
 /*
- * cachedb_nats_ttl.c — pure logic for the native NATS per-key TTL mechanism
- * (TTL-SOLUTION-SPEC.md §2.3/§5).  Broker-less, side-effect-free; the live
- * raw-publish wiring is added later (P6+).
+ * cachedb_nats_ttl.c — pure decision logic for the usrloc-row CAS write
+ * and the reaper-only expiry model.  (The native per-message-TTL
+ * mechanism this file once served was deleted in P1.5: the reaper is
+ * the single expiry authority.)  Broker-less, side-effect-free.
  */
 
 #include <stdio.h>   /* snprintf */
 
 #include "cachedb_nats_ttl.h"
-
-/* [REV-6/F6] (§5) per-message TTL eligibility. */
-int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
-{
-	if (n_contacts < 1)
-		return 0;             /* empty row => no TTL */
-	if (row_exp == 0)
-		return 0;             /* a permanent contact => never auto-expire */
-	return (n_contacts == 1) || all_same_expiry;
-}
-
-/* (§2.3) ttl_seconds = row_exp - now + grace. */
-int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace)
-{
-	return row_exp - now + (int64_t)grace;
-}
-
-/* (§2.3 [TREV-12] / [HREV-3]) MsgTTL in ms; <=0 floors to the 1 s server
- * minimum so an already-expired-at-write row still self-expires instead of
- * being written TTL-less (the old "0 = purge signal" contract was never
- * implemented by any caller and silently meant "no TTL", RC-6). */
-int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
-{
-	int64_t ms;
-
-	if (ttl_seconds <= 0)
-		return 1000;                           /* HREV-3: floor to 1 s min */
-	/* overflow-safe: cap before *1000 (real epochs never reach this). */
-	if (ttl_seconds > 9223372036854775LL)
-		ttl_seconds = 9223372036854775LL;
-	ms = ttl_seconds * 1000;
-	if (ms < 1000)
-		ms = 1000;                             /* clamp to the 1 s minimum */
-	return ms;
-}
-
-/* (§2.3) SubjectDeleteMarkerTTL (stream config) in ns from whole seconds. */
-int64_t _ttl_marker_ns(int64_t seconds)
-{
-	return seconds * NATS_NS_PER_S;
-}
 
 /* (§2.2 [TREV-2/2a], [REV-27]) marker-aware CAS predicate. */
 enum ttl_cas_pred _ttl_cas_predicate(int got_entry, int value_len,
@@ -95,11 +55,8 @@ enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr)
 		return TTL_DONE;
 	if (st == TTL_PUB_CONN_DOWN)
 		return TTL_FAIL_SAVE;            /* down: any jerr is stale/meaningless */
-	switch (jerr) {                     /* st == TTL_PUB_JS_ERR */
-	case 10071: return TTL_RETRY;       /* JSStreamWrongLastSequenceErr */
-	case 10166: return TTL_LATCH_OFF;   /* JSMessageTTLDisabledErr      */
-	case 10165: return TTL_ASSERT_BUG;  /* JSMessageTTLInvalidErr       */
-	}
+	if (jerr == 10071)                  /* JSStreamWrongLastSequenceErr */
+		return TTL_RETRY;               /* CAS conflict: re-read+retry  */
 	/* an unrecognized JS error => fail the save. */
 	return TTL_FAIL_SAVE;
 }
@@ -123,34 +80,6 @@ int _linger_guard(int linger)
 	return (linger >= 0 && linger <= 86400) ? 0 : -1;
 }
 
-/* [D6/HREV-6] kv_marker_ttl guard: the server's floor for marker TTLs is
- * 1 s; 0/negative would ask for markers that never/instantly vanish. */
-int _marker_ttl_guard(int marker_ttl)
-{
-	return (marker_ttl >= 1) ? 0 : -1;
-}
-
-/* [HREV-1] per-message TTL is only safe on a stream that keeps NO old
- * revisions (MaxMsgsPerSubject == 1): on a history-keeping stream a TTL'd
- * head is removed late (~LimitMarkerTTL) and the subject then ROLLS BACK to
- * the previous revision instead of expiring (verified on 2.11.10, spec §0
- * E1/E3).  mmps==0 is the server's "unlimited" -- history-keeping, refuse.
- * The operator may override with nats_ttl_allow_history=1 (fail-open is
- * their explicit call; the WARN below still fires). */
-int _kv_ttl_history_ok(int64_t mmps, int allow_history)
-{
-	if (mmps == 1)
-		return 1;
-	return allow_history ? 1 : 0;
-}
-
-/* [HREV-1] startup WARN policy: ANY history-keeping stream warns, override
- * or not -- the operator must always learn expiry semantics are degraded. */
-int _kv_history_ttl_warn(int64_t mmps)
-{
-	return mmps != 1;
-}
-
 /* P11b [REV-25 / §5.3 REV-7]: policy for a PRE-EXISTING bucket whose backing
  * stream already carries a non-zero MaxAge (created by an older deployment or
  * another tool — the _kv_ttl_guard modparam check above only stops THIS module
@@ -161,19 +90,6 @@ int _kv_history_ttl_warn(int64_t mmps)
 int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns)
 {
 	return maxage_ns != 0 ? 1 : 0;
-}
-
-/* (§6 [TREV-8]) per-message-TTL capability latch transition. */
-enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev)
-{
-	if (ev == TTL_EV_RECONNECT)
-		return TTL_CAP_UNPROBED;            /* re-probe on reconnect */
-	if (ev == TTL_EV_SAW_10166 || ev == TTL_EV_SETUP_FAIL)
-		return TTL_CAP_UNSUPPORTED;         /* latch off for the connection */
-	/* TTL_EV_SETUP_OK */
-	if (cur == TTL_CAP_UNSUPPORTED)
-		return TTL_CAP_UNSUPPORTED;         /* stay latched until a reconnect */
-	return TTL_CAP_SUPPORTED;
 }
 
 /* (§2.1 [TREV-5]) build "$KV.<bucket>.<key>" — one mapping, three consumers. */

@@ -65,14 +65,17 @@ int main(void)
 		"_nats_cdb_reaper_tick", "nats_kv_write_row_cas") >= 1,
 		"reaper survivor-write routes through nats_kv_write_row_cas");
 
-	/* the helper re-asserts TTL (nats_kv_put_row) AND owns the one allowed
-	 * legacy fallback (kvStore_UpdateString) */
+	/* the helper delegates to the single CAS publish (nats_kv_put_row);
+	 * since P1.5 (reaper-only) NO kvStore_UpdateString remains anywhere
+	 * on the row path -- the legacy fallback is gone too */
 	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
 		"nats_kv_write_row_cas", "nats_kv_put_row") >= 1,
-		"helper re-asserts TTL via nats_kv_put_row");
+		"helper delegates to the nats_kv_put_row CAS publish");
 	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
-		"nats_kv_write_row_cas", "nats_dl.kvStore_UpdateString") == 1,
-		"helper owns exactly ONE kvStore_UpdateString (the gated legacy fallback)");
+		"nats_kv_write_row_cas", "nats_dl.kvStore_UpdateString") == 0 &&
+	       grep_in_function("../cachedb_nats_ttl_put.c",
+		"nats_kv_put_row", "nats_dl.kvStore_UpdateString") == 0,
+		"no kvStore_UpdateString remains in the row-write helper");
 
 	if (fails) { printf("\nFAILED (%d)\n", fails); return 1; }
 	printf("\n=== ALL PASS (fails=0) ===\n");

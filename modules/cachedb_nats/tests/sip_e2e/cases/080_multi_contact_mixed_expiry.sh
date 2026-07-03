@@ -1,6 +1,6 @@
 # 080 — [REV-6/F6 / §2.0] multi-contact row with DIFFERING expiries: the
 # TTL-ineligible path, end-to-end.  A min-derived row TTL would tombstone the
-# still-live contact, so the write must carry NO Nats-TTL and the reaper owns
+# still-live contact; no write carries a Nats-TTL (reaper-only, P1.5) and the reaper owns
 # the row: it prunes the expired contact (keeping the live one) and its
 # survivor-write must RE-ASSERT Nats-TTL (the #1994 protection) so the final
 # single-contact row expires natively.  Runs on a 5 s reaper so every stage
@@ -9,7 +9,7 @@
 # Timeline (t0 = second REGISTER):  c1 expires 25, c2 expires 4, grace 5.
 #   t0        row {c1,c2}, mixed -> last msg has NO Nats-TTL header
 #   t0+9      c2 logically expired: lookup still 202 (c1 live), row intact
-#   <= t0+16  reaper prunes c2 -> row {c1}, survivor msg HAS Nats-TTL
+#   <= t0+16  reaper prunes c2 -> row {c1} (survivor-write, still no TTL)
 #   ~t0+30    c1's TTL fires -> row physically gone, 404
 case_begin "080_multi_contact_mixed_expiry"
 
@@ -70,8 +70,8 @@ check "the still-live contact SURVIVED the prune (no collateral delete)" \
 
 hdrs=$(kv_last_headers "mc080@127.0.0.1")
 echo "$hdrs" | grep -q "Nats-TTL"
-check "survivor-write RE-ASSERTED Nats-TTL (§2.0 / #1994 protection)" \
-    $([ "$?" = 0 ] && echo ok || echo fail) "hdrs=$hdrs"
+check "survivor-write carries NO Nats-TTL (reaper-only, P1.5)" \
+    $([ "$?" != 0 ] && echo ok || echo fail) "hdrs=$hdrs"
 
 vis=$(probe_binding mc080)
 check "survivor still served after the prune (202)" \

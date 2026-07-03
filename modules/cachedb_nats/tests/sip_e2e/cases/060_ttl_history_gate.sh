@@ -1,9 +1,10 @@
-# 060 — [HREV-1/RC-5] the history gate: on a PRE-EXISTING bucket that keeps
-# old revisions (MaxMsgsPerSubject=3, AllowMsgTTL present), the module must
-# (a) WARN at startup, (b) latch per-message TTL OFF (else the expired key
-# would roll back to an older revision, spec §0 E1), and (c) still reclaim
-# the expired row via the reaper alone.  Runs with a 5 s reaper so the
-# reaper-only bound (expires + grace + 2*interval) stays testable.
+# 060 — history-keeping bucket under reaper-only expiry (P1.5): on a
+# PRE-EXISTING bucket that keeps old revisions (MaxMsgsPerSubject=3) the
+# reaper must reclaim an expired row cleanly — CAS-prune then delete, with
+# NO revision rollback resurrecting an older doc (the failure mode that
+# made the deleted native-TTL path unsafe on history buckets, spec §0 E1).
+# Runs with a 5 s reaper so the bound (expires + grace + 2*interval)
+# stays testable.
 case_begin "060_ttl_history_gate"
 
 stop_opensips_a
@@ -16,26 +17,16 @@ check "history=3 bucket created" $([ "$?" = 0 ] && echo ok || echo fail)
 REAP_INTERVAL=5 start_opensips_a
 sleep 1
 
-# (a) startup surfacing [D1.4]
-wait_for_log 10 "keeps 3 versions per key"
-check "startup WARN names the history-keeping bucket" \
-    $([ "$?" = 0 ] && echo ok || echo fail)
-
 register_one ttl060 3
 check "REGISTER ttl060 expires=3 accepted" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 sleep 0.5
 
-# (b) the first write's probe refuses TTL on this bucket
-wait_for_log 10 "per-message TTL disabled"
-check "probe WARN latched per-message TTL off" \
-    $([ "$?" = 0 ] && echo ok || echo fail)
-
 doc=$(kv_aor_get "ttl060@127.0.0.1")
 check "doc present right after REGISTER" \
     $([ -n "$doc" ] && echo ok || echo fail)
 
-# (c) reaper-only reclamation: expires(3) + grace(5) + 2*interval(5) + slack
+# reaper-only reclamation: expires(3) + grace(5) + 2*interval(5) + slack
 wait_kv_gone "ttl060@127.0.0.1" 30
 check "reaper reclaimed the row on the history bucket (no rollback doc)" \
     $([ "$?" = 0 ] && echo ok || echo fail) \

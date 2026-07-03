@@ -59,6 +59,6 @@ enum reap_action _reap_row_action(int n_live_survivors);
  * unsupported unless the operator explicitly sets nats_unsafe_ttl_only (which
  * LM_WARNs #6959/#1994) -- and never supported with nats_native_ttl=0, which
  * would leave no expiry mechanism at all. */
-int _reap_interval_guard(int interval, int unsafe_ttl_only, int native_ttl);
+int _reap_interval_guard(int interval);
 
 #endif /* CACHEDB_NATS_REAPER_H */

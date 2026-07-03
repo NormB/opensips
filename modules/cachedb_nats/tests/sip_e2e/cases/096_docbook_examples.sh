@@ -182,9 +182,4 @@ printf '%s' "$out" | grep -q '"bucket"'
 check "doc kv_status: documented fields present" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 
-out=$(mi nats_map_migrate)
-printf '%s' "$out" | grep -q '"migrated": *0'
-check "doc map_migrate: idempotent run, nothing legacy to migrate" \
-    $([ "$?" = 0 ] && echo ok || echo fail)
-
 kv_clear

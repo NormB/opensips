@@ -130,7 +130,6 @@ render_cfg() {
         -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
         -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
         -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
-        -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 

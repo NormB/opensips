@@ -41,8 +41,10 @@ check "re-registered binding served again (MESSAGE -> 202)" \
     $([ "$vis" = 202 ] && echo ok || echo fail) "vis=$vis"
 
 # ttl055's TTL = expires(3) + grace(5) + linger(30) = 38 s from REGISTER;
-# ~13 s have elapsed, so poll the remaining ~25 s + 15 s slack.
-wait_kv_gone "ttl055@127.0.0.1" 40
+# Reaper-only (P1.5): reclamation lands on the first reaper pass AFTER
+# exp(3)+grace(5)+linger(30)=38 s -- worst case +REAP_INTERVAL(30)+scan.
+# ~13 s have elapsed; poll the remaining ~25 s + interval + slack.
+wait_kv_gone "ttl055@127.0.0.1" 75
 check "record reclaimed after the linger window" \
     $([ "$?" = 0 ] && echo ok || echo fail) \
     "doc=$(kv_aor_get "ttl055@127.0.0.1" | head -c 80)"

@@ -130,12 +130,10 @@ static int put_row_calls;
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
-	int got_entry, int value_len, uint64_t entry_rev,
-	int64_t msg_ttl_ms, uint64_t *out_rev)
+	int got_entry, uint64_t entry_rev, uint64_t *out_rev)
 {
 	(void)js; (void)kv; (void)bucket; (void)key; (void)json;
-	(void)json_len; (void)got_entry; (void)value_len; (void)entry_rev;
-	(void)msg_ttl_ms;
+	(void)json_len; (void)got_entry; (void)entry_rev;
 	put_row_calls++;
 	if (out_rev) *out_rev = 7;
 	return fake_put_row_outcome;

@@ -548,15 +548,13 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	 * (10071 -> TTL_RETRY -> -2, the caller re-reads and retries) from a
 	 * generic/transient failure (-1, not retryable).  The old path collapsed
 	 * every NATS_ERR into -2, so a script CAS loop could spin on a
-	 * non-retryable error.  ttl=0: a plain CAS update, no per-message TTL.
-	 * got_entry=1 / value_len=1: an existing (non-marker) row updated at rev. */
+	 * non-retryable error.  got_entry=1: an existing row updated at rev. */
 	{
 		jsCtx *js = nats_pool_get_js();
 		enum ttl_outcome o = nats_kv_put_row(js, kv,
 			bucket_buf[0] ? bucket_buf : kv_bucket, key_buf,
 			val_ptr, value->len > 0 ? value->len : 0,
-			/*got_entry=*/1, /*value_len=*/1,
-			(uint64_t)*expected_rev, /*msg_ttl_ms=*/0, &new_rev);
+			/*got_entry=*/1, (uint64_t)*expected_rev, &new_rev);
 
 		if (o == TTL_RETRY) {
 			LM_DBG("CAS mismatch for '%s' (expected rev %d)\n",

@@ -1,7 +1,7 @@
 # 085 — [REV-6/F6] multi-contact row with UNIFORM expiry: the all_same
 # eligibility arm.  Two contacts sharing one absolute expiry are safe under a
 # single row TTL (nothing live gets tombstoned), so the write MUST carry
-# Nats-TTL and the whole row expires natively on time -- no reaper needed
+# no Nats-TTL (reaper-only, P1.5); the reaper reclaims the whole row
 # (this runs on the default 30 s reaper; native TTL beats its first tick).
 case_begin "085_multi_contact_same_expiry"
 
@@ -35,16 +35,16 @@ check "row holds BOTH contacts" \
 
 hdrs=$(kv_last_headers "ms085@127.0.0.1")
 echo "$hdrs" | grep -q "Nats-TTL"
-check "uniform-expiry multi-contact write CARRIES Nats-TTL (all_same eligible)" \
-    $([ "$?" = 0 ] && echo ok || echo fail) "hdrs=$hdrs"
+check "uniform-expiry multi-contact write carries NO Nats-TTL (reaper-only)" \
+    $([ "$?" != 0 ] && echo ok || echo fail) "hdrs=$hdrs"
 
 vis=$(probe_binding ms085)
 check "lookup serves while live (202)" \
     $([ "$vis" = 202 ] && echo ok || echo fail) "vis=$vis"
 
 # expires(6) + grace(5) = native TTL ~11 s; well before the 30 s reaper tick
-wait_kv_gone "ms085@127.0.0.1" 20
-check "whole row expired natively (gone by expires+grace+9s, no reaper needed)" \
+wait_kv_gone "ms085@127.0.0.1" 45
+check "whole row reclaimed by the reaper (gone by expires+grace+interval)" \
     $([ "$?" = 0 ] && echo ok || echo fail) \
     "doc=$(kv_aor_get "ms085@127.0.0.1" | head -c 80)"
 

@@ -34,29 +34,6 @@
 
 #define NATS_NS_PER_S 1000000000LL
 
-/* [REV-6/F6] (§5): set a per-message MsgTTL on a write IFF the row has no
- * permanent contact (row_exp != 0) AND it holds exactly one contact, or every
- * contact shares the same expires (min == max).  A min-derived TTL on a
- * mixed-expiry row would tombstone the whole row (data loss), so those are
- * ineligible (plain CAS + reaper). */
-int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry);
-
-/* (§2.3) ttl_seconds = row_exp - now + slack.  The slack a call site passes
- * is nats_reap_grace + nats_expired_linger [HREV-3]: grace is the clock-skew
- * correctness margin, linger the operator's physical-retention policy.  The
- * read filter is the one consumer that must stay grace-only (visibility is
- * never lingered). */
-int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace);
-
-/* (§2.3 [TREV-12] / [HREV-3]) jsPubOptions.MsgTTL in milliseconds.  Floors
- * ttl_seconds <= 0 to 1000 ms (the server minimum) so an expired-at-write
- * row self-expires instead of being written TTL-less; otherwise
- * whole-seconds * 1000 (invariant: result % 1000 == 0), overflow-safe. */
-int64_t _ttl_msgttl_ms(int64_t ttl_seconds);
-
-/* (§2.3) stream-config SubjectDeleteMarkerTTL in nanoseconds from seconds. */
-int64_t _ttl_marker_ns(int64_t seconds);
-
 /* ---- marker-aware CAS predicate (§2.2 [TREV-2/2a], [REV-27]) ------ */
 
 /* Which JetStream publish precondition to use.  An empty-value entry is a
@@ -88,8 +65,6 @@ enum ttl_pub_status {
 enum ttl_outcome {
 	TTL_DONE       = 0,   /* committed */
 	TTL_RETRY      = 1,   /* CAS conflict (10071) — re-read + retry */
-	TTL_LATCH_OFF  = 2,   /* stream lacks AllowMsgTTL (10166) — fall back */
-	TTL_ASSERT_BUG = 3,   /* malformed TTL (10165) — the §2.3 guard failed */
 	TTL_FAIL_SAVE  = 4,   /* broker down / unknown — non-2xx, client retries */
 };
 enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr);
@@ -116,35 +91,8 @@ int _kv_ttl_guard(int kv_ttl);
  * is warranted (non-zero), 0 if clean (MaxAge==0). */
 int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns);
 
-/* [D6/HREV-6] mod_init guards for the new operator params: 0 ok, -1 refuse. */
+/* [D6/HREV-6] mod_init guard: 0 ok, -1 refuse. */
 int _linger_guard(int linger);          /* nats_expired_linger: 0..86400 */
-int _marker_ttl_guard(int marker_ttl);  /* kv_marker_ttl: >= 1 s          */
-
-/* [HREV-1] per-message-TTL history gate: TTL is only safe on a stream with
- * MaxMsgsPerSubject == 1 (history>1 => late removal + revision rollback,
- * verified 2.11.10).  @mmps = bound stream MaxMsgsPerSubject (0=unlimited);
- * @allow_history = nats_ttl_allow_history override.  1 = TTL usable, 0 =
- * refuse (reaper-only).  _kv_history_ttl_warn: 1 = emit the startup WARN
- * (any history-keeping stream, override or not). */
-int _kv_ttl_history_ok(int64_t mmps, int allow_history);
-int _kv_history_ttl_warn(int64_t mmps);
-
-/* [TREV-8] Per-message-TTL capability — operational, "by attempt", latched per
- * connection.  SUPPORTED once the AllowMsgTTL setup succeeds and no 10166 seen;
- * a 10166 (or setup failure) latches UNSUPPORTED (plain CAS + reaper); a
- * reconnect re-probes (failover may land on a different server). */
-enum ttl_cap {
-	TTL_CAP_UNPROBED    = 0,
-	TTL_CAP_SUPPORTED   = 1,
-	TTL_CAP_UNSUPPORTED = 2,
-};
-enum ttl_cap_event {
-	TTL_EV_SETUP_OK   = 0,   /* js_UpdateStream AllowMsgTTL succeeded */
-	TTL_EV_SETUP_FAIL = 1,   /* setup rejected / errored */
-	TTL_EV_SAW_10166  = 2,   /* JSMessageTTLDisabledErr on a runtime publish */
-	TTL_EV_RECONNECT  = 3,   /* connection re-established */
-};
-enum ttl_cap _ttl_cap_next(enum ttl_cap cur, enum ttl_cap_event ev);
 
 /* ---- key -> JetStream subject (§2.1 [TREV-5]) -------------------- */
 
@@ -158,32 +106,25 @@ int nats_kv_key_to_subject(const char *bucket, const char *key,
 
 /* ---- the one usrloc-row write helper (§2.0 invariant) ----------- */
 
-/* P8 Stage 1b: single-shot CAS publish that re-asserts Nats-TTL.  EVERY
- * usrloc-row write (registration + reaper survivor-write) goes through this; no
- * kvStore_UpdateString may remain on the usrloc row path.  Implemented in
- * cachedb_nats_ttl_put.c.  Forward-declare the cnats opaque handles (identical
- * to nats.h's typedefs; C11 permits the redefinition) so this header stays
- * usable by pure TUs that don't pull in <nats/nats.h>. */
+/* Single-shot CAS publish.  EVERY usrloc-row write (registration + reaper
+ * survivor-write) goes through this; no kvStore_UpdateString may remain on
+ * the usrloc row path.  Implemented in cachedb_nats_ttl_put.c.
+ * Forward-declare the cnats opaque handles (identical to nats.h's typedefs;
+ * C11 permits the redefinition) so this header stays usable by pure TUs
+ * that don't pull in <nats/nats.h>. */
 typedef struct __jsCtx   jsCtx;
 typedef struct __kvStore kvStore;
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
-	int got_entry, int value_len, uint64_t entry_rev,
-	int64_t msg_ttl_ms, uint64_t *out_rev);
+	int got_entry, uint64_t entry_rev, uint64_t *out_rev);
 
-/* The §2.0 write entry point every row writer uses: resolve TTL capability
- * (behind the nats_native_ttl master switch [D6]), compute eligibility-gated
- * ttl_ms, publish via nats_kv_put_row (re-asserting TTL) or fall back to the
- * legacy CAS write.  rev==0 is the "no prior message" sentinel [HREV-2]
- * (JetStream sequences are 1-based): the write becomes a CREATE carrying the
- * row's TTL; rev>0 CAS-updates at that revision.  @grace is the physical-
- * reclamation slack, nats_reap_grace + nats_expired_linger [HREV-3].
- * 0 = done, 1 = CAS conflict (re-read + retry), -1 = fail.  *out_rev set on
- * success. */
+/* The §2.0 write entry point every row writer uses.  rev==0 is the "no
+ * prior message" sentinel [HREV-2] (JetStream sequences are 1-based): the
+ * write becomes a CREATE; rev>0 CAS-updates at that revision.
+ * 0 = done, 1 = CAS conflict (re-read + retry), -1 = fail.  *out_rev set
+ * on success. */
 int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
-	const char *json, int json_len, uint64_t rev,
-	int64_t row_exp, int n_contacts, int all_same, int grace,
-	uint64_t *out_rev);
+	const char *json, int json_len, uint64_t rev, uint64_t *out_rev);
 
 #endif /* CACHEDB_NATS_TTL_H */

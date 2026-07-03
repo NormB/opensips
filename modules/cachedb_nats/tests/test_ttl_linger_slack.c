@@ -68,11 +68,6 @@ static int _slack(int grace, int linger)
 	return grace + linger;            /* HREV-3: physical-reclamation slack */
 #endif
 }
-/* write path: TTL the row carries (ms) */
-static int64_t write_ttl_ms(int64_t row_exp, int64_t now, int grace, int linger)
-{
-	return _ttl_msgttl_ms(_ttl_seconds(row_exp, now, _slack(grace, linger)));
-}
 /* reaper path: is the row due for physical reclamation? */
 static int reap_due(int64_t row_exp, time_t now, int grace, int linger)
 {
@@ -103,26 +98,20 @@ int main(void)
 	const int G = 5;
 
 	printf("[HREV-3] linger=0 is byte-identical to today's behavior:\n");
-	EQ(write_ttl_ms(EXPIRES, 900, G, 0), 105000, "live row, linger 0: ttl = exp-now+grace");
 	CHECK(reap_due(EXPIRES, 1006, G, 0) == 1, "due at exp+grace+1, linger 0");
 	CHECK(reap_due(EXPIRES, 1004, G, 0) == 0, "not due before exp+grace, linger 0");
 
 	printf("[HREV-3] linger extends PHYSICAL retention by exactly linger:\n");
-	EQ(write_ttl_ms(EXPIRES, 900, G, 30), 135000, "live row, linger 30: ttl += 30s");
 	CHECK(reap_due(EXPIRES, 1006, G, 30) == 0, "reaper NOT due during linger window");
 	CHECK(reap_due(EXPIRES, 1034, G, 30) == 0, "still lingering at exp+grace+29");
 	CHECK(reap_due(EXPIRES, 1035, G, 30) == 1, "due exactly at exp+grace+linger");
 	CHECK(reap_due(EXPIRES, 1100, G, 30) == 1, "due after the linger window");
 
-	printf("[HREV-3] already-expired at write + linger => bounded TTL, never TTL-less:\n");
+	printf("[HREV-3] (native-TTL write arms removed in P1.5; reaper arms below)\n");
 	/* now is 10s past expiry; linger 30 => 25s of linger remain (+grace) */
-	EQ(write_ttl_ms(EXPIRES, 1010, G, 30), 25000, "expired 10s ago, linger 30: 25s left");
 	/* now is way past expiry+grace+linger => floored to the 1s minimum */
-	EQ(write_ttl_ms(EXPIRES, 2000, G, 30), 1000, "long-expired: floored to 1s, not 0");
-	CHECK(write_ttl_ms(EXPIRES, 2000, G, 30) > 0, "never a TTL-less write");
 
-	printf("[HREV-3] boundary: exp + grace + linger == now:\n");
-	EQ(write_ttl_ms(EXPIRES, EXPIRES + G + 30, G, 30), 1000, "ttl_seconds==0 => 1s floor");
+	printf("[HREV-3] boundary: exp + grace + linger == now (reaper due-gate):\n");
 	CHECK(reap_due(EXPIRES, EXPIRES + G + 30, G, 30) == 1, "reaper due at the exact boundary");
 
 	printf("[HREV-3] permanent rows (row_exp==0) are never due, any linger:\n");
