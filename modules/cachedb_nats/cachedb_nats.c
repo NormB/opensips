@@ -717,12 +717,18 @@ static int mod_init(void)
 		 * store (subscriber IP, UA, call-id, path) and NATS KV has no
 		 * per-key ACL.  Transport + auth are mandatory: warn loudly when
 		 * the connection URL is plaintext and/or carries no credentials. */
-		if (_nats_url_insecure(url_to_use))
+		if (_nats_url_insecure(url_to_use)) {
+			/* the URL may carry nats://user:pass@host credentials —
+			 * never log it raw */
+			char _redacted_url[512];
+			nats_redact_url(url_to_use, _redacted_url,
+				sizeof(_redacted_url));
 			LM_WARN("cachedb_nats: connection URL '%s' is INSECURE for a "
 				"PII/lawful-intercept store (subscriber IP, user-agent, "
 				"call-id, path) — use tls:// with an authenticated account "
 				"and one bucket per trust domain (SPEC \xc2\xa7""11 [REV-24])\n",
-				url_to_use);
+				_redacted_url);
+		}
 
 		/* TLS comes from the tls_mgm "nats" client domain at connect
 		 * time (apply_tls_from_mgm in lib/nats).  Operator switches to

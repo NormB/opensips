@@ -112,6 +112,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Lint — no unredacted URLs in log calls
+        run: ./lib/nats/tests/lint_url_redaction.sh
+
       - name: Build NATS module .o files (needed by lib/nats unit tests)
         run: |
           # The lib/nats unit tests link against ../nats_redact.o and
