@@ -194,14 +194,15 @@ int main(void)
 			"impl wires resume_nats_request_slot on async_ctx");
 		ASSERT(strstr(impl, "= tfd;") != NULL,
 			"impl hands the timerfd to the reactor via async_status");
-		/* The hash table / subscription / on_inbox_reply code
-		 * is still present in the file; the consumer-side reply
-		 * path reuses it.  Assert the symbols still exist. */
-		ASSERT(strstr(impl, "on_inbox_reply") != NULL,
-			"on_inbox_reply callback still defined "
-			"(consumed by the consumer-process side)");
-		ASSERT(strstr(impl, "ensure_inbox_subscription") != NULL,
-			"ensure_inbox_subscription still defined");
+		/* The superseded per-worker inbox machine (hash table,
+		 * on_inbox_reply, ensure_inbox_subscription) was DELETED
+		 * in P1.1 -- assert it stays gone (running a libnats
+		 * subscription on a SIP worker crashes libnats 3.x on
+		 * aarch64; the slot transport replaced it). */
+		ASSERT(strstr(impl, "static void on_inbox_reply") == NULL,
+			"superseded on_inbox_reply stays deleted");
+		ASSERT(strstr(impl, "static int ensure_inbox_subscription") == NULL,
+			"superseded ensure_inbox_subscription stays deleted");
 	}
 
 	free(src); free(hdr); free(impl);

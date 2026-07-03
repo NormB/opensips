@@ -33,7 +33,7 @@ MPSC_SRCS    := test_mpsc.c $(SHIM) ../nats_mpsc.c
 TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_persist test_request_route_restriction \
                   test_consumer_heartbeat test_persist_precision \
-                  test_async_request_skeleton test_async_request_inflight \
+                  test_async_request_skeleton \
                   test_header_propagation test_start_time_roundtrip \
                   test_rpc_subject test_fetch_async_timerfd \
                   test_persist_cross_process test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait \
@@ -52,7 +52,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
 all: test_registry test_parser test_ring test_ack_token test_persist \
      test_slurp_file_cap test_request_route_restriction \
      test_consumer_heartbeat test_persist_precision \
-     test_async_request_skeleton test_async_request_inflight \
+     test_async_request_skeleton \
      test_header_propagation test_start_time_roundtrip \
      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
@@ -105,13 +105,6 @@ test_request_route_restriction: test_request_route_restriction.c
 # registration (sync entry + acmd entry in nats_consumer.c).
 test_async_request_skeleton: test_async_request_skeleton.c
 	$(CC) -g -O0 -Wall -o $@ $<
-
-# In-flight state-machine test.  Links nats_rpc_async.c under
-# -DTEST_SHIM so the libnats glue is excluded and only the pure C
-# state machine is exercised.
-ASYNC_SRCS := test_async_request_inflight.c $(SHIM) ../nats_rpc_async.c
-test_async_request_inflight: $(ASYNC_SRCS) test_shim.h ../nats_rpc_async.h
-	$(CC) $(CFLAGS) -o $@ $(ASYNC_SRCS) $(LDFLAGS)
 
 # Generation guard for the consumer-routed async reply correlation.
 # Links the pure subject grammar + the SHM slot allocator under the shim.
@@ -334,7 +327,6 @@ check: all
 	./test_consumer_heartbeat
 	./test_persist_precision
 	./test_async_request_skeleton
-	./test_async_request_inflight
 	./test_header_propagation
 	./test_start_time_roundtrip
 	./test_rpc_subject
@@ -387,7 +379,7 @@ clean:
 	rm -f test_registry test_parser test_ring test_ack_token test_persist \
 	      test_slurp_file_cap test_request_route_restriction \
 	      test_consumer_heartbeat test_persist_precision \
-	      test_async_request_skeleton test_async_request_inflight \
+	      test_async_request_skeleton \
 	      test_header_propagation test_start_time_roundtrip \
 	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
 	      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \

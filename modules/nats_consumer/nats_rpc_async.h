@@ -36,121 +36,9 @@
 #ifndef NATS_RPC_ASYNC_H
 #define NATS_RPC_ASYNC_H
 
-/* Opaque in-flight context.  The concrete struct lives in
- * nats_rpc_async.c and the test driver only ever holds pointers. */
-struct nats_rpc_async_ctx;
-
-/*
- * Allocate a new in-flight context.  Generates a fresh correlation
- * id from a per-worker monotonic counter, allocates a non-blocking
- * eventfd, and initialises the per-ctx mutex.  Refcount starts at
- * 1 (held by the caller).
- *
- * Returns NULL on allocator failure or eventfd creation failure.
- */
-struct nats_rpc_async_ctx *nats_rpc_async_ctx_new(void);
-
-/* Bump the ctx refcount.  Used by the libnats callback path and
- * the test driver when staging a deliberate ref. */
-void nats_rpc_async_ctx_addref(struct nats_rpc_async_ctx *c);
-
-/* Drop one ref.  If this is the last ref, close the eventfd,
- * destroy the mutex, and pkg_free the struct. */
-void nats_rpc_async_ctx_release(struct nats_rpc_async_ctx *c);
-
-/* Insert a freshly-allocated ctx into the per-worker hash table.
- * Bumps the refcount on success (slot's ref).  Returns 0 on
- * success, -1 if the hard in-flight cap is reached, -2 on
- * duplicate corr_id (defence-in-depth -- the monotonic counter
- * makes this impossible in practice). */
-int nats_rpc_async_install(struct nats_rpc_async_ctx *c);
-
-/* Atomically unlink ctx from the table and transfer the hash's
- * refcount to the caller.  Returns 1 if the slot still held the
- * ctx (caller now owns +1 ref), 0 if it was already gone.  Used
- * by the resume path after wake-up / timeout. */
-int nats_rpc_async_take_for_resume(struct nats_rpc_async_ctx *c);
-
-/*
- * Deliver a reply into the context with the matching corr_id.
- * Performs hash-lookup-and-take, then under the per-ctx mutex
- * copies the reply bytes into the ctx and signals the eventfd.
- *
- * This is the unit-test entry point: tests call it with synthetic
- * reply data to exercise the state machine without the libnats
- * subscription / callback wiring.  The libnats on_inbox_reply
- * callback does the same thing inline (no second hash lookup).
- *
- * Returns 0 on successful delivery, -1 if no matching ctx (stale
- * reply -- caller should drop the payload).
- */
-int nats_rpc_async_deliver(const char *corr_id, int corr_id_len,
-                           const char *reply_subject, int reply_subject_len,
-                           const char *reply_data,    int reply_data_len,
-                           const char *reply_headers, int reply_headers_len,
-                           int reply_headers_truncated,
-                           const char *reply_to,      int reply_to_len);
-
-/* Drain the per-ctx eventfd counter so a subsequent wait re-arms.
- * Returns 1 if a count was consumed, 0 if the fd was empty (e.g.
- * we were woken on timeout), -1 on error. */
-int nats_rpc_async_drain_eventfd(struct nats_rpc_async_ctx *c);
-
-/* Promote INFLIGHT -> ABANDONED if no reply has landed yet.
- * Returns the observed state after the operation. */
-int nats_rpc_async_mark_abandoned(struct nats_rpc_async_ctx *c);
-
-/* Accessors (opaque struct compatibility). */
-int  nats_rpc_async_state    (struct nats_rpc_async_ctx *c);
-int  nats_rpc_async_eventfd  (struct nats_rpc_async_ctx *c);
-int  nats_rpc_async_corr_len (struct nats_rpc_async_ctx *c);
-const char *nats_rpc_async_corr_id(struct nats_rpc_async_ctx *c);
-
-/* Reconnect-epoch snapshot taken at ctx alloc time.  The
- * production start path overwrites with
- * `nats_pool_get_reconnect_epoch()`; tests can override
- * directly. */
-void     nats_rpc_async_ctx_set_epoch_at_start(struct nats_rpc_async_ctx *c,
-                                                uint32_t epoch);
-uint32_t nats_rpc_async_ctx_epoch_at_start    (struct nats_rpc_async_ctx *c);
-
-/* Pure decision: should the resume path return -2
- * (connection lost) instead of -1 (timeout) for this ctx given
- * the current pool epoch + connected flag?  Returns 1 = connection
- * lost, 0 = stable.  Exposed for unit tests; the production
- * resume function calls it with the live pool values. */
-int nats_rpc_async_ctx_is_disconnected(struct nats_rpc_async_ctx *c,
-                                       uint32_t current_epoch,
-                                       int current_connected);
-
-/* Centralised script-rc policy for the async resume path.
- *
- *   state == REPLIED       -> 1   (reply delivered)
- *   state != REPLIED && disconnected   -> -2  (connection lost)
- *   state != REPLIED && !disconnected  -> -1  (clean timeout)
- *
- * No path returns 0 -- a 0 return from a script-callable cmd
- * sets ACT_FL_EXIT in run_action_list (action.c:196) and
- * terminates the surrounding route.  Exposed for unit tests so
- * the policy is locked down without depending on libnats. */
-int nats_rpc_async_resume_rc(int state, int disconnected);
-
-/* Process-wide in-flight count snapshot (advisory, locked). */
-int nats_rpc_async_inflight_count(void);
-
-/* Format the per-call reply subject "<prefix>.<pid>.<corr>" into
- * the provided buffer.  Returns the written length, 0 on
- * truncation. */
-int nats_rpc_async_format_reply_subject(struct nats_rpc_async_ctx *c,
-                                        char *out, int cap);
-
-/* Extract the correlation suffix from a reply subject of the form
- * "<prefix>.<pid>.<corr>".  Returns a pointer into the input
- * buffer plus the suffix length via *out_len; NULL on parse fail.
- * Used by the callback and by tests. */
-const char *nats_rpc_async_corr_from_subject(const char *subject,
-                                             int subject_len,
-                                             int *out_len);
+/* The in-flight ctx state machine that used to be declared here (the
+ * per-worker inbox-subscription async transport) was superseded by the
+ * consumer-routed SHM-slot transport and deleted (P1.1). */
 
 /*
  * Mint a UUIDv7 correlation id (RFC 9562 §5.7) into the provided
@@ -191,19 +79,6 @@ int nats_rpc_async_request_id_user_set(const char *id, int len);
  * re-assigns. */
 int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
-/*
- * child_init hook: per-worker eager set-up of the inbox
- * subscription used by w_nats_request_async.  Called from
- * nats_consumer.c's child_init() so libnats's subscription
- * thread is spawned at worker startup, not mid-SIP-message
- * execution (where it can race with active connection usage
- * and segfault on aarch64 + libnats 3.x).
- *
- * Always returns 0; the underlying ensure_inbox_subscription
- * is robust to a missing pool at this point (lazy retry on
- * first request remains a fallback).
- */
-int nats_rpc_async_child_init(int rank);
 
 /* Per-call timerfd poll interval (ms), tunable via the nats_consumer
  * "async_rpc_poll_ms" modparam.  Clamped to [1, 1000] when used. */
