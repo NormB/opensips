@@ -150,20 +150,24 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 	}
 
 	epoch = nats_pool_get_reconnect_epoch();
-	if (epoch == ncon->kv_epoch)
+	if (epoch == ncon->kv_epoch && ncon->kv)
 		return 0;  /* still valid */
 
-	/* Reconnection occurred — get a fresh KV handle.
-	 * Don't destroy the old one (other code may reference it). */
+	/* Reconnection occurred (or a previous refresh failed) — get a fresh
+	 * KV handle.  Don't destroy the old one (other code may reference it). */
 	ncon->kv = nats_pool_get_kv(ncon->bucket_name,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
-	ncon->kv_epoch = epoch;
 
 	if (!ncon->kv) {
+		/* Do NOT adopt the epoch on failure: a transient pool failure
+		 * right after a reconnect would otherwise latch epoch with
+		 * kv == NULL, short-circuiting every subsequent call until the
+		 * NEXT reconnect — a permanent per-worker outage. */
 		LM_ERR("failed to refresh KV handle after reconnect\n");
 		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}
+	ncon->kv_epoch = epoch;
 
 	LM_INFO("refreshed KV handle (epoch %d)\n", epoch);
 	return 0;

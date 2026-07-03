@@ -43,6 +43,25 @@ test_watcher_atomic_race: EXTRA := -pthread
 test_revmap_delete: SAN   := -fsanitize=address,undefined
 test_revmap_delete: EXTRA := -pthread
 
+# (4) Behavioral tests that compile and link a PRODUCTION TU (no carried
+#     copies).  CORE_DEFS mirrors the flag set the module build uses; the
+#     production sources resolve their core includes relative to their own
+#     path, so no extra -I is needed beyond the libnats headers on the
+#     default search path.
+CORE_DEFS := -fPIC -DPIC \
+             -DNAME='"opensips"' -DVERSION='"test"' -DARCH='"x86_64"' \
+             -DOS='"linux"' -DCOMPILER='"cc"' -DCFG_DIR='"/etc/opensips/"' \
+             -DVERSIONTYPE='"git"' -DTHISREVISION='"test"' \
+             -D__CPU_x86_64 -D__OS_linux -DPKG_MALLOC -DSHM_MMAP \
+             -DF_MALLOC -DQ_MALLOC -DHP_MALLOC -DF_PARALLEL_MALLOC \
+             -DFAST_LOCK -DADAPTIVE_WAIT -DADAPTIVE_WAIT_LOOPS=1024 \
+             -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
+
+# P0.1: kv_epoch must not latch on a failed refresh — links the real
+# nats_con_refresh_kv() from ../cachedb_nats_dbase.c with a fake pool.
+test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c
+test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
+
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
 # AddressSanitizer trips.  TSan has no UAF detection, so the buggy
