@@ -67,6 +67,11 @@ test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
 test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c
 test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 
+# P0.6: a KV snapshot stalling mid-stream must fail the index build/rebuild
+# and keep the prior live index.  Links the real json_index + intern TUs.
+test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_index.c ../cachedb_nats_intern.c
+test_index_partial_snapshot: ../cachedb_nats_json_index.c ../cachedb_nats_intern.c ../cachedb_nats_json.h
+
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
 # AddressSanitizer trips.  TSan has no UAF detection, so the buggy

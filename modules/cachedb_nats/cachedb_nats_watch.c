@@ -468,9 +468,12 @@ static void _watcher_loop(void)
 		 * operators may opt out of the O(N) rebuild for hot-reconnect
 		 * topologies and accept a brief window where queries may evict a few
 		 * stale entries before the index converges. */
-		if (index_resync_on_reconnect)
-			nats_json_index_rebuild(kv, fts_json_prefix);
-		else
+		if (index_resync_on_reconnect) {
+			if (nats_json_index_rebuild(kv, fts_json_prefix) < 0)
+				LM_WARN("post-reconnect index rebuild failed; "
+					"keeping the prior index (periodic resync "
+					"will retry)\n");
+		} else
 			LM_DBG("watcher: index_resync_on_reconnect=0; "
 				"skipping post-reconnect rebuild and "
 				"deferring to lazy self-heal\n");

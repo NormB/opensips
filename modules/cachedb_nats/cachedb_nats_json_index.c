@@ -1226,8 +1226,10 @@ typedef int (*_kv_snapshot_cb)(const char *key,
  * stalled, in which case caller-bubbled error is the right outcome.
  *
  * Returns the number of entries the callback successfully indexed
- * (return value 0), or -1 on a NATS-level error before any entry was
- * delivered. */
+ * (return value 0), or -1 on any NATS-level error — including a
+ * timeout after the subscription was established but before the
+ * end-of-snapshot sentinel arrived (a partial snapshot is a FAILED
+ * snapshot; callers must keep their prior state and retry). */
 static int _drain_kv_snapshot(kvStore *kv,
 	_kv_snapshot_cb cb, void *ctx)
 {
@@ -1254,9 +1256,16 @@ static int _drain_kv_snapshot(kvStore *kv,
 
 		s = nats_dl.kvWatcher_Next(&entry, w, 30000);
 		if (s == NATS_TIMEOUT) {
-			LM_WARN("snapshot stalled at %d entries; aborting\n",
-				count);
-			break;
+			/* Post-subscription, pre-sentinel stall: the snapshot is
+			 * INCOMPLETE.  Returning the partial count here let the
+			 * rebuild path swap a partial index over a good one, so
+			 * non-PK queries silently missed every undelivered
+			 * document until the next rebuild.  Fail instead — the
+			 * caller keeps the prior index and retries. */
+			LM_ERR("snapshot stalled at %d entries; failing (partial "
+				"snapshot must not be treated as complete)\n", count);
+			nats_dl.kvWatcher_Destroy(w);
+			return -1;
 		}
 		if (s != NATS_OK) {
 			LM_ERR("kvWatcher_Next failed: %s\n",
@@ -1769,12 +1778,24 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 
 	count = _drain_kv_snapshot(kv, _rebuild_snapshot_cb, &ctx);
 	if (count < 0) {
-		/* No entries in bucket / WatchAll failed harmlessly →
-		 * shadow stays empty; we still proceed with the atomic
-		 * swap so the live index is reset to empty consistently
-		 * with the legacy behaviour (which silently used count=0
-		 * when kvStore_Keys returned NATS_NOT_FOUND). */
-		count = 0;
+		/* Snapshot failed (WatchAll error or a mid-stream stall):
+		 * the shadow is empty or PARTIAL.  Swapping it in would
+		 * silently drop documents from the live index, so keep the
+		 * prior index intact and let the caller retry.  (A genuinely
+		 * empty bucket is NOT this path — it delivers the sentinel
+		 * and returns count == 0, which swaps normally.) */
+		LM_ERR("rebuild snapshot failed; keeping the prior index\n");
+		/* free whatever the callback already put into the shadow */
+		for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
+			e = shadow.buckets[b];
+			while (e) {
+				next = e->next;
+				_free_entry(e);
+				e = next;
+			}
+		}
+		shm_free(shadow.buckets);
+		return -1;
 	}
 
 	/* Step 2: atomic swap under all shard locks.  Snapshot the old
