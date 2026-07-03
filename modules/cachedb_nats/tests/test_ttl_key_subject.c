@@ -26,7 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ─── carried copy of the production helper (cachedb_nats_ttl.c) ─── */
+/* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
 static int nats_kv_key_to_subject(const char *bucket, const char *key,
 	char *buf, int buflen)
 {

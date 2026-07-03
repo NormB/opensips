@@ -36,7 +36,7 @@
 
 #define NATS_NS_PER_S  1000000000LL
 
-/* ─── carried copy of the production policy (cachedb_nats_ttl.c) ──────
+/* ─── carried copy of the production policy (cachedb_nats_expiry.c) ──────
  * @maxage_ns: the bound bucket's backing-stream MaxAge in nanoseconds.
  * @return    1 => warn (non-zero MaxAge will expire permanent contacts),
  *            0 => clean (MaxAge==0, the only safe config for a usrloc store). */

@@ -12,7 +12,7 @@
  *
  * Fix: route the CAS through nats_kv_put_row (js_PublishMsg with
  * ExpectLastSubjectSeq -- byte-for-byte the same optimistic check
- * kvStore_UpdateString(rev) performs, per cachedb_nats_ttl_put.c), which
+ * kvStore_UpdateString(rev) performs, per cachedb_nats_expiry.c), which
  * returns the numeric jsErrCode inline.  Map it: committed -> 0, 10071 (wrong
  * last sequence) -> -2 (real CAS conflict, retry), anything else -> -1.
  *

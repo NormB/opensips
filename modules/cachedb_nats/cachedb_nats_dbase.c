@@ -408,7 +408,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 
 	/* Generic cache_store() path: no per-key TTL here.  (usrloc rows DO get
 	 * per-key expiry — via the row-write per-message Nats-TTL re-assert in
-	 * cachedb_nats_ttl_put.c on a >=2.11 broker, backed by the P9 reaper —
+	 * cachedb_nats_expiry.c, reclaimed by the P9 reaper —
 	 * but that rides the CAS-UPSERT row seam, not this generic set().) */
 	if (expires > 0)
 		LM_DBG("per-key TTL (%d s) ignored on generic cache_store — "

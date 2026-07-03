@@ -28,7 +28,7 @@ enum ttl_pub_status { TTL_PUB_OK = 0, TTL_PUB_CONN_DOWN = 1, TTL_PUB_JS_ERR = 2 
 enum ttl_outcome { TTL_DONE = 0, TTL_RETRY = 1, TTL_LATCH_OFF = 2,
                    TTL_ASSERT_BUG = 3, TTL_FAIL_SAVE = 4 };
 
-/* ─── carried copy of the production helper (cachedb_nats_ttl.c) ─── */
+/* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
 static enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr)
 {
 #ifdef CLASSIFY_CURRENT

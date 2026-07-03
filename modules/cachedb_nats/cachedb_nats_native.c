@@ -52,7 +52,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
-#include "cachedb_nats_ttl.h"   /* nats_kv_put_row + enum ttl_outcome (CAS classify) */
+#include "cachedb_nats_expiry.h"
 #include "../../lib/nats/nats_str.h"
 #include "../../mi/mi.h"
 #include "../../mi/item.h"

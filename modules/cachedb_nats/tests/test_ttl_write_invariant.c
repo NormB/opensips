@@ -68,12 +68,12 @@ int main(void)
 	/* the helper delegates to the single CAS publish (nats_kv_put_row);
 	 * since P1.5 (reaper-only) NO kvStore_UpdateString remains anywhere
 	 * on the row path -- the legacy fallback is gone too */
-	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
+	ASSERT(grep_in_function("../cachedb_nats_expiry.c",
 		"nats_kv_write_row_cas", "nats_kv_put_row") >= 1,
 		"helper delegates to the nats_kv_put_row CAS publish");
-	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
+	ASSERT(grep_in_function("../cachedb_nats_expiry.c",
 		"nats_kv_write_row_cas", "nats_dl.kvStore_UpdateString") == 0 &&
-	       grep_in_function("../cachedb_nats_ttl_put.c",
+	       grep_in_function("../cachedb_nats_expiry.c",
 		"nats_kv_put_row", "nats_dl.kvStore_UpdateString") == 0,
 		"no kvStore_UpdateString remains in the row-write helper");
 

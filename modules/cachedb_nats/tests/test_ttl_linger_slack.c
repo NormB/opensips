@@ -34,7 +34,7 @@
 
 /* ─── carried copies of the production helpers ────────────────────── */
 
-/* cachedb_nats_ttl.c (unchanged single-slack signature) */
+/* cachedb_nats_expiry.c (unchanged single-slack signature) */
 static int64_t _ttl_seconds(int64_t row_exp, int64_t now, int slack)
 {
 	return row_exp - now + (int64_t)slack;
@@ -52,7 +52,7 @@ static int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 		ms = 1000;
 	return ms;
 }
-/* cachedb_nats_reaper.c (unchanged single-slack signature) */
+/* cachedb_nats_expiry.c (unchanged single-slack signature) */
 static int _reap_row_due(int64_t row_exp, time_t now, int slack)
 {
 	return row_exp != 0 && (row_exp + (int64_t)slack) <= (int64_t)now;

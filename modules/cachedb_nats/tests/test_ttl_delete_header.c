@@ -28,7 +28,7 @@
 #define NATS_KV_OP_PURGE "PURGE"
 #endif
 
-/* ─── carried copy of the production helper (cachedb_nats_ttl.c) ─── */
+/* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
 static const char *_ttl_delete_op(int purge)
 {
 	return purge ? NATS_KV_OP_PURGE : NATS_KV_OP_DEL;

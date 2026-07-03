@@ -27,7 +27,7 @@
  */
 #include <stdio.h>
 
-/* ─── carried copy of the production helper (cachedb_nats_reaper.c) ─── */
+/* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
 static int _reap_interval_guard(int interval, int unsafe_ttl_only,
 	int native_ttl)
 {

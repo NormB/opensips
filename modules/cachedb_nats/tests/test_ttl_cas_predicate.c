@@ -30,7 +30,7 @@
 
 enum ttl_cas_pred { TTL_CAS_NO_MESSAGE = 0, TTL_CAS_LAST_SEQ = 1 };
 
-/* ─── carried copy of the production helper (cachedb_nats_ttl.c) ─── */
+/* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
 static enum ttl_cas_pred _ttl_cas_predicate(int got_entry, int value_len,
 	uint64_t entry_rev, uint64_t head_seq, uint64_t *out_seq)
 {

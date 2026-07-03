@@ -29,7 +29,7 @@
  */
 #include <stdio.h>
 
-/* ─── carried copies of the production helpers (cachedb_nats_ttl.c) ─ */
+/* ─── carried copies of the production helpers (cachedb_nats_expiry.c) ─ */
 
 /* 0 = ok (kv_ttl is 0); -1 = reject (non-zero bucket TTL would expire
  * permanent contacts).  Negative kv_ttl is also rejected (invalid). */

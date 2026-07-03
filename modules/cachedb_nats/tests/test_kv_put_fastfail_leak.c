@@ -41,7 +41,7 @@
 #include "../../../lib/nats/nats_pool.h"
 #include "../cachedb_nats_native.h"
 #include "../cachedb_nats_dbase.h"
-#include "../cachedb_nats_ttl.h"
+#include "../cachedb_nats_expiry.h"
 
 /* ── core seams: dprint ─────────────────────────────────────────── */
 

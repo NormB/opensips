@@ -29,8 +29,8 @@
  */
 #include <stdio.h>
 
-/* ─── carried copies of the production helpers (cachedb_nats_ttl.c /
- *     cachedb_nats_reaper.c) ─────────────────────────────────────── */
+/* ─── carried copies of the production helpers (cachedb_nats_expiry.c /
+ *     cachedb_nats_expiry.c) ─────────────────────────────────────── */
 
 static int _linger_guard(int linger)
 {

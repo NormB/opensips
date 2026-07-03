@@ -50,7 +50,7 @@
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_intern.h"
 #include "cachedb_nats_json_internal.h"
-#include "cachedb_nats_ttl.h"        /* P8: nats_kv_write_row_cas() */
+#include "cachedb_nats_expiry.h"
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;

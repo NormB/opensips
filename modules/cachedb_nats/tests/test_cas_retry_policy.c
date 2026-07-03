@@ -85,12 +85,12 @@ int main(void)
 		"nats_cache_counter_op", "nats_cas_should_retry") >= 1,
 		"counter CAS loop bails on non-conflict errors");
 	/* The CAS write step + its conflict/non-conflict split live in the
-	 * shared row-write helper (cachedb_nats_ttl_put.c), the §2.0 entry
+	 * shared row-write helper (cachedb_nats_expiry.c), the §2.0 entry
 	 * point both writers use.  Since P1.5 (reaper-only) the classification
 	 * is _ttl_classify over the inline jsErrCode: 10071 -> RETRY, anything
 	 * else non-OK -> FAIL_SAVE (no legacy kvStore_UpdateString fallback
 	 * remains to guard). */
-	ASSERT(grep_in_function("../cachedb_nats_ttl_put.c",
+	ASSERT(grep_in_function("../cachedb_nats_expiry.c",
 		"nats_kv_put_row", "_ttl_classify") >= 1,
 		"row-write helper classifies conflicts via _ttl_classify");
 

@@ -75,10 +75,9 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
-#include "cachedb_nats_ttl.h"      /* nats_kv_key_to_subject(), NATS_KV_OP_DEL — P9 reaper CAS-delete */
+#include "cachedb_nats_expiry.h"
 #include "cachedb_nats_reg.h"      /* [OBS] registration MI + reap-pass gauges */
 #include "cachedb_nats_kvobs.h"    /* [KVOBS] generic stream/KV introspection MI */
-#include "cachedb_nats_reaper.h"   /* _reap_interval_guard() — P9 reaper host gate */
 #include "../../lib/nats/nats_pool.h"
 #include "../../timer.h"
 

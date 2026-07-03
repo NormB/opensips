@@ -32,7 +32,7 @@
 
 enum reap_action { REAP_WRITE_SURVIVORS = 0, REAP_DELETE_EMPTY = 1 };
 
-/* ─── carried copies of the production helpers (cachedb_nats_reaper.c) ─ */
+/* ─── carried copies of the production helpers (cachedb_nats_expiry.c) ─ */
 static int _reap_row_due(int64_t row_exp, time_t now, int grace)
 {
 #ifdef REAP_CURRENT
