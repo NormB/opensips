@@ -112,7 +112,6 @@ int nats_consumer_fetch_batch = 10;
 int nats_consumer_fetch_timeout_ms = 1000;
 int nats_consumer_poison_max_deliver = 0;
 
-void nats_persist_schedule_write(void) {}
 
 /* ── pool / dl / IPC seams (never exercised by this test) ───────── */
 

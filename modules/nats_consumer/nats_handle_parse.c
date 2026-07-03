@@ -29,7 +29,7 @@
  * whitespace is preserved on values (an explicit quoting scheme can be
  * added later if needed).
  *
- * Unknown keys are stashed into handle->extra_json as JSON
+ * Unknown keys are rejected as config errors (the forward-compat
  * ("k":"v",...) for forward-compat.  All other syntactic / semantic
  * errors are fatal.
  */
@@ -69,6 +69,7 @@
 #define ERR_DUP_KEY         "duplicate key"
 #define ERR_BAD_PAIR        "malformed pair (missing =)"
 #define ERR_OOM             "out of memory"
+#define ERR_UNKNOWN_KEY     "unknown config key"
 #define ERR_SAMPLE_RANGE    "sample_freq out of range 0..100"
 #define ERR_RING_POW2       "ring_capacity must be power of two >= 2"
 #define ERR_RING_TOO_BIG    "ring_capacity exceeds the maximum (65536)"
@@ -331,64 +332,6 @@ enum {
 	F_FETCH_TMO_MS   = 1<<23,
 };
 
-/* ── extra_json builder ───────────────────────────────────────── */
-
-/* Append "key":"value" to an extra_json str, allocating/growing as needed.
- * Leaves the buffer without closing '}'; caller appends the terminator. */
-static int extra_json_append(str *buf, const char *k, int klen,
-		const char *v, int vlen)
-{
-	/* rough upper bound: key_escaped + value_escaped + 5 ("":"", ) */
-	int needed = klen * 2 + vlen * 2 + 16;
-	int newlen;
-	char *newbuf;
-
-	if (buf->len == 0) {
-		newbuf = (char *)shm_malloc(1 + needed + 1);
-		if (!newbuf) return -1;
-		newbuf[0] = '{';
-		buf->s = newbuf;
-		buf->len = 1;
-	} else {
-		newlen = buf->len + 1 + needed;
-		newbuf = (char *)shm_realloc(buf->s, newlen + 1);
-		if (!newbuf) return -1;
-		buf->s = newbuf;
-		buf->s[buf->len++] = ',';
-	}
-
-	{
-		char *p = buf->s + buf->len;
-		int i;
-		*p++ = '"';
-		for (i = 0; i < klen; i++) {
-			if (k[i] == '"' || k[i] == '\\') *p++ = '\\';
-			*p++ = k[i];
-		}
-		*p++ = '"';
-		*p++ = ':';
-		*p++ = '"';
-		for (i = 0; i < vlen; i++) {
-			if (v[i] == '"' || v[i] == '\\') *p++ = '\\';
-			*p++ = v[i];
-		}
-		*p++ = '"';
-		buf->len = p - buf->s;
-	}
-	return 0;
-}
-
-static int extra_json_finalize(str *buf)
-{
-	char *newbuf;
-	if (buf->len == 0) return 0;
-	newbuf = (char *)shm_realloc(buf->s, buf->len + 2);
-	if (!newbuf) return -1;
-	buf->s = newbuf;
-	buf->s[buf->len++] = '}';
-	return 0;
-}
-
 /* ── main parser ──────────────────────────────────────────────── */
 
 #define FAIL(_err) do { *err = (_err); goto fail; } while (0)
@@ -575,15 +518,15 @@ nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 			if (h->fetch_timeout_ms == 0 || h->fetch_timeout_ms > 60000)
 				FAIL(ERR_FETCH_TMO);
 		} else {
-			/* unknown: forward-compat via extra_json */
-			if (extra_json_append(&h->extra_json, key, keylen,
-					val, vallen) < 0) FAIL(ERR_OOM);
+			/* Unknown key: a config error.  (The forward-compat
+			 * extra_json stash was deleted with the persistence
+			 * layer, owner decision 3 -- nothing consumes extras
+			 * any more, so silently accepting typos would only
+			 * hide misconfiguration.) */
+			FAIL(ERR_UNKNOWN_KEY);
 		}
 		#undef SETFLAG
 	}
-
-	/* close extra_json if populated */
-	if (extra_json_finalize(&h->extra_json) < 0) FAIL(ERR_OOM);
 
 	/* cross-field validation */
 	if (!(seen & F_ID)) FAIL(ERR_MISSING_ID);

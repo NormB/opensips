@@ -12,8 +12,6 @@ PARSER_SRCS := test_parser.c   $(SHIM) ../nats_handle_parse.c ../nats_handle_reg
 RING_SRCS   := test_ring.c     $(SHIM) ../nats_ring.c
 XPROC_SRCS  := test_ring_xproc_wakeup.c $(SHIM) ../nats_ring.c
 ACKTOK_SRCS := test_ack_token.c
-PERSIST_SRCS := test_persist.c $(SHIM) cjson_test_shim.c \
-               ../nats_persist.c ../nats_handle_parse.c ../nats_handle_registry.c
 SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
 REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
@@ -27,39 +25,39 @@ MPSC_SRCS    := test_mpsc.c $(SHIM) ../nats_mpsc.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
-# test_slurp_file_cap pins -fsanitize=address in its own rule (it is
+# pins -fsanitize=address in its own rule (it is
 # specifically asserting an ASan trip on a bad slurp), so it cannot
 # be linked under ThreadSanitizer.  The rest of the suite is race-safe.
 TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
-                  test_persist test_request_route_restriction \
-                  test_consumer_heartbeat test_persist_precision \
+                  test_request_route_restriction \
+                  test_consumer_heartbeat \
                   test_async_request_skeleton \
-                  test_header_propagation test_start_time_roundtrip \
+                  test_header_propagation \
                   test_rpc_subject test_fetch_async_timerfd \
-                  test_persist_cross_process test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait \
+                  test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait \
                   test_ring_bounded_spin test_registry_ring_ref_safety \
                   test_ring_xproc_wakeup test_rpc_ipc_generation test_rpc_reply_pin \
                   test_parser_adversarial test_rpc_slot_lifecycle \
                   test_rpc_inbox_auth test_registry_lookup_ref \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
-                  test_registry_index_recycle test_registry_ring_alloc_order test_ring_push_bounded_spin \
+                  test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
                   test_pool_self_register test_msg_ref_orphan_reap \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
                   test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail
 
-all: test_registry test_parser test_ring test_ack_token test_persist \
-     test_slurp_file_cap test_request_route_restriction \
-     test_consumer_heartbeat test_persist_precision \
+all: test_registry test_parser test_ring test_ack_token \
+     test_request_route_restriction \
+     test_consumer_heartbeat \
      test_async_request_skeleton \
-     test_header_propagation test_start_time_roundtrip \
-     test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
+     test_header_propagation \
+     test_rpc_subject test_fetch_async_timerfd \
      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
-     test_registry_index_recycle test_registry_ring_alloc_order test_ring_push_bounded_spin \
+     test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
@@ -84,18 +82,7 @@ test_ring_xproc_wakeup: $(XPROC_SRCS) test_shim.h ../nats_ring.h
 test_ack_token: $(ACKTOK_SRCS) ../nats_ack.h
 	$(CC) $(CFLAGS) -o $@ $(ACKTOK_SRCS) $(LDFLAGS)
 
-# test_persist pulls in a minimal cJSON stand-in (cjson_test_shim.c)
-# instead of lib/cJSON.c, which depends on opensips core mem/.
-test_persist: $(PERSIST_SRCS) test_shim.h ../nats_persist.h \
-              ../nats_handle_registry.h ../nats_handle_parse.h
-	$(CC) $(CFLAGS) -o $@ $(PERSIST_SRCS) $(LDFLAGS)
 
-# Standalone test for slurp_file size cap -- self-contained, ASan-built,
-# does not link against test_shim or production .c files (uses inline
-# copies of the buggy and fixed slurp_file logic plus a source-pattern
-# assertion against ../nats_persist.c).
-test_slurp_file_cap: test_slurp_file_cap.c
-	$(CC) -g -O0 -fsanitize=address -Wall -o $@ $<
 
 # Source-pattern test for nats_request route-flag restriction
 test_request_route_restriction: test_request_route_restriction.c
@@ -144,6 +131,11 @@ test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.
 # reap, so duplicate/failed binds can't exhaust the index space.
 test_registry_index_recycle: $(IDXRECYCLE_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(IDXRECYCLE_SRCS) $(LDFLAGS)
+
+# Owner decision 3: declarative `bind` modparam replaces file
+# persistence (nats_persist deleted).
+test_bind_modparam: test_bind_modparam.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 # P0.7: bind must validate (duplicate/id/index-cap) BEFORE allocating the
 # per-handle SHM ring — a rejected MI bind must not churn a giant alloc.
@@ -272,12 +264,6 @@ test_msg_ref_orphan_reap: test_msg_ref_orphan_reap.c
 test_fetch_async_timerfd: test_fetch_async_timerfd.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# Persistence dirty-flag cross-process visibility (fork+mmap behavioural
-# check) + source assertions that the dirty flag is SHM-allocated.
-# Self-contained; reads ../nats_persist.c.
-test_persist_cross_process: test_persist_cross_process.c
-	$(CC) -g -O0 -Wall -o $@ $<
-
 # msg-ref leak in tear_down_retired_subs: behavioural re-implementation of
 # the msg-ref row lifecycle proving the teardown destroys outstanding
 # natsMsgs + frees the slots buffer, plus source assertions that the real
@@ -322,17 +308,12 @@ check: all
 	./test_parser
 	./test_ring
 	./test_ack_token
-	./test_persist
-	./test_slurp_file_cap
 	./test_request_route_restriction
 	./test_consumer_heartbeat
-	./test_persist_precision
 	./test_async_request_skeleton
 	./test_header_propagation
-	./test_start_time_roundtrip
 	./test_rpc_subject
 	./test_fetch_async_timerfd
-	./test_persist_cross_process
 	./test_msg_ref_teardown
 	./test_msg_ref_gen_epoch
 	./test_orphan_ttl_ackwait
@@ -377,12 +358,12 @@ check-tsan: $(TESTS_TSAN_SAFE)
 	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
 
 clean:
-	rm -f test_registry test_parser test_ring test_ack_token test_persist \
-	      test_slurp_file_cap test_request_route_restriction \
-	      test_consumer_heartbeat test_persist_precision \
+	rm -f test_registry test_parser test_ring test_ack_token \
+	      test_request_route_restriction \
+	      test_consumer_heartbeat \
 	      test_async_request_skeleton \
-	      test_header_propagation test_start_time_roundtrip \
-	      test_rpc_subject test_fetch_async_timerfd test_persist_cross_process \
+	      test_header_propagation \
+	      test_rpc_subject test_fetch_async_timerfd \
 	      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
 	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
 	      test_rpc_ipc_generation test_rpc_inbox_auth \
@@ -392,23 +373,14 @@ clean:
 	      test_msg_ref_orphan_reap test_retired_no_sub_reap \
 	      test_sub_identity_match
 
-# Heartbeat + persist-precision tests (self-contained)
+# Heartbeat test (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
 	$(CC) -g -O0 -Wall -pthread -o $@ $<
-
-test_persist_precision: test_persist_precision.c
-	$(CC) -g -O0 -Wall -o $@ $<
 
 # Source-pattern + wire-format round-trip for the async nats_request
 # header propagation.  Self-contained; runs from the tests/ directory
 # (reads ../nats_rpc_async.c + ../nats_rpc_consumer.c).
 test_header_propagation: test_header_propagation.c
-	$(CC) -g -O0 -Wall -o $@ $<
-
-# Round-trip test for the start_time_ns -> RFC3339 -> ns conversion
-# on persistence rehydrate.  Self-contained; runs from the tests/
-# directory (reads ../nats_persist.c).
-test_start_time_roundtrip: test_start_time_roundtrip.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
 # Live shell smokes (require a real nats-server + opensips binary in

@@ -58,7 +58,6 @@
 #include "nats_rpc_async.h"
 #include "nats_rpc_slot.h"
 #include "nats_rpc_ipc.h"
-#include "nats_persist.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -87,53 +86,50 @@ static void mod_destroy(void);
  * dup -> 409, OOM -> 500) but collapses to a single -1 since cmd_export
  * doesn't carry status codes.
  */
-static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
+/* One bind core shared by the script function, the declarative `bind`
+ * modparam loop in mod_init and (indirectly, same shape) the MI
+ * handler: parse the config string, bind into the registry, log.
+ * Returns 0 on success; on failure logs with @who context and returns
+ * -1 (the handle is freed). */
+static int bind_one_config(const str *config_str, const char *who)
 {
 	const char    *err = NULL;
 	nats_handle_t *h;
 	int            rc;
 
-	(void)msg;
-
 	if (!config_str || config_str->len <= 0 || !config_str->s) {
-		LM_ERR("nats_consumer_bind: empty/null config string\n");
+		LM_ERR("%s: empty/null config string\n", who);
 		return -1;
 	}
 
 	h = nats_handle_parse(config_str, &err);
 	if (!h) {
 		if (!err) err = "parse error";
-		LM_ERR("nats_consumer_bind: parse failed: %s\n", err);
+		LM_ERR("%s: parse failed: %s (config '%.*s')\n", who, err,
+			config_str->len, config_str->s);
 		return -1;
 	}
 
 	rc = nats_registry_bind(h);
-	if (rc == -1) {
-		LM_ERR("nats_consumer_bind: duplicate id '%.*s'\n",
-			h->id.len, h->id.s);
-		nats_handle_free(h);
-		return -1;
-	}
-	if (rc == -2) {
-		LM_ERR("nats_consumer_bind: registry full or OOM\n");
-		nats_handle_free(h);
-		return -1;
-	}
-	if (rc == -3) {
-		LM_ERR("nats_consumer_bind: handle count limit reached\n");
-		nats_handle_free(h);
-		return -1;
-	}
 	if (rc != 0) {
-		LM_ERR("nats_consumer_bind: bind failed rc=%d\n", rc);
+		LM_ERR("%s: bind failed for id '%.*s': %s\n", who,
+			h->id.len, h->id.s,
+			rc == -1 ? "duplicate id" :
+			rc == -3 ? "handle count limit reached" :
+			           "registry full or OOM");
 		nats_handle_free(h);
 		return -1;
 	}
 
-	LM_INFO("nats_consumer: bound handle id=%.*s stream=%.*s "
-		"(via script)\n",
-		h->id.len, h->id.s, h->stream.len, h->stream.s);
-	return 1;
+	LM_INFO("nats_consumer: bound handle id=%.*s stream=%.*s (%s)\n",
+		h->id.len, h->id.s, h->stream.len, h->stream.s, who);
+	return 0;
+}
+
+static int w_nats_consumer_bind(struct sip_msg *msg, str *config_str)
+{
+	(void)msg;
+	return bind_one_config(config_str, "nats_consumer_bind") == 0 ? 1 : -1;
 }
 
 /* ── script-callable commands ────────────────────────────────── */
@@ -249,13 +245,40 @@ static const acmd_export_t acmds[] = {
 
 /* ── modparams ───────────────────────────────────────────────── */
 
-/* Opt-in persistence.  Defaults: off.  If enabled, the registry is
- * JSON-serialized to `persist_path` on every bind/unbind (debounced
- * 500 ms) and rehydrated on mod_init.  If the parent directory of
- * `persist_path` does not exist at init time, we log a warning and run
- * with persistence disabled for this instance. */
-static int persist_handles = 0;
-static char *persist_path  = "/var/lib/opensips/nats_consumer/handles.json";
+/* Declarative handle binds (owner decision 3).  Each `bind` modparam
+ * value uses the same config grammar as nats_consumer_bind(); values
+ * are queued at cfg-parse time and bound in mod_init right after the
+ * registry comes up.  A bad or duplicate declarative bind FAILS
+ * mod_init.  (The former file-persistence layer was deleted: with
+ * binds declarative in the .cfg there is nothing to rehydrate.
+ * Runtime MI binds remain available but are ephemeral.) */
+struct bind_cfg {
+	str s;
+	struct bind_cfg *next;
+};
+static struct bind_cfg *bind_cfg_head = NULL;
+static struct bind_cfg **bind_cfg_tail = &bind_cfg_head;
+
+static int set_bind_param(modparam_t type, void *val)
+{
+	struct bind_cfg *bc;
+	char *v = (char *)val;
+
+	(void)type;
+	if (!v || !*v) {
+		LM_ERR("nats_consumer: empty bind modparam\n");
+		return -1;
+	}
+	bc = pkg_malloc(sizeof(*bc));
+	if (!bc)
+		return -1;
+	bc->s.s = v;                 /* cfg-parser-owned, process lifetime */
+	bc->s.len = (int)strlen(v);
+	bc->next = NULL;
+	*bind_cfg_tail = bc;
+	bind_cfg_tail = &bc->next;
+	return 0;
+}
 
 /* Module-global Fetch tuning.  Per-handle bind keys (`fetch_batch=`,
  * `fetch_timeout_ms=`) override these for a single handle; the
@@ -430,8 +453,8 @@ static const param_export_t params[] = {
 	{ "nats_url",          STR_PARAM, &nats_url },
 	{ "reconnect_wait_ms", INT_PARAM, &nats_reconnect_wait_ms },
 	{ "max_reconnect",     INT_PARAM, &nats_max_reconnect },
-	{ "persist_handles",   INT_PARAM, &persist_handles },
-	{ "persist_path",      STR_PARAM, &persist_path    },
+	{ "bind",              STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)set_bind_param },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
 	{ "fetch_timeout_ms",  INT_PARAM, &nats_consumer_fetch_timeout_ms  },
 	{ "poison_max_deliver",INT_PARAM, &nats_consumer_poison_max_deliver },
@@ -607,25 +630,19 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* Opt-in persistence.  If enabled, start the writer thread and
-	 * rehydrate any snapshot left by a previous run.  Failures here
-	 * are non-fatal -- we log, disable persistence, and continue
-	 * with an empty registry so the module still loads. */
-	if (persist_handles) {
-		if (!persist_path || !*persist_path) {
-			LM_WARN("nats_consumer: persist_handles=1 but persist_path "
-					"is empty; persistence disabled\n");
-		} else if (nats_persist_init(persist_path) < 0) {
-			LM_WARN("nats_consumer: persistence init failed for %s; "
-					"continuing with empty registry\n", persist_path);
-		} else {
-			int n = nats_persist_rehydrate();
-			if (n < 0)
-				LM_WARN("nats_consumer: rehydrate failed; starting "
-						"with empty registry\n");
-			else
-				LM_INFO("nats_consumer: rehydrated %d handles from %s\n",
-						n, persist_path);
+	/* Declarative binds (owner decision 3): bind every queued `bind`
+	 * modparam config now that the registry + rings + IPC are up.  A
+	 * failure here is a config error and fails the boot. */
+	{
+		struct bind_cfg *bc;
+		for (bc = bind_cfg_head; bc; bc = bc->next) {
+			if (bind_one_config(&bc->s, "bind modparam") < 0) {
+				nats_rpc_slot_destroy();
+				nats_rpc_ipc_destroy();
+				nats_ack_ipc_destroy();
+				nats_registry_destroy();
+				return -1;
+			}
 		}
 	}
 
@@ -645,13 +662,8 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	LM_INFO("nats_consumer: shutting down\n");
-	/* Order matters: persistence flush first (so the outgoing snapshot
-	 * reflects the final live state), then ack IPC (so any future
-	 * drain path can flush before the registry disappears
-	 * underneath it), then registry.  nats_persist_destroy() joins the
-	 * writer thread after flushing any outstanding dirty state -- no
-	 * pending writer can race with the registry teardown below. */
-	nats_persist_destroy();
+	/* Order matters: ack IPC before the registry (so any future drain
+	 * path can flush before the registry disappears underneath it). */
 	nats_ack_ipc_destroy();
 	nats_rpc_ipc_destroy();
 	nats_rpc_slot_destroy();

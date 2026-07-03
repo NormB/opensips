@@ -38,12 +38,6 @@
 
 #include "nats_handle_registry.h"
 #include "nats_ring.h"
-#ifndef TEST_SHIM
-#include "nats_persist.h"
-#else
-/* Unit tests do not link nats_persist; stub out the hook. */
-static inline void nats_persist_schedule_write(void) {}
-#endif
 
 /* Default slot count for per-handle rings.  Fixed at the registry
  * level; bind-time override is available via the `ring_capacity`
@@ -294,7 +288,6 @@ void nats_handle_free(nats_handle_t *h)
 	str_free_shm(&h->backoff_csv);
 	str_free_shm(&h->js_domain);
 	str_free_shm(&h->api_prefix);
-	str_free_shm(&h->extra_json);
 	str_free_shm(&h->last_error_msg);
 
 	if (h->rlock) {
@@ -413,9 +406,6 @@ int nats_registry_bind(nats_handle_t *h)
 
 	__atomic_add_fetch(&g_registry->handle_count, 1, __ATOMIC_SEQ_CST);
 
-	/* Persistence hook: schedule a debounced snapshot.  No-op if
-	 * persist_handles was not enabled in the modparam. */
-	nats_persist_schedule_write();
 	return 0;
 }
 
@@ -477,7 +467,6 @@ int nats_registry_unbind(const str *id)
 	__atomic_sub_fetch(&g_registry->handle_count, 1, __ATOMIC_SEQ_CST);
 
 	/* Persistence hook: snapshot drops the retired handle. */
-	nats_persist_schedule_write();
 	return 0;
 }
 

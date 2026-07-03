@@ -145,8 +145,6 @@ typedef struct nats_handle {
 	uint32_t fetch_batch;
 	uint32_t fetch_timeout_ms;
 
-	/* forward-compat */
-	str extra_json;
 
 	/* runtime (guarded by rlock) */
 	rw_lock_t *rlock;

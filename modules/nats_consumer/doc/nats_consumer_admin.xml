@@ -62,7 +62,7 @@
             (called from <varname>startup_route</varname>).  There are
             no bind-time modparams: the module loads with an empty
             registry and every consumer handle is added on demand.  When
-            <varname>persist_handles</varname> is enabled, the registry
+            declarative <varname>bind</varname> parameters are used, the registry
             is snapshotted to disk and rehydrated across restarts.
         </para>
         <para>
@@ -99,8 +99,8 @@
                 Operationally this means the supervisor that runs
                 &osips; (systemd, Kubernetes, etc.) is responsible for
                 restarting the whole &osips; instance after a consumer
-                death.  Bound handles persist across that restart only
-                when <varname>persist_handles</varname> is enabled
+                death.  Bound handles survive that restart only when
+                declared via the <varname>bind</varname> parameter
                 (see the modparam below); otherwise the registry must
                 be repopulated by re-issuing
                 <function>nats_consumer_bind</function>.  In-flight
@@ -230,77 +230,37 @@
     <section id="nats_consumer-parameters">
         <title>Exported Parameters</title>
 
-        <!-- persist_handles -->
-        <section id="param_persist_handles">
-            <title><varname>persist_handles</varname> (integer)</title>
+        <!-- bind -->
+        <section id="param_bind">
+            <title><varname>bind</varname> (string, multiple)</title>
             <para>
-                Opt-in snapshot persistence for the handle registry.
-                When set to <varname>1</varname>, every successful
-                <function>nats_consumer_bind</function> or
-                <function>nats_consumer_unbind</function> schedules a
-                debounced (500 ms) write of the full registry as a JSON
-                array to <varname>persist_path</varname>.  On
-                <function>mod_init</function>, the module rehydrates from
-                that file so handles registered by a previous run come
-                back automatically.
+                Declarative handle bind.  Each value uses the same
+                <literal>key=value;key=value</literal> config grammar as
+                <function>nats_consumer_bind()</function> and is bound
+                into the registry at module init, before any worker
+                forks.  The parameter may be set multiple times, one
+                handle per value.
             </para>
             <para>
-                A persistence failure at init (missing parent directory,
-                unwritable target, malformed JSON) is logged as a warning
-                and the module loads with an empty registry — it never
-                blocks startup.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis> <varname>0</varname>
-                (disabled)
+                A malformed value, an unknown key, or a duplicate
+                <literal>id</literal> is a configuration error and
+                aborts startup.  Handles bound at runtime through the
+                MI command remain available but are ephemeral: after a
+                restart only <varname>bind</varname>-declared handles
+                exist.  (The former <varname>persist_handles</varname> /
+                <varname>persist_path</varname> file-snapshot mechanism
+                was removed in favour of this parameter.)
             </para>
             <example>
-                <title>Enable handle persistence</title>
+                <title>Declare handles in the configuration</title>
                 <programlisting format="linespecific">
-modparam("nats_consumer", "persist_handles", 1)
-modparam("nats_consumer", "persist_path",
-         "/var/lib/opensips/nats_consumer/handles.json")
-                </programlisting>
-            </example>
-        </section>
-
-        <!-- persist_path -->
-        <section id="param_persist_path">
-            <title><varname>persist_path</varname> (string)</title>
-            <para>
-                Filesystem path used by the persistence writer when
-                <varname>persist_handles</varname> is <varname>1</varname>.
-                The parent directory must exist at init time; the module
-                does not create it.  Writes use the standard
-                tempfile + <function>fsync</function> +
-                <function>rename</function> pattern so a crash cannot
-                leave the file half-written.
-            </para>
-            <para>
-                On rehydrate, the file is rejected with an
-                <varname>LM_ERR</varname> if it exceeds 10 MiB
-                (<varname>NATS_PERSIST_MAX_FILE_BYTES</varname>) -- a
-                guard against a misconfigured path or a symlink to a
-                large file (e.g., a log) that would otherwise be
-                slurped entirely into heap before parsing.
-            </para>
-            <para>
-                Numeric fields that exceed double precision
-                (<varname>start_seq</varname> above 2^53,
-                <varname>start_time_ns</varname> in nanoseconds since
-                epoch) are serialized as JSON strings so they
-                round-trip losslessly through the snapshot.
-            </para>
-            <para>
-                <emphasis>Default value:</emphasis>
-                <varname>/var/lib/opensips/nats_consumer/handles.json</varname>
-            </para>
-            <example>
-                <title>Override snapshot location</title>
-                <programlisting format="linespecific">
-modparam("nats_consumer", "persist_path",
-         "/etc/opensips/nats_handles.json")
-                </programlisting>
+...
+modparam("nats_consumer", "bind",
+    "id=jobs;stream=JOBS;subject=jobs.&gt;;durable=jobs_worker")
+modparam("nats_consumer", "bind",
+    "id=audit;stream=AUDIT;subject=audit.&gt;")
+...
+</programlisting>
             </example>
         </section>
 
@@ -1551,9 +1511,7 @@ route[on_reply] {
                 <literal>ring_capacity</literal>.
             </para>
             <para>
-                Unknown keys are preserved in the handle's
-                <varname>extra_json</varname> for forward-compat and
-                survive persistence round-trips.
+                Unknown keys are rejected as configuration errors.
             </para>
             <example>
                 <title>Register a durable work-queue consumer</title>
@@ -1626,18 +1584,6 @@ opensips-cli -x mi nats_consumer_unbind id=jobs
                 failed ensure attempt(s)") fires once per recovery
                 edge so log forwarders can tell wedge from recovery
                 without polling.
-            </para>
-        </section>
-
-        <section id="mi_nats_handle_reload">
-            <title><function moreinfo="none">nats_handle_reload</function></title>
-            <para>
-                Re-read the persistence file
-                (<varname>persist_path</varname>) and merge in any
-                handles that are not already bound.  Existing handles
-                are untouched — the reload is additive.  Returns the
-                number of new handles loaded.  Useful when the snapshot
-                has been hand-edited or copied in from another node.
             </para>
         </section>
 

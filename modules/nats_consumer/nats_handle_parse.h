@@ -33,7 +33,7 @@
  * SHM handle.  Caller owns the returned handle -- pass it to
  * nats_registry_bind (which takes ownership) or nats_handle_free.
  *
- * Unknown keys are accumulated into handle->extra_json for forward-compat.
+ * Unknown keys are rejected as config errors.
  *
  * On parse error, returns NULL and sets *err to a borrowed static string
  * describing the first error.  *err must not be freed.

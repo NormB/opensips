@@ -117,17 +117,15 @@ static void test_multi_filter(void)
 
 static void test_unknown_key(void)
 {
+	/* Since the persist layer was deleted (owner decision 3) nothing
+	 * consumes forward-compat extras: an unknown key is now a CONFIG
+	 * ERROR, rejected at parse time with a message naming the key. */
 	const char *err = NULL;
 	str cfg = mkstr("id=x;stream=S;durable=d;foo=bar");
 	nats_handle_t *h = nats_handle_parse(&cfg, &err);
-	CHECK(h != NULL);
-	if (h) {
-		CHECK(h->extra_json.len > 0);
-		CHECK(str_contains(&h->extra_json, "\"foo\":\"bar\""));
-		CHECK(h->extra_json.s[0] == '{');
-		CHECK(h->extra_json.s[h->extra_json.len - 1] == '}');
-		nats_handle_free(h);
-	}
+	CHECK(h == NULL);
+	CHECK(err != NULL && strstr(err, "unknown") != NULL);
+	if (h) nats_handle_free(h);
 }
 
 static void test_two_unknowns(void)
@@ -135,13 +133,8 @@ static void test_two_unknowns(void)
 	const char *err = NULL;
 	str cfg = mkstr("id=x;stream=S;durable=d;foo=bar;baz=qux");
 	nats_handle_t *h = nats_handle_parse(&cfg, &err);
-	CHECK(h != NULL);
-	if (h) {
-		CHECK(str_contains(&h->extra_json, "\"foo\":\"bar\""));
-		CHECK(str_contains(&h->extra_json, "\"baz\":\"qux\""));
-		CHECK(str_contains(&h->extra_json, ","));
-		nats_handle_free(h);
-	}
+	CHECK(h == NULL);
+	if (h) nats_handle_free(h);
 }
 
 static void test_missing_id(void)

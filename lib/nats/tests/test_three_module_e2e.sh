@@ -83,7 +83,10 @@ modparam("cachedb_nats", "kv_bucket", "${BUCKET}")
 modparam("cachedb_nats", "kv_replicas", 1)
 
 loadmodule "nats_consumer.so"
-modparam("nats_consumer", "persist_handles", 0)
+# Owner decision 3: declarative bind — the handle exists from boot,
+# no MI round-trip needed (and proves the modparam path end-to-end).
+modparam("nats_consumer", "bind",
+    "id=ib;stream=${STREAM};durable=ibd;filter=x8.in.test;ack_wait=30s")
 
 # Background fetch loop: poll the consumer ring for any pending
 # message every 500 ms and log what we got.
@@ -137,12 +140,9 @@ wait_for_log "nats_consumer_proc: pool ready"                          5  || fai
 wait_for_log "evi_publish_event: Registered event <E_NATS_KV_CHANGE"   3  || fail "event registration not seen"
 sleep 0.5
 
-# Bind the consumer handle.
-mi_resp=$(mi_call nats_consumer_bind \
-    "{\"config\":\"id=ib;stream=${STREAM};durable=ibd;filter=x8.in.test;ack_wait=30s\"}")
-echo "    bind reply: ${mi_resp}"
-echo "${mi_resp}" | grep -q '"result":"OK"' \
-    || fail "consumer_bind did not return OK; reply was: ${mi_resp}"
+# The consumer handle is bound declaratively via the `bind` modparam
+# (owner decision 3); assert the boot log recorded it.
+wait_for_log "bound handle id=ib" 3 || fail "declarative bind not seen in log"
 
 # Inject a JetStream message that the consumer should pick up.
 nats --server "${NATS_URL}" pub "x8.in.test" '{"src":"external"}' >/dev/null 2>&1 \
