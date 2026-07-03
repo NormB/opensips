@@ -23,9 +23,10 @@
  *
  * Architecture overview:
  *
- * This module implements a resilient, self-healing watcher thread that
- * monitors a NATS JetStream KV bucket for changes.  The watcher runs as
- * a pthread for the lifetime of the OpenSIPS worker process and drives
+ * This module implements a resilient, self-healing watcher that
+ * monitors a NATS JetStream KV bucket for changes.  The watcher runs
+ * in its own dedicated OpenSIPS child process (nats_watcher_proc_main,
+ * forked via proc_export_t) for the lifetime of the server and drives
  * two downstream subsystems:
  *
  *   1. JSON full-text search index -- kept in sync with live KV mutations
@@ -55,7 +56,6 @@
  */
 
 #include <errno.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -103,17 +103,18 @@ typedef int event_id_t;
  * header, so it stays as a single extern below. */
 extern char *fts_json_prefix;
 
-/* ---- watcher thread state (process-local) ---- */
-static pthread_t       _watcher_tid;
+/* ---- watcher state (process-local to the dedicated watcher proc) ---- */
 static atomic_int      _watcher_running = 0;
-/* _watcher is written by the watcher thread (create + per-iteration
- * teardown) and read/torn-down by nats_watch_stop() on another thread.
- * Make it atomic and have every teardown path atomic_exchange() it to
- * NULL: only the caller that observes the non-NULL value owns the
- * Stop/Destroy, so overlapping shutdown can never double-free. */
+/* _watcher is written by the watcher loop (create + per-iteration
+ * teardown); every teardown path atomic_exchange()s it to NULL so only
+ * the caller that observes the non-NULL value owns the Stop/Destroy —
+ * overlapping teardown can never double-free.  (Kept atomic even though
+ * the dedicated process is single-threaded: cnats callbacks run on
+ * library threads.) */
 static _Atomic(kvWatcher *) _watcher    = NULL;
 
-/* Multiple watch patterns -- set by nats_watch_start(), read by thread.
+/* Multiple watch patterns -- set by nats_watcher_proc_main() from the
+ * kv_watch modparam list, read by the loop.
  * When _num_patterns == 0, watches all keys via nats_dl.kvStore_WatchAll().
  * When > 0, uses nats_dl.kvStore_WatchMulti() for selective watching. */
 static const char    **_watch_patterns  = NULL;
@@ -124,7 +125,6 @@ static int             _num_patterns    = 0;
 event_id_t evi_kv_change_id = EVI_ERROR;
 
 /* ---- forward declarations ---- */
-static void *_watcher_thread_fn(void *arg);
 static void  _watcher_loop(void);
 static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
 
@@ -133,18 +133,18 @@ static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
 /* ------------------------------------------------------------------ */
 
 /*
- * Architecture: The watcher runs as a pthread inside a SIP worker process.
- * EVI functions (evi_get_params, evi_raise_event) use pkg_malloc which is
- * NOT thread-safe.  To avoid heap corruption, the pthread copies event
- * data into a shm_malloc'd struct and dispatches an IPC RPC to a SIP
- * worker, where the EVI functions run safely in the reactor context.
+ * Architecture: The watcher runs in the dedicated watcher process, not
+ * in a SIP worker.  EVI subscribers run in SIP workers, so the watcher
+ * copies event data into a shm_malloc'd struct and dispatches an IPC
+ * RPC to a SIP worker, where the EVI functions (which use pkg_malloc)
+ * run safely in the reactor context.
  *
- * Flow:  pthread → shm_malloc + copy → ipc_dispatch_rpc → worker raises EVI → shm_free
+ * Flow:  watcher proc → shm_malloc + copy → ipc_dispatch_rpc → worker raises EVI → shm_free
  */
 
 #ifdef HAVE_EVI
 /**
- * IPC event struct -- carries KV change data from pthread to worker.
+ * IPC event struct -- carries KV change data from the watcher proc to a worker.
  * Single allocation with flexible array for key + value strings.
  */
 struct kv_change_ipc_event {
@@ -228,7 +228,7 @@ done:
 /**
  * _raise_kv_change_event() -- Dispatch a KV change to the EVI subsystem.
  *
- * Called from the watcher pthread.  Copies event data into shared memory
+ * Called from the watcher process.  Copies event data into shared memory
  * and dispatches an IPC RPC to a SIP worker for safe EVI event raising.
  * No pkg_malloc is used in this function -- only shm_malloc (thread-safe)
  * and ipc_dispatch_rpc (atomic pipe write, thread-safe).
@@ -330,51 +330,14 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Watcher thread -- self-healing resilient loop                      */
-/* ------------------------------------------------------------------ */
-
-/**
- * _watcher_thread_fn() -- Main watcher thread entry point.
- *
- * Runs for the lifetime of the OpenSIPS worker process.  Implements a
- * four-step self-healing loop:
- *
- *   1. Block until NATS connectivity is established (500ms poll).
- *   2. Obtain a fresh KV handle from the pool and create a kvWatcher
- *      with the configured key pattern (or watch all keys if no pattern
- *      is set).
- *   3. Rebuild the JSON full-text search index from the complete bucket
- *      state, with the watcher already buffering concurrent mutations.
- *   4. Process live updates from nats_dl.kvWatcher_Next() in a tight loop.
- *      On reconnect-epoch change or disconnect, break out and
- *      restart from step 1 to get a fresh KV handle and index.
- *
- * Cleanup between iterations destroys the stale kvWatcher.  During
- * disconnect, kvWatcher_Destroy is skipped to avoid double-free races
- * with nats.c's internal I/O thread cleanup.
- *
- * @param arg  Unused (required by pthread_create signature).
- * @return     Always returns NULL.
- */
-static void *_watcher_thread_fn(void *arg)
-{
-	(void)arg;
-	LM_INFO("NATS KV watcher thread started\n");
-	_watcher_loop();
-	LM_INFO("NATS KV watcher thread stopped\n");
-	return NULL;
-}
-
-/* ------------------------------------------------------------------ */
 /*  _watcher_loop() -- shared self-healing event loop                  */
 /* ------------------------------------------------------------------ */
 
 /*
- * The self-healing loop body factored out so both the legacy rank-1
- * pthread (_watcher_thread_fn) and the dedicated-process main
- * (nats_watcher_proc_main) call the same code.  Loops while
- * _watcher_running is non-zero; in the dedicated-process variant
- * the running flag is set to 1 before this is called and is
+ * The self-healing loop body, called by the dedicated-process main
+ * (nats_watcher_proc_main).  Loops while
+ * _watcher_running is non-zero; the running flag is set to 1 before
+ * this is called and is
  * cleared only by the OpenSIPS core sending SIGTERM (which
  * terminates the process directly).
  */
@@ -493,13 +456,12 @@ static void _watcher_loop(void)
 		 * invalidates the current watcher and KV handle. */
 		unsigned orphan_poll = 0;
 		while (atomic_load(&_watcher_running)) {
-			/* Orphan watchdog (dedicated_watcher_proc=1): if the parent
+			/* Orphan watchdog (dedicated watcher process): if the parent
 			 * died and PR_SET_PDEATHSIG didn't fire, the kernel reparents us
 			 * to PID 1.  The NATS_TIMEOUT arm below also checks this, but a
 			 * broker delivering a steady update stream never times out -- so
 			 * poll here too, rate-limited (every 256 iterations) to keep
-			 * getppid() off the per-event hot path.  No-op for the rank-1
-			 * pthread variant (getppid() returns the master forever). */
+			 * getppid() off the per-event hot path. */
 			if ((++orphan_poll & 0xFF) == 0 && getppid() == 1) {
 				LM_NOTICE("watcher: parent gone (reparented to init); "
 					"exiting\n");
@@ -537,14 +499,12 @@ static void _watcher_loop(void)
 
 			if (s == NATS_TIMEOUT) {
 				/* Belt-and-suspenders for the dedicated-process
-				 * topology (dedicated_watcher_proc=1): if our parent died and
+				 * topology (dedicated watcher process): if our parent died and
 				 * PR_SET_PDEATHSIG somehow didn't fire (kernel
 				 * version with the bug, prctl rejected, etc.),
 				 * the kernel re-parents us to PID 1.  Detect
 				 * that here and exit so we never become an
-				 * orphan watcher.  Cheap on every 500 ms tick;
-				 * no-op for the rank-1 pthread variant where
-				 * getppid() returns the master forever. */
+				 * orphan watcher.  Cheap on every 500 ms tick. */
 				if (getppid() == 1) {
 					LM_NOTICE("watcher: parent gone "
 						"(reparented to init); exiting\n");
@@ -640,8 +600,7 @@ static void _watcher_loop(void)
 		/* ---- Cleanup before retry ----
 		 * Destroy the stale watcher.  atomic_exchange claims the
 		 * handle: whoever swaps the non-NULL value to NULL owns the
-		 * Stop/Destroy.  If nats_watch_stop() raced us and already
-		 * claimed it, we observe NULL here and do nothing -- no
+		 * Stop/Destroy, so an overlapping teardown can never
 		 * double Stop/Destroy. */
 		{
 			kvWatcher *w_claim = atomic_exchange(&_watcher, NULL);
@@ -676,126 +635,6 @@ static void _watcher_loop(void)
 		}
 	}
 }
-
-/* ------------------------------------------------------------------ */
-/*  Public API                                                         */
-/* ------------------------------------------------------------------ */
-
-/**
- * nats_watch_start() -- Start the self-healing KV watcher thread.
- *
- * Called from child_init() on the first SIP worker (rank == 1) to
- * minimize the number of JetStream ordered consumers.  Registers the
- * E_NATS_KV_CHANGE EVI event (if compiled with HAVE_EVI), stores the
- * watch patterns, and spawns the watcher pthread.
- *
- * The thread runs autonomously for the lifetime of the process,
- * handling all reconnection and index-rebuild logic internally.
- *
- * @param kv            Initial KV store handle (used only to validate that
- *                      the bucket exists; the thread obtains fresh handles
- *                      after each reconnect).
- * @param patterns      Array of key patterns to watch (e.g., "usrloc.>").
- *                      NULL with num_patterns==0 means watch all keys.
- * @param num_patterns  Number of entries in the patterns array.
- * @return              0 on success, -1 on error.
- */
-int nats_watch_start(kvStore *kv, const char **patterns, int num_patterns)
-{
-	int i;
-
-	if (!kv) {
-		LM_ERR("nats_watch_start: NULL kv handle\n");
-		return -1;
-	}
-
-	if (num_patterns <= 0 || !patterns) {
-		LM_ERR("nats_watch_start: no patterns specified\n");
-		return -1;
-	}
-
-	/* Store patterns for the watcher thread.  The strings are owned by
-	 * OpenSIPS's module parameter parser and persist for the process
-	 * lifetime, so we only need to copy the pointer array.
-	 *
-	 * pkg memory is correct here: the array is allocated on this (the
-	 * rank-1 worker's main) thread before pthread_create() below, read
-	 * but never freed by the watcher thread, and released only after
-	 * pthread_join() in nats_watch_stop() -- so it is never touched
-	 * concurrently and OpenSIPS's pkg accounting applies. */
-	_watch_patterns = pkg_malloc(num_patterns * sizeof(char *));
-	if (!_watch_patterns) {
-		LM_ERR("no more pkg memory for watch patterns array\n");
-		return -1;
-	}
-	for (i = 0; i < num_patterns; i++)
-		_watch_patterns[i] = patterns[i];
-	_num_patterns = num_patterns;
-
-	atomic_store(&_watcher_running, 1);
-	if (pthread_create(&_watcher_tid, NULL, _watcher_thread_fn, NULL) != 0) {
-		LM_ERR("failed to create watcher thread\n");
-		atomic_store(&_watcher_running, 0);
-		pkg_free(_watch_patterns);
-		_watch_patterns = NULL;
-		_num_patterns   = 0;
-		return -1;
-	}
-
-	if (num_patterns > 0) {
-		LM_INFO("NATS KV watcher started (%d pattern(s)):\n", num_patterns);
-		for (i = 0; i < num_patterns; i++)
-			LM_INFO("  kv_watch[%d]: %s\n", i, patterns[i]);
-	} else {
-		LM_INFO("NATS KV watcher started (all keys)\n");
-	}
-	return 0;
-}
-
-/**
- * nats_watch_stop() -- Stop the KV watcher thread and clean up.
- *
- * Called from mod_destroy() during OpenSIPS shutdown.  Clears the
- * running flag, stops the kvWatcher (which unblocks nats_dl.kvWatcher_Next()),
- * then joins the thread.  After the thread exits, the kvWatcher handle
- * is destroyed.
- *
- * Safe to call multiple times or when the watcher was never started.
- */
-void nats_watch_stop(void)
-{
-	kvWatcher *w_claim;
-
-	if (!atomic_load(&_watcher_running))
-		return;
-
-	atomic_store(&_watcher_running, 0);
-
-	/* Claim the watcher handle with a single atomic_exchange.  The
-	 * watcher thread's per-iteration teardown does the same; only the
-	 * thread that swaps the non-NULL value to NULL owns Stop/Destroy,
-	 * so an overlapping shutdown can never double-free.  Stopping the
-	 * watcher we claimed unblocks nats_dl.kvWatcher_Next() so the
-	 * thread can observe _watcher_running == 0 and exit. */
-	w_claim = atomic_exchange(&_watcher, NULL);
-	if (w_claim)
-		nats_dl.kvWatcher_Stop(w_claim);
-
-	pthread_join(_watcher_tid, NULL);
-
-	/* Thread has exited; safe to destroy the handle we claimed. */
-	if (w_claim)
-		nats_dl.kvWatcher_Destroy(w_claim);
-
-	if (_watch_patterns) {
-		pkg_free(_watch_patterns);
-		_watch_patterns = NULL;
-		_num_patterns = 0;
-	}
-}
-
-/* ------------------------------------------------------------------ */
-/*  Dedicated-process watcher entry                          */
 /* ------------------------------------------------------------------ */
 
 /* The kv_watch_list / kv_watch_count globals are owned by
@@ -806,14 +645,16 @@ void nats_watch_stop(void)
  * nats_watcher_proc_main() -- dedicated-process watcher entry point.
  *
  * Forked by the OpenSIPS core via the proc_export_t entry registered
- * in cachedb_nats.c when both `dedicated_watcher_proc` and
- * `enable_search_index` are 1.  The function never returns.
+ * in cachedb_nats.c when `enable_search_index` is 1 and at least one
+ * kv_watch pattern is configured.  The function never returns.
+ * This is the ONLY watcher mode: the process runs a single thread
+ * against the connection pool, so it has none of the pool races the
+ * removed in-worker pthread mode had.
  *
- * The body mirrors nats_watch_start() / _watcher_thread_fn() but
- * runs in its own process: it calls nats_pool_get() to bring up the
+ * It calls nats_pool_get() to bring up the
  * per-process NATS connection (nats_pool_register having seeded the
  * shared config in mod_init pre-fork), validates the KV bucket, and
- * enters the same self-healing loop.  Index updates are
+ * enters the self-healing loop.  Index updates are
  * written to the SHM-backed g_idx that every SIP worker also maps;
  * the per-shard locks added in commit 43ceca02b serialise the
  * cross-process writes safely without any new synchronisation.

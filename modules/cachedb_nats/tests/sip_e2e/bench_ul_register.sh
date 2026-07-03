@@ -49,7 +49,6 @@ INDEX_BUCKETS="${INDEX_BUCKETS:-4096}"
 # OpenSIPS forks one extra child that owns the watcher loop and frees
 # rank 1 from the watcher pthread.  Default 0 keeps the legacy
 # rank-1 pthread topology.
-DEDICATED_WATCHER="${DEDICATED_WATCHER:-0}"
 
 WORKDIR="$(mktemp -d -t cachedb-nats-bench.XXXXXX)"
 OUT="${OUT:-$WORKDIR}"
@@ -95,7 +94,6 @@ render_cfg() {
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" -e "s|@@INSTANCE@@|${inst}|g" \
         -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX}|g" \
         -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS}|g" \
-        -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER}|g" \
         -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
         -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
         -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
@@ -291,5 +289,4 @@ echo "  KV stream messages:    ${MSGS:-?}"
 echo "  opensips A RSS (KB):   ${A_RSS_KB}"
 echo "  ENABLE_INDEX:          ${ENABLE_INDEX}"
 echo "  index_buckets:         ${INDEX_BUCKETS}"
-echo "  DEDICATED_WATCHER:     ${DEDICATED_WATCHER}"
 echo "=========================================="

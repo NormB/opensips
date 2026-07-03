@@ -31,16 +31,15 @@
 #
 # Usage:
 #   ./bench_matrix.sh [--out DIR] [--trials N] [--scales 'AOR1 AOR2 ...'] \
-#                     [--modes  'rank1 ded off']                          \
+#                     [--modes  'idx off']                          \
 #                     [--rps RPS]      [--workers W]      [--timeout-ms MS]
 #
-# Defaults: 3 trials, scales "10000 30000", modes "rank1 ded off",
+# Defaults: 3 trials, scales "10000 30000", modes "idx off",
 #           RPS 1000, 16 workers, 1 s timeout.
 #
 # Each mode is mapped to a knob preset:
-#   rank1 -> ENABLE_INDEX=1 DEDICATED_WATCHER=0
-#   ded   -> ENABLE_INDEX=1 DEDICATED_WATCHER=1
-#   off   -> ENABLE_INDEX=0 DEDICATED_WATCHER=0
+#   idx -> ENABLE_INDEX=1 (watcher in its dedicated process, the only mode)
+#   off -> ENABLE_INDEX=0 (no index, no watcher)
 #
 # Output:
 #   $OUT/runs.csv   -- one row per run: scale,mode,trial,elapsed_s,rps,
@@ -57,7 +56,7 @@ TREE_ROOT="$(cd "${HERE}/../../../.." && pwd)"
 OUT="${OUT:-/tmp/bench-matrix-$(date +%Y%m%d-%H%M%S)}"
 TRIALS=3
 SCALES="10000 30000"
-MODES="rank1 ded off"
+MODES="idx off"
 RPS=1000
 WORKERS=16
 TIMEOUT_MS=1000
@@ -100,9 +99,8 @@ echo "scale,mode,trial,elapsed_s,rps,p50_us,p95_us,p99_us,max_us,rss_kb,err" \
 
 mode_env() {
     case "$1" in
-        rank1) echo "ENABLE_INDEX=1 DEDICATED_WATCHER=0" ;;
-        ded)   echo "ENABLE_INDEX=1 DEDICATED_WATCHER=1" ;;
-        off)   echo "ENABLE_INDEX=0 DEDICATED_WATCHER=0" ;;
+        idx) echo "ENABLE_INDEX=1" ;;
+        off) echo "ENABLE_INDEX=0" ;;
         *) echo "bench_matrix: unknown mode: $1" >&2; exit 2 ;;
     esac
 }

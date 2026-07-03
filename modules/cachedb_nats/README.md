@@ -102,18 +102,17 @@ cache_query("nats", "domain", "example.com", $var(results));
 
 The index is:
 - Built at startup from existing KV data
-- Updated in real-time by the KV watcher thread
+- Updated in real-time by the dedicated KV-watcher process
 - Rebuilt automatically on NATS reconnection
-- Thread-safe (pthread mutex protects the index; heap `malloc`/`free` used instead of
-  `pkg_malloc` because the watcher pthread and SIP worker share the same process and
-  `pkg_malloc` is not thread-safe)
+- Safe across processes (the SHM-backed index is protected by per-shard locks;
+  the watcher process writes, SIP workers read)
 
 ## KV Watcher
 
-A single watcher pthread is started in the rank-1 SIP worker (or, when
-`dedicated_watcher_proc=1`, in a forked OpenSIPS child process — see
-`PERF_NOTES.md` §"Dedicated KV-watcher process"). The watcher subscribes to
-the KV bucket and on each put/delete/purge event:
+A single watcher runs in its own forked OpenSIPS child process (declared via
+`proc_export_t`, forked when `enable_search_index=1` and at least one `kv_watch`
+pattern is configured — see `PERF_NOTES.md` §"Dedicated KV-watcher process").
+The watcher subscribes to the KV bucket and on each put/delete/purge event:
 
 1. Updates the SHM-backed search index that every worker reads
 2. Raises an `E_NATS_KV_CHANGE` EVI event (if compiled with `HAVE_EVI`)

@@ -189,30 +189,10 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 			search index that <function>cachedb_nats</function>
 			maintains is therefore <emphasis>optional weight</emphasis>
 			for any deployment that uses the module purely as a
-			usrloc backend.  Three operator knobs control the index
+			usrloc backend.  Two operator knobs control the index
 			behaviour:
 		</para>
 		<variablelist>
-			<varlistentry>
-				<term><varname>dedicated_watcher_proc</varname>
-				(int, default 0)</term>
-				<listitem><para>
-					When set to <literal>1</literal> (and the
-					index is on), the module declares a
-					<varname>proc_export_t</varname> entry and the
-					OpenSIPS core forks a dedicated child process
-					that owns the KV watcher loop.  Rank&apos;s 1
-					SIP worker no longer runs the watcher pthread,
-					so the steady-state watcher event rate
-					(~1 700 events/s at 100k AoRs, ~17 % of one
-					core) stops competing with SIP request
-					handling on rank 1.  Ignored when
-					<varname>enable_search_index = 0</varname>
-					(no index, no watcher).  Only worth flipping
-					when the deployment keeps the index on at
-					&ge; 100k AoRs and rank-1 latency matters.
-				</para></listitem>
-			</varlistentry>
 			<varlistentry>
 				<term><varname>enable_search_index</varname>
 				(int, default 1)</term>
@@ -284,9 +264,9 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 				<emphasis>Mixed workloads (script-driven non-PK
 				queries on the same bucket):</emphasis> leave the
 				index on and tune <varname>index_buckets</varname>.
-				At &ge; 100k AoRs also set
-				<varname>dedicated_watcher_proc = 1</varname> to
-				move the watcher out of the rank-1 SIP worker.
+				The KV watcher always runs in its own dedicated
+				child process, so it never competes with SIP
+				request handling in the workers.
 			</para></listitem>
 			<listitem><para>
 				<emphasis>1MM endpoints:</emphasis> the index off
@@ -294,9 +274,8 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 				instance); the watcher would otherwise saturate
 				one core at the steady-state event rate.  If
 				the index is still kept on for mixed-workload
-				reasons,
-				<varname>dedicated_watcher_proc = 1</varname>
-				is required.
+				reasons, budget one core for the dedicated
+				watcher process.
 			</para></listitem>
 			<listitem><para>
 				<emphasis>10MM endpoints:</emphasis> the index

@@ -280,25 +280,17 @@ int   nats_max_value_size = 1048576;
  * 1MM / 10MM endpoint scales. */
 int   nats_enable_search_index = 1;
 
-/* dedicated_watcher_proc: move the KV watcher out of the rank-1 SIP worker.
- *
- * Default 0 preserves legacy behaviour: the watcher runs as a
- * pthread inside the rank-1 SIP worker and shares its CPU with
- * SIP request handling.  Set to 1 to fork a dedicated OpenSIPS
- * child process (declared via proc_export_t) that owns the
- * watcher loop and writes to the SHM-backed JSON-FTS index.
- *
- * Only meaningful when enable_search_index=1.  When the index is
- * disabled there is no watcher to relocate, so the dedicated
- * process is neither declared nor forked.
- *
- * The benefit is isolation: at >=100k AoRs the steady-state
- * watcher event rate (~1 700 events/s, ~17 % of one core) no
- * longer competes with SIP routing on rank 1.  At lower scales
- * the rank-1 pthread is fine and the dedicated process is just
- * extra address-space and a duplicate NATS connection.  Doc
- * SCALING.md "Watcher CPU at scale" has the threshold table. */
-int   nats_dedicated_watcher_proc = 0;
+/* The KV watcher always runs as a dedicated OpenSIPS child process
+ * (proc_export_t, forked when enable_search_index=1 and at least one
+ * kv_watch pattern is configured).  The former in-worker pthread mode
+ * (dedicated_watcher_proc=0) was removed: a pthread inside the rank-1
+ * SIP worker called nats_pool_get_kv() concurrently with the worker's
+ * main thread, but the pool's cached KV/JS handles are managed
+ * process-single-threaded — after a reconnect one thread could destroy
+ * a cached handle while the other was still using it (use-after-free
+ * under broker flap, in what used to be the default mode).  The
+ * dedicated process runs exactly one thread against the pool and has
+ * none of these races. */
 
 /* lib/nats connection-pool tuning.  These three modparams previously
  * appeared in the admin XML but were never actually exported -- the
@@ -385,7 +377,6 @@ static const param_export_t params[] = {
 	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
 	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
-	{"dedicated_watcher_proc", INT_PARAM,          &nats_dedicated_watcher_proc},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{"reconnect_wait",      INT_PARAM,             &nats_cdb_reconnect_wait_ms},
 	{"max_reconnect",       INT_PARAM,             &nats_cdb_max_reconnect},
@@ -521,11 +512,11 @@ static const dep_export_t deps = {
 	},
 };
 
-/* dedicated KV watcher process.
+/* dedicated KV watcher process — the ONLY watcher mode.
  *
  * Declared unconditionally so the symbol resolves at link time, but
  * only attached to module_exports.procs at runtime in mod_init when
- * BOTH enable_search_index=1 AND dedicated_watcher_proc=1.  The
+ * enable_search_index=1 and at least one kv_watch pattern is set.  The
  * core's start_module_procs() walks exports.procs after init_modules
  * returns, so the late binding is safe.
  *
@@ -824,36 +815,25 @@ static int mod_init(void)
 		LM_INFO("cachedb_nats: search index DISABLED "
 			"(enable_search_index=0); query/update accept "
 			"PK-only filters\n");
-		if (nats_dedicated_watcher_proc) {
-			LM_INFO("cachedb_nats: dedicated_watcher_proc=1 "
-				"is meaningless when enable_search_index=0; "
-				"the dedicated process will NOT be forked\n");
-		}
 	}
 
-	/* attach the dedicated watcher process to the module
-	 * exports only when both knobs are on AND at least one
-	 * kv_watch pattern was configured.  start_module_procs()
-	 * (in main_loop) reads exports.procs AFTER init_modules
-	 * returns, so this late assignment is safe and is the cleanest
-	 * way to keep the proc declaration runtime-conditional without
-	 * forking when it isn't wanted.
-	 *
-	 * Mirrors the rank-1 child_init gate (kv_watch_count > 0): if
-	 * the operator hasn't configured any kv_watch patterns there is
-	 * nothing for the watcher to do, so we don't fork the dedicated
-	 * process either. */
-	if (nats_enable_search_index && nats_dedicated_watcher_proc) {
-		if (kv_watch_count > 0) {
-			exports.procs = nats_watcher_procs;
-			LM_INFO("cachedb_nats: dedicated KV watcher process "
-				"ENABLED (rank-1 SIP worker will skip the "
-				"watcher pthread)\n");
-		} else {
-			LM_INFO("cachedb_nats: dedicated_watcher_proc=1 but "
-				"no kv_watch pattern configured; dedicated "
-				"process NOT forked\n");
-		}
+	/* attach the dedicated watcher process to the module exports when
+	 * the index is enabled AND at least one kv_watch pattern was
+	 * configured.  This is the ONLY watcher mode: the process runs a
+	 * single thread against the connection pool, so it has none of the
+	 * pool races the removed in-worker pthread mode had.
+	 * start_module_procs() (in main_loop) reads exports.procs AFTER
+	 * init_modules returns, so this late assignment is safe and is the
+	 * cleanest way to keep the proc declaration runtime-conditional
+	 * without forking when it isn't wanted. */
+	if (nats_enable_search_index && kv_watch_count > 0) {
+		exports.procs = nats_watcher_procs;
+		LM_INFO("cachedb_nats: dedicated KV watcher process "
+			"ENABLED (%d kv_watch pattern(s))\n", kv_watch_count);
+	} else if (nats_enable_search_index) {
+		LM_INFO("cachedb_nats: no kv_watch pattern configured; "
+			"KV watcher process NOT forked (the index will only "
+			"track changes via the periodic resync, if enabled)\n");
 	}
 
 	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): register the periodic
@@ -890,10 +870,9 @@ static int mod_init(void)
 			"lost on update (#1994/#6959)\n");
 	}
 
-	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once).
-	 * This avoids the "previously published" warning that occurs when
-	 * both startup_route's subscribe_event() and child_init's
-	 * nats_watch_start() each try to register the same event. */
+	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once)
+	 * so it exists before startup_route's subscribe_event() and before
+	 * the dedicated watcher process forks. */
 #ifdef HAVE_EVI
 	{
 		extern event_id_t evi_kv_change_id;
@@ -996,43 +975,13 @@ static int child_init(int rank)
 			"queries may return empty results until index is rebuilt\n");
 	}
 
-	/* Start the self-healing KV watcher thread on rank 1 only.
-	 * Only the first SIP worker runs the watcher to minimize the
-	 * JetStream ordered-consumer count -- each watcher creates one
-	 * ordered consumer in nats.c, and keeping that count low is a
-	 * cluster-side resource optimization.
-	 *
-	 * The HTTPD/MI process (PROC_MODULE) doesn't need a watcher -- it
-	 * only handles MI commands, not SIP routing with index lookups.
-	 * Other SIP workers rely on the initial index build above; live
-	 * updates from the watcher on rank 1 are a best-effort bonus.
-	 *
-	 * When dedicated_watcher_proc=1 the watcher runs in its
-	 * own forked child (declared via exports.procs), so rank 1 must
-	 * NOT also spawn the pthread -- otherwise we'd have two watchers
-	 * racing each other on the same SHM index. */
-	if (nats_enable_search_index && !nats_dedicated_watcher_proc &&
-			rank == 1 && kv_watch_count > 0) {
-		const char **patterns;
-		struct kv_watch_entry *e;
-		int i = 0;
-
-		/* convert linked list to array for nats_dl.kvStore_WatchMulti() */
-		patterns = pkg_malloc((kv_watch_count + 1) * sizeof(char *));
-		if (!patterns) {
-			LM_ERR("no more pkg memory for watch patterns\n");
-			return -1;
-		}
-		for (e = kv_watch_list; e; e = e->next)
-			patterns[i++] = e->pattern;
-		patterns[i] = NULL;
-
-		if (nats_watch_start(kv, patterns, kv_watch_count) < 0)
-			LM_WARN("KV watcher not started; index will not "
-				"track live changes\n");
-
-		pkg_free(patterns);
-	}
+	/* Live index updates come from the dedicated watcher process
+	 * (exports.procs, attached in mod_init when enable_search_index=1
+	 * and kv_watch patterns exist).  The former rank-1 in-worker
+	 * watcher pthread was removed: it shared the SIP worker's
+	 * per-process connection pool from a second thread, racing the
+	 * pool's single-threaded KV-handle cache (use-after-free under
+	 * broker flap). */
 
 	/* open cachedb connections for each configured URL */
 	for (it = nats_cdb_urls; it; it = it->next) {
@@ -1068,16 +1017,9 @@ static int child_init(int rank)
 static void destroy(void)
 {
 	LM_NOTICE("destroying module cachedb_nats ...\n");
-	/* nats_watch_stop() flips the pthread-running flag and
-	 * pthread_join()s the watcher thread.  In the dedicated-process
-	 * mode the watcher pthread lives in another process entirely,
-	 * so calling it from main would block on a tid that this
-	 * process never spawned.  The OpenSIPS core delivers SIGTERM to
-	 * every child including the dedicated watcher proc, which
-	 * terminates it cleanly via the kernel; we have nothing to do
-	 * here. */
-	if (!nats_dedicated_watcher_proc)
-		nats_watch_stop();
+	/* The KV watcher lives in its own forked child process; the
+	 * OpenSIPS core delivers SIGTERM to every child including it,
+	 * which terminates it cleanly — nothing to stop from here. */
 	nats_json_index_destroy();
 	/* Tear down the doc-key intern table after the index, since
 	 * _free_entry calls nats_intern_release on every key. */

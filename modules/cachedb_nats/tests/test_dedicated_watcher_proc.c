@@ -3,27 +3,22 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Dedicated-watcher wiring test: cachedb_nats can move the KV watcher out of
- * the rank-1 SIP worker (where it lives as a pthread) into a
- * dedicated OpenSIPS child process.
+ * Dedicated-watcher wiring test: the KV watcher runs ONLY as a
+ * dedicated OpenSIPS child process (proc_export_t), never as a pthread
+ * inside the rank-1 SIP worker.
  *
- *   dedicated_watcher_proc (int, default 0)
- *     When 1 (and enable_search_index is also 1), the module
- *     declares a proc_export_t that the OpenSIPS core forks at
- *     startup, and the rank-1 SIP worker skips the
- *     pthread_create() in nats_watch_start().  The dedicated
- *     process owns the watcher's NATS connection, the kvWatcher,
- *     and the SHM-index update path.
- *
- *   When 0 (default): legacy rank-1 pthread behaviour, unchanged.
- *
- *   When enable_search_index=0: dedicated process is NOT declared
- *     and NOT forked, regardless of dedicated_watcher_proc -- the
- *     watcher has nothing to update.
+ * The deleted in-worker pthread mode was a default-on use-after-free:
+ * the watcher pthread called nats_pool_get_kv() concurrently with the
+ * worker's main thread, but the pool's _kv_cache[]/_kv_stale/_js state
+ * is written as process-single-threaded — after any reconnect one
+ * thread could kvStore_Destroy() a cached handle while the other was
+ * inside kvStore_Get() on it.  The dedicated-process variant has none
+ * of these races (its process runs exactly one thread against the
+ * pool), so it is now the only mode and the dedicated_watcher_proc
+ * modparam is gone.
  *
  * This test is structural -- it greps the production source for the
- * required declarations, the proc_export_t entry, the watcher_proc
- * entry function, and the gate sites in mod_init / nats_watch_start.
+ * single-mode wiring and for the ABSENCE of the pthread path.
  */
 
 #include <stdio.h>
@@ -51,13 +46,13 @@ static int file_contains(const char *path, const char *needle)
 
 int main(void)
 {
-	/* Modparam declaration + default storage in cachedb_nats.c */
-	ASSERT(file_contains("../cachedb_nats.c",
+	/* The two-mode knob is GONE: no modparam, no global. */
+	ASSERT(!file_contains("../cachedb_nats.c",
 		"\"dedicated_watcher_proc\""),
-		"dedicated_watcher_proc modparam declared");
-	ASSERT(file_contains("../cachedb_nats.c",
-		"int   nats_dedicated_watcher_proc = 0"),
-		"nats_dedicated_watcher_proc global defined with default 0");
+		"dedicated_watcher_proc modparam removed");
+	ASSERT(!file_contains("../cachedb_nats.c",
+		"nats_dedicated_watcher_proc"),
+		"nats_dedicated_watcher_proc global removed");
 
 	/* proc_export_t entry pointing at the dedicated proc main */
 	ASSERT(file_contains("../cachedb_nats.c",
@@ -70,13 +65,25 @@ int main(void)
 		"nats_watcher_proc_main"),
 		"dedicated proc main referenced from cachedb_nats.c");
 
-	/* mod_init wires exports.procs only when both knobs are on */
+	/* mod_init wires exports.procs whenever the index is on and there
+	 * is something to watch — no second knob. */
 	ASSERT(file_contains("../cachedb_nats.c",
-		"if (nats_enable_search_index && nats_dedicated_watcher_proc)"),
-		"mod_init gates exports.procs on both flags");
+		"if (nats_enable_search_index && kv_watch_count > 0)"),
+		"mod_init gates exports.procs on index + kv_watch only");
 	ASSERT(file_contains("../cachedb_nats.c",
 		"exports.procs ="),
 		"mod_init assigns exports.procs at runtime");
+
+	/* The in-worker pthread path is GONE. */
+	ASSERT(!file_contains("../cachedb_nats.c",
+		"nats_watch_start"),
+		"child_init no longer spawns the watcher pthread");
+	ASSERT(!file_contains("../cachedb_nats_watch.c",
+		"pthread_create"),
+		"cachedb_nats_watch.c contains no pthread_create");
+	ASSERT(!file_contains("../cachedb_nats.c",
+		"nats_watch_stop"),
+		"destroy() no longer joins a watcher pthread");
 
 	/* The dedicated proc main lives in cachedb_nats_watch.c */
 	ASSERT(file_contains("../cachedb_nats_watch.c",
@@ -104,19 +111,6 @@ int main(void)
 		"getppid() == 1"),
 		"watcher polls getppid in loop as belt-and-suspenders "
 		"backstop for the rare case where PDEATHSIG didn't arm");
-
-	/* The rank-1 pthread spawn must be skipped when the dedicated
-	 * process is in use -- otherwise we'd run the watcher twice. */
-	ASSERT(file_contains("../cachedb_nats.c",
-		"!nats_dedicated_watcher_proc"),
-		"child_init skips rank-1 pthread when dedicated proc on");
-
-	/* destroy() must skip nats_watch_stop() when the dedicated
-	 * proc owns the watcher -- the pthread state is in another
-	 * process and pthread_join() from main would deadlock. */
-	ASSERT(file_contains("../cachedb_nats.c",
-		"if (!nats_dedicated_watcher_proc)"),
-		"destroy() skips watch_stop in dedicated mode");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

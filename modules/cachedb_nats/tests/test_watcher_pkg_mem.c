@@ -93,13 +93,11 @@ int main(void)
 {
 	const char *W = "../cachedb_nats_watch.c";
 
-	/* (1) pkg memory for the patterns array, both code paths. */
-	ASSERT(file_contains(W, "pkg_malloc(num_patterns * sizeof(char *))"),
-		"nats_watch_start uses pkg_malloc for _watch_patterns");
+	/* (1) pkg memory for the patterns array (dedicated proc, the only
+	 * watcher mode — the rank-1 pthread path was removed with the
+	 * dedicated_watcher_proc modparam, P0.2). */
 	ASSERT(file_contains(W, "pkg_malloc((kv_watch_count + 1) * sizeof(char *))"),
 		"nats_watcher_proc_main uses pkg_malloc for patterns");
-	ASSERT(file_contains(W, "pkg_free(_watch_patterns)"),
-		"_watch_patterns released with pkg_free");
 
 	/* No raw libc malloc/free may survive in the watcher TU. */
 	ASSERT(count_raw_calls(W, "malloc") == 0,
