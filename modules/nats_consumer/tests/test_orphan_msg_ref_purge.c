@@ -123,11 +123,8 @@ natsConnection *nats_pool_get(void) { return NULL; }
 jsCtx *nats_pool_get_js(void) { return NULL; }
 int nats_pool_get_reconnect_epoch(void) { return 0; }
 
-int nats_ack_ipc_fd(void) { return -1; }
-int nats_ack_ipc_drain(void (*cb)(const nats_ack_ipc_msg_t *msg, void *user),
-	void *user)
-{ (void)cb; (void)user; return 0; }
-int nats_rpc_ipc_fd(void) { return -1; }
+/* ack/rpc IPC veneers are header inlines over nats_ipcq.c since P1.3;
+ * the real nats_ipcq.c + nats_mpsc.c are linked instead of stubbed. */
 int nats_rpc_consumer_subscribe(void) { return 0; }
 int nats_rpc_consumer_inbox_ready(void) { return 1; }
 int nats_rpc_consumer_drain_ipc(void) { return 0; }

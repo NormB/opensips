@@ -170,7 +170,8 @@ CORE_DEFS := -fPIC -DPIC \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
                     ../nats_msg_ref.c ../nats_sub_config.c \
-                    ../nats_handle_registry.c ../nats_ring.c
+                    ../nats_handle_registry.c ../nats_ring.c \
+                    ../nats_ipcq.c ../nats_mpsc.c
 test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
 

@@ -224,7 +224,7 @@ static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
 typedef struct drain_ack_ctx drain_ack_ctx_t;
 
 static int  pull_one_batch(proc_sub_state_t *ss, int budget_ms);
-static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user);
+static void drain_ack_ipc_cb(const void *elem, void *user);
 static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
 
 /* ── header serialization ────────────────────────────────────── */
@@ -731,8 +731,9 @@ static inline int next_bits_test(const drain_ack_ctx_t *c,
 	return (c->next_bits[handle_idx / 64] >> (handle_idx % 64)) & 1;
 }
 
-static void drain_ack_ipc_cb(const nats_ack_ipc_msg_t *m, void *user)
+static void drain_ack_ipc_cb(const void *elem, void *user)
 {
+	const nats_ack_ipc_msg_t *m = (const nats_ack_ipc_msg_t *)elem;
 	natsMsg    *nmsg;
 	natsStatus  s;
 	drain_ack_ctx_t *ctx = (drain_ack_ctx_t *)user;

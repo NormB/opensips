@@ -314,8 +314,9 @@ int nats_rpc_consumer_inbox_ready(void)
  * X-Request-Id auto-stage and any nats_hdr_set() calls reach the
  * remote responder verbatim.
  */
-static void publish_cb(const nats_rpc_ipc_msg_t *msg, void *user)
+static void publish_cb(const void *elem, void *user)
 {
+	const nats_rpc_ipc_msg_t *msg = (const nats_rpc_ipc_msg_t *)elem;
 	nats_rpc_slot_t *s;
 	natsMsg         *out = NULL;
 	natsStatus       st;

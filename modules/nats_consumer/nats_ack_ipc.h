@@ -86,43 +86,36 @@ typedef struct nats_ack_ipc_slot {
 	uint8_t  _pad[7];
 } nats_ack_ipc_slot_t;
 
-/* Allocate the SHM-backed lock-free MPSC queue and its eventfd.
- * Called from mod_init (pre-fork) so the eventfd is inherited by
- * every child process.
- * Returns 0 on success, -1 on SHM exhaustion / eventfd failure. */
-int nats_ack_ipc_init(void);
+/* Typed veneers over the ONE generic queue wrapper (nats_ipcq.c, P1.3).
+ * The callback receives a copied-out element, so a long-running
+ * natsMsg_Ack/Nak network trip never holds a queue slot against
+ * concurrent producers. */
+#include "nats_ipcq.h"
 
-/* Tear down the queue.  Called from mod_destroy before registry
- * teardown.  Closes the eventfd and frees the SHM backing.  Safe to
- * call even if init failed; no-op on already-destroyed. */
-void nats_ack_ipc_destroy(void);
-
-/* Worker-side enqueue.  Returns 0 on success, -1 on full queue.
- * Signals the eventfd on the empty -> non-empty edge. */
-int nats_ack_ipc_enqueue(const nats_ack_ipc_msg_t *msg);
-
-/* Consumer-process side: drain everything visible right now,
- * invoking `cb` for each dequeued message.  `user` is passed through
- * to the callback.  Returns the number of messages drained.
- *
- * The callback is responsible for converting the token into a
- * natsMsg* and calling the appropriate natsMsg_Ack / Nak / etc.
- * The drainer does not read the eventfd -- callers that blocked on
- * it must drain the eventfd counter separately. */
-int nats_ack_ipc_drain(
-		void (*cb)(const nats_ack_ipc_msg_t *msg, void *user),
-		void *user);
-
-/* Return the eventfd for the consumer process to include in its
- * select() / reactor loop.  Ownership stays with the module; callers
- * must not close(). */
-int nats_ack_ipc_fd(void);
-
-/* Advisory snapshots of queue state.  Atomic, non-blocking, OK from
- * any process.  Zero when the queue is not initialized. */
-uint64_t nats_ack_ipc_enqueued_total(void);
-uint64_t nats_ack_ipc_drained_total(void);
-uint32_t nats_ack_ipc_depth(void);
-uint64_t nats_ack_ipc_dropped_total(void);
+static inline int nats_ack_ipc_init(void)
+{
+	return nats_ipcq_init(&nats_ack_ipcq, NATS_ACK_IPC_QUEUE_DEPTH,
+		(uint32_t)sizeof(nats_ack_ipc_msg_t));
+}
+static inline void nats_ack_ipc_destroy(void)
+{ nats_ipcq_destroy(&nats_ack_ipcq); }
+static inline int nats_ack_ipc_enqueue(const nats_ack_ipc_msg_t *msg)
+{ return nats_ipcq_enqueue(&nats_ack_ipcq, msg); }
+static inline int nats_ack_ipc_drain(
+		void (*cb)(const void *elem, void *user), void *user)
+{
+	return nats_ipcq_drain(&nats_ack_ipcq,
+		(uint32_t)sizeof(nats_ack_ipc_msg_t), cb, user);
+}
+static inline int nats_ack_ipc_fd(void)
+{ return nats_ipcq_fd(&nats_ack_ipcq); }
+static inline uint64_t nats_ack_ipc_enqueued_total(void)
+{ return nats_ipcq_enqueued_total(&nats_ack_ipcq); }
+static inline uint64_t nats_ack_ipc_drained_total(void)
+{ return nats_ipcq_drained_total(&nats_ack_ipcq); }
+static inline uint64_t nats_ack_ipc_dropped_total(void)
+{ return nats_ipcq_dropped_total(&nats_ack_ipcq); }
+static inline uint32_t nats_ack_ipc_depth(void)
+{ return nats_ipcq_depth(&nats_ack_ipcq); }
 
 #endif /* NATS_ACK_IPC_H */
