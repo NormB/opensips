@@ -151,6 +151,11 @@ int reap_orphan_msg_refs(void);
  * use-after-free. */
 void purge_msg_ref_row(uint16_t handle_idx);
 
+/* Walk the registry's retire list and mark retired handles that never
+ * got a subscription (no g_subs entry) as torn down so the reaper can
+ * free them.  Called each consumer-loop tick; exported for unit tests. */
+void mark_orphan_retired_handles(void);
+
 /* ── subscription config / lifecycle (nats_sub_config.c) ──────── */
 
 /* O(1) lookup of the owning subscription state by handle index. */

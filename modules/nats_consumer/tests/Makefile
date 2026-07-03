@@ -64,7 +64,7 @@ all: test_registry test_parser test_ring test_ack_token test_persist \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail test_rpc_reply_pin
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail test_orphan_msg_ref_purge test_rpc_reply_pin
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -162,6 +162,24 @@ test_registry_ring_alloc_order: $(RINGORDER_SRCS) test_shim.h ../nats_handle_reg
 RETIREDNOSUB_SRCS := test_retired_no_sub_reap.c $(SHIM) ../nats_handle_registry.c
 test_retired_no_sub_reap: $(RETIREDNOSUB_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(RETIREDNOSUB_SRCS) $(LDFLAGS)
+
+# P0.8: the orphan-retired pass must purge the msg-ref row a failed first
+# subscribe presized.  Links the REAL production TUs (no TEST_SHIM); the
+# core seams (dprint, pkg/shm allocators, pool, IPC fds) are stubbed in
+# the test itself, so CORE_DEFS mirrors the module build's flag set.
+CORE_DEFS := -fPIC -DPIC \
+             -DNAME='"opensips"' -DVERSION='"test"' -DARCH='"x86_64"' \
+             -DOS='"linux"' -DCOMPILER='"cc"' -DCFG_DIR='"/etc/opensips/"' \
+             -DVERSIONTYPE='"git"' -DTHISREVISION='"test"' \
+             -D__CPU_x86_64 -D__OS_linux -DPKG_MALLOC -DSHM_MMAP \
+             -DF_MALLOC -DQ_MALLOC -DHP_MALLOC -DF_PARALLEL_MALLOC \
+             -DFAST_LOCK -DADAPTIVE_WAIT -DADAPTIVE_WAIT_LOOPS=1024 \
+             -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
+ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
+                    ../nats_msg_ref.c ../nats_sub_config.c \
+                    ../nats_handle_registry.c ../nats_ring.c
+test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
+	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
 
 # Source-pattern: proc-sub state is matched by handle identity (index /
 # h_ref), not id string, so unbind+rebind of one id can't wedge delivery.
@@ -338,6 +356,7 @@ check: all
 	./test_rpc_subject_validation
 	./test_registry_index_recycle
 	./test_registry_ring_alloc_order
+	./test_orphan_msg_ref_purge
 	./test_ring_push_bounded_spin
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap

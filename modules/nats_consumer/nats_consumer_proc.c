@@ -978,6 +978,14 @@ static int mark_orphan_retired_cb(nats_handle_t *h, void *user)
 	if (h->index < NATS_REGISTRY_MAX_HANDLES &&
 	    g_subs_by_idx[h->index] != NULL)
 		return 0;
+	/* A failed first subscribe presizes the msg-ref row BEFORE the
+	 * subscribe attempt (presize_msg_ref_row), and with no g_subs entry
+	 * no subscription-teardown path ever purges it — the slot buffer
+	 * (up to ~1.5 MB) would leak for the process lifetime and a later
+	 * handle recycling this index would inherit the stale row.  Purge
+	 * it here; no-op if no row was ever presized. */
+	if (h->index < NATS_REGISTRY_MAX_HANDLES)
+		purge_msg_ref_row(h->index);
 	__atomic_store_n(&h->sub_torn_down, 1, __ATOMIC_SEQ_CST);
 	LM_INFO("nats_consumer_proc: marking never-subscribed retired handle "
 		"id='%.*s' torn down so it can be reaped\n",
@@ -985,7 +993,7 @@ static int mark_orphan_retired_cb(nats_handle_t *h, void *user)
 	return 0;
 }
 
-static void mark_orphan_retired_handles(void)
+void mark_orphan_retired_handles(void)
 {
 	nats_registry_foreach_retired(mark_orphan_retired_cb, NULL);
 }

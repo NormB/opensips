@@ -57,3 +57,4 @@ test_orphan_ttl_ackwait
 test_parser_adversarial
 test_rpc_slot_lifecycle
 test_registry_ring_alloc_order
+test_orphan_msg_ref_purge
