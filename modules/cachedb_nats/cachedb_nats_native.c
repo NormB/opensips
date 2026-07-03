@@ -401,7 +401,12 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	val.flags = PV_VAL_STR;
 	val.rs.s = buf;
 	val.rs.len = pos;
-	pv_set_value(msg, result_var, 0, &val);
+	if (pv_set_value(msg, result_var, 0, &val) < 0) {
+		LM_ERR("failed to set history pvar — script would read a stale "
+			"value as this key's history\n");
+		pkg_free(buf);
+		return -1;
+	}
 	pkg_free(buf);
 
 	LM_DBG("kv_history for '%s': %d entries, %d bytes JSON\n",
@@ -499,7 +504,12 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		val.flags = PV_VAL_STR;
 		val.rs.s = value_copy;
 		val.rs.len = entry_len;
-		pv_set_value(msg, value_var, 0, &val);
+		if (pv_set_value(msg, value_var, 0, &val) < 0) {
+			LM_ERR("failed to set value pvar — script would read a "
+				"stale value as key '%s'\n", key_buf);
+			pkg_free(value_copy);
+			return -1;
+		}
 
 		/* set revision pvar (optional)
 		 *
@@ -533,7 +543,12 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 			val.rs.s = rev_buf;
 			val.rs.len = rev_buf_len;
 			val.ri = (int)rev;
-			pv_set_value(msg, rev_var, 0, &val);
+			if (pv_set_value(msg, rev_var, 0, &val) < 0) {
+				LM_ERR("failed to set revision pvar — a CAS "
+					"update from this rev would be stale\n");
+				pkg_free(value_copy);
+				return -1;
+			}
 		}
 
 		LM_DBG("nats_kv_get '%s' = '%.*s' (rev=%llu)\n",
@@ -565,6 +580,7 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 	char val_buf[NATS_NATIVE_VAL_BUF];
 	char *val_ptr = val_buf;
 	int val_heap = 0;
+	int rc;
 
 	if (!bucket || !key || !value) {
 		LM_ERR("null parameter\n");
@@ -577,6 +593,16 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		return -1;
 	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
+
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race.  Checked BEFORE the value
+	 * copy — a bare return after the copy would
+	 * leak the heap buffer on every call for the whole outage. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 
 	/* null-terminate value, heap-alloc if too large for stack buf */
 	if (value->s && value->len > 0) {
@@ -594,33 +620,29 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		val_ptr[0] = '\0';
 	}
 
-	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
-	 * on a disconnected pool blocks the SIP worker and can hit cnats's
-	 * "free(): invalid pointer" reconnect race. */
-	if (!nats_pool_is_connected()) {
-		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
-		return -1;
-	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
 		LM_ERR("failed to get KV store for bucket '%s'\n",
 			bucket_buf[0] ? bucket_buf : kv_bucket);
-		if (val_heap) pkg_free(val_ptr);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	s = nats_dl.kvStore_PutString(&rev, kv, key_buf, val_ptr);
-	if (val_heap) pkg_free(val_ptr);
-
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_PutString failed for '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	LM_DBG("nats_kv_put '%s' rev=%llu\n", key_buf, (unsigned long long)rev);
-	return 1;
+	rc = 1;
+out:
+	if (val_heap)
+		pkg_free(val_ptr);
+	return rc;
 }
 
 /**
@@ -647,6 +669,7 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	char val_buf[NATS_NATIVE_VAL_BUF];
 	char *val_ptr = val_buf;
 	int val_heap = 0;
+	int rc;
 
 	if (!bucket || !key || !value || !expected_rev) {
 		LM_ERR("null parameter\n");
@@ -659,6 +682,16 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	if (nats_str_to_buf(key, key_buf, sizeof(key_buf)) < 0)
 		return -1;
+
+	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
+	 * on a disconnected pool blocks the SIP worker and can hit cnats's
+	 * "free(): invalid pointer" reconnect race.  Checked BEFORE the value
+	 * copy — a bare return after the copy would
+	 * leak the heap buffer on every call for the whole outage. */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
+		return -1;
+	}
 
 	/* null-terminate value */
 	if (value->s && value->len > 0) {
@@ -676,20 +709,13 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		val_ptr[0] = '\0';
 	}
 
-	/* Fast-fail when the broker is down: nats_pool_get_kv() + kvStore_*
-	 * on a disconnected pool blocks the SIP worker and can hit cnats's
-	 * "free(): invalid pointer" reconnect race. */
-	if (!nats_pool_is_connected()) {
-		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
-		return -1;
-	}
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
 		LM_ERR("failed to get KV store for bucket '%s'\n",
 			bucket_buf[0] ? bucket_buf : kv_bucket);
-		if (val_heap) pkg_free(val_ptr);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	/* Route the CAS through nats_kv_put_row (js_PublishMsg with
@@ -709,23 +735,28 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 			val_ptr, value->len > 0 ? value->len : 0,
 			/*got_entry=*/1, /*value_len=*/1,
 			(uint64_t)*expected_rev, /*msg_ttl_ms=*/0, &new_rev);
-		if (val_heap) pkg_free(val_ptr);
 
 		if (o == TTL_RETRY) {
 			LM_DBG("CAS mismatch for '%s' (expected rev %d)\n",
 				key_buf, *expected_rev);
-			return -2;
+			rc = -2;
+			goto out;
 		}
 		if (o != TTL_DONE) {
 			LM_ERR("kv update CAS failed for '%s' (outcome %d)\n",
 				key_buf, (int)o);
-			return -1;
+			rc = -1;
+			goto out;
 		}
 	}
 
 	LM_DBG("nats_kv_update '%s' rev=%llu (was %d)\n",
 		key_buf, (unsigned long long)new_rev, *expected_rev);
-	return 1;
+	rc = 1;
+out:
+	if (val_heap)
+		pkg_free(val_ptr);
+	return rc;
 }
 
 /**
@@ -863,7 +894,11 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	val.rs.s = rev_buf;
 	val.rs.len = rev_buf_len;
 	val.ri = (int)rev;
-	pv_set_value(msg, rev_var, 0, &val);
+	if (pv_set_value(msg, rev_var, 0, &val) < 0) {
+		LM_ERR("failed to set revision pvar — script would read a "
+			"stale revision for key '%s'\n", key_buf);
+		return -1;
+	}
 
 	LM_DBG("nats_kv_revision '%s' = %llu\n",
 		key_buf, (unsigned long long)rev);

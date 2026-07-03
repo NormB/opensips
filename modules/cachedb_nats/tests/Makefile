@@ -62,6 +62,11 @@ CORE_DEFS := -fPIC -DPIC \
 test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c
 test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
 
+# P0.4: kv_put/kv_update fast-fail must not leak the pkg value copy;
+# kv_get must fail when the pvar write fails.  Links ../cachedb_nats_native.c.
+test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c
+test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
+
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
 # AddressSanitizer trips.  TSan has no UAF detection, so the buggy
