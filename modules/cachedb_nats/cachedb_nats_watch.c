@@ -391,8 +391,8 @@ static void _watcher_loop(void)
 		 * operators may opt out of the O(N) rebuild for hot-reconnect
 		 * topologies and accept a brief window where queries may evict a few
 		 * stale entries before the index converges. */
-		if (index_resync_on_reconnect) {
-			if (nats_json_index_rebuild(kv, fts_json_prefix) < 0)
+		if (cdbn_fts_on && index_resync_on_reconnect) {
+			if (cdbn_fts.rebuild(kv, fts_json_prefix) < 0)
 				LM_WARN("post-reconnect index rebuild failed; "
 					"keeping the prior index (periodic resync "
 					"will retry)\n");
@@ -493,7 +493,7 @@ static void _watcher_loop(void)
 				continue;
 			}
 
-			{
+			if (cdbn_fts_on) {
 				const char *val     = (op == kvOp_Put) ?
 					nats_dl.kvEntry_ValueString(entry) : NULL;
 				int         val_len = (op == kvOp_Put) ?
@@ -506,7 +506,7 @@ static void _watcher_loop(void)
 					 * Non-JSON keys are silently skipped -- no spam. */
 					if (prefix_len == 0 ||
 					    strncmp(key, fts_json_prefix, prefix_len) == 0)
-						nats_json_index_add(key, val, val_len);
+						cdbn_fts.add(key, val, val_len);
 				} else if (act == WATCH_IDX_REMOVE) {
 					/* Delete/Purge OR an empty-value Put (MaxAge
 					 * tombstone, [R1]).  Fast path: remove only the
@@ -516,10 +516,10 @@ static void _watcher_loop(void)
 					 * 0 => the key WAS indexed (revmap had its fv set) and
 					 * is now removed; <0 => no revmap record (a full-walk
 					 * fallback covers a possibly-stale entry). */
-					int before = nats_json_index_count();
-					int was_indexed = (nats_json_index_remove_by_revmap(key) == 0);
+					int before = cdbn_fts.count();
+					int was_indexed = (cdbn_fts.remove_by_revmap(key) == 0);
 					if (!was_indexed)
-						nats_json_index_remove(key);
+						cdbn_fts.remove(key);
 					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
 					 * REV-26] observability: a server-side TTL expiry
 					 * surfaces (cnats <=3.12) as an empty-value Put;
@@ -541,12 +541,12 @@ static void _watcher_loop(void)
 							"%d->%d)\n", key,
 							was_indexed ? "removed (was indexed)"
 							            : "not in revmap; full-walk fallback",
-							before, nats_json_index_count());
+							before, cdbn_fts.count());
 					else
 						LM_DBG("watcher: delete/purge marker on '%s' -> "
 							"index entry %s (num_documents %d->%d)\n", key,
 							was_indexed ? "removed" : "full-walk fallback",
-							before, nats_json_index_count());
+							before, cdbn_fts.count());
 				}
 			}
 

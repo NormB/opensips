@@ -71,7 +71,7 @@
 #include "cachedb_nats_dbase.h"
 #include "../tls_mgm/api.h"
 #include "cachedb_nats_json.h"
-#include "cachedb_nats_intern.h"
+#include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
@@ -162,7 +162,6 @@ static struct tls_mgm_binds tls_api;
  * characters; operators may override via modparam if their bucket
  * convention requires a different separator. */
 char *fts_json_prefix = "json_";
-int   fts_max_results = 100;
 
 /* Compare-and-swap retry count for atomic counter increments
  * (nats_cache_add) and JSON field updates (nats_cache_update).
@@ -208,31 +207,12 @@ int   nats_expired_linger = 0;
  * (and <= the stream's max_msg_size).  <= 0 disables the guard. */
 int   nats_max_value_size = 1048576;
 
-/* Whether to maintain the in-memory JSON-FTS search index.
- *
- * Default 1 (enabled) preserves legacy behaviour: the index is
- * built at startup, kept live by the watcher, and consulted by
- * non-PK query/update filters.  Set to 0 for usrloc-style PK-only
- * workloads where every read/write is a is_pk=1 lookup -- the
- * index is then dead weight (extra SHM, watcher CPU, lock
- * contention on every set/update/delete) and we route the entire
- * query/update path through the PK fast path that already exists
- * in nats_cache_query / nats_cache_update.
- *
- * When 0:
- *   - nats_json_index_init / index_build / watcher start are
- *     skipped at module init.
- *   - nats_json_index_add / remove / remove_fields become no-ops
- *     on the hot path.
- *   - nats_cache_query rejects any non-PK filter with -1 (the
- *     PK fast path already handles is_pk=1 without touching
- *     the index).
- *   - nats_cache_update likewise rejects non-PK filters.
- *
- * For the canonical usrloc-as-store deployment this is the
- * recommended setting; the design-repo SCALING.md covers the rationale at
- * 1MM / 10MM endpoint scales. */
-int   nats_enable_search_index = 1;
+/* Optional FTS/search-index module binds (P1.2 split): loading
+ * cachedb_nats_fts IS the enable switch (replaces the former
+ * enable_search_index modparam).  All hooks NULL / cdbn_fts_on == 0
+ * when the module is absent — PK-only operation. */
+cdbn_fts_api_t cdbn_fts;
+int cdbn_fts_on = 0;
 
 /* The KV watcher always runs as a dedicated OpenSIPS child process
  * (proc_export_t, forked when enable_search_index=1 and at least one
@@ -316,14 +296,11 @@ static const param_export_t params[] = {
 	      (void *)nats_pool_drain_timeout_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
-	{"fts_max_results", INT_PARAM,               &fts_max_results},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
 	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
 	{"nats_expired_linger",     INT_PARAM,         &nats_expired_linger},
 	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
-	{"index_buckets",   INT_PARAM,                 &nats_idx_buckets},
-	{"enable_search_index", INT_PARAM,             &nats_enable_search_index},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
 	{"reconnect_wait",      INT_PARAM,             &nats_cdb_reconnect_wait_ms},
 	{"max_reconnect",       INT_PARAM,             &nats_cdb_max_reconnect},
@@ -465,7 +442,10 @@ struct module_exports exports = {
 	"cachedb_nats",             /* module name */
 	MOD_TYPE_CACHEDB,           /* class of this module */
 	MODULE_VERSION,
-	DEFAULT_DLFLAGS,            /* dlopen flags */
+	RTLD_NOW | RTLD_GLOBAL,     /* dlopen flags: GLOBAL so the optional
+	                             * cachedb_nats_fts module (loaded after
+	                             * us) resolves the shared JSON walkers
+	                             * this module defines (P1.2 split) */
 	0,                          /* load function */
 	&deps,                      /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
@@ -688,50 +668,36 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* Allocate the SHM-backed search index BEFORE forking so every
-	 * worker maps the same instance.  Each worker then reads/writes
-	 * via the shared shard locks; rank 1 is responsible for the
-	 * initial KV-driven population (see child_init) and for the
-	 * watcher thread that keeps it live.
-	 *
-	 * Gated on enable_search_index so PK-only workloads (usrloc,
-	 * counters) can opt out and skip the SHM cost + watcher CPU. */
-	if (nats_enable_search_index) {
-		/* The intern table is required by the index's
-		 * _entry_add_key path; allocate it BEFORE the index
-		 * itself.  Skipped when the index is disabled
-		 * (nothing calls intern_acquire then). */
-		if (nats_intern_init(nats_idx_buckets) < 0) {
-			LM_ERR("failed to initialise doc-key intern table\n");
+	/* Bind the optional FTS/search-index module (P1.2 split).  The
+	 * module owns the SHM index + intern table (allocated in ITS
+	 * mod_init, pre-fork); we only take its API here.  Without it,
+	 * query/update accept PK-only filters and the watcher serves the
+	 * E_NATS_KV_CHANGE event alone. */
+	{
+		cdbn_fts_bind_f bind_f =
+			(cdbn_fts_bind_f)find_export("cdbn_fts_bind", 0);
+		if (bind_f && bind_f(&cdbn_fts) == 0) {
+			cdbn_fts_on = 1;
+			LM_INFO("cachedb_nats: FTS module bound; non-PK "
+				"query filters ENABLED\n");
+		} else {
+			LM_INFO("cachedb_nats: cachedb_nats_fts not loaded; "
+				"query/update accept PK-only filters\n");
+		}
+	}
+
+	/* Periodic index resync: optional belt-and-braces rebuild for
+	 * deployments that want a hard upper bound on index staleness.
+	 * Only meaningful with the FTS module bound. */
+	if (cdbn_fts_on && index_resync_interval_secs > 0) {
+		if (register_timer("nats_cdb_resync",
+				_nats_cdb_periodic_resync, NULL,
+				index_resync_interval_secs, 0) < 0) {
+			LM_ERR("failed to register periodic resync timer\n");
 			return -1;
 		}
-
-		if (nats_json_index_init() < 0) {
-			LM_ERR("failed to initialize JSON search index\n");
-			return -1;
-		}
-
-		/* Periodic index resync: optional belt-and-braces rebuild
-		 * for deployments that want a hard upper bound on
-		 * per-process index staleness regardless of reconnect
-		 * cadence or self-heal pace.  Default 0 means no timer is
-		 * registered. */
-		if (index_resync_interval_secs > 0) {
-			if (register_timer("nats_cdb_resync",
-					_nats_cdb_periodic_resync, NULL,
-					index_resync_interval_secs, 0) < 0) {
-				LM_ERR("failed to register periodic "
-					"resync timer\n");
-				return -1;
-			}
-			LM_INFO("cachedb_nats: periodic index resync "
-				"every %d s\n",
-				index_resync_interval_secs);
-		}
-	} else {
-		LM_INFO("cachedb_nats: search index DISABLED "
-			"(enable_search_index=0); query/update accept "
-			"PK-only filters\n");
+		LM_INFO("cachedb_nats: periodic index resync every %d s\n",
+			index_resync_interval_secs);
 	}
 
 	/* attach the dedicated watcher process to the module exports when
@@ -743,14 +709,15 @@ static int mod_init(void)
 	 * init_modules returns, so this late assignment is safe and is the
 	 * cleanest way to keep the proc declaration runtime-conditional
 	 * without forking when it isn't wanted. */
-	if (nats_enable_search_index && kv_watch_count > 0) {
+	if (kv_watch_count > 0) {
 		exports.procs = nats_watcher_procs;
 		LM_INFO("cachedb_nats: dedicated KV watcher process "
-			"ENABLED (%d kv_watch pattern(s))\n", kv_watch_count);
-	} else if (nats_enable_search_index) {
+			"ENABLED (%d kv_watch pattern(s))%s\n", kv_watch_count,
+			cdbn_fts_on ? "" : " — E_NATS_KV_CHANGE only "
+			"(FTS module not loaded)");
+	} else {
 		LM_INFO("cachedb_nats: no kv_watch pattern configured; "
-			"KV watcher process NOT forked (the index will only "
-			"track changes via the periodic resync, if enabled)\n");
+			"KV watcher process NOT forked\n");
 	}
 
 	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): register the periodic
@@ -858,8 +825,8 @@ static int child_init(int rank)
 	 * Skip both the initial build and the watcher if the index is
 	 * disabled -- there's no SHM index to populate and nothing for
 	 * the watcher to update. */
-	if (nats_enable_search_index && rank == 1 &&
-			nats_json_index_build(kv, fts_json_prefix) < 0) {
+	if (cdbn_fts_on && rank == 1 &&
+			cdbn_fts.build(kv, fts_json_prefix) < 0) {
 		LM_WARN("failed to build initial search index; "
 			"queries may return empty results until index is rebuilt\n");
 	}
@@ -909,10 +876,8 @@ static void destroy(void)
 	/* The KV watcher lives in its own forked child process; the
 	 * OpenSIPS core delivers SIGTERM to every child including it,
 	 * which terminates it cleanly — nothing to stop from here. */
-	nats_json_index_destroy();
-	/* Tear down the doc-key intern table after the index, since
-	 * _free_entry calls nats_intern_release on every key. */
-	nats_intern_destroy();
+	/* the SHM index + intern table are owned (and destroyed) by the
+	 * optional cachedb_nats_fts module */
 	cachedb_end_connections(&cache_mod_name);
 	/* Drop our pool reference (pool tears down on the last module's
 	 * unregister) -- after the watcher/index that used it are gone. */
@@ -948,7 +913,7 @@ static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
 		return;
 	}
 
-	if (nats_json_index_rebuild(kv, fts_json_prefix) < 0)
+	if (cdbn_fts.rebuild(kv, fts_json_prefix) < 0)
 		LM_WARN("periodic resync: index rebuild failed\n");
 	else
 		LM_DBG("periodic resync: index rebuilt\n");

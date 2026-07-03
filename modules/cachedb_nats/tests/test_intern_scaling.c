@@ -74,8 +74,8 @@ static int grep_in_function(const char *path, const char *fn_name,
 
 int main(void)
 {
-	const char *src = "../cachedb_nats_intern.c";
-	const char *hdr = "../cachedb_nats_intern.h";
+	const char *src = "../../cachedb_nats_fts/fts_intern.c";
+	const char *hdr = "../../cachedb_nats_fts/fts_intern.h";
 
 	/* Bucket count is configurable at init, not fixed at 1024. */
 	ASSERT(file_contains(hdr, "nats_intern_init(int"),

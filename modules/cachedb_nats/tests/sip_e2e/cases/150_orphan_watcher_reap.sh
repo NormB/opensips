@@ -31,6 +31,11 @@ ORPHAN_CLUSTER_PORT=5669
 ORPHAN_CFG="$WORKDIR/opensips_orphan.cfg"
 ORPHAN_LOG="$WORKDIR/opensips_orphan.log"
 
+if [ "${ENABLE_INDEX:-1}" = "1" ]; then
+    CASE_FTS_LOAD="loadmodule \"cachedb_nats_fts.so\"\nmodparam(\"cachedb_nats_fts\", \"index_buckets\", ${INDEX_BUCKETS:-4096})"
+else
+    CASE_FTS_LOAD="# cachedb_nats_fts not loaded (ENABLE_INDEX=0): PK-only"
+fi
 sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NATS_URL@@|${NATS_URL}|g" \
     -e "s|@@CACHEDB_URL@@|${CACHEDB_URL}|g" \
@@ -40,12 +45,9 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NODE_ID@@|7|g" \
     -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" \
     -e "s|@@INSTANCE@@|ORPHAN|g" \
-    -e "s|@@ENABLE_INDEX@@|1|g" \
-    -e "s|@@INDEX_BUCKETS@@|4096|g" \
-    -e "s|@@DEDICATED_WATCHER@@|1|g" \
+    -e "s|@@FTS_LOAD@@|${CASE_FTS_LOAD}|g" \
     -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
     -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
-    -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$ORPHAN_CFG"
 
 # Start opensips directly (no wrapper traps).  Keep stdout / stderr

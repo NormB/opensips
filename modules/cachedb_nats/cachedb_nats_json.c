@@ -48,228 +48,20 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_stats.h"
 #include "cachedb_nats_dbase.h"
-#include "cachedb_nats_intern.h"
 #include "cachedb_nats_json_internal.h"
 #include "cachedb_nats_expiry.h"
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
-extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 extern int   nats_reap_grace;      /* defined in cachedb_nats.c (max-skew S) */
 extern int   nats_expired_linger;  /* [HREV-3] physical-retention window     */
 extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
-extern int   nats_enable_search_index;
 /* kv_bucket is declared in cachedb_nats_dbase.h (included above) */
 
-/* ------------------------------------------------------------------ */
-/*                 Index search helper functions                      */
-/* ------------------------------------------------------------------ */
-
-/**
- * _lookup() — Look up the index entry for a field + value pair.
- *
- * Builds the composite "field:value" string in a stack buffer, then calls
- * _find_entry() to locate the hash table entry.  Returns the entry (whose
- * ->keys / ->num_keys describe the matching document set) or NULL if no
- * documents contain this field:value pair.  Caller must hold the entry's
- * shard lock.
- */
-static nats_idx_entry *_lookup(const char *field, int flen,
-	const char *val, int vlen)
-{
-	char fv_buf[1024];
-	int fv_len;
-
-	/* Guard negative lengths before the size math: a negative flen/vlen
-	 * could keep fv_len under the ceiling below yet sign-extend to a huge
-	 * size_t in memcpy (OOB).  Mirrors the other fv-builders. */
-	if (flen < 0 || vlen < 0)
-		return NULL;
-
-	fv_len = flen + 1 + vlen;
-	if (fv_len >= (int)sizeof(fv_buf))
-		return NULL;
-
-	memcpy(fv_buf, field, flen);
-	fv_buf[flen] = ':';
-	memcpy(fv_buf + flen + 1, val, vlen);
-	fv_buf[fv_len] = '\0';
-
-	return _find_entry(fv_buf, fv_len);
-}
-
-/* Same hash as _lookup but returns the shard index instead of the
- * entry.  Used by query callers that want to lock the right shard
- * before calling _lookup, so concurrent queries on different shards
- * proceed without serialising. */
-static int _lookup_shard(const char *field, int flen,
-	const char *val, int vlen)
-{
-	char fv_buf[1024];
-	int fv_len;
-	unsigned int b;
-
-	if (flen < 0 || vlen < 0)
-		return -1;
-	fv_len = flen + 1 + vlen;
-	if (fv_len >= (int)sizeof(fv_buf))
-		return -1;
-	memcpy(fv_buf, field, flen);
-	fv_buf[flen] = ':';
-	memcpy(fv_buf + flen + 1, val, vlen);
-	b = _hash(fv_buf, fv_len);
-	return NATS_IDX_SHARD_OF(b);
-}
-
-/**
- * _intersect_keys() — Compute the set intersection of two key arrays.
- *
- * Produces a new array containing only the keys present in both @a and @b.
- * The result array is allocated with min(a_count, b_count) slots (the
- * maximum possible intersection size).  String pointers in the result
- * reference @a's entries — the caller must free the result array but NOT
- * the strings within it.
- *
- * Algorithm: nested-loop O(n*m) comparison.  This is acceptable because
- * typical per-field key counts are small (tens to low hundreds).
- *
- * Returns 0 on success, -1 on allocation failure.
- */
-/* Open-addressed pointer hash set used by _intersect_keys.  Keys
- * are NUL-terminated strings, but we hash by string content (not
- * pointer) so the set is correct even if A and B contain
- * independent strdup'd copies of the same content.  When all keys
- * are canonical/interned, the FNV hash + strcmp degenerates to
- * one strcmp per probe but the lookup is still O(1) average. */
-typedef struct {
-	const char **slots;
-	int          mask;     /* capacity - 1; capacity power of two */
-	int          count;
-} _intkeyset_t;
-
-static uint32_t _intkeyset_hash(const char *s)
-{
-	/* FNV-1a 32-bit. */
-	uint32_t h = 2166136261u;
-	while (*s) {
-		h ^= (unsigned char)*s++;
-		h *= 16777619u;
-	}
-	return h;
-}
-
-static int _intkeyset_init(_intkeyset_t *set, int min_capacity)
-{
-	int cap = 8;
-	while (cap < min_capacity * 2) cap <<= 1;
-	set->slots = calloc(cap, sizeof(*set->slots));
-	if (!set->slots) return -1;
-	set->mask  = cap - 1;
-	set->count = 0;
-	return 0;
-}
-
-static void _intkeyset_free(_intkeyset_t *set)
-{
-	free(set->slots);
-	set->slots = NULL;
-}
-
-static int _intkeyset_insert(_intkeyset_t *set, const char *key)
-{
-	uint32_t idx = _intkeyset_hash(key) & set->mask;
-	while (set->slots[idx]) {
-		if (strcmp(set->slots[idx], key) == 0)
-			return 0; /* dup */
-		idx = (idx + 1) & set->mask;
-	}
-	set->slots[idx] = key;
-	set->count++;
-	return 1;
-}
-
-static int _intkeyset_contains(const _intkeyset_t *set, const char *key)
-{
-	uint32_t idx = _intkeyset_hash(key) & set->mask;
-	while (set->slots[idx]) {
-		if (strcmp(set->slots[idx], key) == 0)
-			return 1;
-		idx = (idx + 1) & set->mask;
-	}
-	return 0;
-}
-
-static int _intersect_keys(char **a, int a_count,
-	char **b, int b_count,
-	char ***out_keys, int *out_count)
-{
-	int i, n = 0;
-	char **result;
-	int alloc = (a_count < b_count) ? a_count : b_count;
-	_intkeyset_t bset;
-
-	if (alloc == 0) {
-		*out_keys = NULL;
-		*out_count = 0;
-		return 0;
-	}
-
-	result = malloc(sizeof(char *) * alloc);
-	if (!result)
-		return -1;
-
-	/* Build a hash set from B (the smaller of the two arrays is a
-	 * candidate but ownership rules around the result mean we keep
-	 * A on the outer scan -- A's pointers populate `result`).  The
-	 * lookup is O(1) average per A element instead of O(b_count),
-	 * giving us O(a_count + b_count) total instead of O(a_count *
-	 * b_count).  Mattered for high-cardinality AND queries (> 500
-	 * matched keys per filter); below that the constant factors
-	 * cancel.  Falls back to the old nested-loop semantics on
-	 * allocation failure. */
-	if (_intkeyset_init(&bset, b_count) < 0) {
-		int j;
-		for (i = 0; i < a_count; i++) {
-			for (j = 0; j < b_count; j++) {
-				if (strcmp(a[i], b[j]) == 0) {
-					result[n++] = a[i];
-					break;
-				}
-			}
-		}
-		*out_keys = result;
-		*out_count = n;
-		return 0;
-	}
-	for (i = 0; i < b_count; i++)
-		_intkeyset_insert(&bset, b[i]);
-	for (i = 0; i < a_count; i++) {
-		if (_intkeyset_contains(&bset, a[i]))
-			result[n++] = a[i];
-	}
-	_intkeyset_free(&bset);
-
-	*out_keys = result;
-	*out_count = n;
-	return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*                   cachedb query() callback                         */
-/* ------------------------------------------------------------------ */
-
-/* Release one query reference per key and the array itself.  Balances
- * the nats_intern_retain() snapshots taken in _query_match_keys(). */
-static void _release_keyset(char **keys, int count)
-{
-	int k;
-	if (!keys)
-		return;
-	for (k = 0; k < count; k++)
-		nats_intern_release(keys[k]);
-	free(keys);
-}
+/* The index search helpers (_lookup, _intersect_keys, the retained-key
+ * snapshot walk) moved to the optional cachedb_nats_fts module (P1.2);
+ * non-PK filters are served through the cdbn_fts binds. */
 
 /* PK fast path: single is_pk=1 EQ filter -> one kvStore_Get, no index.
  * Returns 0 on success (including not-found = empty result), -1 on
@@ -373,131 +165,6 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	return 0;
 }
 
-/* Resolve the AND-filter chain against the search index, leaving the
- * surviving keyset (one query reference per key) in *out_keys.  An
- * empty intersection is success with *out_count == 0. */
-static int _query_match_keys(const cdb_filter_t *filter,
-	char ***out_keys, int *out_count)
-{
-	const cdb_filter_t *it;
-	nats_idx_entry *e;
-	char **match_keys = NULL;
-	int match_count = 0;
-	int first = 1;
-
-	/* Search the index for each filter (AND logic).  Each filter
-	 * resolves to one shard (its field:value hash), so we lock and
-	 * release per filter rather than holding the whole index for the
-	 * entire AND chain.  Concurrent queries that hash to different
-	 * shards now proceed in parallel. */
-	for (it = filter; it; it = it->next) {
-		char **iter_keys = NULL;
-		int iter_count = 0;
-		int shard;
-
-		if (!it->val.is_str) {
-			LM_DBG("skipping non-string filter for field '%.*s'\n",
-				it->key.name.len, it->key.name.s);
-			continue;
-		}
-
-		if (it->op != CDB_OP_EQ) {
-			LM_ERR("only CDB_OP_EQ supported for NATS JSON search "
-				"(got op %d)\n", it->op);
-			_release_keyset(match_keys, match_count);
-			return -1;
-		}
-
-		shard = _lookup_shard(it->key.name.s, it->key.name.len,
-			it->val.s.s, it->val.s.len);
-		if (shard < 0) continue;
-
-		_idx_lock_shard(g_idx, shard);
-		e = _lookup(it->key.name.s, it->key.name.len,
-			it->val.s.s, it->val.s.len);
-
-		if (!e || e->num_keys == 0) {
-			_idx_unlock_shard(g_idx, shard);
-			/* no match for this filter — intersection is empty */
-			_release_keyset(match_keys, match_count);
-			match_keys = NULL;
-			match_count = 0;
-			break;
-		}
-
-		/* Snapshot the matching keys into a private array so we can
-		 * release the shard before the per-filter merge work. */
-		iter_keys = malloc(sizeof(char *) * e->num_keys);
-		if (!iter_keys) {
-			LM_ERR("query: malloc for per-filter key snapshot "
-				"failed (filter '%.*s'='%.*s', %d keys, "
-				"%zu bytes)\n",
-				it->key.name.len, it->key.name.s,
-				it->val.s.len, it->val.s.s,
-				e->num_keys,
-				sizeof(char *) * e->num_keys);
-			_idx_unlock_shard(g_idx, shard);
-			_release_keyset(match_keys, match_count);
-			return -1;
-		}
-		{
-			int k;
-			/* Snapshot the interned key pointers with a refcount bump
-			 * each -- O(1) per key, no allocation -- instead of strdup'ing
-			 * the whole match set under the shard lock.  The intern table
-			 * guarantees the pointers stay valid until we release them, so
-			 * the lock can drop immediately and the document fetches +
-			 * allocations below run unlocked.  Balanced by the matching
-			 * nats_intern_release() at every cleanup site. */
-			for (k = 0; k < e->num_keys; k++)
-				iter_keys[k] = nats_intern_retain(e->keys[k]);
-			iter_count = e->num_keys;
-		}
-		_idx_unlock_shard(g_idx, shard);
-
-		if (first) {
-			/* first filter — adopt iter_keys directly */
-			match_keys = iter_keys;
-			match_count = iter_count;
-			first = 0;
-		} else {
-			/* intersect previous match_keys (strdup'd) with the new
-			 * iter_keys (also strdup'd).  After the intersect we
-			 * own a result array of survivors (pointers aliasing
-			 * match_keys); strdup them, free both inputs, install
-			 * the new survivors as match_keys. */
-			char **new_keys = NULL;
-			int new_count = 0;
-
-			if (_intersect_keys(match_keys, match_count,
-					iter_keys, iter_count,
-					&new_keys, &new_count) < 0) {
-				LM_ERR("intersection failed\n");
-				_release_keyset(iter_keys, iter_count);
-				_release_keyset(match_keys, match_count);
-				return -1;
-			}
-			{
-				int k;
-				/* Survivors alias entries in match_keys (the `a` input).
-				 * Take a fresh reference on each so it outlives the
-				 * release-all of both input sets just below; new_keys then
-				 * carries exactly one query reference per survivor. */
-				for (k = 0; k < new_count; k++)
-					nats_intern_retain(new_keys[k]);
-			}
-			_release_keyset(iter_keys, iter_count);
-			_release_keyset(match_keys, match_count);
-			match_keys = new_keys;
-			match_count = new_count;
-		}
-	}
-
-	*out_keys = match_keys;
-	*out_count = match_count;
-	return 0;
-}
-
 /* Fetch the matched documents from the KV and append parsed rows to
  * @res.  Per-row fetch/parse problems skip the row (the KV is the
  * truth); only allocation failure is fatal (-1). */
@@ -524,7 +191,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			 * the truth is the KV, so the result set stays
 			 * complete (this row genuinely no longer exists). */
 			NATS_CDB_STATS_INC(index_miss_kv);
-			nats_json_index_remove(match_keys[i]);
+			cdbn_fts.remove(match_keys[i]);
 			LM_DBG("evicted stale index entry for '%s'\n",
 				match_keys[i]);
 			continue;
@@ -667,45 +334,35 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	    filter->val.is_str && filter->op == CDB_OP_EQ)
 		return _query_pk_fast_path(ncon, filter, res);
 
-	if (!g_idx) {
-		if (!nats_enable_search_index) {
-			LM_ERR("query: non-PK filter rejected because the "
-				"search index is disabled (modparam "
-				"enable_search_index=0); only single-condition "
-				"is_pk=1 filters are accepted in this mode "
-				"(filter field '%.*s')\n",
-				filter->key.name.len, filter->key.name.s);
-		} else {
-			LM_ERR("query: search index not initialized; "
-				"non-PK filter cannot be served (filter field "
-				"'%.*s')\n",
-				filter->key.name.len, filter->key.name.s);
-		}
+	if (!cdbn_fts_on) {
+		LM_ERR("query: non-PK filter rejected -- the search index "
+			"module (cachedb_nats_fts) is not loaded; only "
+			"single-condition is_pk=1 filters are accepted "
+			"(filter field '%.*s')\n",
+			filter->key.name.len, filter->key.name.s);
 		return -1;
 	}
 
-	if (_query_match_keys(filter, &match_keys, &match_count) < 0)
+	if (cdbn_fts.query_match_keys(filter, &match_keys, &match_count) < 0)
 		return -1;
 
 	if (match_count == 0) {
 		LM_DBG("no documents match the filter\n");
-		_release_keyset(match_keys, match_count);
+		cdbn_fts.release_keyset(match_keys, match_count);
 		return 0;
 	}
 
-	/* Limit results */
+	/* result cap applied inside the FTS module (fts_max_results) */
 	result_cnt = match_count;
-	if (fts_max_results > 0 && result_cnt > fts_max_results)
-		result_cnt = fts_max_results;
 
 	if (_query_fetch_rows(ncon, match_keys, result_cnt, res) < 0) {
-		_release_keyset(match_keys, match_count);
+		cdbn_fts.release_keyset(match_keys, match_count);
 		cdb_free_rows(res);
 		return -1;
 	}
 
 	LM_DBG("query returned %d rows\n", res->count);
-	_release_keyset(match_keys, match_count);
+	cdbn_fts.release_keyset(match_keys, match_count);
 	return 0;
 }
 
@@ -1129,39 +786,24 @@ out:
  * Returns a pkg_malloc'd key, or NULL on error (logged). */
 static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 {
-	nats_idx_entry *e;
 	char *target_key = NULL;
 
-	/* Try the index first when the filter is non-PK; on hit, the
-	 * stored key was assigned at insert time and is already
-	 * KV-safe. */
-	if (!row_filter->key.is_pk) {
-		int shard = _lookup_shard(row_filter->key.name.s,
-			row_filter->key.name.len,
-			row_filter->val.s.s, row_filter->val.s.len);
-		if (shard >= 0) {
-			_idx_lock_shard(g_idx, shard);
-			e = _lookup(row_filter->key.name.s,
-				row_filter->key.name.len,
-				row_filter->val.s.s, row_filter->val.s.len);
-			if (e && e->num_keys > 0) {
-				size_t klen = strlen(e->keys[0]);
-				target_key = pkg_malloc(klen + 1);
-				if (!target_key) {
-					_idx_unlock_shard(g_idx, shard);
-					LM_ERR("update: pkg_malloc for indexed "
-						"target_key copy failed (filter "
-						"'%.*s'='%.*s', key length %zu)\n",
-						row_filter->key.name.len,
-						row_filter->key.name.s,
-						row_filter->val.s.len,
-						row_filter->val.s.s,
-						klen);
-					return NULL;
-				}
-				strcpy(target_key, e->keys[0]);
+	/* Try the index first when the filter is non-PK (via the optional
+	 * cachedb_nats_fts binds); on hit, the stored key was assigned at
+	 * insert time and is already KV-safe. */
+	if (!row_filter->key.is_pk && cdbn_fts_on) {
+		char kbuf[512];
+		int r = cdbn_fts.resolve_key(&row_filter->key.name,
+			&row_filter->val.s, kbuf, (int)sizeof(kbuf));
+		if (r > 0) {
+			size_t klen = strlen(kbuf);
+			target_key = pkg_malloc(klen + 1);
+			if (!target_key) {
+				LM_ERR("update: pkg_malloc for indexed "
+					"target_key copy failed\n");
+				return NULL;
 			}
-			_idx_unlock_shard(g_idx, shard);
+			memcpy(target_key, kbuf, klen + 1);
 		}
 	}
 
@@ -1457,8 +1099,11 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 			NATS_CDB_STATS_INC(create_doc);
 		/* Targeted index update: remove the key from only the entries it
 		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
-		nats_json_index_remove_fields(target_key, json_buf, old_len);
-		nats_json_index_add(target_key, new_json, (int)strlen(new_json));
+		if (cdbn_fts_on) {
+			cdbn_fts.remove_fields(target_key, json_buf, old_len);
+			cdbn_fts.add(target_key, new_json,
+				(int)strlen(new_json));
+		}
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
 		free(new_json);
@@ -1547,12 +1192,10 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	 * enable_search_index=0) g_idx is NULL and we reject non-PK
 	 * updates outright -- there's no way to resolve the document
 	 * without scanning the whole bucket. */
-	if (!row_filter->key.is_pk && !g_idx) {
-		LM_ERR("update: non-PK filter rejected because the search "
-			"index is %s (filter field '%.*s'); only "
-			"is_pk=1 filters are accepted in this mode\n",
-			nats_enable_search_index
-				? "not yet initialized" : "disabled",
+	if (!row_filter->key.is_pk && !cdbn_fts_on) {
+		LM_ERR("update: non-PK filter rejected -- the search index "
+			"module (cachedb_nats_fts) is not loaded (filter "
+			"field '%.*s'); only is_pk=1 filters are accepted\n",
 			row_filter->key.name.len, row_filter->key.name.s);
 		return -1;
 	}
@@ -1618,3 +1261,5 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	pkg_free(target_key);
 	return -1;
 }
+
+

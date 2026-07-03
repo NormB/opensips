@@ -178,8 +178,8 @@ int main(void)
 
 	/* ---- production wiring -------------------------------------- */
 	{
-		const char *j = "../cachedb_nats_json.c";
-		const char *ih = "../cachedb_nats_intern.h";
+		const char *j = "../../cachedb_nats_fts/fts_query.c";
+		const char *ih = "../../cachedb_nats_fts/fts_intern.h";
 		ASSERT(file_contains(ih, "nats_intern_retain"),
 			"intern table exposes nats_intern_retain");
 		ASSERT(file_contains(j, "nats_intern_retain(e->keys["),

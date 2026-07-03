@@ -1,0 +1,100 @@
+<!-- module User's Guide -->
+
+<chapter>
+	<title>&adminguide;</title>
+
+	<section id="overview" xreflabel="Overview">
+	<title>Overview</title>
+	<para>
+		Optional full-text-search / secondary-index companion to the
+		<emphasis>cachedb_nats</emphasis> module.  Loading this module
+		is the enable switch: <emphasis>cachedb_nats</emphasis> binds
+		it at startup, feeds the shared-memory
+		<literal>field:value -> document keys</literal> index from its
+		write path and KV-watcher process, and serves non-PK
+		<function>cache_query()</function> /
+		<function>update()</function> filters (including
+		<literal>"search:term"</literal> raw queries) from it.
+	</para>
+	<para>
+		Without this module <emphasis>cachedb_nats</emphasis> accepts
+		PK-only filters — the recommended shape for pure
+		usrloc-as-store deployments, which then avoid the index
+		shared memory, the watcher-feed CPU and the per-write lock
+		traffic entirely.
+	</para>
+	</section>
+
+	<section id="exported_parameters" xreflabel="Exported Parameters">
+	<title>Exported Parameters</title>
+	<section id="param_index_buckets" xreflabel="index_buckets">
+	<title><varname>index_buckets</varname> (integer)</title>
+	<para>
+		Hash bucket count for the in-memory JSON-FTS search index.
+		Higher values reduce average chain length on the lookup
+		path at the cost of a larger fixed allocation for the
+		bucket array (~32 KB per doubling).
+	</para>
+	<para>
+		The init code rounds the requested value up to the next
+		power of two with a floor of <emphasis>16</emphasis>
+		(<varname>NATS_IDX_SHARDS</varname>) so the hash function
+		can use a bitmask AND instead of a modulo.  Operators
+		setting non-power-of-two values will see the rounded
+		count logged at <emphasis>LM_INFO</emphasis> on startup.
+	</para>
+	<para>
+		Recommended values:
+		<emphasis role="bold">4096</emphasis> at &lt;= 20 000 AoRs,
+		<emphasis role="bold">16384</emphasis> at 100 000,
+		<emphasis role="bold">65536</emphasis> at 1 000 000.
+		Above 1 000 000 endpoints the recommended path is to
+		disable the index entirely via
+		<varname>enable_search_index = 0</varname>; see
+		the scaling notes in the opensips-usrloc-nats design repository for the analysis.
+	</para>
+	<para>
+		Ignored when
+		<varname>enable_search_index = 0</varname>.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>4096</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>index_buckets</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats_fts", "index_buckets", 16384)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_fts_max_results" xreflabel="fts_max_results">
+	<title><varname>fts_max_results</varname> (integer)</title>
+	<para>
+		The maximum number of documents returned by a single
+		<function>cache_query</function> call.  Limits memory consumption
+		for broad queries that would otherwise match a large fraction of the
+		index.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>100</quote>.
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>fts_max_results</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats_fts", "fts_max_results", 500)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	</section>
+
+</chapter>

@@ -50,6 +50,11 @@ BOUNCE_SIP_PORT=5076
 BOUNCE_MI_PORT=8891
 BOUNCE_CLUSTER_PORT=5668
 BOUNCE_CFG="$WORKDIR/opensips_bounce.cfg"
+if [ "${ENABLE_INDEX:-1}" = "1" ]; then
+    CASE_FTS_LOAD="loadmodule \"cachedb_nats_fts.so\"\nmodparam(\"cachedb_nats_fts\", \"index_buckets\", ${INDEX_BUCKETS:-4096})"
+else
+    CASE_FTS_LOAD="# cachedb_nats_fts not loaded (ENABLE_INDEX=0): PK-only"
+fi
 sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NATS_URL@@|${BOUNCE_NATS_URL}|g" \
     -e "s|@@CACHEDB_URL@@|nats:loc://127.0.0.1:${BOUNCE_NATS_PORT}/|g" \
@@ -59,12 +64,9 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
     -e "s|@@NODE_ID@@|9|g" \
     -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" \
     -e "s|@@INSTANCE@@|BOUNCE|g" \
-    -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
-    -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
-    -e "s|@@DEDICATED_WATCHER@@|${DEDICATED_WATCHER:-0}|g" \
+    -e "s|@@FTS_LOAD@@|${CASE_FTS_LOAD}|g" \
     -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
     -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
-    -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
     "${HERE}/opensips.cfg.in" > "$BOUNCE_CFG"
 
 LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \

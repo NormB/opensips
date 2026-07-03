@@ -42,7 +42,7 @@
 				against this index without scanning the KV bucket.  The bucket
 				count is tunable via the <varname>index_buckets</varname>
 				modparam.  The index can be disabled entirely via
-				<varname>enable_search_index = 0</varname> for PK-only
+				not loading <emphasis>cachedb_nats_fts</emphasis> for PK-only
 				deployments (notably usrloc-as-store), in which case
 				<function>cache_query</function> uses a PK fast path that
 				goes straight to <function>kvStore_Get</function> with no
@@ -54,7 +54,7 @@
 				the search index on every put/delete/purge and raising the
 				<emphasis>E_NATS_KV_CHANGE</emphasis> EVI event for script reaction.
 				Skipped entirely when
-				<varname>enable_search_index = 0</varname>.
+				the <emphasis>cachedb_nats_fts</emphasis> module is not loaded.
 			</para></listitem>
 			<listitem><para>
 				<emphasis role="bold">nats_kv_history()</emphasis> —
@@ -387,29 +387,6 @@ modparam("cachedb_nats", "fts_json_prefix", "usrloc.")
 	</example>
 	</section>
 
-	<section id="param_fts_max_results" xreflabel="fts_max_results">
-	<title><varname>fts_max_results</varname> (integer)</title>
-	<para>
-		The maximum number of documents returned by a single
-		<function>cache_query</function> call.  Limits memory consumption
-		for broad queries that would otherwise match a large fraction of the
-		index.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>100</quote>.
-		</emphasis>
-	</para>
-	<example>
-	<title>Set <varname>fts_max_results</varname> parameter</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "fts_max_results", 500)
-...
-	</programlisting>
-	</example>
-	</section>
-
 	<section id="param_kv_watch" xreflabel="kv_watch">
 	<title><varname>kv_watch</varname> (string)</title>
 	<para>
@@ -528,121 +505,6 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 	</para>
 	</section>
 
-	<section id="param_index_buckets" xreflabel="index_buckets">
-	<title><varname>index_buckets</varname> (integer)</title>
-	<para>
-		Hash bucket count for the in-memory JSON-FTS search index.
-		Higher values reduce average chain length on the lookup
-		path at the cost of a larger fixed allocation for the
-		bucket array (~32 KB per doubling).
-	</para>
-	<para>
-		The init code rounds the requested value up to the next
-		power of two with a floor of <emphasis>16</emphasis>
-		(<varname>NATS_IDX_SHARDS</varname>) so the hash function
-		can use a bitmask AND instead of a modulo.  Operators
-		setting non-power-of-two values will see the rounded
-		count logged at <emphasis>LM_INFO</emphasis> on startup.
-	</para>
-	<para>
-		Recommended values:
-		<emphasis role="bold">4096</emphasis> at &lt;= 20 000 AoRs,
-		<emphasis role="bold">16384</emphasis> at 100 000,
-		<emphasis role="bold">65536</emphasis> at 1 000 000.
-		Above 1 000 000 endpoints the recommended path is to
-		disable the index entirely via
-		<varname>enable_search_index = 0</varname>; see
-		the scaling notes in the opensips-usrloc-nats design repository for the analysis.
-	</para>
-	<para>
-		Ignored when
-		<varname>enable_search_index = 0</varname>.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>4096</quote>.
-		</emphasis>
-	</para>
-	<example>
-	<title>Set <varname>index_buckets</varname> parameter</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "index_buckets", 16384)
-...
-	</programlisting>
-	</example>
-	</section>
-
-	<section id="param_enable_search_index"
-		xreflabel="enable_search_index">
-	<title><varname>enable_search_index</varname> (integer)</title>
-	<para>
-		Whether to maintain the in-memory JSON-FTS search index.
-		When set to <emphasis role="bold">0</emphasis> the module:
-		<itemizedlist>
-			<listitem><para>
-				Skips <function>nats_json_index_init</function>
-				in <function>mod_init</function>; the global
-				index handle stays NULL.
-			</para></listitem>
-			<listitem><para>
-				Skips the initial KV-driven index build and the
-				watcher thread in <function>child_init</function>.
-			</para></listitem>
-			<listitem><para>
-				Routes every <function>cache_query</function>
-				through the PK fast path (single-condition
-				is_pk=1 filter only); non-PK and multi-condition
-				filters are rejected with an explicit error
-				message.
-			</para></listitem>
-			<listitem><para>
-				Routes every <function>cache_update</function>
-				through its long-existing PK branch; non-PK
-				updates are likewise rejected.
-			</para></listitem>
-		</itemizedlist>
-	</para>
-	<para>
-		This is the recommended setting for
-		<varname>cluster_mode = full-sharing-cachedb</varname>
-		usrloc deployments at every scale.  usrloc&apos;s read
-		(<function>cdb_load_urecord</function>) and write
-		(<function>cdb_flush_urecord</function>) paths construct
-		<varname>cdb_filter_t</varname> with
-		<varname>is_pk = 1</varname>, so the index adds only
-		cost.  Disabling it saves the SHM footprint
-		(~250 MB at 1MM endpoints, ~2.5 GB at 10MM), avoids
-		watcher-thread CPU saturation at scale, and removes
-		the per-write index update from the CAS hot path.
-	</para>
-	<para>
-		Leave at <emphasis role="bold">1</emphasis> only for
-		mixed deployments that also serve script-driven non-PK
-		<function>cache_query</function> calls against the
-		same bucket.
-	</para>
-	<para>
-		See the scaling notes in the opensips-usrloc-nats design repository and the
-		usrloc playbook (<xref
-			linkend="usrloc_storage_scale_tuning"/>) for
-		guidance on when to flip this knob.
-	</para>
-	<para>
-		<emphasis>
-			Default value is <quote>1</quote> (enabled).
-		</emphasis>
-	</para>
-	<example>
-	<title>Disable the search index for usrloc deployments</title>
-	<programlisting format="linespecific">
-...
-modparam("cachedb_nats", "enable_search_index", 0)
-...
-	</programlisting>
-	</example>
-	</section>
-
 	<section id="param_index_resync_on_reconnect"
 		xreflabel="index_resync_on_reconnect">
 	<title><varname>index_resync_on_reconnect</varname>
@@ -671,7 +533,7 @@ modparam("cachedb_nats", "enable_search_index", 0)
 		</para>
 	<para>
 		Ignored when
-		<varname>enable_search_index = 0</varname>.
+		the <emphasis>cachedb_nats_fts</emphasis> module is not loaded.
 	</para>
 	<para>
 		<emphasis>
@@ -699,7 +561,7 @@ modparam("cachedb_nats", "enable_search_index", 0)
 	</para>
 	<para>
 		Ignored when
-		<varname>enable_search_index = 0</varname>.
+		the <emphasis>cachedb_nats_fts</emphasis> module is not loaded.
 	</para>
 	<para>
 		<emphasis>

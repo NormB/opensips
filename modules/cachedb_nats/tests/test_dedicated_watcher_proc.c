@@ -65,11 +65,13 @@ int main(void)
 		"nats_watcher_proc_main"),
 		"dedicated proc main referenced from cachedb_nats.c");
 
-	/* mod_init wires exports.procs whenever the index is on and there
-	 * is something to watch — no second knob. */
+	/* mod_init wires exports.procs whenever there is something to
+	 * watch — the watcher serves E_NATS_KV_CHANGE always and feeds the
+	 * FTS index only when the optional cachedb_nats_fts module is
+	 * bound (P1.2 split). */
 	ASSERT(file_contains("../cachedb_nats.c",
-		"if (nats_enable_search_index && kv_watch_count > 0)"),
-		"mod_init gates exports.procs on index + kv_watch only");
+		"if (kv_watch_count > 0)"),
+		"mod_init gates exports.procs on kv_watch only");
 	ASSERT(file_contains("../cachedb_nats.c",
 		"exports.procs ="),
 		"mod_init assigns exports.procs at runtime");

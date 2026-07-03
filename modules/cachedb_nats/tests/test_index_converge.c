@@ -91,10 +91,11 @@ int main(void)
 	/* ---- watcher still honours the flag (opt-out path intact) ---- */
 	{
 		const char *w = "../cachedb_nats_watch.c";
-		ASSERT(file_contains(w, "if (index_resync_on_reconnect)"),
-			"watcher rebuilds on reconnect when the flag is set");
-		ASSERT(file_contains(w, "nats_json_index_rebuild"),
-			"watcher calls the full index rebuild");
+		ASSERT(file_contains(w, "if (cdbn_fts_on && index_resync_on_reconnect)"),
+			"watcher rebuilds on reconnect when the flag is set "
+			"(and the FTS module is bound, P1.2)");
+		ASSERT(file_contains(w, "cdbn_fts.rebuild"),
+			"watcher calls the full index rebuild via the binds");
 	}
 
 	if (g_fails == 0) fprintf(stderr, "\n=== ALL PASS (fails=0) ===\n");

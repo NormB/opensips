@@ -95,7 +95,7 @@ The index is:
 ## KV Watcher
 
 A single watcher runs in its own forked OpenSIPS child process (declared via
-`proc_export_t`, forked when `enable_search_index=1` and at least one `kv_watch`
+`proc_export_t`, forked when at least one `kv_watch`
 pattern is configured — see PERF_NOTES.md §"Dedicated KV-watcher process" in the opensips-usrloc-nats design repo, docs/relocated/).
 The watcher subscribes to the KV bucket and on each put/delete/purge event:
 

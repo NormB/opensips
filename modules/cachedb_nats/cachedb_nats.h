@@ -45,6 +45,12 @@
 
 #include <nats/nats.h>
 #include "../../cachedb/cachedb.h"
+#include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
+
+/* optional FTS module binds (P1.2 split; defined in cachedb_nats.c).
+ * cdbn_fts_on == 0 -> hooks are NULL, PK-only operation. */
+extern cdbn_fts_api_t cdbn_fts;
+extern int cdbn_fts_on;
 
 /*
  * CacheDB connection wrapper for NATS JetStream KV.

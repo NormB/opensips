@@ -83,7 +83,7 @@ int main(void)
 
 	/* ---- production wiring ---------------------------------------- */
 	{
-		const char *src = "../cachedb_nats_json_index.c";
+		const char *src = "../../cachedb_nats_fts/fts_index.c";
 		ASSERT(file_contains(src, "removed_any"),
 			"remove paths gate the decrement on actual removal (removed_any)");
 		ASSERT(file_contains(src, "return 1;   /* removed */"),

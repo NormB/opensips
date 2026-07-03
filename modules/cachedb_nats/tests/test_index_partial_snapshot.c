@@ -23,8 +23,8 @@
  *   - a complete snapshot (entries + sentinel) still rebuilds and
  *     swaps normally.
  *
- * Compiles and links the REAL production TUs (../cachedb_nats_json_index.c
- * + ../cachedb_nats_intern.c); the nats_dl watcher functions are replaced
+ * Compiles and links the REAL production TUs (../../cachedb_nats_fts/fts_index.c
+ * + ../../cachedb_nats_fts/fts_intern.c); the nats_dl watcher functions are replaced
  * with a scripted fake stream, and the pkg/shm allocators with malloc
  * wrappers (single-threaded test: the shm lock is a real-but-uncontended
  * gen_lock_t).
@@ -42,7 +42,7 @@
 #include "../../../mem/mem.h"
 #include "../../../mem/shm_mem.h"
 #include "../../../lib/nats/nats_dl.h"
-#include "../cachedb_nats_json.h"
+#include "../../cachedb_nats_fts/fts_index.h"
 
 /* ── core seams: dprint ─────────────────────────────────────────── */
 

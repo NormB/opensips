@@ -86,7 +86,7 @@ int main(void)
 		"nats_cache_query distinguishes NATS_NOT_FOUND in fetch loop");
 
 	/* (b) on stale-index detection, the entry is evicted from the index */
-	n = grep_in_function(path, "_query_fetch_rows", "nats_json_index_remove");
+	n = grep_in_function(path, "_query_fetch_rows", "cdbn_fts.remove");
 	ASSERT(n >= 1,
 		"nats_cache_query evicts stale index entries on KV miss");
 

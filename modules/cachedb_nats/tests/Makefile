@@ -69,8 +69,8 @@ test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 
 # P0.6: a KV snapshot stalling mid-stream must fail the index build/rebuild
 # and keep the prior live index.  Links the real json_index + intern TUs.
-test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_index.c ../cachedb_nats_intern.c
-test_index_partial_snapshot: ../cachedb_nats_json_index.c ../cachedb_nats_intern.c ../cachedb_nats_json.h
+test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+test_index_partial_snapshot: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c ../cachedb_nats_json.h
 
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that

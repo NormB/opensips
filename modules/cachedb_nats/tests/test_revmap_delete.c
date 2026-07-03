@@ -258,14 +258,13 @@ int main(void)
 
 	/* D. production wiring */
 	{
-		const char *json  = "../cachedb_nats_json_index.c";
+		const char *json  = "../../cachedb_nats_fts/fts_index.c";
 		const char *watch = "../cachedb_nats_watch.c";
 		ASSERT(grep_in_function(json, "nats_json_index_add", "nats_rev_put") >= 1,
 			"index_add populates the reverse map");
-		ASSERT(grep_in_function(watch, "nats_consumer_watch_loop", "nats_json_index_remove_by_revmap") >= 1 ||
-		       file_contains(watch, "nats_json_index_remove_by_revmap"),
+		ASSERT(file_contains(watch, "cdbn_fts.remove_by_revmap"),
 			"watcher delete path uses the reverse-map fast delete");
-		ASSERT(file_contains(watch, "nats_json_index_remove(key)"),
+		ASSERT(file_contains(watch, "cdbn_fts.remove(key)"),
 			"watcher keeps the full-walk remove as the fallback");
 	}
 

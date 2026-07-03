@@ -194,24 +194,15 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		</para>
 		<variablelist>
 			<varlistentry>
-				<term><varname>enable_search_index</varname>
-				(int, default 1)</term>
+				<term><emphasis>cachedb_nats_fts</emphasis> module
+				(load / don't load)</term>
 				<listitem><para>
-					When set to <literal>0</literal>, the module
-					skips <function>nats_json_index_init</function>
-					entirely, never builds the index from KV at
-					startup, and never starts the watcher thread.
-					<function>nats_cache_query</function> handles
-					every read through the new PK fast path
-					(<function>kvStore_Get</function> on the
-					encoded primary key); non-PK or
-					multi-condition filters are rejected with an
-					explicit error.
-					<function>nats_cache_update</function> uses
-					its long-existing PK branch for writes; non-PK
-					updates are likewise rejected.  This is the
-					recommended setting for pure usrloc-as-store
-					deployments at every scale.
+					The former <varname>enable_search_index</varname>
+					modparam is gone: loading the optional
+					<emphasis>cachedb_nats_fts</emphasis> module IS the
+					enable switch for the JSON-FTS index.  Pure usrloc
+					workloads simply do not load it — PK-only operation,
+					no index SHM, no watcher-feed CPU.
 				</para></listitem>
 			</varlistentry>
 			<varlistentry>
@@ -225,7 +216,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 					hash can use a bitmask AND.  Each doubling
 					halves average chain length for ~32 KB more
 					SHM.  Only relevant when
-					<varname>enable_search_index = 1</varname>;
+					the <emphasis>cachedb_nats_fts</emphasis> module loaded;
 					ignored otherwise.  Recommended values:
 					4096 at &le; 20k AoRs, 16384 at 100k, 65536
 					at 1MM.
@@ -257,7 +248,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		<itemizedlist>
 			<listitem><para>
 				<emphasis>Pure usrloc workloads at any scale:</emphasis>
-				set <varname>enable_search_index = 0</varname>.
+				do not load <emphasis>cachedb_nats_fts</emphasis>.
 				No index, no watcher, no per-write index update.
 			</para></listitem>
 			<listitem><para>
@@ -418,7 +409,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		<title>Optional knobs introduced in this work</title>
 		<para>
 			See <xref linkend="usrloc_storage_scale_tuning"/> for
-			<varname>enable_search_index</varname> and
+			loading <emphasis>cachedb_nats_fts</emphasis> and
 			<varname>index_buckets</varname>, the two scale-tuning
 			knobs.  The remaining knobs are listed below.
 		</para>

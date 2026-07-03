@@ -3,19 +3,16 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * `enable_search_index` wiring test: cachedb_nats exposes an `enable_search_index`
- * modparam (default 1) that lets operators disable the in-memory
- * JSON-FTS index for PK-only workloads (notably usrloc).  When
- * disabled:
+ * FTS-split wiring test (P1.2): the former enable_search_index modparam
+ * is GONE — loading the optional cachedb_nats_fts module is the enable
+ * switch.  cachedb_nats binds it at mod_init (cdbn_fts_bind) and:
+ *   - query/update reject non-PK filters when the module is absent;
+ *   - the write path / watcher feed the index only through the binds
+ *     (cdbn_fts_on-guarded);
+ *   - the index + intern lifecycles live in the FTS module's
+ *     mod_init/destroy, not in cachedb_nats.
  *
- *   - mod_init must skip nats_json_index_init.
- *   - child_init must skip nats_json_index_build and the watcher.
- *   - nats_cache_query and nats_cache_update must reject non-PK
- *     filters with an explicit error message rather than crashing
- *     on a NULL g_idx.
- *
- * This test is structural -- it greps the production source for the
- * required declarations and gate sites.
+ * Source-pattern test; run from the tests/ directory.
  */
 
 #include <stdio.h>
@@ -43,23 +40,34 @@ static int file_contains(const char *path, const char *needle)
 
 int main(void)
 {
-	ASSERT(file_contains("../cachedb_nats.c",
-		"\"enable_search_index\""),
-		"enable_search_index modparam declared");
-	ASSERT(file_contains("../cachedb_nats.c",
-		"int   nats_enable_search_index = 1"),
-		"nats_enable_search_index global defined with default 1");
+	const char *CN = "../cachedb_nats.c";
+	const char *JS = "../cachedb_nats_json.c";
+	const char *W  = "../cachedb_nats_watch.c";
+	const char *FM = "../../cachedb_nats_fts/cachedb_nats_fts.c";
 
-	ASSERT(file_contains("../cachedb_nats.c",
-		"if (nats_enable_search_index) {"),
-		"mod_init gates nats_json_index_init on the flag");
-	ASSERT(file_contains("../cachedb_nats.c",
-		"if (nats_enable_search_index && rank == 1 &&"),
-		"child_init gates index_build / watcher on the flag");
+	/* the modparam is gone; the binds replace it */
+	ASSERT(!file_contains(CN, "\"enable_search_index\""),
+		"enable_search_index modparam removed");
+	ASSERT(file_contains(CN, "find_export(\"cdbn_fts_bind\""),
+		"cachedb_nats binds the FTS module at mod_init");
 
-	ASSERT(file_contains("../cachedb_nats_json.c",
-		"non-PK filter rejected because the "),
-		"query and update reject non-PK filters when index disabled");
+	/* PK-only rejection when absent */
+	ASSERT(file_contains(JS, "cachedb_nats_fts) is not loaded"),
+		"query/update reject non-PK filters without the module");
+
+	/* binds-guarded feeds */
+	ASSERT(file_contains(W, "if (cdbn_fts_on)"),
+		"watcher index feed is binds-guarded");
+	ASSERT(file_contains(CN, "cdbn_fts.build(kv, fts_json_prefix)"),
+		"child_init initial build goes through the binds");
+
+	/* index + intern lifecycle belongs to the FTS module */
+	ASSERT(file_contains(FM, "nats_json_index_init()"),
+		"FTS module mod_init owns index init");
+	ASSERT(file_contains(FM, "nats_intern_destroy()"),
+		"FTS module destroy owns the intern table");
+	ASSERT(!file_contains(CN, "nats_json_index_init"),
+		"cachedb_nats no longer inits the index itself");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

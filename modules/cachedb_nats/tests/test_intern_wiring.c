@@ -42,52 +42,54 @@ static int file_contains(const char *path, const char *needle)
 int main(void)
 {
 	/* Headers exposing the API */
-	ASSERT(file_contains("../cachedb_nats_intern.h",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.h",
 		"int  nats_intern_init"),
 		"nats_intern_init prototype declared");
-	ASSERT(file_contains("../cachedb_nats_intern.h",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.h",
 		"void nats_intern_destroy"),
 		"nats_intern_destroy prototype declared");
-	ASSERT(file_contains("../cachedb_nats_intern.h",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.h",
 		"char *nats_intern_acquire"),
 		"nats_intern_acquire prototype declared");
-	ASSERT(file_contains("../cachedb_nats_intern.h",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.h",
 		"void nats_intern_release"),
 		"nats_intern_release prototype declared");
 
 	/* Implementation file present */
-	ASSERT(file_contains("../cachedb_nats_intern.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.c",
 		"NATS_INTERN_BUCKETS"),
 		"intern .c defines NATS_INTERN_BUCKETS");
-	ASSERT(file_contains("../cachedb_nats_intern.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.c",
 		"NATS_INTERN_SHARDS"),
 		"intern .c defines NATS_INTERN_SHARDS");
-	ASSERT(file_contains("../cachedb_nats_intern.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.c",
 		"refcount"),
 		"intern entries are refcounted");
-	ASSERT(file_contains("../cachedb_nats_intern.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_intern.c",
 		"lock_set_alloc"),
 		"intern uses gen_lock_set for sharded locking");
 
 	/* Callers in cachedb_nats_json_index.c (the index TU after the
 	 * proc-TU split) -- the optimization is pointless if
 	 * _entry_add_key still strdups instead of interning. */
-	ASSERT(file_contains("../cachedb_nats_json_index.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"nats_intern_acquire"),
 		"_entry_add_key acquires from intern table");
-	ASSERT(file_contains("../cachedb_nats_json_index.c",
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"nats_intern_release"),
 		"key release path goes through intern table");
 
 	/* Init / destroy hooks in mod_init / destroy.  Without these
 	 * the table is NULL when index code calls into it -- everything
 	 * gracefully fails but no one gets the alloc savings. */
-	ASSERT(file_contains("../cachedb_nats.c",
+	/* P1.2: the intern table moved to the optional cachedb_nats_fts
+	 * module, whose mod_init/destroy own its lifecycle. */
+	ASSERT(file_contains("../../cachedb_nats_fts/cachedb_nats_fts.c",
 		"nats_intern_init"),
-		"mod_init initialises the intern table");
-	ASSERT(file_contains("../cachedb_nats.c",
+		"FTS mod_init initialises the intern table");
+	ASSERT(file_contains("../../cachedb_nats_fts/cachedb_nats_fts.c",
 		"nats_intern_destroy"),
-		"destroy() tears the intern table down");
+		"FTS destroy() tears the intern table down");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

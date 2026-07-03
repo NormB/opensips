@@ -56,7 +56,7 @@ static int line_count(const char *path)
 
 int main(void)
 {
-	const char *IDX = "../cachedb_nats_json_index.c";
+	const char *IDX = "../../cachedb_nats_fts/fts_index.c";
 	const char *SER = "../cachedb_nats_json_ser.c";
 	const char *RM  = "../cachedb_nats_json_rowmeta.c";
 	const char *QU  = "../cachedb_nats_json.c";
@@ -105,9 +105,12 @@ int main(void)
 	/* --- shared private surface lives in the internal header --- */
 	ASSERT(file_contains(INT, "} json_sink_t;"),
 		"internal header carries json_sink_t");
-	ASSERT(file_contains(INT, "extern nats_search_idx *g_idx;"),
-		"internal header exposes g_idx to the query/update TU");
-	ASSERT(file_contains(INT, "static inline void _idx_lock_shard"),
+	/* P1.2: g_idx + shard locks moved to the FTS module's header */
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.h",
+		"extern nats_search_idx *g_idx;"),
+		"FTS header exposes g_idx to the FTS query TU");
+	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.h",
+		"static inline void _idx_lock_shard"),
 		"internal header carries the shard-lock inlines");
 
 	/* --- the split actually shrank things; cap each TU --- */

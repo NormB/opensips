@@ -53,7 +53,7 @@ int main(void)
 		"nats_pool_get_kv") >= 1,
 		"resync handler lazily connects via nats_pool_get_kv");
 	ASSERT(grep_in_function(src, "_nats_cdb_periodic_resync",
-		"nats_json_index_rebuild") >= 1,
+		"cdbn_fts.rebuild") >= 1,
 		"resync handler still rebuilds the index");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

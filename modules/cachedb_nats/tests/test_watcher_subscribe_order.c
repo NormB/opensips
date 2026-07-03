@@ -17,7 +17,7 @@
  * removes are membership-gated).
  *
  * This asserts the ordering in the production source: kvStore_WatchMulti must
- * appear BEFORE nats_json_index_rebuild in the watcher thread.
+ * appear BEFORE the binds index rebuild in the watcher loop.
  *
  * Build: cc -g -O0 -Wall -o test_watcher_subscribe_order test_watcher_subscribe_order.c
  */
@@ -50,13 +50,13 @@ int main(void)
 {
 	const char *src = "../cachedb_nats_watch.c";
 	int watch_line   = first_line_of(src, "kvStore_WatchMulti(&w");
-	int rebuild_line = first_line_of(src, "nats_json_index_rebuild(kv");
+	int rebuild_line = first_line_of(src, "cdbn_fts.rebuild(kv");
 
 	ASSERT(watch_line > 0, "found kvStore_WatchMulti call in the watcher");
-	ASSERT(rebuild_line > 0, "found nats_json_index_rebuild call in the watcher");
+	ASSERT(rebuild_line > 0, "found the binds index-rebuild call in the watcher");
 	ASSERT(watch_line > 0 && rebuild_line > 0 && watch_line < rebuild_line,
 		"watcher subscribes (kvStore_WatchMulti) BEFORE it rebuilds the "
-		"snapshot (nats_json_index_rebuild) -- no (snapshot,subscribe) gap");
+		"snapshot (cdbn_fts.rebuild) -- no (snapshot,subscribe) gap");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

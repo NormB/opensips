@@ -33,15 +33,7 @@
 
 #include "../../cachedb/cachedb.h"
 #include "cachedb_nats_json.h"
-
-/* --- search index internals (cachedb_nats_json_index.c) ----------- */
-
-/* The process-global SHM search index; query/update read it directly
- * (under the shard locks below).  NULL until nats_json_index_init(). */
-extern nats_search_idx *g_idx;
-
-/* djb2 over "field:value"; returns a bucket in [0, nats_idx_buckets). */
-unsigned int _hash(const char *s, int len);
+#include "../../locking.h"
 
 /* Iterative JSON scanners used to pre-validate broker-supplied bytes
  * before the recursive cJSON parser (and to walk documents in the
@@ -56,22 +48,6 @@ const char *_parse_json_string(const char *p, const char *end,
 
 /* Depth/size-guarded JSON -> cdb_dict_t conversion. */
 int _safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out);
-
-/* Locate the index entry for a composite "field:value" key.  Caller
- * must hold the entry's shard lock. */
-nats_idx_entry *_find_entry(const char *fv, int fv_len);
-
-/* Shard-locking helpers.  Whole-index ops acquire shards in index
- * order to keep the lock hierarchy consistent.  The lock set itself
- * is SHM-backed so cross-process synchronisation is safe. */
-static inline void _idx_lock_shard(nats_search_idx *idx, int shard)
-{
-	lock_set_get(idx->shard_locks, shard);
-}
-static inline void _idx_unlock_shard(nats_search_idx *idx, int shard)
-{
-	lock_set_release(idx->shard_locks, shard);
-}
 
 /* --- JSON sink / serializer (cachedb_nats_json_ser.c) -------------- */
 

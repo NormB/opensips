@@ -47,14 +47,11 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_stats.h"
 #include "cachedb_nats_dbase.h"
-#include "cachedb_nats_intern.h"
 #include "cachedb_nats_json_internal.h"
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
-extern int   fts_max_results;
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
-extern int   nats_enable_search_index;
 
 
 /* ------------------------------------------------------------------ */

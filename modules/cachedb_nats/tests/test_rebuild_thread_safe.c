@@ -71,7 +71,7 @@ static int count(const char *hay, const char *needle)
 
 int main(void)
 {
-	const char *src = "../cachedb_nats_json_index.c";
+	const char *src = "../../cachedb_nats_fts/fts_index.c";
 	char *body = body_after(src, "nats_json_index_rebuild(kvStore");
 	ASSERT(body != NULL, "found nats_json_index_rebuild body");
 	if (!body) { fprintf(stderr, "\n=== FAILS=%d ===\n", g_fails); return 1; }
@@ -96,10 +96,10 @@ int main(void)
 		char line[4096]; int saw = 0;
 		if (w) {
 			while (fgets(line, sizeof(line), w))
-				if (strstr(line, "nats_json_index_rebuild(")) { saw = 1; break; }
+				if (strstr(line, "cdbn_fts.rebuild(")) { saw = 1; break; }
 			fclose(w);
 		}
-		ASSERT(saw, "watcher TU calls nats_json_index_rebuild (the racy caller)");
+		ASSERT(saw, "watcher TU calls the index rebuild via binds (the racy caller)");
 	}
 
 	if (g_fails == 0) fprintf(stderr, "\n=== ALL PASS (fails=0) ===\n");

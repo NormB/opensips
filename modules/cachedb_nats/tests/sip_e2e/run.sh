@@ -113,7 +113,14 @@ NODE_ID_B="${NODE_ID_B:-2}"
 render_cfg() {
     # render_cfg <out> <instance> <sip-port> <mi-port> <cluster-port> <node-id>
     local out=$1 inst=$2 sip=$3 mi=$4 cport=$5 nid=$6
-    # The cfg template gained `enable_search_index` and `index_buckets`
+    if [ "${ENABLE_INDEX:-1}" = "1" ]; then
+        FTS_LOAD="loadmodule \"cachedb_nats_fts.so\"\nmodparam(\"cachedb_nats_fts\", \"index_buckets\", ${INDEX_BUCKETS:-4096})"
+    else
+        FTS_LOAD="# cachedb_nats_fts not loaded (ENABLE_INDEX=0): PK-only"
+    fi
+    # ENABLE_INDEX=1 loads the optional cachedb_nats_fts module (the
+    # P1.2 split replaced the enable_search_index modparam with the
+    # module itself); INDEX_BUCKETS becomes its index_buckets modparam.
     # placeholders for bench_ul_register.sh; integration cases default
     # both to legacy values (index on, 4096 buckets) unless the case
     # overrides via env.
@@ -126,8 +133,7 @@ render_cfg() {
         -e "s|@@NODE_ID@@|${nid}|g" \
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" \
         -e "s|@@INSTANCE@@|${inst}|g" \
-        -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX:-1}|g" \
-        -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS:-4096}|g" \
+        -e "s|@@FTS_LOAD@@|${FTS_LOAD}|g" \
         -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
         -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
         "${HERE}/opensips.cfg.in" > "$out"

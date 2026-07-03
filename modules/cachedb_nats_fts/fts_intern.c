@@ -20,7 +20,7 @@
 #include "../../locking.h"
 #include "../../mem/shm_mem.h"
 
-#include "cachedb_nats_intern.h"
+#include "fts_intern.h"
 
 #define NATS_INTERN_DEFAULT_BUCKETS 1024  /* fallback when caller passes <= 0 */
 #define NATS_INTERN_SHARDS   32           /* lock-set size */

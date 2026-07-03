@@ -219,7 +219,6 @@ modparam("cachedb_nats", "nats_url", "tls://localhost:${NATS_PORT}")
 modparam("cachedb_nats", "cachedb_url", "nats:loc://localhost:${NATS_PORT}/")
 modparam("cachedb_nats", "kv_bucket", "TEST_TLS_MGM_SMOKE")
 modparam("cachedb_nats", "kv_replicas", 1)
-modparam("cachedb_nats", "enable_search_index", 0)
 
 route {
     sl_send_reply(200, "ok");
@@ -376,7 +375,6 @@ modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
 modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
 modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_NO_MGM\")
 modparam(\"cachedb_nats\", \"kv_replicas\", 1)
-modparam(\"cachedb_nats\", \"enable_search_index\", 0)
 ${FOOTER}"
 
 if boot_scenario "no_mgm" "$NO_MGM_CFG" "tls_mgm is not loaded" 8; then
@@ -403,7 +401,6 @@ modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
 modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
 modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_NO_DOMAIN\")
 modparam(\"cachedb_nats\", \"kv_replicas\", 1)
-modparam(\"cachedb_nats\", \"enable_search_index\", 0)
 ${FOOTER}"
 
 if boot_scenario "no_domain" "$NO_DOMAIN_CFG" \
@@ -436,7 +433,6 @@ modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
 modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
 modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_CA_DIR\")
 modparam(\"cachedb_nats\", \"kv_replicas\", 1)
-modparam(\"cachedb_nats\", \"enable_search_index\", 0)
 ${FOOTER}"
 
 if boot_scenario "cadir" "$CADIR_CFG" "NATS pool: connected to" 10; then
@@ -463,7 +459,6 @@ modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${NATS_PORT}\")
 modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/\")
 modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_SKIP_VERIFY\")
 modparam(\"cachedb_nats\", \"kv_replicas\", 1)
-modparam(\"cachedb_nats\", \"enable_search_index\", 0)
 ${FOOTER}"
 
 if boot_scenario "skip_verify" "$SKIP_VERIFY_CFG" "NATS pool: connected to" 10; then

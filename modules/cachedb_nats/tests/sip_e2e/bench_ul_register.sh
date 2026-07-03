@@ -86,17 +86,20 @@ nats --server "$NATS_URL" kv add "$KV_BUCKET" --history=3 --replicas=1 \
 
 render_cfg() {
     local out=$1 inst=$2 sip=$3 mi=$4 cport=$5 nid=$6
-    sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
+    if [ "${ENABLE_INDEX:-1}" = "1" ]; then
+    BENCH_FTS_LOAD="loadmodule \"cachedb_nats_fts.so\"\nmodparam(\"cachedb_nats_fts\", \"index_buckets\", ${INDEX_BUCKETS:-4096})"
+else
+    BENCH_FTS_LOAD="# cachedb_nats_fts not loaded (ENABLE_INDEX=0): PK-only"
+fi
+sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
         -e "s|@@NATS_URL@@|${NATS_URL}|g" \
         -e "s|@@CACHEDB_URL@@|${CACHEDB_URL}|g" \
         -e "s|@@SIP_PORT@@|${sip}|g" -e "s|@@MI_PORT@@|${mi}|g" \
         -e "s|@@CLUSTER_PORT@@|${cport}|g" -e "s|@@NODE_ID@@|${nid}|g" \
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" -e "s|@@INSTANCE@@|${inst}|g" \
-        -e "s|@@ENABLE_INDEX@@|${ENABLE_INDEX}|g" \
-        -e "s|@@INDEX_BUCKETS@@|${INDEX_BUCKETS}|g" \
+        -e "s|@@FTS_LOAD@@|${BENCH_FTS_LOAD}|g" \
         -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
         -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
-        -e "s|@@UNSAFE_TTL_ONLY@@|${UNSAFE_TTL_ONLY:-0}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 

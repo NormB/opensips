@@ -68,8 +68,7 @@ modparam("cachedb_nats", "nats_expired_linger", @@EXPIRED_LINGER@@)
 modparam("cachedb_nats", "nats_reap_interval",  @@REAP_INTERVAL@@)
 # acknowledgment flag for reaper-off runs (case 088 failure-mode probe).
 modparam("cachedb_nats", "fts_json_prefix", "json_")
-modparam("cachedb_nats", "enable_search_index",   @@ENABLE_INDEX@@)
-modparam("cachedb_nats", "index_buckets",         @@INDEX_BUCKETS@@)
+@@FTS_LOAD@@
 # Watch every KV mutation; the watcher updates the SHM-backed
 # JSON-FTS index live so cross-instance changes propagate without
 # the per-query lazy self-heal.  The dedicated watcher process (the
