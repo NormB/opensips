@@ -650,10 +650,13 @@ static int mod_init(void)
 			/* extract host:port from cachedb_url
 			 * format: nats:group1://host1:4222,host2:4223/
 			 * we need: nats://host1:4222,nats://host2:4223 */
-			char *p = nats_cdb_urls->url.s;
 			char *hosts_start;
-			/* skip past "://" */
-			hosts_start = strstr(p, "://");
+			/* skip past "://" — counted search [P0.9]: core
+			 * cachedb_store_url() does NOT NUL-terminate url.s,
+			 * so a libc strstr() here could read past the pkg
+			 * allocation when the URL lacks the separator */
+			hosts_start = str_strstr(&nats_cdb_urls->url,
+					_str("://"));
 			if (hosts_start) {
 				hosts_start += 3;
 				/* strip trailing slash */
