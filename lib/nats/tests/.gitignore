@@ -1,21 +1,11 @@
 *.o
 *.d
-test_js_pending_cap
-test_kv_op_timeout
-test_kv_ttl_probe_matrix
-test_nats_ca_dir
-test_nats_dl
-test_nats_pool_fixes
-test_ping_liveness
-test_pool_atomics_explicit
-test_pool_refcount
-test_reconnect_jitter
-test_redact_url
-test_server_info_redact
-test_tls_downgrade_policy
-test_unsafe_log_clamp
-test_validate_publish_subject
-test_validate_subject_cache
-test_validate_modes
-test_pool_merge
-test_async_first_connect
+
+# Compiled test binaries: every test_*.c builds an extensionless test_* binary.
+# Ignore those, but keep the sources, shell runners and python helpers tracked.
+# (Pattern replaces the previously hand-maintained per-binary list, which drifted
+# out of date as tests were added/deleted.)
+test_*
+!test_*.c
+!test_*.sh
+!test_*.py

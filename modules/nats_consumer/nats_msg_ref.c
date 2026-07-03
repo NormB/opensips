@@ -27,7 +27,7 @@
  * Also owns the orphan reap (a worker that died after popping but
  * before acking must not leak its slot forever).
  *
- * Split out of nats_consumer_proc.c (NATS_TODO #60); cross-TU private
+ * Split out of nats_consumer_proc.c (proc-TU split); cross-TU private
  * declarations live in nats_consumer_proc_internal.h.
  */
 

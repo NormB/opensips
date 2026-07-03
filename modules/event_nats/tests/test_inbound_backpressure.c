@@ -9,7 +9,7 @@
  * cap and NO payload-size limit.  A publish flood -- especially of large
  * messages -- exhausts SHM and saturates the worker IPC queue, and the
  * per-message allocator lock traffic is the dominant cost at high event
- * rates (PERF_NOTES identifies SHM allocator locking as the top
+ * rates (the design-repo PERF_NOTES.md identifies SHM allocator locking as the top
  * bottleneck).
  *
  * Fix:

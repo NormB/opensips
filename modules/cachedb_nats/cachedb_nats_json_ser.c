@@ -26,7 +26,7 @@
  * target-key builder and the seed-document builder used by the
  * query() / update() callbacks in cachedb_nats_json.c.
  *
- * Split out of cachedb_nats_json.c (NATS_TODO #60); the search index
+ * Split out of cachedb_nats_json.c (proc-TU split); the search index
  * lives in cachedb_nats_json_index.c.  Cross-TU private declarations
  * are in cachedb_nats_json_internal.h.
  */

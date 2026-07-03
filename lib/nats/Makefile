@@ -51,7 +51,7 @@ endif
 
 CFLAGS  := $(MOD_CFLAGS) -fPIC
 
-.PHONY: all clean install test-rank clean-test-rank
+.PHONY: all clean install
 
 ifeq ($(NATS_SKIP),yes)
 all install: ; @true
@@ -78,21 +78,6 @@ install: $(NAME)
 
 endif
 
-clean: clean-test-rank
+clean:
 	rm -f $(OBJS) $(NAME) *.d
 
-# ---------------------------------------------------------------------
-# Unit test for nats_pool_should_init().
-#
-# Links only nats_rank.o so the test binary does not need to resolve the
-# full NATS pool / OpenSIPS core symbol graph.  Run with:
-#   make -C lib/nats test-rank
-# ---------------------------------------------------------------------
-test-rank: test_nats_rank
-	./test_nats_rank
-
-test_nats_rank: test_nats_rank.c nats_rank.o
-	$(CC) -I../.. -o $@ $< nats_rank.o
-
-clean-test-rank:
-	rm -f test_nats_rank

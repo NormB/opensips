@@ -252,7 +252,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 		</variablelist>
 		<para>
 			Scaling guidance is documented in detail in
-			<filename>doc/SCALING.md</filename>; the short version:
+			the scaling notes in the opensips-usrloc-nats design repository; the short version:
 		</para>
 		<itemizedlist>
 			<listitem><para>

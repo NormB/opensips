@@ -14,7 +14,7 @@
  *
  * Why this exists.  At 100k AoRs / 2000 RPS the watcher's
  * nats_json_index_add hot path was spending ~half of all opensips
- * CPU in sem_wait -> hp_shm_malloc paths (see PERF_NOTES.md).
+ * CPU in sem_wait -> hp_shm_malloc paths (design-repo PERF_NOTES.md).
  * Each indexed field on a usrloc contact triggers _entry_add_key
  * -> shm_malloc(klen+1) for a duplicate of the document key,
  * which then takes a per-bucket SHM_LOCK semaphore inside

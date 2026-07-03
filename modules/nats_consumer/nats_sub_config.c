@@ -27,7 +27,7 @@
  * rebuild the JetStream pull consumer for a bound handle) and the
  * registry reconcile callback driven by the consumer main loop.
  *
- * Split out of nats_consumer_proc.c (NATS_TODO #60); cross-TU private
+ * Split out of nats_consumer_proc.c (proc-TU split); cross-TU private
  * declarations live in nats_consumer_proc_internal.h.
  */
 

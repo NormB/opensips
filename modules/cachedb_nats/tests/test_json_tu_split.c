@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * TU-split test (NATS_TODO #60, cachedb_nats half):
+ * TU-split test (the design notes, cachedb_nats half):
  *
  *   cachedb_nats_json.c (3597 lines) is split into focused TUs:
  *     - cachedb_nats_json_index.c   — search index, revmap, build/rebuild

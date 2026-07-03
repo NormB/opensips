@@ -29,7 +29,7 @@
  * before any broker-supplied document reaches the recursive cJSON
  * parser.
  *
- * Split out of cachedb_nats_json.c (NATS_TODO #60); the query() /
+ * Split out of cachedb_nats_json.c (proc-TU split); the query() /
  * update() cachedb callbacks live there, the escape/sink/serializer
  * helpers in cachedb_nats_json_ser.c.  Cross-TU private declarations
  * are in cachedb_nats_json_internal.h.
@@ -480,7 +480,7 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	 *
 	 * Why this matters: the watcher's nats_json_index_add path was
 	 * spending half of opensips CPU on hp_shm_malloc -> sem_wait at
-	 * 100k AoRs (PERF_NOTES "HP_MALLOC contention hypothesis").
+	 * 100k AoRs (design-repo PERF_NOTES.md, "HP_MALLOC contention hypothesis").
 	 * Cutting allocs from 3 to 1 per new entry gives the cold-fill
 	 * path 3x fewer bucket-lock acquires; the re-register hot path
 	 * was already cut to ~zero by the doc-key intern table.

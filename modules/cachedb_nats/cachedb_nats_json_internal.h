@@ -21,7 +21,7 @@
 /*
  * cachedb_nats_json_internal.h — private cross-TU declarations for the
  * JSON index / serializer / query+update translation units (the
- * NATS_TODO #60 split of cachedb_nats_json.c).  Nothing here is module
+ * proc-TU split of cachedb_nats_json.c).  Nothing here is module
  * API: modules outside cachedb_nats must use cachedb_nats_json.h.
  */
 

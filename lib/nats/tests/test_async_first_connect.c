@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Async-first-connect test (NATS_TODO #7, the sub-part that was never
+ * Async-first-connect test (the design notes, the sub-part that was never
  * wired -- caught live by test_boot_degraded_e2e.sh):
  *
  *   With the broker down at BOOT, nats_pool_get()'s synchronous retry

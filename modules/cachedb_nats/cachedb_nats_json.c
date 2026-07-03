@@ -27,7 +27,7 @@
  * and the single-pass CAS JSON update (classify pairs, walk the existing
  * document once, merge subkeys, append new fields).
  *
- * Split per NATS_TODO #60: the index lives in cachedb_nats_json_index.c,
+ * Split out of the proc TU: the index lives in cachedb_nats_json_index.c,
  * the escape/sink/serializer helpers in cachedb_nats_json_ser.c, and the
  * cross-TU private declarations in cachedb_nats_json_internal.h.
  */

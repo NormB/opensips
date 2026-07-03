@@ -80,7 +80,7 @@ int main(void)
 	/* (a) the query function must distinguish NATS_NOT_FOUND from other
 	 *     non-OK statuses on the result-fetch path */
 	/* the result-fetch loop now lives in the _query_fetch_rows helper
-	 * extracted from nats_cache_query (NATS_TODO #60 decomposition) */
+	 * extracted from nats_cache_query (the design notes decomposition) */
 	n = grep_in_function(path, "_query_fetch_rows", "NATS_NOT_FOUND");
 	ASSERT(n >= 1,
 		"nats_cache_query distinguishes NATS_NOT_FOUND in fetch loop");

@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Watcher hygiene test (NATS_TODO #71):
+ * Watcher hygiene test:
  *
  *   1. The _watch_patterns pointer array must be allocated/freed with
  *      OpenSIPS's pkg_malloc/pkg_free, not the raw libc malloc/free.

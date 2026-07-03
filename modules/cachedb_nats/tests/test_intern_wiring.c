@@ -5,7 +5,7 @@
  *
  * Structural wiring test for the doc-key intern table introduced
  * to cut HP_MALLOC contention on the watcher's _entry_add_key
- * hot path.  See cachedb_nats_intern.h and PERF_NOTES.md
+ * hot path.  See cachedb_nats_intern.h and the design-repo PERF_NOTES.md
  * "HP_MALLOC contention hypothesis -> watcher-local arena" for
  * the design.
  *
@@ -70,7 +70,7 @@ int main(void)
 		"intern uses gen_lock_set for sharded locking");
 
 	/* Callers in cachedb_nats_json_index.c (the index TU after the
-	 * NATS_TODO #60 split) -- the optimization is pointless if
+	 * proc-TU split) -- the optimization is pointless if
 	 * _entry_add_key still strdups instead of interning. */
 	ASSERT(file_contains("../cachedb_nats_json_index.c",
 		"nats_intern_acquire"),

@@ -2,16 +2,16 @@
  * test_nats_rank.c — Unit test for nats_pool_should_init().
  *
  * Build standalone:
- *   make -C lib/nats test-rank
+ *   make -C lib/nats/tests test_nats_rank && ./test_nats_rank (part of make check)
  *
  * Run:
- *   lib/nats/test_nats_rank
+ *   lib/nats/tests/test_nats_rank
  */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "nats_pool.h"
-#include "../../sr_module.h"
+#include "../nats_pool.h"
+#include "../../../sr_module.h"
 
 struct rank_case {
 	int rank;

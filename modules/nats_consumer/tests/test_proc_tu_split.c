@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * TU-split test (NATS_TODO #60, nats_consumer half):
+ * TU-split test (the design notes, nats_consumer half):
  *
  *   nats_consumer_proc.c (2220 lines) is split into three focused TUs:
  *     - nats_msg_ref.c         — process-local natsMsg ref table

@@ -85,7 +85,7 @@ int main(void)
 	/* ---- production wiring -------------------------------------- */
 	{
 		/* ensure_backoff_seconds and the reconcile callback moved to
-		 * the sub-config TU in the NATS_TODO #60 split. */
+		 * the sub-config TU in the proc-TU split. */
 		const char *p = "../nats_sub_config.c";
 		ASSERT(file_contains(p, "#define ENSURE_BACKOFF_CAP_S 60u"),
 			"production caps the backoff at 60 s");

@@ -283,7 +283,7 @@ int main(void)
 	 * actually use the RAW emitter (the fix) and that the raw helper
 	 * exists. */
 	{
-		/* After the NATS_TODO #60 split the helper DEFINITION lives
+		/* After the proc-TU split the helper DEFINITION lives
 		 * in the serializer TU while the copy-through CALL SITES stay
 		 * with the update path in cachedb_nats_json.c. */
 		FILE *f = fopen("../cachedb_nats_json.c", "r");

@@ -115,7 +115,7 @@ int main(void)
 		ASSERT(file_contains(json, "_pk_target_key"),
 			"json defines the stack-buffer PK key helper");
 		/* the PK branch now lives in the _query_pk_fast_path helper
-		 * extracted from nats_cache_query (NATS_TODO #60 decomposition) */
+		 * extracted from nats_cache_query (the design notes decomposition) */
 		ASSERT(grep_in_function(json, "_query_pk_fast_path", "_pk_target_key") >= 1,
 			"PK query path uses the stack-buffer key build");
 		ASSERT(grep_in_function(json, "_query_pk_fast_path", "pkg_malloc(plen + enc") == 0,

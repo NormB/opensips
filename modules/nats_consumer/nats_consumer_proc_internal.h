@@ -20,7 +20,7 @@
 
 /*
  * nats_consumer_proc_internal.h — private cross-TU declarations for the
- * consumer-process translation units (the NATS_TODO #60 split of
+ * consumer-process translation units (the proc-TU split of
  * nats_consumer_proc.c into msg-ref / sub-config / proc-loop TUs).
  * Nothing here is module API: code outside the consumer process must
  * use nats_consumer_proc.h.

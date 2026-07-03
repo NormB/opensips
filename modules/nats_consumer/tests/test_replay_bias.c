@@ -93,7 +93,7 @@ int main(void)
 
 	/* production wiring */
 	{
-		/* After the NATS_TODO #60 split: the sub-state typedef (and
+		/* After the proc-TU split: the sub-state typedef (and
 		 * its last_stream_seq field) lives in the internal header;
 		 * ensure_subscription_for_handle in the sub-config TU. */
 		const char *p = "../nats_consumer_proc_internal.h";

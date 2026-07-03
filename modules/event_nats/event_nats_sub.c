@@ -426,7 +426,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 
 	/* ONE combined SHM allocation: event struct + subject + data laid out
 	 * back-to-back.  Per-field mallocs tripled the SHM allocator lock
-	 * traffic that PERF_NOTES flags as the dominant cost at high rates;
+	 * traffic that the design-repo PERF_NOTES.md flags as the dominant cost at high rates;
 	 * the whole event is freed with a single shm_free. */
 	need = sizeof(nats_ipc_event_t) + (size_t)subject_len + 1 +
 		(size_t)data_len + 1;

@@ -560,7 +560,7 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 		Above 1 000 000 endpoints the recommended path is to
 		disable the index entirely via
 		<varname>enable_search_index = 0</varname>; see
-		<filename>doc/SCALING.md</filename> for the analysis.
+		the scaling notes in the opensips-usrloc-nats design repository for the analysis.
 	</para>
 	<para>
 		Ignored when
@@ -631,7 +631,7 @@ modparam("cachedb_nats", "index_buckets", 16384)
 		same bucket.
 	</para>
 	<para>
-		See <filename>doc/SCALING.md</filename> and the
+		See the scaling notes in the opensips-usrloc-nats design repository and the
 		usrloc playbook (<xref
 			linkend="usrloc_storage_scale_tuning"/>) for
 		guidance on when to flip this knob.

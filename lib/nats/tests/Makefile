@@ -12,7 +12,8 @@ TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_p
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
         test_js_pending_cap test_pool_refcount \
         test_kv_op_timeout test_reconnect_jitter \
-        test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix
+        test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix \
+        test_nats_rank
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -34,6 +35,11 @@ test_validate_modes: test_validate_modes.c ../nats_validate.o
 
 test_pool_merge: test_pool_merge.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ test_pool_merge.c
+
+# nats_pool_should_init() rank matrix — links only ../nats_rank.o so the
+# binary does not need the full pool / core symbol graph.
+test_nats_rank: test_nats_rank.c ../nats_rank.o
+	$(CC) $(CFLAGS) $(ASAN) -I../../.. -o $@ test_nats_rank.c ../nats_rank.o
 
 test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_subject_cache.c ../nats_validate.o

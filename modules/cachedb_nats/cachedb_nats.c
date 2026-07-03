@@ -263,7 +263,7 @@ int   nats_max_value_size = 1048576;
  *   - nats_cache_update likewise rejects non-PK filters.
  *
  * For the canonical usrloc-as-store deployment this is the
- * recommended setting; doc/SCALING.md covers the rationale at
+ * recommended setting; the design-repo SCALING.md covers the rationale at
  * 1MM / 10MM endpoint scales. */
 int   nats_enable_search_index = 1;
 
@@ -495,7 +495,7 @@ static const dep_export_t deps = {
  * returns, so the late binding is safe.
  *
  * Single instance ("no" = 1) -- one watcher is enough; multiplying
- * watchers does not parallelise the per-event cost (see SCALING.md
+ * watchers does not parallelise the per-event cost (see the design-repo SCALING.md
  * "Re-examining option 2 (watcher)") and would just multiply broker
  * delivery cost. */
 static const proc_export_t nats_watcher_procs[] = {

@@ -67,7 +67,7 @@ static int grep_in_function(const char *path, const char *fn_name,
 
 int main(void)
 {
-	/* After the NATS_TODO #60 split, ensure_subscription_for_handle
+	/* After the proc-TU split, ensure_subscription_for_handle
 	 * lives in the sub-config TU; the teardown stays in the proc TU. */
 	const char *src = "../nats_consumer_proc.c";
 	const char *sub = "../nats_sub_config.c";
