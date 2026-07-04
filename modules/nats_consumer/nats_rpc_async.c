@@ -313,6 +313,8 @@ typedef struct nats_rpc_call_wrap {
 	nats_rpc_slot_t *slot;          /* SHM */
 	int              timerfd;       /* worker-private, registered with reactor */
 	int64_t          deadline_us;   /* CLOCK_MONOTONIC, microseconds */
+	uint32_t         gen;           /* claim generation: guards the free
+	                                 * against an orphan-reaped slot [P2.2] */
 } nats_rpc_call_wrap_t;
 
 /* Default tick interval for the timerfd poll.  1 ms gives sub-ms p50 with
@@ -386,7 +388,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 			s->reply_headers_truncated);
 
 		async_status = ASYNC_DONE_CLOSE_FD;
-		nats_rpc_slot_free(s);
+		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return 1;
 	}
@@ -400,7 +402,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
 
 		async_status = ASYNC_DONE_CLOSE_FD;
-		nats_rpc_slot_free(s);
+		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return disc ? -2 : -1;
 	}
@@ -434,7 +436,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 			return 0;
 		}
 		async_status = ASYNC_DONE_CLOSE_FD;
-		nats_rpc_slot_free(s);
+		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return disc ? -2 : -1;
 	}
@@ -602,12 +604,21 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		slot->corr_id_len = 0;
 	}
 	slot->epoch_at_start = (uint32_t)nats_pool_get_reconnect_epoch();
+	ipc_gen = atomic_load_explicit(&slot->generation,
+		memory_order_relaxed);
+	/* [P2.2] Stamp the per-call deadline into the slot BEFORE the
+	 * CLAIMED->INFLIGHT release below: the consumer-side orphan
+	 * reaper reclaims this slot at deadline + slack if we die and
+	 * our timerfd resume never runs. */
+	atomic_store_explicit(&slot->deadline_us,
+		now_us_monotonic() + (int64_t)tmo_ms * 1000,
+		memory_order_relaxed);
 
 	LM_DBG("nats_request[async]: filled slot, about to publish\n");
 	if (nats_rpc_slot_publish(slot) < 0) {
 		LM_ERR("nats_request[async]: slot_publish failed (slot %u)\n",
 			slot->slot_idx);
-		nats_rpc_slot_free(slot);
+		nats_rpc_slot_free(slot, ipc_gen);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -6;
@@ -619,8 +630,6 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	 * the consumer reject this entry if the slot is freed and
 	 * re-claimed before the pump (prevents a double-publish -- see
 	 * nats_rpc_ipc_on_publish). */
-	ipc_gen = atomic_load_explicit(&slot->generation,
-		memory_order_relaxed);
 	ipc_dst = nats_consumer_proc_no();
 	LM_DBG("nats_request[async]: about to IPC-send slot_idx=%u gen=%u "
 		"dst=%d\n", slot->slot_idx, ipc_gen, ipc_dst);
@@ -632,7 +641,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 			slot->slot_idx);
 		nats_rpc_ipc_count_sent(0);
 		(void)nats_rpc_slot_abandon(slot);
-		nats_rpc_slot_free(slot);
+		nats_rpc_slot_free(slot, ipc_gen);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -5;
@@ -647,7 +656,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		LM_ERR("nats_request[async]: timerfd_create: %s\n",
 			strerror(errno));
 		(void)nats_rpc_slot_abandon(slot);
-		nats_rpc_slot_free(slot);
+		nats_rpc_slot_free(slot, ipc_gen);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -6;
@@ -665,7 +674,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 			strerror(errno));
 		close(tfd);
 		(void)nats_rpc_slot_abandon(slot);
-		nats_rpc_slot_free(slot);
+		nats_rpc_slot_free(slot, ipc_gen);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -6;
@@ -677,7 +686,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		LM_ERR("nats_request[async]: pkg_malloc wrap failed\n");
 		close(tfd);
 		(void)nats_rpc_slot_abandon(slot);
-		nats_rpc_slot_free(slot);
+		nats_rpc_slot_free(slot, ipc_gen);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -6;
@@ -685,6 +694,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	wrap->slot        = slot;
 	wrap->timerfd     = tfd;
 	wrap->deadline_us = now_us_monotonic() + (int64_t)tmo_ms * 1000;
+	wrap->gen         = ipc_gen;
 
 	/* Hand off to the reactor.  The staged headers were
 	 * "consumed" when we built the slot; clear the staging area

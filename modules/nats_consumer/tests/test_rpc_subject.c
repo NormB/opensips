@@ -135,7 +135,8 @@ static nats_rpc_slot_t *reclaim_idx(uint32_t want)
 		nats_rpc_slot_t *c = nats_rpc_slot_claim();
 		if (!c) return NULL;
 		if (c->slot_idx == want) return c;
-		nats_rpc_slot_free(c);
+		nats_rpc_slot_free(c,
+		atomic_load_explicit(&(c)->generation, memory_order_relaxed));
 	}
 	return NULL;
 }
@@ -164,7 +165,8 @@ static void test_generation_guard(void)
 		"build reply subject for claim A");
 
 	/* request #1 times out -> worker frees the slot */
-	nats_rpc_slot_free(a);
+	nats_rpc_slot_free(a,
+		atomic_load_explicit(&(a)->generation, memory_order_relaxed));
 
 	/* request #2 re-claims the SAME slot index */
 	b = reclaim_idx(idx);
@@ -194,7 +196,8 @@ static void test_generation_guard(void)
 	ASSERT(atomic_load_explicit(&b->generation, memory_order_relaxed) == pgen,
 		"FRESH reply accepted: slot generation == reply generation");
 
-	nats_rpc_slot_free(b);
+	nats_rpc_slot_free(b,
+		atomic_load_explicit(&(b)->generation, memory_order_relaxed));
 	nats_rpc_slot_destroy();
 }
 

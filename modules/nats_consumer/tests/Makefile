@@ -54,7 +54,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_rpc_subject test_fetch_async_timerfd \
      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
-     test_rpc_ipc_generation test_rpc_ipc_pack test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_inbox_auth test_registry_lookup_ref \
+     test_rpc_ipc_generation test_rpc_ipc_pack test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_slot_reaper test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
      test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
@@ -118,6 +118,12 @@ test_parser_adversarial: $(ADVPARSE_SRCS) test_shim.h ../nats_handle_parse.h ../
 test_rpc_slot_lifecycle: $(SLOTLIFE_SRCS) test_shim.h ../nats_rpc_slot.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(SLOTLIFE_SRCS) $(LDFLAGS)
 
+# [P2.2] Orphan reaper: dead-worker slots reclaimed after deadline+slack
+# (or claim-TTL pre-publish); DELIVERING pinned; generation-guarded free.
+SLOTREAP_SRCS := test_rpc_slot_reaper.c $(SHIM) ../nats_rpc_slot.c
+test_rpc_slot_reaper: $(SLOTREAP_SRCS) test_shim.h ../nats_rpc_slot.h
+	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(SLOTREAP_SRCS) $(LDFLAGS)
+
 test_rpc_reply_pin: $(REPLYPIN_SRCS) test_shim.h ../nats_rpc_slot.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(REPLYPIN_SRCS) $(LDFLAGS)
 
@@ -166,7 +172,8 @@ CORE_DEFS := -fPIC -DPIC \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
                     ../nats_msg_ref.c ../nats_sub_config.c \
-                    ../nats_handle_registry.c ../nats_ring.c
+                    ../nats_handle_registry.c ../nats_ring.c \
+                    ../nats_rpc_slot.c
 test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
 
@@ -176,7 +183,8 @@ test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 # nak_delay SHM payload lifecycle, stale-token no-op, stats.
 ACKIPC_SRCS := test_ack_ipc_actions.c ../nats_consumer_proc.c \
                ../nats_msg_ref.c ../nats_sub_config.c \
-               ../nats_handle_registry.c ../nats_ring.c
+               ../nats_handle_registry.c ../nats_ring.c \
+               ../nats_rpc_slot.c
 test_ack_ipc_actions: $(ACKIPC_SRCS) ../nats_consumer_proc_internal.h ../nats_ack_ipc.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ACKIPC_SRCS) $(LDFLAGS)
 
@@ -332,6 +340,7 @@ check: all
 	./test_rpc_reply_pin
 	./test_parser_adversarial
 	./test_rpc_slot_lifecycle
+	./test_rpc_slot_reaper
 	./test_rpc_inbox_auth
 	./test_registry_lookup_ref
 	./test_consumer_proc_boot_retry

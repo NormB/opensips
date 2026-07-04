@@ -74,7 +74,8 @@ int main(void)
 		"abandon INFLIGHT -> ABANDONED");
 
 	/* free returns the slot to the pool. */
-	nats_rpc_slot_free(a);
+	nats_rpc_slot_free(a,
+		atomic_load_explicit(&(a)->generation, memory_order_relaxed));
 	CHECK(nats_rpc_slot_inflight_count() == 0, "inflight == 0 after free");
 	CHECK(nats_rpc_slot_lookup(a->slot_idx) == NULL,
 		"lookup on a freed (FREE) slot is NULL");
@@ -82,7 +83,8 @@ int main(void)
 	/* the slot is reusable after free. */
 	b = nats_rpc_slot_claim();
 	CHECK(b == a, "the freed slot is re-claimed (reuse)");
-	nats_rpc_slot_free(b);
+	nats_rpc_slot_free(b,
+		atomic_load_explicit(&(b)->generation, memory_order_relaxed));
 
 	nats_rpc_slot_destroy();
 

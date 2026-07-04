@@ -125,7 +125,8 @@ int main(void)
 	CHECK(accept_reply(s, gen + 1, uuid) == 0,
 		"right corr_id but wrong generation is rejected");
 
-	nats_rpc_slot_free(s);
+	nats_rpc_slot_free(s,
+		atomic_load_explicit(&(s)->generation, memory_order_relaxed));
 	nats_rpc_slot_destroy();
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

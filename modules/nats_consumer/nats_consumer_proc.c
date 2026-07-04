@@ -92,6 +92,7 @@
 #include "nats_ack.h"
 #include "nats_consumer_proc.h"
 #include "nats_rpc_consumer.h"
+#include "nats_rpc_slot.h"
 #include "nats_rpc_ipc.h"
 #include "nats_consumer_proc_internal.h"
 
@@ -1230,6 +1231,10 @@ void nats_consumer_proc_main(int rank)
 			long long now = _now_monotonic_us();
 			if (now - last_reap_us >= NATS_MSG_REF_REAP_INTERVAL_US) {
 				reap_orphan_msg_refs();
+				/* [P2.2] also reclaim RPC slots whose owning
+				 * worker died mid-call (nothing else returns
+				 * them to the shared pool). */
+				(void)nats_rpc_slot_reap_orphans(now);
 				last_reap_us = now;
 			}
 		}

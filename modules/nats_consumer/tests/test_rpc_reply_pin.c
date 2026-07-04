@@ -131,7 +131,8 @@ int main(void)
 
 	/* A times out -> abandon + free. */
 	(void)nats_rpc_slot_abandon(sa);
-	nats_rpc_slot_free(sa);
+	nats_rpc_slot_free(sa,
+		atomic_load_explicit(&(sa)->generation, memory_order_relaxed));
 
 	/* Worker B re-claims the SAME slot (gen B = A+1), publishes. */
 	sb = nats_rpc_slot_claim();
@@ -155,7 +156,8 @@ int main(void)
 	CHECK(worker_poll(sb) != (long)gen_a,
 		"the slot is not left DELIVERED carrying A's foreign reply");
 
-	nats_rpc_slot_free(sb);
+	nats_rpc_slot_free(sb,
+		atomic_load_explicit(&(sb)->generation, memory_order_relaxed));
 	nats_rpc_slot_destroy();
 
 	/* ---- production wiring ---------------------------------------- */

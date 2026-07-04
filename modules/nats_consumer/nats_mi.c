@@ -372,6 +372,7 @@ mi_response_t *mi_consumer_stats(const mi_params_t *params,
 	SN("rpc_ipc_enqueued",   nats_rpc_ipc_enqueued_total());
 	SN("rpc_ipc_drained",    nats_rpc_ipc_drained_total());
 	SN("rpc_ipc_dropped",    nats_rpc_ipc_dropped_total());
+	SN("rpc_slot_orphans_reaped", nats_rpc_slot_orphans_reaped_total());
 
 	/* async-RPC slot pool */
 	SN("rpc_slots_inflight", nats_rpc_slot_inflight_count());

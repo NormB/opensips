@@ -84,7 +84,8 @@ int main(void)
 
 	/* ── step 2: A times out -> abandon + free ────────────────────── */
 	(void)nats_rpc_slot_abandon(sa);
-	nats_rpc_slot_free(sa);
+	nats_rpc_slot_free(sa,
+		atomic_load_explicit(&(sa)->generation, memory_order_relaxed));
 
 	/* ── step 3: worker B re-claims the SAME slot (gen G+1) ───────── */
 	sb = nats_rpc_slot_claim();
@@ -116,7 +117,8 @@ int main(void)
 	(void)nats_rpc_slot_abandon(sb);   /* INFLIGHT -> ABANDONED */
 	CHECK(would_publish(&entry_b) == 0,
 		"entry for an ABANDONED slot is skipped");
-	nats_rpc_slot_free(sb);
+	nats_rpc_slot_free(sb,
+		atomic_load_explicit(&(sb)->generation, memory_order_relaxed));
 
 	nats_rpc_slot_destroy();
 

@@ -32,6 +32,7 @@
 #endif
 
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -125,6 +126,15 @@ void nats_rpc_slot_destroy(void)
 	g_slot_total = 0;
 }
 
+/* CLOCK_MONOTONIC microseconds (system-wide, comparable across
+ * processes) for the [P2.2] orphan-reaper age stamps. */
+static long long _slot_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
 /* ── claim / publish / abandon / free ────────────────────────── */
 
 nats_rpc_slot_t *nats_rpc_slot_claim(void)
@@ -172,6 +182,11 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 			s->reply_headers_truncated = 0;
 			s->reply_to_len           = 0;
 			s->reply_has_reply_to     = 0;
+			/* [P2.2] age tracking for the orphan reaper */
+			atomic_store_explicit(&s->claimed_at_us,
+				_slot_now_us(), memory_order_relaxed);
+			atomic_store_explicit(&s->deadline_us, 0,
+				memory_order_relaxed);
 			return s;
 		}
 	}
@@ -211,13 +226,100 @@ int nats_rpc_slot_abandon(nats_rpc_slot_t *s)
 		: expected;
 }
 
-void nats_rpc_slot_free(nats_rpc_slot_t *s)
+void nats_rpc_slot_free(nats_rpc_slot_t *s, uint32_t gen)
 {
+	int st;
+
 	if (!s) return;
-	atomic_store_explicit(&s->state, NATS_RPC_SLOT_FREE,
-		memory_order_release);
-	atomic_fetch_sub_explicit(&g_inflight_count, 1,
+	/* [P2.2] Generation guard: if the claim was orphan-reaped (and
+	 * possibly recycled to a new caller) a blind store would clobber
+	 * the new claim.  A mismatch means the reaper already returned
+	 * the slot to the pool -- nothing left to do. */
+	if (atomic_load_explicit(&s->generation, memory_order_acquire)
+			!= gen)
+		return;
+	st = atomic_load_explicit(&s->state, memory_order_acquire);
+	if (st == NATS_RPC_SLOT_FREE)
+		return;
+	/* CAS from the observed state: if the reaper wins the race in
+	 * between, our expected value no longer matches and we back off
+	 * (it already repaired the inflight count). */
+	if (atomic_compare_exchange_strong_explicit(
+			&s->state, &st, NATS_RPC_SLOT_FREE,
+			memory_order_acq_rel, memory_order_relaxed))
+		atomic_fetch_sub_explicit(&g_inflight_count, 1,
+			memory_order_relaxed);
+}
+
+/* ── orphan reaper [P2.2] ────────────────────────────────────── */
+
+static _Atomic uint64_t g_slot_orphans_reaped;
+
+uint64_t nats_rpc_slot_orphans_reaped_total(void)
+{
+	return atomic_load_explicit(&g_slot_orphans_reaped,
 		memory_order_relaxed);
+}
+
+int nats_rpc_slot_reap_orphans(long long now_us)
+{
+	int reaped = 0;
+	uint32_t i;
+
+	if (!g_slots)
+		return 0;
+	for (i = 0; i < g_slot_total; i++) {
+		nats_rpc_slot_t *s = &g_slots[i];
+		int st = atomic_load_explicit(&s->state,
+			memory_order_acquire);
+		long long dl, ca;
+
+		/* DELIVERING is pinned by the consumer's libnats thread
+		 * mid-reply -- never reap it (it resolves to DELIVERED in
+		 * a few instructions; a later pass reaps that). */
+		if (st == NATS_RPC_SLOT_FREE ||
+		    st == NATS_RPC_SLOT_DELIVERING)
+			continue;
+		dl = atomic_load_explicit(&s->deadline_us,
+			memory_order_relaxed);
+		ca = atomic_load_explicit(&s->claimed_at_us,
+			memory_order_relaxed);
+		if (dl > 0) {
+			/* Published claim: a LIVE worker's own resume frees
+			 * at its deadline, so deadline + slack means the
+			 * owner is gone. */
+			if (now_us < dl + NATS_RPC_SLOT_REAP_SLACK_US)
+				continue;
+		} else {
+			/* Death between claim and publish: the claim->publish
+			 * window is microseconds in a live worker. */
+			if (now_us < ca + NATS_RPC_SLOT_REAP_CLAIM_TTL_US)
+				continue;
+		}
+		/* Invalidate FIRST: a late reply (generation echoed in the
+		 * inbox subject) and a stale worker->consumer IPC entry both
+		 * revalidate the generation and now fail.  Only then return
+		 * the slot to the pool. */
+		atomic_fetch_add_explicit(&s->generation, 1,
+			memory_order_relaxed);
+		if (atomic_compare_exchange_strong_explicit(
+				&s->state, &st, NATS_RPC_SLOT_FREE,
+				memory_order_acq_rel, memory_order_relaxed)) {
+			atomic_fetch_sub_explicit(&g_inflight_count, 1,
+				memory_order_relaxed);
+			reaped++;
+			LM_WARN("nats_rpc_slot: reaped orphaned slot %u "
+				"(state %d, owner gone; async RPC capacity "
+				"restored)\n", (unsigned)s->slot_idx, st);
+		}
+		/* CAS failure: the libnats thread pinned DELIVERING under
+		 * us; the extra generation bump only strengthens the
+		 * invalidation and the next pass reaps the DELIVERED. */
+	}
+	if (reaped)
+		atomic_fetch_add_explicit(&g_slot_orphans_reaped,
+			(uint64_t)reaped, memory_order_relaxed);
+	return reaped;
 }
 
 /* ── lookup / accessors ──────────────────────────────────────── */

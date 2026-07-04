@@ -165,6 +165,15 @@ typedef struct nats_rpc_slot {
 	uint32_t reply_to_len;
 	uint8_t  reply_has_reply_to;
 
+	/* [P2.2] Orphan-reaper age tracking.  claimed_at_us is stamped by
+	 * claim(); deadline_us is 0 until the worker stores its per-call
+	 * deadline just before publish.  Both CLOCK_MONOTONIC (system-wide
+	 * on Linux, so the consumer process can compare).  Atomic because
+	 * the reaper reads them from the consumer process while the
+	 * owning worker writes them. */
+	_Atomic long long claimed_at_us;
+	_Atomic long long deadline_us;
+
 	/* Snapshot of the pool reconnect-epoch at claim time.  The
 	 * worker resume compares against the current value to surface
 	 * -2 (connection lost) if a reconnect intervened. */
@@ -215,12 +224,14 @@ int nats_rpc_slot_publish(nats_rpc_slot_t *s);
 int nats_rpc_slot_abandon(nats_rpc_slot_t *s);
 
 /*
- * Worker resume / cleanup: transition any state -> FREE.  The
- * slot becomes available for the next claimer.  Must be called
- * exactly once per claim; failing to free a slot leaks it until
- * mod_destroy.
+ * Worker resume / cleanup: transition the CALLER'S claim -> FREE.
+ * @gen is the generation captured at claim time: if it no longer
+ * matches, the claim was orphan-reaped [P2.2] and possibly recycled
+ * to a new caller, so the free is a NO-OP (a blind store here would
+ * clobber the new claim).  Must be called exactly once per live
+ * claim; the reaper covers claims whose owner died.
  */
-void nats_rpc_slot_free(nats_rpc_slot_t *s);
+void nats_rpc_slot_free(nats_rpc_slot_t *s, uint32_t gen);
 
 /*
  * Lookup by slot_idx.  Used by the consumer process's libnats
@@ -257,6 +268,22 @@ static inline int nats_rpc_slot_entry_is_current(const nats_rpc_slot_t *s,
 
 /* Advisory snapshots (atomic load of state counter; no lock). */
 uint32_t nats_rpc_slot_inflight_count(void);
+
+/* [P2.2] Orphan reaper -- run from the consumer main loop.  Reclaims
+ * any non-FREE, non-DELIVERING slot whose owner is provably gone:
+ * past deadline_us + slack when the worker stamped a deadline, or
+ * past the claim TTL for a CLAIMED slot that never published (death
+ * between claim and publish).  Bumps the generation BEFORE the state
+ * CAS so late replies / stale IPC entries are invalidated first;
+ * repairs the inflight count.  Returns the number reaped. */
+#ifndef NATS_RPC_SLOT_REAP_SLACK_US
+#define NATS_RPC_SLOT_REAP_SLACK_US      (60LL * 1000000LL)   /* 60 s  */
+#endif
+#ifndef NATS_RPC_SLOT_REAP_CLAIM_TTL_US
+#define NATS_RPC_SLOT_REAP_CLAIM_TTL_US  (120LL * 1000000LL)  /* 120 s */
+#endif
+int nats_rpc_slot_reap_orphans(long long now_us);
+uint64_t nats_rpc_slot_orphans_reaped_total(void);
 uint32_t nats_rpc_slot_total_count(void);
 
 #endif /* NATS_RPC_SLOT_H */
