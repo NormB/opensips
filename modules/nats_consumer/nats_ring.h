@@ -137,6 +137,17 @@ typedef struct nats_ring nats_ring_t;
  */
 nats_ring_t *nats_ring_create(uint32_t capacity);
 
+/* [P2.2] How long the SAME generation may keep push blocked before the
+ * producer force-releases the orphaned slot (a live popper's release
+ * lands in nanoseconds; this long means the popper died mid-pop). */
+#ifndef NATS_RING_FORCE_UNWEDGE_US
+#define NATS_RING_FORCE_UNWEDGE_US  (30LL * 1000000LL)   /* 30 s */
+#endif
+
+/* [P2.2] Total force-unwedges on this ring (operator signal: worker
+ * deaths mid-pop; each one implies a JetStream redelivery). */
+uint64_t nats_ring_forced_unwedges(const nats_ring_t *r);
+
 /*
  * Tear down a ring.  Frees the SHM block (there is no fd to close).
  *

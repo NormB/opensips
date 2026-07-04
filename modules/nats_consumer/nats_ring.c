@@ -123,6 +123,13 @@ struct nats_ring {
 	 * when no one is waiting. */
 	_Atomic uint32_t waiters;
 
+	/* [P2.2] producer-side force-unwedge state.  Single producer per
+	 * ring (the consumer process), so the tracker fields are plain;
+	 * only the stat is atomic (read by MI from other procs). */
+	uint64_t         unwedge_want;      /* generation blocking push */
+	long long        unwedge_since_us;  /* first observation; 0 = none */
+	_Atomic uint64_t forced_unwedges;
+
 	/* hot counters -- head is written by producers, tail by consumers;
 	 * they are placed on separate 64-bit slots so the compiler cannot
 	 * coalesce them but we deliberately do not false-share-pad: in our
@@ -203,6 +210,78 @@ void nats_ring_destroy(nats_ring_t *r)
  */
 #define NATS_RING_PUSH_SPIN_MAX  4096u
 
+/* CLOCK_MONOTONIC microseconds for the [P2.2] unwedge tracker. */
+static long long _ring_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
+/*
+ * [P2.2] The push spin cap just expired waiting for consumed_gen ==
+ * @want on @slot.  A live popper's release lands in nanoseconds; the
+ * SAME generation keeping push blocked for the whole unwedge window
+ * means the popper died between its tail-CAS and the release.  Force
+ * the missing release (CAS from the observed stale value) so the
+ * handle resumes delivery -- the un-popped message was never acked,
+ * so JetStream redelivers it.  Returns 1 if push should retry the
+ * wait (recovered), 0 to bail full as before.
+ */
+static int _ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
+	uint64_t want)
+{
+	long long now = _ring_now_us();
+	uint64_t got;
+
+	if (r->unwedge_since_us == 0 || r->unwedge_want != want) {
+		/* first sighting of THIS stuck generation: arm the timer */
+		r->unwedge_want = want;
+		r->unwedge_since_us = now;
+		return 0;
+	}
+	if (now - r->unwedge_since_us < NATS_RING_FORCE_UNWEDGE_US)
+		return 0;
+
+	got = __atomic_load_n(&slot->consumed_gen, __ATOMIC_ACQUIRE);
+	if (got == want ||
+	    __atomic_compare_exchange_n(&slot->consumed_gen, &got, want,
+			0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		if (got != want) {
+			LM_WARN("nats_ring: force-unwedged slot %u at "
+				"generation %llu (popper died before its "
+				"release; JetStream will redeliver the lost "
+				"message)\n",
+				(unsigned)(want & r->mask),
+				(unsigned long long)want);
+			atomic_fetch_add_explicit(&r->forced_unwedges, 1,
+				memory_order_relaxed);
+		}
+		r->unwedge_since_us = 0;
+		return 1;
+	}
+	/* CAS lost: the popper released concurrently -- recovered anyway */
+	r->unwedge_since_us = 0;
+	return 1;
+}
+
+/* [P2.2] Post-copy ownership check for pop: a force-unwedge may hand
+ * the slot back to the producer under a STALLED copy; if the slot was
+ * republished, the copy is torn and must be dropped (the message was
+ * never acked -- JetStream redelivers). */
+static inline int _ring_pop_still_owned(const nats_ring_slot_t *slot,
+	uint64_t t)
+{
+	return __atomic_load_n(&slot->ready_gen, __ATOMIC_ACQUIRE) == t;
+}
+
+uint64_t nats_ring_forced_unwedges(const nats_ring_t *r)
+{
+	return r ? atomic_load_explicit(
+		&((nats_ring_t *)r)->forced_unwedges,
+		memory_order_relaxed) : 0;
+}
+
 int nats_ring_push(nats_ring_t *r,
                    const char *subject, uint32_t subject_len,
                    const char *data,    uint32_t data_len,
@@ -261,8 +340,16 @@ int nats_ring_push(nats_ring_t *r,
 				 * CPU forever.  A tail/head that advances (real
 				 * progress) resets the counter. */
 				if (spin_tracking && h == spin_h) {
-					if (++spins >= NATS_RING_PUSH_SPIN_MAX)
+					if (++spins >= NATS_RING_PUSH_SPIN_MAX) {
+						/* [P2.2] dead-popper recovery
+						 * before bailing full */
+						if (_ring_try_force_unwedge(r,
+								slot, want)) {
+							spins = 0;
+							continue;
+						}
 						return -1;
+					}
 				} else {
 					spin_tracking = 1;
 					spin_h = h;
@@ -274,6 +361,7 @@ int nats_ring_push(nats_ring_t *r,
 		}
 
 		spin_tracking = 0;
+		r->unwedge_since_us = 0;    /* [P2.2] progress: disarm */
 		if (atomic_compare_exchange_weak_explicit(
 				&r->head, &h, h + 1,
 				memory_order_acq_rel,
@@ -453,9 +541,23 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 	 * caller's buffer to avoid touching ~17.9 KB of SHM per pop. */
 	nats_ring_slot_copy_used(out, slot);
 
-	/* Mark the slot consumed at generation t so the matching
-	 * producer (generation t + capacity) may reuse it. */
-	__atomic_store_n(&slot->consumed_gen, t, __ATOMIC_RELEASE);
+	/* [P2.2] If a force-unwedge recycled this slot under a stalled
+	 * copy, the bytes above are torn: drop them (never released, never
+	 * acked -- JetStream redelivers the message). */
+	if (!_ring_pop_still_owned(slot, t))
+		return -1;
+
+	/* Mark the slot consumed at generation t so the matching producer
+	 * (generation t + capacity) may reuse it.  [P2.2] CAS from the
+	 * deterministic prior value (t - capacity, or the create() seed on
+	 * the first lap): a resurrected popper's LATE release must never
+	 * regress a consumed_gen the force-unwedge already moved past. */
+	{
+		uint64_t prev = (t >= r->capacity) ? t - r->capacity
+		                                   : UINT64_MAX;
+		(void)__atomic_compare_exchange_n(&slot->consumed_gen,
+			&prev, t, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
 
 	return 0;
 }

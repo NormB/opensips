@@ -39,7 +39,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_parser_adversarial test_rpc_slot_lifecycle \
                   test_rpc_inbox_auth test_registry_lookup_ref \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
-                  test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
+                  test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin test_ring_force_unwedge \
                   test_pool_self_register test_msg_ref_orphan_reap \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
@@ -56,7 +56,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
      test_rpc_ipc_generation test_rpc_ipc_pack test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_slot_reaper test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
-     test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
+     test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin test_ring_force_unwedge \
      test_pool_self_register test_msg_ref_orphan_reap \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
@@ -312,6 +312,12 @@ PUSHSPIN_SRCS := test_ring_push_bounded_spin.c $(SHIM)
 test_ring_push_bounded_spin: $(PUSHSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(PUSHSPIN_SRCS) $(LDFLAGS)
 
+# [P2.2] Ring force-unwedge: dead-popper slot recovery (threshold compiled
+# to 50ms), late-release regression guard, torn-copy ownership check.
+UNWEDGE_SRCS := test_ring_force_unwedge.c $(SHIM)
+test_ring_force_unwedge: $(UNWEDGE_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
+	$(CC) $(CFLAGS) -DNATS_RING_FORCE_UNWEDGE_US=50000 -o $@ $(UNWEDGE_SRCS) $(LDFLAGS)
+
 # Guards the removal of the unused, ref-unsafe registry ring helpers
 # (nats_registry_ring_get / nats_registry_set_ring_capacity).  Source
 # assertion; self-contained, reads ../nats_handle_registry.{c,h}.
@@ -350,6 +356,7 @@ check: all
 	./test_orphan_msg_ref_purge
 	./test_ack_ipc_actions
 	./test_ring_push_bounded_spin
+	./test_ring_force_unwedge
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap
 	./test_retired_no_sub_reap

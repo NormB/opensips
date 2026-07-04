@@ -206,8 +206,11 @@ static int list_cb(nats_handle_t *h, void *user)
 	ADD_N("fetch_skips_full",   h->fetch_skips_full);
 	ADD_N("backpressure_drops", h->backpressure_drops);
 	ADD_N("fetch_errors",       h->fetch_errors);
-	if (h->ring)
+	if (h->ring) {
 		ADD_N("ring_depth",  nats_ring_depth(h->ring));
+		ADD_N("ring_forced_unwedges",
+			nats_ring_forced_unwedges(h->ring));
+	}
 	lock_stop_read(h->rlock);
 
 	/* Backoff state for ensure_subscription_for_handle() retries.
