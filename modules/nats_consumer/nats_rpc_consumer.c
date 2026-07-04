@@ -34,6 +34,7 @@
 #include <nats/nats.h>
 
 #include "../../dprint.h"
+#include "../../mem/shm_mem.h"
 #include "../../lib/nats/nats_pool.h"
 
 #include "nats_rpc_consumer.h"
@@ -300,7 +301,72 @@ int nats_rpc_consumer_inbox_ready(void)
 	return g_inbox_sub != NULL;
 }
 
-/* ── IPC drain ───────────────────────────────────────────────── */
+/* ── worker->consumer IPC hop [P2.1] ─────────────────────────── */
+
+/* SHM counters behind the rpc_ipc_* MI stats.  The pipe itself has no
+ * readable depth, so depth is derived: sent - drained. */
+typedef struct nats_rpc_ipc_stats {
+	_Atomic uint64_t sent;      /* worker: ipc_send_rpc succeeded */
+	_Atomic uint64_t drained;   /* consumer: handler ran */
+	_Atomic uint64_t dropped;   /* worker: send refused (pipe full /
+	                             * consumer proc not up) */
+} nats_rpc_ipc_stats_t;
+
+static nats_rpc_ipc_stats_t *g_rpc_ipc_stats;
+
+int nats_rpc_ipc_stats_init(void)
+{
+	g_rpc_ipc_stats = shm_malloc(sizeof(*g_rpc_ipc_stats));
+	if (!g_rpc_ipc_stats) {
+		LM_ERR("nats_rpc_consumer: shm_malloc for IPC stats failed\n");
+		return -1;
+	}
+	memset(g_rpc_ipc_stats, 0, sizeof(*g_rpc_ipc_stats));
+	return 0;
+}
+
+void nats_rpc_ipc_stats_destroy(void)
+{
+	if (g_rpc_ipc_stats) {
+		shm_free(g_rpc_ipc_stats);
+		g_rpc_ipc_stats = NULL;
+	}
+}
+
+void nats_rpc_ipc_count_sent(int ok)
+{
+	if (!g_rpc_ipc_stats)
+		return;
+	atomic_fetch_add_explicit(ok ? &g_rpc_ipc_stats->sent
+	                             : &g_rpc_ipc_stats->dropped,
+		1, memory_order_relaxed);
+}
+
+uint64_t nats_rpc_ipc_enqueued_total(void)
+{
+	return g_rpc_ipc_stats ? atomic_load_explicit(&g_rpc_ipc_stats->sent,
+		memory_order_relaxed) : 0;
+}
+
+uint64_t nats_rpc_ipc_drained_total(void)
+{
+	return g_rpc_ipc_stats ? atomic_load_explicit(
+		&g_rpc_ipc_stats->drained, memory_order_relaxed) : 0;
+}
+
+uint64_t nats_rpc_ipc_dropped_total(void)
+{
+	return g_rpc_ipc_stats ? atomic_load_explicit(
+		&g_rpc_ipc_stats->dropped, memory_order_relaxed) : 0;
+}
+
+uint32_t nats_rpc_ipc_depth(void)
+{
+	uint64_t s = nats_rpc_ipc_enqueued_total();
+	uint64_t d = nats_rpc_ipc_drained_total();
+
+	return s > d ? (uint32_t)(s - d) : 0;
+}
 
 /*
  * Build the outbound natsMsg from a slot's out_* fields and
@@ -314,36 +380,35 @@ int nats_rpc_consumer_inbox_ready(void)
  * X-Request-Id auto-stage and any nats_hdr_set() calls reach the
  * remote responder verbatim.
  */
-static void publish_cb(const void *elem, void *user)
+static void publish_slot(uint32_t slot_idx, uint32_t generation,
+	natsConnection *nc)
 {
-	const nats_rpc_ipc_msg_t *msg = (const nats_rpc_ipc_msg_t *)elem;
 	nats_rpc_slot_t *s;
 	natsMsg         *out = NULL;
 	natsStatus       st;
 	char             reply_subject[128];
-	natsConnection  *nc = (natsConnection *)user;
 	char             subj_c[NATS_RING_SUBJECT_MAX + 1];
 	int              n;
 
-	if (!msg || !nc) return;
+	if (!nc) return;
 
-	s = nats_rpc_slot_lookup(msg->slot_idx);
+	s = nats_rpc_slot_lookup(slot_idx);
 	if (!s) {
 		LM_DBG("nats_rpc_consumer: drained publish for free slot %u "
-			"(worker timed out?)\n", (unsigned)msg->slot_idx);
+			"(worker timed out?)\n", (unsigned)slot_idx);
 		return;
 	}
 
-	/* Only proceed if the slot is still the SAME claim that enqueued
-	 * this entry: INFLIGHT *and* matching generation.  A worker that
-	 * ABANDONED before the drain (state no longer INFLIGHT) or a slot
+	/* Only proceed if the slot is still the SAME claim that sent this
+	 * entry: INFLIGHT *and* matching generation.  A worker that
+	 * ABANDONED before the pump (state no longer INFLIGHT) or a slot
 	 * that was freed and re-claimed by a different request (generation
 	 * advanced) must be skipped -- otherwise this stale entry would
 	 * publish the new claim's request a second time. */
-	if (!nats_rpc_slot_entry_is_current(s, msg->generation)) {
+	if (!nats_rpc_slot_entry_is_current(s, generation)) {
 		LM_DBG("nats_rpc_consumer: skipping stale IPC publish for slot "
 			"%u gen %u (slot re-claimed or abandoned)\n",
-			(unsigned)msg->slot_idx, (unsigned)msg->generation);
+			(unsigned)slot_idx, (unsigned)generation);
 		return;
 	}
 
@@ -471,9 +536,33 @@ static void publish_cb(const void *elem, void *user)
 	 * tick of its private timerfd; no fd signaling needed. */
 }
 
-int nats_rpc_consumer_drain_ipc(void)
+/* The ipc_send_rpc handler for one worker->consumer publish request
+ * [P2.1].  Runs in the consumer process when the main loop pumps its
+ * IPC fd (gated on a live connection, so nc is normally set; a
+ * connection lost between the gate and this call abandons the slot
+ * fail-fast, exactly like a failed PublishMsg). */
+void nats_rpc_ipc_on_publish(int sender, void *param)
 {
+	uint32_t slot_idx, generation;
 	natsConnection *nc = nats_pool_get();
-	if (!nc) return 0;
-	return nats_rpc_ipc_drain(publish_cb, (void *)nc);
+
+	(void)sender;
+	nats_rpc_ipc_unpack(param, &slot_idx, &generation);
+	if (g_rpc_ipc_stats)
+		atomic_fetch_add_explicit(&g_rpc_ipc_stats->drained, 1,
+			memory_order_relaxed);
+	if (!nc) {
+		nats_rpc_slot_t *s = nats_rpc_slot_lookup(slot_idx);
+		if (s && nats_rpc_slot_entry_is_current(s, generation)) {
+			int expected = NATS_RPC_SLOT_INFLIGHT;
+			(void)atomic_compare_exchange_strong_explicit(
+				&s->state, &expected, NATS_RPC_SLOT_ABANDONED,
+				memory_order_release, memory_order_relaxed);
+			LM_WARN("nats_rpc_consumer: connection lost before "
+				"publish; abandoning RPC slot %u\n",
+				(unsigned)slot_idx);
+		}
+		return;
+	}
+	publish_slot(slot_idx, generation, nc);
 }

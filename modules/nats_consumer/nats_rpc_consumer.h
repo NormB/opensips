@@ -71,13 +71,28 @@ void nats_rpc_consumer_unsubscribe(void);
  * inbox) while this is 0. */
 int nats_rpc_consumer_inbox_ready(void);
 
+#include <stdint.h>
+
 /*
- * Drain the worker -> consumer publish IPC queue.  Called from
- * the consumer's main loop alongside the ack-IPC drain.
- * Returns the number of publishes processed.  Each entry reads
- * the slot's out_* fields and calls natsConnection_PublishMsg
- * with the reply-to subject pointing back at our inbox.
+ * [P2.1] The ipc_send_rpc handler for one worker->consumer publish
+ * request.  Workers send it with
+ *   ipc_send_rpc(nats_consumer_proc_no(), nats_rpc_ipc_on_publish,
+ *                nats_rpc_ipc_pack(slot_idx, generation));
+ * the consumer main loop pumps its IPC fd (gated on a live broker
+ * connection, so entries wait in the pipe across reconnects).  Reads
+ * the slot's out_* fields and PublishMsg's with reply-to pointing
+ * back at our inbox.
  */
-int nats_rpc_consumer_drain_ipc(void);
+void nats_rpc_ipc_on_publish(int sender, void *param);
+
+/* SHM counters behind the rpc_ipc_* MI stats (init/destroy from
+ * mod_init / mod_destroy; count_sent from the worker send path). */
+int      nats_rpc_ipc_stats_init(void);
+void     nats_rpc_ipc_stats_destroy(void);
+void     nats_rpc_ipc_count_sent(int ok);
+uint64_t nats_rpc_ipc_enqueued_total(void);
+uint64_t nats_rpc_ipc_drained_total(void);
+uint64_t nats_rpc_ipc_dropped_total(void);
+uint32_t nats_rpc_ipc_depth(void);
 
 #endif /* NATS_RPC_CONSUMER_H */

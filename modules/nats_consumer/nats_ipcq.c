@@ -46,7 +46,6 @@
 
 /* The module's two queues: ack/nak/term actions, and publish requests. */
 nats_ipcq_t nats_ack_ipcq = { NULL, "nats_ack_ipc" };
-nats_ipcq_t nats_rpc_ipcq = { NULL, "nats_rpc_ipc" };
 
 int nats_ipcq_init(nats_ipcq_t *iq, uint32_t capacity, uint32_t elem_size)
 {

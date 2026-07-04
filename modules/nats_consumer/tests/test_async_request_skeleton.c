@@ -184,8 +184,11 @@ int main(void)
 			"impl claims an SHM slot from the pool");
 		ASSERT(strstr(impl, "nats_rpc_slot_publish") != NULL,
 			"impl transitions slot CLAIMED -> INFLIGHT before IPC");
-		ASSERT(strstr(impl, "nats_rpc_ipc_enqueue") != NULL,
-			"impl enqueues the slot_idx on the worker -> consumer IPC");
+		ASSERT(strstr(impl, "ipc_send_rpc(ipc_dst, nats_rpc_ipc_on_publish") != NULL,
+			"impl sends the packed slot/gen over core IPC to the "
+			"consumer proc [P2.1]");
+		ASSERT(strstr(impl, "nats_rpc_ipc_pack(slot->slot_idx") != NULL,
+			"impl packs {slot_idx, generation} into the IPC param");
 		ASSERT(strstr(impl, "timerfd_create") != NULL,
 			"impl creates a worker-private timerfd for the resume "
 			"poll");

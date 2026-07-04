@@ -51,6 +51,5 @@ uint32_t nats_ipcq_depth(const nats_ipcq_t *iq);
 
 /* the module's two instances (defined in nats_ipcq.c) */
 extern nats_ipcq_t nats_ack_ipcq;
-extern nats_ipcq_t nats_rpc_ipcq;
 
 #endif /* NATS_IPCQ_H */

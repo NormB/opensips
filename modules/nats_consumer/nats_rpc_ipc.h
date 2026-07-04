@@ -19,32 +19,28 @@
  */
 
 /*
- * nats_rpc_ipc.h -- worker -> consumer-process publish queue for
- * the consumer-process-routed async nats_request transport.
+ * nats_rpc_ipc.h -- worker -> consumer-process publish hop for the
+ * consumer-process-routed async nats_request transport.
  *
- * Producers are any SIP worker that called
- * async(nats_request(...)).  The single consumer is the dedicated
- * nats_consumer process which receives the slot_idx, reads the
- * outbound publish data out of the SHM slot, and calls
- * natsConnection_PublishMsg with reply-to set to the consumer's
- * persistent inbox subject (the libnats-callback path then
- * delivers the reply back into the slot; the worker picks it up
- * on its next private-timerfd poll).
+ * [P2.1] This hop rides OpenSIPS core IPC: the SIP worker calls
+ * ipc_send_rpc(<consumer proc>, nats_rpc_ipc_on_publish, param) and the
+ * whole payload -- {slot_idx u32, generation u32} -- is packed INTO the
+ * opaque param pointer (zero allocation; the pipe is the queue).  The
+ * consumer process pumps its IPC fd from the main loop, gated on a live
+ * broker connection, so entries wait in the pipe across reconnects
+ * exactly like they used to wait in the SHM ring.
  *
- * Implementation mirrors nats_ack_ipc:
+ * The generation captured at send time lets the consumer reject a stale
+ * entry whose slot was freed and re-claimed before the pump
+ * (nats_rpc_slot_entry_is_current -- prevents a double-publish).
+ * Producers transition the slot CLAIMED -> INFLIGHT via
+ * nats_rpc_slot_publish() BEFORE sending.
  *
- *   * Bounded SHM ring sized at init time.
- *   * Lock-free bounded MPSC (nats_mpsc.c): CAS head reservation +
- *     per-cell generation, no lock.
- *   * eventfd inherited by all children at fork() so the
- *     consumer process's reactor wakes on the empty -> non-empty
- *     edge.
+ * If the send fails (pipe full / consumer proc not yet up) the producer
+ * sees -1 and surfaces -5 (capacity exhausted) to the script -- the
+ * same fail-fast contract as the old bounded SHM queue.
  *
- * The payload of each queue entry is just the SHM-slot index --
- * everything else (subject, payload, headers, correlation id,
- * timeout, etc.) is already in the slot.  Producers transition
- * the slot from CLAIMED to INFLIGHT via nats_rpc_slot_publish()
- * BEFORE enqueueing here.
+ * The pack/unpack pair is unit-locked in tests/test_rpc_ipc_pack.c.
  */
 
 #ifndef NATS_RPC_IPC_H
@@ -52,52 +48,32 @@
 
 #include <stdint.h>
 
-/* Tuning.  Sized for bursts when many SIP workers issue async
- * RPCs simultaneously.  Same default as the ack IPC -- if the
- * queue saturates the producer sees a -1 return and surfaces -5
- * (capacity exhausted) to the script. */
-#define NATS_RPC_IPC_QUEUE_DEPTH 4096
-
 /*
- * On-wire message format.  Carries the slot index plus the slot's
- * per-claim generation at enqueue time.  The consumer's publish_cb
- * revalidates the generation against the slot's current claim before
- * publishing: if the worker timed out and the slot was re-claimed by a
- * different request, the stale entry's generation no longer matches and
- * it is skipped, preventing a double-publish of the new claim.
+ * The logical message.  Kept as a struct for the tests that model the
+ * consumer's stale-entry decision (test_rpc_ipc_generation.c); on the
+ * wire the two fields travel packed in the IPC param pointer.
  */
 typedef struct nats_rpc_ipc_msg {
 	uint32_t slot_idx;       /* index into the nats_rpc_slot pool */
-	uint32_t generation;     /* slot generation captured at enqueue */
+	uint32_t generation;     /* slot generation captured at send */
 } nats_rpc_ipc_msg_t;
 
-/* Typed veneers over the ONE generic queue wrapper (nats_ipcq.c, P1.3). */
-#include "nats_ipcq.h"
+/* {slot_idx, generation} <-> the opaque ipc_send_rpc param.  Slot in
+ * the low word, generation in the high word; pack(0,0) is NULL and is
+ * still a valid encoding (the receiver decodes, never sentinel-checks). */
+static inline void *nats_rpc_ipc_pack(uint32_t slot_idx, uint32_t generation)
+{
+	return (void *)(uintptr_t)(((uint64_t)generation << 32)
+	                           | (uint64_t)slot_idx);
+}
 
-static inline int nats_rpc_ipc_init(void)
+static inline void nats_rpc_ipc_unpack(void *param,
+	uint32_t *slot_idx, uint32_t *generation)
 {
-	return nats_ipcq_init(&nats_rpc_ipcq, NATS_RPC_IPC_QUEUE_DEPTH,
-		(uint32_t)sizeof(nats_rpc_ipc_msg_t));
+	uint64_t v = (uint64_t)(uintptr_t)param;
+
+	*slot_idx   = (uint32_t)(v & 0xFFFFFFFFu);
+	*generation = (uint32_t)(v >> 32);
 }
-static inline void nats_rpc_ipc_destroy(void)
-{ nats_ipcq_destroy(&nats_rpc_ipcq); }
-static inline int nats_rpc_ipc_enqueue(const nats_rpc_ipc_msg_t *msg)
-{ return nats_ipcq_enqueue(&nats_rpc_ipcq, msg); }
-static inline int nats_rpc_ipc_drain(
-		void (*cb)(const void *elem, void *user), void *user)
-{
-	return nats_ipcq_drain(&nats_rpc_ipcq,
-		(uint32_t)sizeof(nats_rpc_ipc_msg_t), cb, user);
-}
-static inline int nats_rpc_ipc_fd(void)
-{ return nats_ipcq_fd(&nats_rpc_ipcq); }
-static inline uint64_t nats_rpc_ipc_enqueued_total(void)
-{ return nats_ipcq_enqueued_total(&nats_rpc_ipcq); }
-static inline uint64_t nats_rpc_ipc_drained_total(void)
-{ return nats_ipcq_drained_total(&nats_rpc_ipcq); }
-static inline uint64_t nats_rpc_ipc_dropped_total(void)
-{ return nats_ipcq_dropped_total(&nats_rpc_ipcq); }
-static inline uint32_t nats_rpc_ipc_depth(void)
-{ return nats_ipcq_depth(&nats_rpc_ipcq); }
 
 #endif /* NATS_RPC_IPC_H */

@@ -121,13 +121,13 @@ int main(void)
 	/* ---- publish path fast-fails while the inbox is down --------- */
 	{
 		const char *c = "../nats_rpc_consumer.c";
-		ASSERT(grep_in_function(c, "publish_cb",
+		ASSERT(grep_in_function(c, "publish_slot",
 				"nats_rpc_consumer_inbox_ready") >= 1,
-			"publish_cb checks inbox readiness before publishing");
+			"publish_slot checks inbox readiness before publishing");
 		/* the abandon transition (CAS to ABANDONED) is the fail-fast */
-		ASSERT(grep_in_function(c, "publish_cb",
+		ASSERT(grep_in_function(c, "publish_slot",
 				"NATS_RPC_SLOT_ABANDONED") >= 1,
-			"publish_cb abandons the slot when it cannot publish");
+			"publish_slot abandons the slot when it cannot publish");
 	}
 
 	/* ---- main loop retries the subscribe (not just once) -------- */

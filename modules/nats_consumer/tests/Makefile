@@ -55,7 +55,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_rpc_subject test_fetch_async_timerfd \
      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
      test_registry_ring_ref_safety test_ring_xproc_wakeup \
-     test_rpc_ipc_generation test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_inbox_auth test_registry_lookup_ref \
+     test_rpc_ipc_generation test_rpc_ipc_pack test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_inbox_auth test_registry_lookup_ref \
      test_consumer_proc_boot_retry test_rpc_subject_validation \
      test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin \
      test_pool_self_register test_msg_ref_orphan_reap \
@@ -103,6 +103,11 @@ test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_
 # claim's request.  Built with a 1-slot pool to force the reuse.
 test_rpc_ipc_generation: $(IPCGEN_SRCS) test_shim.h ../nats_rpc_slot.h ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(IPCGEN_SRCS) $(LDFLAGS)
+
+# [P2.1] The packed core-IPC param: {slot_idx, generation} <-> void*
+# roundtrip, field isolation, NULL-encoding.  Pure header logic.
+test_rpc_ipc_pack: test_rpc_ipc_pack.c ../nats_rpc_ipc.h
+	$(CC) $(CFLAGS) -fsanitize=address -o $@ test_rpc_ipc_pack.c $(LDFLAGS)
 
 # Slot-reuse reply-misdelivery: on_inbox_reply pins the claim (INFLIGHT ->
 # DELIVERING) before writing reply_* + re-checking generation, so a worker that
@@ -321,6 +326,7 @@ check: all
 	./test_registry_ring_ref_safety
 	./test_ring_xproc_wakeup
 	./test_rpc_ipc_generation
+	./test_rpc_ipc_pack
 	./test_rpc_reply_pin
 	./test_parser_adversarial
 	./test_rpc_slot_lifecycle

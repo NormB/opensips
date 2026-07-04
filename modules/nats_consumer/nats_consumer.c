@@ -57,6 +57,7 @@
 #include "nats_rpc_async.h"
 #include "nats_rpc_slot.h"
 #include "nats_rpc_ipc.h"
+#include "nats_rpc_consumer.h"
 
 static int  mod_init(void);
 static int  child_init(int rank);
@@ -495,7 +496,8 @@ static const pv_export_t mod_pvars[] = {
 /* Dedicated JetStream pull consumer process.
  * One instance -- there is a single process for the module. */
 static const proc_export_t procs[] = {
-	{ "NATS consumer", 0, 0, nats_consumer_proc_main, 1, 0 },
+	{ "NATS consumer", 0, 0, nats_consumer_proc_main, 1,
+		PROC_FLAG_HAS_IPC /* [P2.1] receives worker ack/RPC jobs */ },
 	{ 0, 0, 0, 0, 0, 0 }
 };
 
@@ -604,13 +606,12 @@ static int mod_init(void)
 		/* deliberately non-fatal */
 	}
 
-	/* Worker -> consumer-process publish queue for the
-	 * consumer-process-routed async transport.  Mirrors the
-	 * ack IPC, eventfd inherited via fork().  Non-fatal: if SHM
-	 * is short, async will fall back to the sync path. */
-	if (nats_rpc_ipc_init() < 0) {
-		LM_WARN("nats_consumer: rpc IPC init failed; async "
-			"nats_request will fall back to the sync path\n");
+	/* Worker -> consumer-process publish hop for the async transport
+	 * rides core IPC [P2.1]; only its SHM stat counters need setup.
+	 * Non-fatal: if SHM is short, stats read as zero. */
+	if (nats_rpc_ipc_stats_init() < 0) {
+		LM_WARN("nats_consumer: rpc IPC stats init failed; "
+			"rpc_ipc_* MI stats will read as zero\n");
 	}
 
 	if (nats_consumer_hb_init() < 0) {
@@ -628,7 +629,7 @@ static int mod_init(void)
 		for (bc = bind_cfg_head; bc; bc = bc->next) {
 			if (bind_one_config(&bc->s, "bind modparam") < 0) {
 				nats_rpc_slot_destroy();
-				nats_rpc_ipc_destroy();
+				nats_rpc_ipc_stats_destroy();
 				nats_ack_ipc_destroy();
 				nats_registry_destroy();
 				return -1;
@@ -655,7 +656,7 @@ static void mod_destroy(void)
 	/* Order matters: ack IPC before the registry (so any future drain
 	 * path can flush before the registry disappears underneath it). */
 	nats_ack_ipc_destroy();
-	nats_rpc_ipc_destroy();
+	nats_rpc_ipc_stats_destroy();
 	nats_rpc_slot_destroy();
 	nats_consumer_hb_destroy();
 	nats_registry_destroy();

@@ -126,7 +126,11 @@ int nats_pool_get_reconnect_epoch(void) { return 0; }
  * the real nats_ipcq.c + nats_mpsc.c are linked instead of stubbed. */
 int nats_rpc_consumer_subscribe(void) { return 0; }
 int nats_rpc_consumer_inbox_ready(void) { return 1; }
-int nats_rpc_consumer_drain_ipc(void) { return 0; }
+
+/* [P2.1] core-IPC seam: the purge test never enters the main loop, so
+ * the pump's pt[]/ipc_handle_job references only need to link. */
+struct process_table *pt = NULL;
+void ipc_handle_job(int fd) { (void)fd; }
 
 /* ── harness ────────────────────────────────────────────────────── */
 

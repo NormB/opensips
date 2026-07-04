@@ -73,12 +73,15 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <sys/select.h>
+#include <poll.h>
 #include <sys/timerfd.h>
 
 #include <nats/nats.h>
 
 #include "../../dprint.h"
 #include "../../mem/shm_mem.h"
+#include "../../ipc.h"           /* IPC_FD_READ_SELF + ipc_handle_job */
+#include "../../pt.h"            /* pt[] behind IPC_FD_READ_SELF */
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_str.h"
 
@@ -108,6 +111,10 @@ int nats_consumer_hb_init(void)
 	atomic_store_explicit(&nats_consumer_hb->tick, 0, memory_order_relaxed);
 	atomic_store_explicit(&nats_consumer_hb->last_tick_us, 0, memory_order_relaxed);
 	atomic_store_explicit(&nats_consumer_hb->consumer_pid, 0, memory_order_relaxed);
+	/* 0 is a valid pt[] index -- the "not up yet" sentinel must be -1
+	 * (see nats_consumer_proc_no()) */
+	atomic_store_explicit(&nats_consumer_hb->consumer_proc_no, -1,
+		memory_order_relaxed);
 	return 0;
 }
 
@@ -845,6 +852,30 @@ static int drain_ack_ipc(drain_ack_ctx_t *ctx)
 	return ctx->count;
 }
 
+/* [P2.1] Pump the core-IPC pipe: each pending job is one
+ * worker->consumer request (async-RPC publish today; acks migrate here
+ * next).  Gated on a live broker connection so jobs wait in the pipe
+ * across reconnects -- the pipe IS the queue.  The core's
+ * ipc_handle_all_pending_jobs() uses recv(MSG_PEEK), which is a no-op
+ * on the pipe fds pt[] actually carries, so readability is probed with
+ * a zero-timeout poll per job instead.  Returns 1 if any job ran. */
+static int pump_worker_ipc(void)
+{
+	struct pollfd pfd;
+	int fd = IPC_FD_READ_SELF;
+	int ran = 0;
+
+	if (fd < 0 || !nats_pool_get())
+		return 0;
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	while (poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLIN)) {
+		ipc_handle_job(fd);
+		ran = 1;
+	}
+	return ran;
+}
+
 /* Read the ack eventfd counter to rearm the reactor-ish select().
  * The eventfd is edge-signaled on empty->non-empty; one read clears
  * the counter irrespective of how many enqueues coalesced. */
@@ -1010,6 +1041,17 @@ void nats_consumer_proc_main(int rank)
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
 
+	/* [P2.1] Publish our pt[] index FIRST -- before the connect-retry
+	 * loop below, which can sleep for as long as the broker is down.
+	 * Worker ipc_send_rpc() calls target this index; the IPC pipe
+	 * exists from fork time, so jobs sent while we are still
+	 * connecting simply wait in the pipe (the pump below is gated on
+	 * a live connection), exactly like they used to wait in the SHM
+	 * queue. */
+	if (nats_consumer_hb)
+		atomic_store_explicit(&nats_consumer_hb->consumer_proc_no,
+			process_no, memory_order_release);
+
 	/* Acquire the NATS connection + JetStream context.  Do NOT return on
 	 * failure: an unexpected exit of this dedicated process is fatal to
 	 * the whole OpenSIPS instance, so a broker that is merely down at boot
@@ -1162,11 +1204,8 @@ void nats_consumer_proc_main(int rank)
 				int pushed = pull_one_batch(ss, budget);
 				if (pushed > 0)
 					any_work = 1;
-				if (num_subs > 1) {
-					int rpcs = nats_rpc_consumer_drain_ipc();
-					if (rpcs > 0)
-						any_work = 1;
-				}
+				if (num_subs > 1 && pump_worker_ipc())
+					any_work = 1;
 			}
 		}
 
@@ -1218,21 +1257,16 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
-		/* 3.5 Async nats_request: drain the worker ->
-		 *     consumer publish IPC.  For each entry the helper
-		 *     reads the slot's out_* fields and PublishMsg's
-		 *     against our libnats connection with reply-to
-		 *     pointing back at our persistent inbox.  Replies
-		 *     land in on_inbox_reply (running on the libnats
-		 *     thread, also in this process) which writes reply_*
-		 *     and stores the slot state DELIVERED; the worker
-		 *     observes it on its next private-timerfd poll (no fd
-		 *     is signalled). */
-		{
-			int rpcs = nats_rpc_consumer_drain_ipc();
-			if (rpcs > 0)
-				any_work = 1;
-		}
+		/* 3.5 Async nats_request: pump the worker -> consumer core-IPC
+		 *     pipe [P2.1].  Each job reads its slot's out_* fields and
+		 *     PublishMsg's against our libnats connection with
+		 *     reply-to pointing back at our persistent inbox.  Replies
+		 *     land in on_inbox_reply (running on the libnats thread,
+		 *     also in this process) which writes reply_* and stores
+		 *     the slot state DELIVERED; the worker observes it on its
+		 *     next private-timerfd poll (no fd is signalled). */
+		if (pump_worker_ipc())
+			any_work = 1;
 
 		/* 4. Retire/reap lifecycle: tear down subscriptions whose
 		 *    handles are retiring, then reap any fully-drained handles.
@@ -1247,21 +1281,24 @@ void nats_consumer_proc_main(int rank)
 		if (!any_work) {
 			/* Blocking idle: wait until either the ack IPC eventfd
 			 * becomes readable (a worker acked something), the
-			 * async RPC IPC eventfd becomes readable (a worker
-			 * issued an async nats_request), or the retry
-			 * timerfd fires (bounded stall recovery).  Avoids a
-			 * busy poll so the consumer process spends ~0% CPU
-			 * on empty subscriptions. */
+			 * core-IPC pipe becomes readable (a worker issued an
+			 * async nats_request [P2.1]), or the retry timerfd
+			 * fires (bounded stall recovery).  Avoids a busy poll
+			 * so the consumer process spends ~0% CPU on empty
+			 * subscriptions.  The IPC fd only joins the set while
+			 * the broker connection is live -- the pump is gated on
+			 * it, so selecting on it while disconnected would spin;
+			 * the 1s timeout covers reconnect progress instead. */
 			fd_set rfds;
 			int    maxfd = ack_fd;
-			int    rpc_fd = nats_rpc_ipc_fd();
+			int    ipc_fd = nats_pool_get() ? IPC_FD_READ_SELF : -1;
 			struct timeval tv;
 
 			FD_ZERO(&rfds);
 			if (ack_fd >= 0) FD_SET(ack_fd, &rfds);
-			if (rpc_fd >= 0) {
-				FD_SET(rpc_fd, &rfds);
-				if (rpc_fd > maxfd) maxfd = rpc_fd;
+			if (ipc_fd >= 0) {
+				FD_SET(ipc_fd, &rfds);
+				if (ipc_fd > maxfd) maxfd = ipc_fd;
 			}
 
 			if (retry_fd >= 0) {
@@ -1289,17 +1326,9 @@ void nats_consumer_proc_main(int rank)
 				} while (r < 0 && errno == EINTR);
 			}
 
-			/* Drain the async RPC IPC eventfd so the next
-			 * empty -> non-empty edge wakes us again.  The
-			 * actual queue is drained on the next loop
-			 * iteration via nats_rpc_consumer_drain_ipc(). */
-			if (rpc_fd >= 0 && FD_ISSET(rpc_fd, &rfds)) {
-				uint64_t sink;
-				ssize_t r;
-				do {
-					r = read(rpc_fd, &sink, sizeof(sink));
-				} while (r < 0 && errno == EINTR);
-			}
+			/* A readable IPC pipe needs no rearm here -- pipes are
+			 * level-triggered and the jobs are consumed by
+			 * pump_worker_ipc() on the next loop iteration. */
 		}
 	}
 }

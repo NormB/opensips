@@ -106,8 +106,8 @@ int main(void)
 	ASSERT(grep_in_function(src, "nats_consumer_proc_main", "fetch_budget_ms") >= 1,
 		"main loop budgets the fetch sweep");
 	ASSERT(grep_in_function(src, "nats_consumer_proc_main",
-		"nats_rpc_consumer_drain_ipc") >= 2,
-		"main loop drains the RPC IPC between fetches (not only after)");
+		"pump_worker_ipc") >= 2,
+		"main loop pumps the worker IPC between fetches (not only after)");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

@@ -39,6 +39,7 @@
 #include "nats_ring.h"
 #include "nats_ack_ipc.h"
 #include "nats_rpc_ipc.h"
+#include "nats_rpc_consumer.h"
 #include "nats_rpc_slot.h"
 
 #include <stdatomic.h>

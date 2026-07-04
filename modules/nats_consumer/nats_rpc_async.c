@@ -76,11 +76,15 @@ typedef int                            natsStatus;
 #include <sys/types.h>
 #include <sys/random.h>
 
+#include "../../ipc.h"          /* ipc_send_rpc [P2.1] */
+
 #include "nats_rpc.h"
 #include "nats_ring.h"          /* NATS_RING_*_MAX caps */
 #include "nats_rpc_async.h"
 #include "nats_rpc_slot.h"
-#include "nats_rpc_ipc.h"
+#include "nats_rpc_ipc.h"       /* nats_rpc_ipc_pack */
+#include "nats_rpc_consumer.h"  /* nats_rpc_ipc_on_publish + counters */
+#include "nats_consumer_proc.h" /* nats_consumer_proc_no */
 
 /*
  * Per-worker stash of the most recent outbound request's UUIDv7.
@@ -479,7 +483,8 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 {
 	nats_rpc_slot_t        *slot = NULL;
 	nats_rpc_call_wrap_t   *wrap = NULL;
-	nats_rpc_ipc_msg_t      ipc_msg;
+	uint32_t                ipc_gen;
+	int                     ipc_dst;
 	struct itimerspec       its;
 	int                     tfd = -1;
 	int                     tmo_ms;
@@ -608,24 +613,31 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 
-	memset(&ipc_msg, 0, sizeof(ipc_msg));
-	ipc_msg.slot_idx = slot->slot_idx;
-	/* Tag the entry with the slot's current claim generation so the
-	 * consumer can reject this entry if the slot is freed and re-claimed
-	 * before the drain (prevents a double-publish -- see publish_cb). */
-	ipc_msg.generation = atomic_load_explicit(&slot->generation,
+	/* [P2.1] Send the publish request over core IPC.  The payload --
+	 * slot index + the slot's current claim generation -- travels
+	 * packed in the param pointer (zero alloc); the generation lets
+	 * the consumer reject this entry if the slot is freed and
+	 * re-claimed before the pump (prevents a double-publish -- see
+	 * nats_rpc_ipc_on_publish). */
+	ipc_gen = atomic_load_explicit(&slot->generation,
 		memory_order_relaxed);
-	LM_DBG("nats_request[async]: about to enqueue IPC slot_idx=%u gen=%u\n",
-		ipc_msg.slot_idx, ipc_msg.generation);
-	if (nats_rpc_ipc_enqueue(&ipc_msg) < 0) {
-		LM_WARN("nats_request[async]: IPC full -- dropping (slot %u)\n",
+	ipc_dst = nats_consumer_proc_no();
+	LM_DBG("nats_request[async]: about to IPC-send slot_idx=%u gen=%u "
+		"dst=%d\n", slot->slot_idx, ipc_gen, ipc_dst);
+	if (ipc_dst < 0 ||
+	    ipc_send_rpc(ipc_dst, nats_rpc_ipc_on_publish,
+			nats_rpc_ipc_pack(slot->slot_idx, ipc_gen)) < 0) {
+		LM_WARN("nats_request[async]: IPC send refused (pipe full or "
+			"consumer proc not up) -- dropping (slot %u)\n",
 			slot->slot_idx);
+		nats_rpc_ipc_count_sent(0);
 		(void)nats_rpc_slot_abandon(slot);
 		nats_rpc_slot_free(slot);
 		nats_rpc_staged_clear();
 		async_status = ASYNC_NO_IO;
 		return -5;
 	}
+	nats_rpc_ipc_count_sent(1);
 
 	/* Worker-private timerfd: created post-fork so the reactor
 	 * can register it (see commit 8eae39a5b1). */

@@ -35,6 +35,8 @@
 #ifndef NATS_CONSUMER_PROC_H
 #define NATS_CONSUMER_PROC_H
 
+#include <stdatomic.h>
+
 /* Process entry point.  Matches the `mod_proc` signature expected by
  * OpenSIPS' proc_export_t: it is called once per fork with the rank
  * assigned by the core.  Returns only on fatal error; the core treats
@@ -67,9 +69,24 @@ typedef struct nats_consumer_heartbeat {
 	_Atomic unsigned long  tick;          /* monotonic loop counter */
 	_Atomic long long      last_tick_us;  /* CLOCK_MONOTONIC microseconds */
 	_Atomic int            consumer_pid;  /* pid of the consumer process */
+	_Atomic int            consumer_proc_no; /* [P2.1] pt[] index, the
+	                                          * ipc_send_rpc destination;
+	                                          * -1 until the proc is up */
 } nats_consumer_heartbeat_t;
 
 extern nats_consumer_heartbeat_t *nats_consumer_hb;
+
+/* [P2.1] The consumer process's process-table index, published by the
+ * proc itself as its first act.  Workers pass it to ipc_send_rpc for
+ * the worker->consumer ack/RPC hops.  -1 while the proc is not (yet)
+ * up -- senders fail fast with the usual capacity error. */
+static inline int nats_consumer_proc_no(void)
+{
+	if (!nats_consumer_hb)
+		return -1;
+	return atomic_load_explicit(&nats_consumer_hb->consumer_proc_no,
+		memory_order_acquire);
+}
 
 /* Allocate the SHM heartbeat block (mod_init).  Returns 0 on success,
  * -1 on shared-memory allocation failure. */
