@@ -21,7 +21,6 @@ INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rp
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
 IDXRECYCLE_SRCS := test_registry_index_recycle.c $(SHIM) ../nats_handle_registry.c
 RINGORDER_SRCS := test_registry_ring_alloc_order.c $(SHIM) ../nats_handle_registry.c
-MPSC_SRCS    := test_mpsc.c $(SHIM) ../nats_mpsc.c
 
 .PHONY: all clean check check-tsan smoke smoke-tls smoke-multi-instance
 
@@ -45,7 +44,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail
+                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail
 
 all: test_registry test_parser test_ring test_ack_token \
      test_request_route_restriction \
@@ -62,7 +61,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_mpsc test_ensure_backoff test_proc_tu_split test_request_fastfail test_orphan_msg_ref_purge test_rpc_reply_pin
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -167,10 +166,19 @@ CORE_DEFS := -fPIC -DPIC \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
                     ../nats_msg_ref.c ../nats_sub_config.c \
-                    ../nats_handle_registry.c ../nats_ring.c \
-                    ../nats_ipcq.c ../nats_mpsc.c
+                    ../nats_handle_registry.c ../nats_ring.c
 test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
+
+# [P2.1] Worker acks over core IPC: drives the production ack handlers
+# (../nats_consumer_proc.c) against a recording nats_dl table -- per-verb
+# JetStream routing, in_progress re-stash, ACK_NEXT refill hint,
+# nak_delay SHM payload lifecycle, stale-token no-op, stats.
+ACKIPC_SRCS := test_ack_ipc_actions.c ../nats_consumer_proc.c \
+               ../nats_msg_ref.c ../nats_sub_config.c \
+               ../nats_handle_registry.c ../nats_ring.c
+test_ack_ipc_actions: $(ACKIPC_SRCS) ../nats_consumer_proc_internal.h ../nats_ack_ipc.h
+	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ACKIPC_SRCS) $(LDFLAGS)
 
 # Source-pattern: proc-sub state is matched by handle identity (index /
 # h_ref), not id string, so unbind+rebind of one id can't wedge delivery.
@@ -252,12 +260,6 @@ test_dead_inbox_retry: test_dead_inbox_retry.c
 test_ensure_backoff: test_ensure_backoff.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# Concurrency: the lock-free bounded MPSC queue (nats_mpsc) that replaces
-# the per-queue gen_lock_t.  Message-conservation stress test (4 producer
-# threads + 1 consumer); race-safe, so it runs under check-tsan too.
-test_mpsc: $(MPSC_SRCS) test_shim.h ../nats_mpsc.h
-	$(CC) $(CFLAGS) -pthread -o $@ $(MPSC_SRCS) $(LDFLAGS)
-
 # Behavioural (ASan): the consumer reaps msg-ref slots orphaned by a
 # worker that died before acking (no leak; table doesn't wedge).
 test_msg_ref_orphan_reap: test_msg_ref_orphan_reap.c
@@ -337,6 +339,7 @@ check: all
 	./test_registry_index_recycle
 	./test_registry_ring_alloc_order
 	./test_orphan_msg_ref_purge
+	./test_ack_ipc_actions
 	./test_ring_push_bounded_spin
 	./test_pool_self_register
 	./test_msg_ref_orphan_reap
@@ -355,7 +358,6 @@ check: all
 	./test_poison_term
 	./test_dead_inbox_retry
 	./test_ensure_backoff
-	./test_mpsc
 	./test_proc_tu_split
 	./test_request_fastfail
 

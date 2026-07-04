@@ -584,13 +584,12 @@ static int mod_init(void)
 	LM_DBG("nats_consumer: registry ready (%d buckets)\n",
 		NATS_CONSUMER_REGISTRY_BUCKETS);
 
-	if (nats_ack_ipc_init() < 0) {
-		LM_ERR("nats_consumer: ack IPC init failed\n");
-		nats_registry_destroy();
-		return -1;
+	/* Worker acks ride core IPC [P2.1]; only the SHM stat counters
+	 * need setup.  Non-fatal: if SHM is short, stats read as zero. */
+	if (nats_ack_ipc_stats_init() < 0) {
+		LM_WARN("nats_consumer: ack IPC stats init failed; "
+			"ack_ipc_* MI stats will read as zero\n");
 	}
-	LM_DBG("nats_consumer: ack IPC queue ready (fd=%d)\n",
-		nats_ack_ipc_fd());
 
 	/* Allocate the SHM slot pool + eventfd pool for the
 	 * consumer-process-routed async nats_request transport.
@@ -616,7 +615,7 @@ static int mod_init(void)
 
 	if (nats_consumer_hb_init() < 0) {
 		LM_ERR("nats_consumer: heartbeat SHM alloc failed\n");
-		nats_ack_ipc_destroy();
+		nats_ack_ipc_stats_destroy();
 		nats_registry_destroy();
 		return -1;
 	}
@@ -630,7 +629,7 @@ static int mod_init(void)
 			if (bind_one_config(&bc->s, "bind modparam") < 0) {
 				nats_rpc_slot_destroy();
 				nats_rpc_ipc_stats_destroy();
-				nats_ack_ipc_destroy();
+				nats_ack_ipc_stats_destroy();
 				nats_registry_destroy();
 				return -1;
 			}
@@ -655,7 +654,7 @@ static void mod_destroy(void)
 	LM_INFO("nats_consumer: shutting down\n");
 	/* Order matters: ack IPC before the registry (so any future drain
 	 * path can flush before the registry disappears underneath it). */
-	nats_ack_ipc_destroy();
+	nats_ack_ipc_stats_destroy();
 	nats_rpc_ipc_stats_destroy();
 	nats_rpc_slot_destroy();
 	nats_consumer_hb_destroy();

@@ -39,9 +39,10 @@
  *        room, the Fetch is skipped entirely; pull-mode JetStream
  *        keeps the un-fetched messages on the broker side until the
  *        next iteration after the worker drains.
- *     3. drain_ack_ipc() dequeues every pending ack request from the
- *        IPC queue, looks up the stashed natsMsg, and calls the
- *        requested natsMsg_Ack / Nak / Term / InProgress.
+ *     3. pump_worker_ipc() runs every pending worker job from the
+ *        core-IPC pipe [P2.1]; each ack job looks up the stashed
+ *        natsMsg and calls the requested natsMsg_Ack / Nak / Term /
+ *        InProgress.
  *
  *   Back-pressure model: the dynamic Fetch clamp in step (2) means
  *   a successful Fetch never produces a defer-drop on push, so the
@@ -59,7 +60,7 @@
  *   Ack model: rather than auto-acking each pushed message, the
  *   consumer process stashes natsMsg* in a process-local ref table
  *   indexed by (handle_idx, slot_idx) and only calls
- *   natsMsg_Ack / Nak / Term / InProgress in drain_ack_ipc() on a
+ *   natsMsg_Ack / Nak / Term / InProgress in apply_ack_action() on a
  *   worker's explicit request.  A 16-bit generation counter in each
  *   ref slot is bumped on (re)use and checked on ack to guard against
  *   ABA-style stale-token reuse after ring wrap.
@@ -189,7 +190,7 @@ static int fetch_budget_ms(int configured, int num_subs)
 	return b;
 }
 
-/* Idle cycle: blocking select() on (ack_fd, retry_timerfd) instead of
+/* Idle cycle: blocking select() on (core-IPC fd, retry_timerfd) instead of
  * a usleep spin.  The retry timerfd gives us a bounded upper wait so
  * a stalled subscription (e.g. broker TCP stall) does not keep us
  * asleep forever; acks still wake us immediately on any worker
@@ -228,11 +229,9 @@ static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
 
 /* ── forward declarations ────────────────────────────────────── */
 
-typedef struct drain_ack_ctx drain_ack_ctx_t;
-
 static int  pull_one_batch(proc_sub_state_t *ss, int budget_ms);
-static void drain_ack_ipc_cb(const void *elem, void *user);
-static int  drain_ack_ipc(drain_ack_ctx_t *ctx);
+static int  apply_ack_action(uint64_t token, nats_ack_action_e action,
+	uint32_t delay_ms);
 
 /* ── header serialization ────────────────────────────────────── */
 
@@ -715,47 +714,117 @@ out:
 	return pushed;
 }
 
-/* ── ack IPC drain ───────────────────────────────────────────── */
+/* ── worker ack hop [P2.1] ───────────────────────────────────── */
 
-/* Per-drain cookie: counts acks applied and tracks which handle
- * indices saw an ACK_NEXT so the outer loop can prioritize pulling
- * from them on the same iteration. */
-typedef struct drain_ack_ctx {
-	int      count;
-	uint64_t next_bits[(NATS_REGISTRY_MAX_HANDLES + 63) / 64];
-} drain_ack_ctx_t;
+/* SHM counters behind the ack_ipc_* MI stats.  The pipe has no
+ * readable depth, so depth is derived: sent - drained (floored). */
+typedef struct nats_ack_ipc_stats_blk {
+	_Atomic uint64_t sent;      /* worker: ipc_send_rpc succeeded */
+	_Atomic uint64_t drained;   /* consumer: handler ran */
+	_Atomic uint64_t dropped;   /* worker: send refused */
+} nats_ack_ipc_stats_blk_t;
 
-static inline void next_bits_set(drain_ack_ctx_t *c, uint16_t handle_idx)
+static nats_ack_ipc_stats_blk_t *g_ack_ipc_stats;
+
+int nats_ack_ipc_stats_init(void)
+{
+	g_ack_ipc_stats = shm_malloc(sizeof(*g_ack_ipc_stats));
+	if (!g_ack_ipc_stats) {
+		LM_ERR("nats_consumer: shm_malloc for ack IPC stats failed\n");
+		return -1;
+	}
+	memset(g_ack_ipc_stats, 0, sizeof(*g_ack_ipc_stats));
+	return 0;
+}
+
+void nats_ack_ipc_stats_destroy(void)
+{
+	if (g_ack_ipc_stats) {
+		shm_free(g_ack_ipc_stats);
+		g_ack_ipc_stats = NULL;
+	}
+}
+
+void nats_ack_ipc_count_sent(int ok)
+{
+	if (!g_ack_ipc_stats)
+		return;
+	atomic_fetch_add_explicit(ok ? &g_ack_ipc_stats->sent
+	                             : &g_ack_ipc_stats->dropped,
+		1, memory_order_relaxed);
+}
+
+uint64_t nats_ack_ipc_enqueued_total(void)
+{
+	return g_ack_ipc_stats ? atomic_load_explicit(&g_ack_ipc_stats->sent,
+		memory_order_relaxed) : 0;
+}
+
+uint64_t nats_ack_ipc_drained_total(void)
+{
+	return g_ack_ipc_stats ? atomic_load_explicit(
+		&g_ack_ipc_stats->drained, memory_order_relaxed) : 0;
+}
+
+uint64_t nats_ack_ipc_dropped_total(void)
+{
+	return g_ack_ipc_stats ? atomic_load_explicit(
+		&g_ack_ipc_stats->dropped, memory_order_relaxed) : 0;
+}
+
+uint32_t nats_ack_ipc_depth(void)
+{
+	uint64_t snt = nats_ack_ipc_enqueued_total();
+	uint64_t drn = nats_ack_ipc_drained_total();
+
+	return snt > drn ? (uint32_t)(snt - drn) : 0;
+}
+
+/* Per-handle ACK_NEXT refill hints: set by the ack handlers on this
+ * tick, consumed (and cleared) by the main loop right after the pump.
+ * Proc-local single-thread state -- the successor of the old
+ * drain_ack_ctx next_bits. */
+static uint64_t g_ack_next_bits[(NATS_REGISTRY_MAX_HANDLES + 63) / 64];
+
+static void ack_next_set(uint16_t handle_idx)
 {
 	if (handle_idx < NATS_REGISTRY_MAX_HANDLES)
-		c->next_bits[handle_idx / 64] |= (uint64_t)1 << (handle_idx % 64);
+		g_ack_next_bits[handle_idx / 64] |=
+			(uint64_t)1 << (handle_idx % 64);
 }
 
-static inline int next_bits_test(const drain_ack_ctx_t *c,
-                                 uint16_t handle_idx)
+int nats_ack_next_take(uint16_t handle_idx)
 {
-	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES) return 0;
-	return (c->next_bits[handle_idx / 64] >> (handle_idx % 64)) & 1;
+	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
+		return 0;
+	if ((g_ack_next_bits[handle_idx / 64] >> (handle_idx % 64)) & 1) {
+		g_ack_next_bits[handle_idx / 64] &=
+			~((uint64_t)1 << (handle_idx % 64));
+		return 1;
+	}
+	return 0;
 }
 
-static void drain_ack_ipc_cb(const void *elem, void *user)
+/* Apply one worker ack action.  Runs in the consumer process (the
+ * only libnats-safe context for JetStream ack calls).  Returns 0 if
+ * applied, -1 for a stale token (already released / re-claimed). */
+static int apply_ack_action(uint64_t token, nats_ack_action_e action,
+	uint32_t delay_ms)
 {
-	const nats_ack_ipc_msg_t *m = (const nats_ack_ipc_msg_t *)elem;
 	natsMsg    *nmsg;
 	natsStatus  s;
-	drain_ack_ctx_t *ctx = (drain_ack_ctx_t *)user;
-	uint16_t           h_idx = nats_ack_token_handle(m->ack_token);
+	uint16_t           h_idx = nats_ack_token_handle(token);
 	proc_sub_state_t  *cb_ss = (h_idx < NATS_REGISTRY_MAX_HANDLES)
 	                          ? g_subs_by_idx[h_idx] : NULL;
 	nats_handle_t     *cb_h  = cb_ss ? cb_ss->h_ref : NULL;
 
-	nmsg = release_msg_ref(m->ack_token);
+	nmsg = release_msg_ref(token);
 	if (!nmsg) {
 		/* Stale or already-released.  release_msg_ref logged at DBG. */
-		return;
+		return -1;
 	}
 
-	switch ((nats_ack_action_e)m->action) {
+	switch (action) {
 		case NATS_ACK_ACTION_ACK:
 			s = nats_dl.natsMsg_Ack(nmsg, NULL);
 			if (s == NATS_OK && cb_h)
@@ -766,18 +835,16 @@ static void drain_ack_ipc_cb(const void *elem, void *user)
 			 * payload via the public API, so we fall back to:
 			 *   1) synchronous ack (so the broker has definitively seen
 			 *      the ack before we ask for a refill), and
-			 *   2) flag the originating handle in the drain context so
-			 *      the outer loop runs an extra pull_one_batch() for it
-			 *      on this tick rather than waiting for the next idle
-			 *      wake-up.
+			 *   2) flag the originating handle so the outer loop runs an
+			 *      extra pull_one_batch() for it on this tick rather
+			 *      than waiting for the next idle wake-up.
 			 * This matches the user-observable semantics of +NXT
 			 * (finish the current message and immediately hand me the
 			 * next one) without depending on library internals. */
 			s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
 			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->acks, 1);
-			if (ctx)
-				next_bits_set(ctx, h_idx);
+			ack_next_set(h_idx);
 			break;
 		case NATS_ACK_ACTION_NAK:
 			s = nats_dl.natsMsg_Nak(nmsg, NULL);
@@ -786,7 +853,7 @@ static void drain_ack_ipc_cb(const void *elem, void *user)
 			break;
 		case NATS_ACK_ACTION_NAK_DELAY:
 			s = nats_dl.natsMsg_NakWithDelay(nmsg,
-				(int64_t)m->delay_ms * 1000000LL, NULL);
+				(int64_t)delay_ms * 1000000LL, NULL);
 			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
@@ -801,23 +868,17 @@ static void drain_ack_ipc_cb(const void *elem, void *user)
 			 * keep it alive.  Put it back in the ref table under
 			 * the same token (same handle, slot, and generation). */
 			{
-				uint16_t handle_idx =
-					nats_ack_token_handle(m->ack_token);
-				uint32_t slot_idx =
-					nats_ack_token_slot(m->ack_token);
-				uint16_t gen =
-					nats_ack_token_generation(m->ack_token);
+				uint32_t slot_idx = nats_ack_token_slot(token);
+				uint16_t gen      = nats_ack_token_generation(token);
 				msg_ref_slot_t *slot;
-				if (handle_idx < NATS_REGISTRY_MAX_HANDLES &&
-				    g_msg_refs[handle_idx].slots &&
-				    slot_idx < g_msg_refs[handle_idx].capacity) {
-					slot = &g_msg_refs[handle_idx].slots[slot_idx];
+				if (h_idx < NATS_REGISTRY_MAX_HANDLES &&
+				    g_msg_refs[h_idx].slots &&
+				    slot_idx < g_msg_refs[h_idx].capacity) {
+					slot = &g_msg_refs[h_idx].slots[slot_idx];
 					slot->msg        = nmsg;
 					slot->in_use     = 1;
 					slot->generation = gen;
-					if (ctx)
-						ctx->count++;
-					return;
+					return 0;
 				}
 				/* Fall through to destroy if somehow invalid. */
 			}
@@ -825,8 +886,7 @@ static void drain_ack_ipc_cb(const void *elem, void *user)
 		default:
 			LM_WARN("nats_consumer_proc: unknown ack action %u for "
 				"token=0x%016lx\n",
-				(unsigned)m->action,
-				(unsigned long)m->ack_token);
+				(unsigned)action, (unsigned long)token);
 			s = NATS_OK;
 			break;
 	}
@@ -834,27 +894,80 @@ static void drain_ack_ipc_cb(const void *elem, void *user)
 	if (s != NATS_OK) {
 		LM_DBG("nats_consumer_proc: ack action=%u token=0x%016lx "
 			"returned %s\n",
-			(unsigned)m->action, (unsigned long)m->ack_token,
+			(unsigned)action, (unsigned long)token,
 			nats_dl.natsStatus_GetText(s));
 	}
 
 	nats_dl.natsMsg_Destroy(nmsg);
-	if (ctx)
-		ctx->count++;
+	return 0;
 }
 
-static int drain_ack_ipc(drain_ack_ctx_t *ctx)
+/* The ipc_send_rpc handlers, one per ack verb [P2.1].  param is the
+ * raw 64-bit token, except nak_delay whose param is a SHM payload
+ * this side frees. */
+static void ack_drained_bump(void)
 {
-	int n;
-	n = nats_ack_ipc_drain(drain_ack_ipc_cb, ctx);
-	(void)n;   /* currently logged only if ack_count differs, but
-	            * they should match -- kept for future MI metrics */
-	return ctx->count;
+	if (g_ack_ipc_stats)
+		atomic_fetch_add_explicit(&g_ack_ipc_stats->drained, 1,
+			memory_order_relaxed);
+}
+
+void nats_ack_ipc_on_ack(int sender, void *param)
+{
+	(void)sender;
+	ack_drained_bump();
+	(void)apply_ack_action((uint64_t)(uintptr_t)param,
+		NATS_ACK_ACTION_ACK, 0);
+}
+
+void nats_ack_ipc_on_ack_next(int sender, void *param)
+{
+	(void)sender;
+	ack_drained_bump();
+	(void)apply_ack_action((uint64_t)(uintptr_t)param,
+		NATS_ACK_ACTION_ACK_NEXT, 0);
+}
+
+void nats_ack_ipc_on_nak(int sender, void *param)
+{
+	(void)sender;
+	ack_drained_bump();
+	(void)apply_ack_action((uint64_t)(uintptr_t)param,
+		NATS_ACK_ACTION_NAK, 0);
+}
+
+void nats_ack_ipc_on_nak_delay(int sender, void *param)
+{
+	nats_ack_nak_delay_t *d = (nats_ack_nak_delay_t *)param;
+
+	(void)sender;
+	ack_drained_bump();
+	if (!d)
+		return;
+	(void)apply_ack_action(d->token, NATS_ACK_ACTION_NAK_DELAY,
+		d->delay_ms);
+	shm_free(d);
+}
+
+void nats_ack_ipc_on_term(int sender, void *param)
+{
+	(void)sender;
+	ack_drained_bump();
+	(void)apply_ack_action((uint64_t)(uintptr_t)param,
+		NATS_ACK_ACTION_TERM, 0);
+}
+
+void nats_ack_ipc_on_in_progress(int sender, void *param)
+{
+	(void)sender;
+	ack_drained_bump();
+	(void)apply_ack_action((uint64_t)(uintptr_t)param,
+		NATS_ACK_ACTION_IN_PROGRESS, 0);
 }
 
 /* [P2.1] Pump the core-IPC pipe: each pending job is one
- * worker->consumer request (async-RPC publish today; acks migrate here
- * next).  Gated on a live broker connection so jobs wait in the pipe
+ * worker->consumer request (an ack verb or an async-RPC publish).
+ * Gated on a live broker connection so jobs wait in the pipe
  * across reconnects -- the pipe IS the queue.  The core's
  * ipc_handle_all_pending_jobs() uses recv(MSG_PEEK), which is a no-op
  * on the pipe fds pt[] actually carries, so readability is probed with
@@ -874,20 +987,6 @@ static int pump_worker_ipc(void)
 		ran = 1;
 	}
 	return ran;
-}
-
-/* Read the ack eventfd counter to rearm the reactor-ish select().
- * The eventfd is edge-signaled on empty->non-empty; one read clears
- * the counter irrespective of how many enqueues coalesced. */
-static void drain_ack_eventfd(int fd)
-{
-	uint64_t sink;
-	ssize_t r;
-	if (fd < 0)
-		return;
-	do {
-		r = read(fd, &sink, sizeof(sink));
-	} while (r < 0 && errno == EINTR);
 }
 
 /* ── retire teardown ─────────────────────────────────────────── */
@@ -1034,7 +1133,6 @@ void mark_orphan_retired_handles(void)
 
 void nats_consumer_proc_main(int rank)
 {
-	int ack_fd;
 	int retry_fd;
 	int baseline_epoch;
 
@@ -1083,7 +1181,6 @@ void nats_consumer_proc_main(int rank)
 		}
 	}
 
-	ack_fd = nats_ack_ipc_fd();
 	baseline_epoch = nats_pool_get_reconnect_epoch();
 
 	/* Blocking-idle timerfd -- armed each idle round to cap how long
@@ -1108,9 +1205,9 @@ void nats_consumer_proc_main(int rank)
 			"the IPC will be marked abandoned\n");
 	}
 
-	LM_INFO("nats_consumer_proc: pool ready, ack_fd=%d retry_fd=%d, "
+	LM_INFO("nats_consumer_proc: pool ready, ipc_fd=%d retry_fd=%d, "
 		"baseline_epoch=%d, entering main loop\n",
-		ack_fd, retry_fd, baseline_epoch);
+		IPC_FD_READ_SELF, retry_fd, baseline_epoch);
 
 	if (nats_consumer_hb) {
 		atomic_store_explicit(&nats_consumer_hb->consumer_pid,
@@ -1209,64 +1306,23 @@ void nats_consumer_proc_main(int rank)
 			}
 		}
 
-		/* 3. Service pending ack requests.  Drain the eventfd
-		 *    counter first so the next edge wakes us again; then
-		 *    drain the IPC queue.  The order matters: reading the
-		 *    counter BEFORE draining the queue is a rendez-vous
-		 *    against the producer-side race where an enqueue
-		 *    happens right between the two steps -- we simply see
-		 *    it on the next iteration. */
-		if (ack_fd >= 0) {
-			struct timeval tv;
-			fd_set rfds;
-			int sr;
-
-			/* Non-blocking poll of the ack fd.  We already polled
-			 * nats for up to fetch_timeout above, so here we only
-			 * check whether acks arrived during that window. */
-			FD_ZERO(&rfds);
-			FD_SET(ack_fd, &rfds);
-			tv.tv_sec  = 0;
-			tv.tv_usec = 0;
-			sr = select(ack_fd + 1, &rfds, NULL, NULL, &tv);
-			if (sr > 0 && FD_ISSET(ack_fd, &rfds)) {
-				drain_ack_eventfd(ack_fd);
-			}
-		}
-		{
-			drain_ack_ctx_t ctx;
-			int acks;
-			memset(&ctx, 0, sizeof(ctx));
-			acks = drain_ack_ipc(&ctx);
-			if (acks > 0)
-				any_work = 1;
-
-			/* ACK_NEXT fallback: any handle that got an ack-and-pull
-			 * hint on this tick gets an extra pull_one_batch() right
-			 * now, without waiting for the next outer iteration.  This
-			 * is the fallback for the missing +NXT payload API. */
-			for (ss = g_subs; ss; ss = ss->next) {
-				if (next_bits_test(&ctx, ss->handle_idx)) {
-					/* ack-and-pull hint: the next message is likely
-					 * already waiting, so use the full timeout (0 = no
-					 * cap) -- this is not part of the idle sweep. */
-					int pushed = pull_one_batch(ss, 0);
-					if (pushed > 0)
-						any_work = 1;
-				}
-			}
-		}
-
-		/* 3.5 Async nats_request: pump the worker -> consumer core-IPC
-		 *     pipe [P2.1].  Each job reads its slot's out_* fields and
-		 *     PublishMsg's against our libnats connection with
-		 *     reply-to pointing back at our persistent inbox.  Replies
-		 *     land in on_inbox_reply (running on the libnats thread,
-		 *     also in this process) which writes reply_* and stores
-		 *     the slot state DELIVERED; the worker observes it on its
-		 *     next private-timerfd poll (no fd is signalled). */
+		/* 3. Service worker acks + async-RPC publishes: pump the
+		 *    core-IPC pipe [P2.1], then honour any ACK_NEXT refill
+		 *    hints the ack handlers set on this tick -- the extra
+		 *    pull runs now instead of waiting for the next idle
+		 *    wake-up (fallback for the missing +NXT payload API). */
 		if (pump_worker_ipc())
 			any_work = 1;
+		for (ss = g_subs; ss; ss = ss->next) {
+			if (nats_ack_next_take(ss->handle_idx)) {
+				/* the next message is likely already waiting: use
+				 * the full timeout (0 = no cap) -- this is not part
+				 * of the idle sweep */
+				int pushed = pull_one_batch(ss, 0);
+				if (pushed > 0)
+					any_work = 1;
+			}
+		}
 
 		/* 4. Retire/reap lifecycle: tear down subscriptions whose
 		 *    handles are retiring, then reap any fully-drained handles.
@@ -1279,23 +1335,21 @@ void nats_consumer_proc_main(int rank)
 		nats_registry_reap();
 
 		if (!any_work) {
-			/* Blocking idle: wait until either the ack IPC eventfd
-			 * becomes readable (a worker acked something), the
-			 * core-IPC pipe becomes readable (a worker issued an
-			 * async nats_request [P2.1]), or the retry timerfd
-			 * fires (bounded stall recovery).  Avoids a busy poll
+			/* Blocking idle: wait until the core-IPC pipe becomes
+			 * readable (a worker acked something or issued an async
+			 * nats_request [P2.1]) or the retry timerfd fires
+			 * (bounded stall recovery).  Avoids a busy poll
 			 * so the consumer process spends ~0% CPU on empty
 			 * subscriptions.  The IPC fd only joins the set while
 			 * the broker connection is live -- the pump is gated on
 			 * it, so selecting on it while disconnected would spin;
 			 * the 1s timeout covers reconnect progress instead. */
 			fd_set rfds;
-			int    maxfd = ack_fd;
+			int    maxfd = -1;
 			int    ipc_fd = nats_pool_get() ? IPC_FD_READ_SELF : -1;
 			struct timeval tv;
 
 			FD_ZERO(&rfds);
-			if (ack_fd >= 0) FD_SET(ack_fd, &rfds);
 			if (ipc_fd >= 0) {
 				FD_SET(ipc_fd, &rfds);
 				if (ipc_fd > maxfd) maxfd = ipc_fd;

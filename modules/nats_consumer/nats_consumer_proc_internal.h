@@ -145,6 +145,10 @@ uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
 natsMsg *release_msg_ref(uint64_t token);
 /* Reclaim slots older than the orphan TTL; returns the reap count. */
 int reap_orphan_msg_refs(void);
+/* [P2.1] Consume (and clear) a handle's ACK_NEXT refill hint; 1 if it
+ * was set.  Proc-local; set by the ack IPC handlers, read by the main
+ * loop right after the pump. */
+int nats_ack_next_take(uint16_t handle_idx);
 /* Destroy every outstanding natsMsg for a handle and free its ref row.
  * MUST be called at every subscription-destroy site: a fetched natsMsg
  * holds an unref'd msg->sub, so acking one after its sub is destroyed is a

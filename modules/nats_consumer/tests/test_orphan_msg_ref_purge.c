@@ -122,8 +122,8 @@ natsConnection *nats_pool_get(void) { return NULL; }
 jsCtx *nats_pool_get_js(void) { return NULL; }
 int nats_pool_get_reconnect_epoch(void) { return 0; }
 
-/* ack/rpc IPC veneers are header inlines over nats_ipcq.c since P1.3;
- * the real nats_ipcq.c + nats_mpsc.c are linked instead of stubbed. */
+/* [P2.1] worker acks/RPCs ride core IPC now; the seams below only
+ * need to link (this test never enters the main loop). */
 int nats_rpc_consumer_subscribe(void) { return 0; }
 int nats_rpc_consumer_inbox_ready(void) { return 1; }
 

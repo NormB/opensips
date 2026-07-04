@@ -34,24 +34,63 @@
  */
 
 #include "../../dprint.h"
+#include "../../ipc.h"           /* ipc_send_rpc [P2.1] */
+#include "../../mem/shm_mem.h"
 
 #include "nats_ack.h"
 #include "nats_fetch.h"
 #include "nats_ack_ipc.h"
+#include "nats_consumer_proc.h"  /* nats_consumer_proc_no */
 
+/* [P2.1] One ack over core IPC: the action selects the handler
+ * function, the token IS the param (zero alloc) -- except NAK_DELAY,
+ * whose token+delay need a small SHM payload the handler frees. */
 static int send_ack_ipc(uint64_t token, nats_ack_action_e action,
                         uint32_t delay_ms)
 {
-	nats_ack_ipc_msg_t m;
-	m.ack_token = token;
-	m.action    = (uint32_t)action;
-	m.delay_ms  = delay_ms;
-	if (nats_ack_ipc_enqueue(&m) < 0) {
-		LM_ERR("nats_ack: IPC enqueue failed for token=0x%016lx "
-			"action=%d (queue full?)\n",
-			(unsigned long)token, (int)action);
+	int dst = nats_consumer_proc_no();
+	int rc;
+
+	if (dst < 0) {
+		LM_ERR("nats_ack: consumer process not up for token=0x%016lx "
+			"action=%d\n", (unsigned long)token, (int)action);
+		nats_ack_ipc_count_sent(0);
 		return -2;
 	}
+	if (action == NATS_ACK_ACTION_NAK_DELAY) {
+		nats_ack_nak_delay_t *d = shm_malloc(sizeof(*d));
+		if (!d) {
+			LM_ERR("nats_ack: no SHM for nak-delay payload\n");
+			nats_ack_ipc_count_sent(0);
+			return -2;
+		}
+		d->token    = token;
+		d->delay_ms = delay_ms;
+		rc = ipc_send_rpc(dst, nats_ack_ipc_on_nak_delay, d);
+		if (rc < 0)
+			shm_free(d);
+	} else {
+		ipc_rpc_f *fn;
+		switch (action) {
+		case NATS_ACK_ACTION_ACK:         fn = nats_ack_ipc_on_ack;         break;
+		case NATS_ACK_ACTION_ACK_NEXT:    fn = nats_ack_ipc_on_ack_next;    break;
+		case NATS_ACK_ACTION_NAK:         fn = nats_ack_ipc_on_nak;         break;
+		case NATS_ACK_ACTION_TERM:        fn = nats_ack_ipc_on_term;        break;
+		case NATS_ACK_ACTION_IN_PROGRESS: fn = nats_ack_ipc_on_in_progress; break;
+		default:
+			LM_ERR("nats_ack: unknown action %d\n", (int)action);
+			return -2;
+		}
+		rc = ipc_send_rpc(dst, fn, (void *)(uintptr_t)token);
+	}
+	if (rc < 0) {
+		LM_ERR("nats_ack: IPC send refused for token=0x%016lx "
+			"action=%d (pipe full?)\n",
+			(unsigned long)token, (int)action);
+		nats_ack_ipc_count_sent(0);
+		return -2;
+	}
+	nats_ack_ipc_count_sent(1);
 	return 1;
 }
 

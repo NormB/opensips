@@ -19,25 +19,27 @@
  */
 
 /*
- * nats_ack_ipc.h -- worker -> consumer-process ack queue.
+ * nats_ack_ipc.h -- worker -> consumer-process ack hop.
  *
- * Implementation: a bounded SHM ring acting as a
- * multi-producer / single-consumer queue.  Producers are any SIP
- * worker that called nats_ack() / nats_nak() / nats_term() from a
- * script; the single consumer is the dedicated nats_consumer process
- * which turns queued entries into natsMsg_Ack / Nak / Term /
- * InProgress calls on the corresponding natsMsg refs it stashed when
- * it originally pushed the message into the per-handle ring.
+ * [P2.1] Acks ride OpenSIPS core IPC.  The ACTION is the ipc_send_rpc
+ * function identity -- one handler per JetStream ack verb -- and the
+ * 64-bit ack token travels verbatim as the opaque param pointer, so
+ * the hot path allocates nothing:
  *
- * The queue has its own eventfd so the consumer process can block on
- * "something to ack OR something to fetch" with a single select() /
- * poll() without spinning.  Producers signal the eventfd on the
- * empty -> non-empty edge; the consumer drains everything visible on
- * wake.
+ *   ipc_send_rpc(nats_consumer_proc_no(), nats_ack_ipc_on_ack,
+ *                (void *)(uintptr_t)token);
  *
- * Concurrency: lock-free bounded MPSC (head/tail-CAS + per-cell
- * generation, via nats_mpsc.c).  Producers reserve a cell with a
- * single CAS and never take a lock or block on the consumer.
+ * The one exception is NAK_DELAY: token + delay_ms cannot fit a
+ * pointer, so it carries a small SHM payload the handler frees.
+ *
+ * The consumer process pumps its IPC fd from the main loop, gated on
+ * a live broker connection, so acks wait in the pipe across
+ * reconnects exactly like they used to wait in the SHM ring.  A send
+ * refused (pipe full / consumer proc not up) surfaces the usual -2 to
+ * the script; the message stays un-acked and JetStream redelivers.
+ *
+ * Handler behavior is unit-locked in tests/test_ack_ipc_actions.c
+ * (drives the production handlers against a recording nats_dl table).
  */
 
 #ifndef NATS_ACK_IPC_H
@@ -45,15 +47,9 @@
 
 #include <stdint.h>
 
-/* Tuning -- bounded ring sized for bursts.  Oversubscription is
- * handled by returning -1 from enqueue; the caller decides whether
- * to log+drop or retry.  We log+drop so a mis-scripted worker
- * cannot wedge the module. */
-#define NATS_ACK_IPC_QUEUE_DEPTH 4096
-
-/* Ack action vocabulary.  Keep this aligned with the nats.c JetStream
- * client enumerations -- the consumer process maps these into calls
- * on natsMsg_Ack / natsMsg_Nak / natsMsg_NakWithDelay /
+/* Ack action vocabulary.  Kept for the worker-side dispatch and the
+ * consumer-side apply switch -- the consumer process maps these into
+ * calls on natsMsg_Ack / natsMsg_Nak / natsMsg_NakWithDelay /
  * natsMsg_InProgress / natsMsg_Term. */
 typedef enum {
 	NATS_ACK_ACTION_NOOP = 0,       /* ignored */
@@ -69,53 +65,32 @@ typedef enum {
 	                                 * to ack+ring-refill-on-next-tick. */
 } nats_ack_action_e;
 
-/* Public message format used by both producer (worker) and consumer
- * (consumer process).  Fits in one cache line so a producer publishes
- * it with a single memcpy + release-store into its reserved cell. */
-typedef struct nats_ack_ipc_msg {
-	uint64_t ack_token;        /* handle_idx:16 | slot_idx:32 | gen:16 */
-	uint32_t action;           /* nats_ack_action_e -- 32 bits for ABI */
-	uint32_t delay_ms;         /* NAK_DELAY only; ignored otherwise */
-} nats_ack_ipc_msg_t;
+/* NAK_DELAY payload: SHM-allocated by the worker, freed by the
+ * handler (or by the worker again if the send itself fails). */
+typedef struct nats_ack_nak_delay {
+	uint64_t token;
+	uint32_t delay_ms;
+} nats_ack_nak_delay_t;
 
-/* Back-compat alias kept for any callers that referenced the old
- * slot-level struct.  Prefer nats_ack_ipc_msg_t. */
-typedef struct nats_ack_ipc_slot {
-	uint64_t ack_token;
-	uint8_t  action;
-	uint8_t  _pad[7];
-} nats_ack_ipc_slot_t;
+/* The ipc_send_rpc handlers, one per action.  All run in the consumer
+ * process; param is the raw token (cast via uintptr_t), except
+ * on_nak_delay whose param is a nats_ack_nak_delay_t*. */
+void nats_ack_ipc_on_ack(int sender, void *param);
+void nats_ack_ipc_on_ack_next(int sender, void *param);
+void nats_ack_ipc_on_nak(int sender, void *param);
+void nats_ack_ipc_on_nak_delay(int sender, void *param);
+void nats_ack_ipc_on_term(int sender, void *param);
+void nats_ack_ipc_on_in_progress(int sender, void *param);
 
-/* Typed veneers over the ONE generic queue wrapper (nats_ipcq.c, P1.3).
- * The callback receives a copied-out element, so a long-running
- * natsMsg_Ack/Nak network trip never holds a queue slot against
- * concurrent producers. */
-#include "nats_ipcq.h"
-
-static inline int nats_ack_ipc_init(void)
-{
-	return nats_ipcq_init(&nats_ack_ipcq, NATS_ACK_IPC_QUEUE_DEPTH,
-		(uint32_t)sizeof(nats_ack_ipc_msg_t));
-}
-static inline void nats_ack_ipc_destroy(void)
-{ nats_ipcq_destroy(&nats_ack_ipcq); }
-static inline int nats_ack_ipc_enqueue(const nats_ack_ipc_msg_t *msg)
-{ return nats_ipcq_enqueue(&nats_ack_ipcq, msg); }
-static inline int nats_ack_ipc_drain(
-		void (*cb)(const void *elem, void *user), void *user)
-{
-	return nats_ipcq_drain(&nats_ack_ipcq,
-		(uint32_t)sizeof(nats_ack_ipc_msg_t), cb, user);
-}
-static inline int nats_ack_ipc_fd(void)
-{ return nats_ipcq_fd(&nats_ack_ipcq); }
-static inline uint64_t nats_ack_ipc_enqueued_total(void)
-{ return nats_ipcq_enqueued_total(&nats_ack_ipcq); }
-static inline uint64_t nats_ack_ipc_drained_total(void)
-{ return nats_ipcq_drained_total(&nats_ack_ipcq); }
-static inline uint64_t nats_ack_ipc_dropped_total(void)
-{ return nats_ipcq_dropped_total(&nats_ack_ipcq); }
-static inline uint32_t nats_ack_ipc_depth(void)
-{ return nats_ipcq_depth(&nats_ack_ipcq); }
+/* SHM counters behind the ack_ipc_* MI stats (init/destroy from
+ * mod_init / mod_destroy; count_sent from the worker send path;
+ * depth = sent - drained, floored at 0). */
+int      nats_ack_ipc_stats_init(void);
+void     nats_ack_ipc_stats_destroy(void);
+void     nats_ack_ipc_count_sent(int ok);
+uint64_t nats_ack_ipc_enqueued_total(void);
+uint64_t nats_ack_ipc_drained_total(void);
+uint64_t nats_ack_ipc_dropped_total(void);
+uint32_t nats_ack_ipc_depth(void);
 
 #endif /* NATS_ACK_IPC_H */
