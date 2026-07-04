@@ -100,8 +100,11 @@ int main(void)
 {
 	const char *src = "../event_nats_sub.c";
 
-	ASSERT(grep_count(src, "nats_pool_get_reconnect_epoch") >= 1,
-		"consumer loop reads reconnect epoch");
+	/* [P2.8] the epoch idiom moved behind lib/nats/nats_epoch.h; the
+	 * loop tags its sub set and re-checks via the wrapper. */
+	ASSERT(grep_count(src, "nats_epoch_save") >= 1 &&
+	       grep_count(src, "nats_epoch_current") >= 1,
+		"consumer loop tracks the reconnect epoch via nats_epoch");
 
 	ASSERT(grep_count(src, "natsSubscription_IsValid") >= 1,
 		"consumer loop checks subscription validity post-reconnect");
