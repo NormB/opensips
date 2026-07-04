@@ -123,12 +123,14 @@ struct nats_ring {
 	 * when no one is waiting. */
 	_Atomic uint32_t waiters;
 
-	/* [P2.2] producer-side force-unwedge state.  Single producer per
-	 * ring (the consumer process), so the tracker fields are plain;
-	 * only the stat is atomic (read by MI from other procs). */
-	uint64_t         unwedge_want;      /* generation blocking push */
-	long long        unwedge_since_us;  /* first observation; 0 = none */
-	_Atomic uint64_t forced_unwedges;
+	/* [P2.2] producer-side force-unwedge state.  Production has a
+	 * single producer per ring (the consumer process), but the ring's
+	 * contract -- and the MPMC stress test -- allow concurrent
+	 * producers, so the advisory tracker is atomic (relaxed: a torn
+	 * arm at worst delays a force by one window, the safe direction). */
+	_Atomic uint64_t  unwedge_want;      /* generation blocking push */
+	_Atomic long long unwedge_since_us;  /* first observation; 0 = none */
+	_Atomic uint64_t  forced_unwedges;
 
 	/* hot counters -- head is written by producers, tail by consumers;
 	 * they are placed on separate 64-bit slots so the compiler cannot
@@ -232,15 +234,21 @@ static int _ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
 	uint64_t want)
 {
 	long long now = _ring_now_us();
+	long long since = atomic_load_explicit(&r->unwedge_since_us,
+		memory_order_relaxed);
 	uint64_t got;
 
-	if (r->unwedge_since_us == 0 || r->unwedge_want != want) {
+	if (since == 0 ||
+	    atomic_load_explicit(&r->unwedge_want,
+			memory_order_relaxed) != want) {
 		/* first sighting of THIS stuck generation: arm the timer */
-		r->unwedge_want = want;
-		r->unwedge_since_us = now;
+		atomic_store_explicit(&r->unwedge_want, want,
+			memory_order_relaxed);
+		atomic_store_explicit(&r->unwedge_since_us, now,
+			memory_order_relaxed);
 		return 0;
 	}
-	if (now - r->unwedge_since_us < NATS_RING_FORCE_UNWEDGE_US)
+	if (now - since < NATS_RING_FORCE_UNWEDGE_US)
 		return 0;
 
 	got = __atomic_load_n(&slot->consumed_gen, __ATOMIC_ACQUIRE);
@@ -257,11 +265,13 @@ static int _ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
 			atomic_fetch_add_explicit(&r->forced_unwedges, 1,
 				memory_order_relaxed);
 		}
-		r->unwedge_since_us = 0;
+		atomic_store_explicit(&r->unwedge_since_us, 0,
+			memory_order_relaxed);
 		return 1;
 	}
 	/* CAS lost: the popper released concurrently -- recovered anyway */
-	r->unwedge_since_us = 0;
+	atomic_store_explicit(&r->unwedge_since_us, 0,
+		memory_order_relaxed);
 	return 1;
 }
 
@@ -361,7 +371,8 @@ int nats_ring_push(nats_ring_t *r,
 		}
 
 		spin_tracking = 0;
-		r->unwedge_since_us = 0;    /* [P2.2] progress: disarm */
+		atomic_store_explicit(&r->unwedge_since_us, 0,
+			memory_order_relaxed);  /* [P2.2] progress: disarm */
 		if (atomic_compare_exchange_weak_explicit(
 				&r->head, &h, h + 1,
 				memory_order_acq_rel,
