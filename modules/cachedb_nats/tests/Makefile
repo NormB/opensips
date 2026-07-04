@@ -57,6 +57,11 @@ CORE_DEFS := -fPIC -DPIC \
              -DFAST_LOCK -DADAPTIVE_WAIT -DADAPTIVE_WAIT_LOOPS=1024 \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 
+# [P2.5] the shared top-level JSON field iterator: #includes the
+# production walker TU, whose core includes need the full define set.
+test_json_foreach: EXTRA := $(CORE_DEFS)
+test_json_foreach: ../cachedb_nats_json_walk.c ../cachedb_nats_json_internal.h
+
 # P0.1: kv_epoch must not latch on a failed refresh — links the real
 # nats_con_refresh_kv() from ../cachedb_nats_dbase.c with a fake pool.
 test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c

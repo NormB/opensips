@@ -279,10 +279,55 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
  *   - non-usrloc document (no top-level "contacts"): returned byte-for-byte
  *     unchanged, so other cachedb_nats consumers are never disturbed.
  * Returns NULL on malformed input or OOM. */
+/* [P2.5] pass-1 helper: remember the span of the top-level "contacts"
+ * object (last occurrence wins, matching the old scan). */
+struct find_contacts_ctx {
+	const char *vs, *ve;
+};
+
+static int _find_contacts_cb(const char *name, int nlen,
+	const char *vstart, const char *vend, void *ud)
+{
+	struct find_contacts_ctx *c = ud;
+
+	if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
+		c->vs = vstart;
+		c->ve = vend;
+	}
+	return 0;
+}
+
+/* [P2.5] pass-2 helper: copy every top-level field through except the
+ * private metadata peers (freshly recomputed by the caller). */
+struct copy_minus_meta_ctx {
+	json_sink_t *s;
+	int          first;
+};
+
+static int _copy_minus_meta_cb(const char *name, int nlen,
+	const char *vstart, const char *vend, void *ud)
+{
+	struct copy_minus_meta_ctx *c = ud;
+
+	if ((nlen == 7 && memcmp(name, "row_exp", 7) == 0) ||
+	    (nlen == 14 && memcmp(name, "schema_version", 14) == 0))
+		return 0;            /* drop stale private peer */
+	if (!c->first && _sink_putc(c->s, ',') < 0)
+		return -1;
+	c->first = 0;
+	if (_sink_emit_raw_string(c->s, name, nlen) < 0)
+		return -1;
+	if (_sink_putc(c->s, ':') < 0)
+		return -1;
+	if (_sink_write(c->s, vstart, (int)(vend - vstart)) < 0)
+		return -1;
+	return 0;
+}
+
 char *_row_finalize_metadata(const char *json, int len, int *out_len,
 	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same)
 {
-	const char *p, *end, *c_vs = NULL, *c_ve = NULL;
+	const char *c_vs = NULL, *c_ve = NULL;
 	int64_t *exps = NULL;
 	int n_exp = 0, first = 1;
 	int64_t row_exp;
@@ -297,38 +342,14 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 	if (!json || len <= 0)
 		return NULL;
 
-	/* Pass 1: locate the top-level "contacts" object. */
-	end = json + len;
-	p = _skip_ws(json, end);
-	if (p >= end || *p != '{')
-		return NULL;
-	p++;
-	while (p < end) {
-		const char *name, *vs;
-		int nlen;
-
-		p = _skip_ws(p, end);
-		if (p >= end)
+	/* Pass 1: locate the top-level "contacts" object [P2.5]. */
+	{
+		struct find_contacts_ctx fc = { NULL, NULL };
+		if (_json_foreach_top_field(json, len,
+				_find_contacts_cb, &fc) < 0)
 			return NULL;
-		if (*p == '}')
-			break;
-		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
-		if (!p)
-			return NULL;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':')
-			return NULL;
-		p++;
-		p = _skip_ws(p, end);
-		vs = p;
-		p = _skip_json_value(p, end);
-		if (!p)
-			return NULL;
-		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			c_vs = vs;
-			c_ve = p;
-		}
+		c_vs = fc.vs;
+		c_ve = fc.ve;
 	}
 
 	/* Non-usrloc document: return verbatim, never re-shape it. */
@@ -367,42 +388,12 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 		return NULL;
 	if (_sink_putc(&s, '{') < 0)
 		goto fail;
-	p = _skip_ws(json, end);
-	p++; /* past '{' */
-	while (p < end) {
-		const char *name, *vs;
-		int nlen;
-
-		p = _skip_ws(p, end);
-		if (p >= end)
+	{
+		struct copy_minus_meta_ctx cm = { &s, 1 };
+		if (_json_foreach_top_field(json, len,
+				_copy_minus_meta_cb, &cm) < 0)
 			goto fail;
-		if (*p == '}')
-			break;
-		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
-		if (!p)
-			goto fail;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':')
-			goto fail;
-		p++;
-		p = _skip_ws(p, end);
-		vs = p;
-		p = _skip_json_value(p, end);
-		if (!p)
-			goto fail;
-		if ((nlen == 7 && memcmp(name, "row_exp", 7) == 0) ||
-		    (nlen == 14 && memcmp(name, "schema_version", 14) == 0))
-			continue;            /* drop stale private peer */
-		if (!first && _sink_putc(&s, ',') < 0)
-			goto fail;
-		first = 0;
-		if (_sink_emit_raw_string(&s, name, nlen) < 0)
-			goto fail;
-		if (_sink_putc(&s, ':') < 0)
-			goto fail;
-		if (_sink_write(&s, vs, (int)(p - vs)) < 0)
-			goto fail;
+		first = cm.first;
 	}
 	if (!first && _sink_putc(&s, ',') < 0)
 		goto fail;
@@ -479,45 +470,21 @@ static int _raw_find_contact(const char *c_vs, const char *c_ve,
  * and for any contact whose last_mod is absent / non-integer (left untouched). */
 void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 {
-	const char *p, *end, *c_vs = NULL, *c_ve = NULL;
+	const char *c_vs = NULL, *c_ve = NULL;
 	struct list_head *pos;
 	cdb_pair_t *pair;
 
 	if (!json || len <= 0 || !row_dict)
 		return;
 
-	/* locate the raw top-level "contacts" object slice */
-	end = json + len;
-	p = _skip_ws(json, end);
-	if (p >= end || *p != '{')
-		return;
-	p++;
-	while (p < end) {
-		const char *name, *vs;
-		int nlen;
-
-		p = _skip_ws(p, end);
-		if (p >= end)
+	/* locate the raw top-level "contacts" object slice [P2.5] */
+	{
+		struct find_contacts_ctx fc = { NULL, NULL };
+		if (_json_foreach_top_field(json, len,
+				_find_contacts_cb, &fc) < 0)
 			return;
-		if (*p == '}')
-			break;
-		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
-		if (!p)
-			return;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':')
-			return;
-		p++;
-		p = _skip_ws(p, end);
-		vs = p;
-		p = _skip_json_value(p, end);
-		if (!p)
-			return;
-		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			c_vs = vs;
-			c_ve = p;
-		}
+		c_vs = fc.vs;
+		c_ve = fc.ve;
 	}
 	if (!c_vs)
 		return;            /* not a usrloc row */

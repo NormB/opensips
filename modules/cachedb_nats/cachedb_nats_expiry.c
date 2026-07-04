@@ -360,12 +360,57 @@ static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs,
  * then (2) hand it to _row_finalize_metadata() which recomputes row_exp +
  * schema_version over exactly those survivors — so the 0=permanent sentinel and
  * int64 arithmetic have a single owner (the rowmeta TU). */
+/* [P2.5] pass-1: is this a usrloc row?  (has a top-level "contacts") */
+static int _find_contacts_flag_cb(const char *name, int nlen,
+	const char *vstart, const char *vend, void *ud)
+{
+	int *has = ud;
+
+	(void)vstart; (void)vend;
+	if (nlen == 8 && memcmp(name, "contacts", 8) == 0)
+		*has = 1;
+	return 0;
+}
+
+/* [P2.5] stage-1: copy every top-level field, filtering the contacts
+ * object down to its surviving members. */
+struct project_walk_ctx {
+	json_sink_t *s;
+	time_t       now;
+	int          grace;
+	int          n_surv;
+	int          first;
+};
+
+static int _project_field_cb(const char *name, int nlen,
+	const char *vstart, const char *vend, void *ud)
+{
+	struct project_walk_ctx *c = ud;
+
+	if (!c->first && _sink_putc(c->s, ',') < 0)
+		return -1;
+	c->first = 0;
+	if (_sink_emit_raw_string(c->s, name, nlen) < 0)
+		return -1;
+	if (_sink_putc(c->s, ':') < 0)
+		return -1;
+	if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
+		if (_emit_survivor_contacts(c->s, vstart, vend,
+				c->now, c->grace, &c->n_surv) < 0)
+			return -1;
+	} else {
+		if (_sink_write(c->s, vstart, (int)(vend - vstart)) < 0)
+			return -1;
+	}
+	return 0;
+}
+
 char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 	int *n_survivors, int *out_len,
 	int64_t *out_row_exp, int *out_all_same)
 {
-	const char *p, *end, *c_vs = NULL;
-	int n_surv = 0, first = 1, tmp_len = 0;
+	int has_contacts = 0;
+	int n_surv = 0, tmp_len = 0;
 	char *tmp, *final;
 	json_sink_t s;
 
@@ -377,37 +422,11 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 		*out_all_same = 0;
 	if (!json || len <= 0)
 		return NULL;
-	end = json + len;
-	p = _skip_ws(json, end);
-	if (p >= end || *p != '{')
+	/* pass 1: is this a usrloc row at all? [P2.5] */
+	if (_json_foreach_top_field(json, len,
+			_find_contacts_flag_cb, &has_contacts) < 0)
 		return NULL;
-	p++;
-	/* pass 1: locate the top-level contacts object */
-	while (p < end) {
-		const char *name, *vs;
-		int nlen;
-		p = _skip_ws(p, end);
-		if (p >= end)
-			return NULL;
-		if (*p == '}')
-			break;
-		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
-		if (!p)
-			return NULL;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':')
-			return NULL;
-		p++;
-		p = _skip_ws(p, end);
-		vs = p;
-		p = _skip_json_value(p, end);
-		if (!p)
-			return NULL;
-		if (nlen == 8 && memcmp(name, "contacts", 8) == 0)
-			c_vs = vs;                 /* marks "this is a usrloc row" */
-	}
-	if (!c_vs) {                               /* non-usrloc doc -> skip */
+	if (!has_contacts) {                       /* non-usrloc doc -> skip */
 		char *copy = malloc(len + 1);
 		if (!copy)
 			return NULL;
@@ -426,43 +445,12 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 		return NULL;
 	if (_sink_putc(&s, '{') < 0)
 		goto fail;
-	p = _skip_ws(json, end);
-	p++;
-	while (p < end) {
-		const char *name, *vs;
-		int nlen;
-		p = _skip_ws(p, end);
-		if (p >= end)
+	{
+		struct project_walk_ctx pw = { &s, now, grace, 0, 1 };
+		if (_json_foreach_top_field(json, len,
+				_project_field_cb, &pw) < 0)
 			goto fail;
-		if (*p == '}')
-			break;
-		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
-		if (!p)
-			goto fail;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':')
-			goto fail;
-		p++;
-		p = _skip_ws(p, end);
-		vs = p;
-		p = _skip_json_value(p, end);
-		if (!p)
-			goto fail;
-		if (!first && _sink_putc(&s, ',') < 0)
-			goto fail;
-		first = 0;
-		if (_sink_emit_raw_string(&s, name, nlen) < 0)
-			goto fail;
-		if (_sink_putc(&s, ':') < 0)
-			goto fail;
-		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			if (_emit_survivor_contacts(&s, vs, p, now, grace, &n_surv) < 0)
-				goto fail;
-		} else {
-			if (_sink_write(&s, vs, (int)(p - vs)) < 0)
-				goto fail;
-		}
+		n_surv = pw.n_surv;
 	}
 	if (_sink_putc(&s, '}') < 0)
 		goto fail;

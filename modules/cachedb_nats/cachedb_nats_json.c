@@ -513,99 +513,102 @@ static int _find_top_op(apply_op_t *ops, int n,
  * range [@vstart, @vend).  Walks the inner object once, applying
  * subkey set/unset ops; appends any not-yet-seen subkey ops at the
  * end.  Marks each consumed op in @ops. */
+/* Per-subkey body of _sink_merge_subkeys, invoked by the shared
+ * iterator over the INNER object span [P2.5]. */
+struct merge_walk_ctx {
+	json_sink_t *s;
+	apply_op_t  *ops;
+	int          n;
+	const char  *fname;
+	int          flen;
+	int          first;
+};
+
+static int _merge_subkey_cb(const char *kfield, int kflen,
+	const char *kvstart, const char *kvend, void *ud)
+{
+	struct merge_walk_ctx *c = ud;
+	json_sink_t *s = c->s;
+	int op_idx = -1, i;
+
+	/* Is there an op for this subkey under @fname? Last wins. */
+	for (i = 0; i < c->n; i++) {
+		const cdb_pair_t *q = c->ops[i].pair;
+		if (q->key.name.len != c->flen ||
+		    memcmp(q->key.name.s, c->fname, c->flen) != 0)
+			continue;
+		if (q->subkey.len != kflen ||
+		    memcmp(q->subkey.s, kfield, kflen) != 0)
+			continue;
+		op_idx = i;
+	}
+	if (op_idx >= 0) {
+		c->ops[op_idx].consumed = 1;
+		if (c->ops[op_idx].pair->unset)
+			return 0; /* drop this subkey */
+		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		c->first = 0;
+		/* kfield is an already-escaped existing name —
+		 * copy it through raw, do not re-escape. */
+		if (_sink_emit_raw_string(s, kfield, kflen) < 0)
+			return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		/* P2.2 [REV-8]: same-subkey collision — keep the
+		 * higher cseq (tie-break last_mod).  When the NEW
+		 * write is stale versus the existing value, discard
+		 * it and keep the existing one.  Only an object value
+		 * carrying a cseq engages this; everything else falls
+		 * through to last-writer-wins (overwrite), unchanged. */
+		if (c->ops[op_idx].val_type == 'O' &&
+		    !_cseq_new_wins(c->ops[op_idx].val_str,
+				c->ops[op_idx].val_len,
+				kvstart, (int)(kvend - kvstart))) {
+			/* [REV-8] stale cseq: keep the existing
+			 * higher-cseq value, discard the incoming one
+			 * (no rollback). */
+			LM_DBG("[REV-8] discarded stale-cseq write; "
+				"kept the existing higher-cseq contact\n");
+			if (_sink_write(s, kvstart,
+					(int)(kvend - kvstart)) < 0)
+				return -1;
+		} else if (_sink_emit_op_value(s, &c->ops[op_idx]) < 0) {
+			return -1;
+		}
+	} else {
+		/* Copy through the existing entry. */
+		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		c->first = 0;
+		/* kfield is an already-escaped existing name —
+		 * copy it through raw, do not re-escape. */
+		if (_sink_emit_raw_string(s, kfield, kflen) < 0)
+			return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_write(s, kvstart,
+				(int)(kvend - kvstart)) < 0)
+			return -1;
+	}
+	return 0;
+}
+
 static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 	const char *vend, apply_op_t *ops, int n,
 	const char *fname, int flen)
 {
-	const char *p = _skip_ws(vstart, vend);
-	const char *end = vend;
-	int first = 1;
+	struct merge_walk_ctx ctx;
+	int first;
 	int i;
 
-	if (p >= end || *p != '{') return -1;
-	p++;
 	if (_sink_putc(s, '{') < 0) return -1;
-
-	while (p < end) {
-		const char *kfield, *kvstart, *kvend;
-		int kflen;
-
-		p = _skip_ws(p, end);
-		if (p >= end) return -1;
-		if (*p == '}') break;
-		if (*p == ',') { p++; continue; }
-
-		p = _parse_json_string(p, end, &kfield, &kflen);
-		if (!p) return -1;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':') return -1;
-		p++;
-		p = _skip_ws(p, end);
-		kvstart = p;
-		p = _skip_json_value(p, end);
-		if (!p) return -1;
-		kvend = p;
-
-		/* Is there an op for this subkey under @fname? Last wins. */
-		{
-			int op_idx = -1;
-			for (i = 0; i < n; i++) {
-				const cdb_pair_t *q = ops[i].pair;
-				if (q->key.name.len != flen ||
-				    memcmp(q->key.name.s, fname, flen) != 0)
-					continue;
-				if (q->subkey.len != kflen ||
-				    memcmp(q->subkey.s, kfield, kflen) != 0)
-					continue;
-				op_idx = i;
-			}
-			if (op_idx >= 0) {
-				ops[op_idx].consumed = 1;
-				if (ops[op_idx].pair->unset)
-					continue; /* drop this subkey */
-				if (!first && _sink_putc(s, ',') < 0) return -1;
-				first = 0;
-				/* kfield is an already-escaped existing name —
-				 * copy it through raw, do not re-escape. */
-				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
-					return -1;
-				if (_sink_putc(s, ':') < 0) return -1;
-				/* P2.2 [REV-8]: same-subkey collision — keep the
-				 * higher cseq (tie-break last_mod).  When the NEW
-				 * write is stale versus the existing value, discard
-				 * it and keep the existing one.  Only an object value
-				 * carrying a cseq engages this; everything else falls
-				 * through to last-writer-wins (overwrite), unchanged. */
-				if (ops[op_idx].val_type == 'O' &&
-				    !_cseq_new_wins(ops[op_idx].val_str,
-						ops[op_idx].val_len,
-						kvstart, (int)(kvend - kvstart))) {
-					/* [REV-8] stale cseq: keep the existing
-					 * higher-cseq value, discard the incoming one
-					 * (no rollback). */
-					LM_DBG("[REV-8] discarded stale-cseq write; "
-						"kept the existing higher-cseq contact\n");
-					if (_sink_write(s, kvstart,
-							(int)(kvend - kvstart)) < 0)
-						return -1;
-				} else if (_sink_emit_op_value(s, &ops[op_idx]) < 0) {
-					return -1;
-				}
-			} else {
-				/* Copy through the existing entry. */
-				if (!first && _sink_putc(s, ',') < 0) return -1;
-				first = 0;
-				/* kfield is an already-escaped existing name —
-				 * copy it through raw, do not re-escape. */
-				if (_sink_emit_raw_string(s, kfield, kflen) < 0)
-					return -1;
-				if (_sink_putc(s, ':') < 0) return -1;
-				if (_sink_write(s, kvstart,
-						(int)(kvend - kvstart)) < 0)
-					return -1;
-			}
-		}
-	}
+	ctx.s = s;
+	ctx.ops = ops;
+	ctx.n = n;
+	ctx.fname = fname;
+	ctx.flen = flen;
+	ctx.first = 1;
+	if (_json_foreach_top_field(vstart, (int)(vend - vstart),
+			_merge_subkey_cb, &ctx) < 0)
+		return -1;
+	first = ctx.first;
 
 	/* Append any subkey ops not yet consumed. */
 	for (i = 0; i < n; i++) {
@@ -632,14 +635,73 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 /* Single-pass apply: copy the input doc through to a fresh malloc'd
  * buffer, applying every cdb_pair_t in @pairs.  Returns NULL on
  * malformed input or any error.  Caller frees with free(). */
+/* Per-field body of _apply_pairs_one_pass, invoked by the shared
+ * top-level iterator [P2.5].  Routes each existing field through the
+ * matching op (replace / drop / subkey-merge / verbatim copy). */
+struct apply_walk_ctx {
+	json_sink_t *s;
+	apply_op_t  *ops;
+	int          n_ops;
+	int          first;
+};
+
+static int _apply_field_cb(const char *fname, int flen,
+	const char *vstart, const char *vend, void *ud)
+{
+	struct apply_walk_ctx *c = ud;
+	json_sink_t *s = c->s;
+	int sk_count = 0, top_idx, i;
+
+	top_idx = _find_top_op(c->ops, c->n_ops, fname, flen, &sk_count);
+
+	if (top_idx >= 0) {
+		c->ops[top_idx].consumed = 1;
+		if (c->ops[top_idx].pair->unset)
+			return 0; /* drop the field entirely */
+		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		c->first = 0;
+		/* fname is an already-escaped existing name — raw copy. */
+		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_emit_op_value(s, &c->ops[top_idx]) < 0) return -1;
+		/* Mark any subkey ops on the same field as consumed —
+		 * the top-level set replaces the whole value. */
+		for (i = 0; i < c->n_ops; i++) {
+			const cdb_pair_t *q = c->ops[i].pair;
+			if (q->key.name.len != flen ||
+			    memcmp(q->key.name.s, fname, flen) != 0)
+				continue;
+			if (q->subkey.len > 0)
+				c->ops[i].consumed = 1;
+		}
+	} else if (sk_count > 0) {
+		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		c->first = 0;
+		/* fname is an already-escaped existing name — raw copy. */
+		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_merge_subkeys(s, vstart, vend,
+				c->ops, c->n_ops, fname, flen) < 0) return -1;
+	} else {
+		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		c->first = 0;
+		/* fname is an already-escaped existing name — raw copy. */
+		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (_sink_putc(s, ':') < 0) return -1;
+		if (_sink_write(s, vstart, (int)(vend - vstart)) < 0)
+			return -1;
+	}
+	return 0;
+}
+
 static char *_apply_pairs_one_pass(const char *json, int json_len,
 	const cdb_dict_t *pairs)
 {
 	json_sink_t s;
 	apply_op_t *ops = NULL;
 	int n_ops = 0;
-	const char *p, *end;
-	int first = 1;
+	struct apply_walk_ctx ctx;
+	int first;
 	int i;
 	int rc = -1;
 
@@ -651,73 +713,14 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 	if (_sink_init(&s, json_len + 256) < 0) goto out;
 	if (_sink_putc(&s, '{') < 0) goto out;
 
-	p = json;
-	end = json + json_len;
-	p = _skip_ws(p, end);
-	if (p >= end || *p != '{') goto out;
-	p++;
-
-	while (p < end) {
-		const char *fname, *vstart, *vend;
-		int flen;
-		int sk_count = 0, top_idx;
-
-		p = _skip_ws(p, end);
-		if (p >= end) goto out;
-		if (*p == '}') break;
-		if (*p == ',') { p++; continue; }
-
-		p = _parse_json_string(p, end, &fname, &flen);
-		if (!p) goto out;
-		p = _skip_ws(p, end);
-		if (p >= end || *p != ':') goto out;
-		p++;
-		p = _skip_ws(p, end);
-		vstart = p;
-		p = _skip_json_value(p, end);
-		if (!p) goto out;
-		vend = p;
-
-		top_idx = _find_top_op(ops, n_ops, fname, flen, &sk_count);
-
-		if (top_idx >= 0) {
-			ops[top_idx].consumed = 1;
-			if (ops[top_idx].pair->unset)
-				continue; /* drop the field entirely */
-			if (!first && _sink_putc(&s, ',') < 0) goto out;
-			first = 0;
-			/* fname is an already-escaped existing name — raw copy. */
-			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
-			if (_sink_putc(&s, ':') < 0) goto out;
-			if (_sink_emit_op_value(&s, &ops[top_idx]) < 0) goto out;
-			/* Mark any subkey ops on the same field as consumed —
-			 * the top-level set replaces the whole value. */
-			for (i = 0; i < n_ops; i++) {
-				const cdb_pair_t *q = ops[i].pair;
-				if (q->key.name.len != flen ||
-				    memcmp(q->key.name.s, fname, flen) != 0)
-					continue;
-				if (q->subkey.len > 0)
-					ops[i].consumed = 1;
-			}
-		} else if (sk_count > 0) {
-			if (!first && _sink_putc(&s, ',') < 0) goto out;
-			first = 0;
-			/* fname is an already-escaped existing name — raw copy. */
-			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
-			if (_sink_putc(&s, ':') < 0) goto out;
-			if (_sink_merge_subkeys(&s, vstart, vend,
-					ops, n_ops, fname, flen) < 0) goto out;
-		} else {
-			if (!first && _sink_putc(&s, ',') < 0) goto out;
-			first = 0;
-			/* fname is an already-escaped existing name — raw copy. */
-			if (_sink_emit_raw_string(&s, fname, flen) < 0) goto out;
-			if (_sink_putc(&s, ':') < 0) goto out;
-			if (_sink_write(&s, vstart, (int)(vend - vstart)) < 0)
-				goto out;
-		}
-	}
+	ctx.s = &s;
+	ctx.ops = ops;
+	ctx.n_ops = n_ops;
+	ctx.first = 1;
+	if (_json_foreach_top_field(json, json_len,
+			_apply_field_cb, &ctx) < 0)
+		goto out;
+	first = ctx.first;
 
 	/* Append any unconsumed ops as new fields. */
 	for (i = 0; i < n_ops; i++) {

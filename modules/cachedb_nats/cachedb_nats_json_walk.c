@@ -260,3 +260,57 @@ int _safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
 	return rc;
 }
 
+
+/*
+ * [P2.5] The ONE top-level field iterator behind the row-mutation
+ * paths.  Walks `{ "name": <value>, ... }` and hands the cb each
+ * field's name span (raw, still-escaped bytes between the quotes) and
+ * value span (raw bytes; a nested object/array is one span).  The cb
+ * returns 0 to continue, <0 to abort.
+ *
+ * Returns 0 after a complete walk, -1 on malformed JSON, a cb abort,
+ * or bad arguments.  Pure: no allocation, no logging.
+ */
+int _json_foreach_top_field(const char *json, int len,
+	json_field_cb cb, void *ud)
+{
+	const char *p, *end;
+
+	if (!json || len <= 0 || !cb)
+		return -1;
+	p = json;
+	end = json + len;
+	p = _skip_ws(p, end);
+	if (p >= end || *p != '{')
+		return -1;
+	p++;
+	while (p < end) {
+		const char *fname, *vstart, *vend;
+		int flen;
+
+		p = _skip_ws(p, end);
+		if (p >= end)
+			return -1;              /* unterminated object */
+		if (*p == '}')
+			return 0;               /* complete walk */
+		if (*p == ',') { p++; continue; }
+
+		p = _parse_json_string(p, end, &fname, &flen);
+		if (!p)
+			return -1;
+		p = _skip_ws(p, end);
+		if (p >= end || *p != ':')
+			return -1;
+		p++;
+		p = _skip_ws(p, end);
+		vstart = p;
+		p = _skip_json_value(p, end);
+		if (!p || p == vstart)
+			return -1;
+		vend = p;
+
+		if (cb(fname, flen, vstart, vend, ud) < 0)
+			return -1;
+	}
+	return -1;                          /* ran off the end */
+}

@@ -43,6 +43,17 @@ const char *_skip_json_value(const char *p, const char *end);
 
 /* Scan a JSON quoted string (escape-aware); *out / *out_len get the raw
  * slice inside the quotes.  Returns past the closing quote or NULL. */
+/* [P2.5] Per-field callback for _json_foreach_top_field: @fname/@flen
+ * is the raw (still-escaped) name span, @vstart..@vend the raw value
+ * span (nested structures arrive as one span).  Return 0 to continue,
+ * <0 to abort the walk. */
+typedef int (*json_field_cb)(const char *fname, int flen,
+	const char *vstart, const char *vend, void *ud);
+/* Walk the top-level fields of a JSON object.  0 = complete walk,
+ * -1 = malformed input / cb abort / bad args.  Pure. */
+int _json_foreach_top_field(const char *json, int len,
+	json_field_cb cb, void *ud);
+
 const char *_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len);
 
