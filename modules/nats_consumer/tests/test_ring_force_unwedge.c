@@ -48,8 +48,18 @@ static int g_fails;
 
 static int push_one(nats_ring_t *r, const char *tag)
 {
-	return nats_ring_push(r, "s", 1, tag, (uint32_t)strlen(tag),
-		1, 1, 1, 0, 0, 0x42ULL, NULL, 0, NULL, 0, 0);
+	return nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = tag,
+			.data_len = (uint32_t)strlen(tag),
+			.stream_seq = 1,
+			.consumer_seq = 1,
+			.delivered = 1,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 0x42ULL,
+		});
 }
 
 int main(void)

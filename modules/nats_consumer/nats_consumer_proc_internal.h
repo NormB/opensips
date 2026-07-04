@@ -135,6 +135,15 @@ typedef struct msg_ref_row {
 
 extern msg_ref_row_t g_msg_refs[NATS_REGISTRY_MAX_HANDLES];
 
+/* Per-handle stat bump without the rwlock (relaxed atomics; NULL-safe).
+ * Shared by the fetch path (nats_consumer_proc.c) and the ack hop
+ * (nats_ack_ipc.c). */
+static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
+{
+	if (!h || !field) return;
+	__atomic_fetch_add(field, v, __ATOMIC_RELAXED);
+}
+
 /* Size (or re-size) a handle's ref row to the ring capacity. */
 int ensure_row(uint16_t handle_idx, uint32_t capacity);
 /* Stash a natsMsg under a fresh ack token; *ok is cleared (and 0

@@ -68,8 +68,18 @@ static void test_no_eventfd(void)
 
 	/* A push on the empty->non-empty edge must not crash or touch any
 	 * descriptor; it simply bumps the futex word. */
-	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 1, NULL, 0, NULL, 0, 0) == 0,
+	CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 1,
+		}) == 0,
 		"edge push succeeds without an fd");
 
 	nats_ring_destroy(r);
@@ -119,8 +129,18 @@ static void test_futex_wakeup(void)
 
 	/* Let the waiter reach the futex wait on the empty ring, then push. */
 	usleep(50 * 1000);
-	CHECK(nats_ring_push(r, "evt", 3, "hello", 5,
-		0, 0, 0, 0, 0, 42, NULL, 0, NULL, 0, 0) == 0,
+	CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "evt",
+			.subject_len = 3,
+			.data = "hello",
+			.data_len = 5,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 42,
+		}) == 0,
 		"producer push (empty->non-empty edge)");
 
 	pthread_join(th, NULL);

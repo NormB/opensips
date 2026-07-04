@@ -95,8 +95,18 @@ int main(void)
 
 	/* Push W messages -- each should wake exactly one waiter. */
 	for (i = 0; i < W; i++)
-		nats_ring_push(r, "s", 1, "x", 1, 0, 0, 0, 0, 0, (uint64_t)i,
-			NULL, 0, NULL, 0, 0);
+		nats_ring_push(r, &(nats_ring_msg_t){
+				.subject = "s",
+				.subject_len = 1,
+				.data = "x",
+				.data_len = 1,
+				.stream_seq = 0,
+				.consumer_seq = 0,
+				.delivered = 0,
+				.pending = 0,
+				.timestamp_ns = 0,
+				.ack_token = (uint64_t)i,
+			});
 
 	for (i = 0; i < W; i++) pthread_join(th[i], NULL);
 

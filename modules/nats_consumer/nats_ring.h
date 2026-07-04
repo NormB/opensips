@@ -183,16 +183,25 @@ void nats_ring_destroy(nats_ring_t *r);
  * ring itself does NOT parse the stream -- it is copied byte-for-byte.
  * Passing headers_len > NATS_RING_HEADERS_MAX returns -4.
  */
-int nats_ring_push(nats_ring_t *r,
-                   const char *subject, uint32_t subject_len,
-                   const char *data,    uint32_t data_len,
-                   uint64_t stream_seq, uint64_t consumer_seq,
-                   uint64_t delivered,  uint64_t pending,
-                   int64_t  timestamp_ns,
-                   uint64_t ack_token,
-                   const char *reply_to, uint32_t reply_to_len,
-                   const char *headers,  uint16_t headers_len,
-                   uint8_t headers_truncated);
+/* [P2.6] One published message: the payload/metadata inputs of a push,
+ * mirroring the slot layout.  Spans are borrowed for the duration of
+ * the call (the push copies).  Designated initializers keep call
+ * sites self-describing; zeroed members mean "absent". */
+typedef struct nats_ring_msg {
+	const char *subject;   uint32_t subject_len;
+	const char *data;      uint32_t data_len;
+	uint64_t    stream_seq;
+	uint64_t    consumer_seq;
+	uint64_t    delivered;
+	uint64_t    pending;
+	int64_t     timestamp_ns;
+	uint64_t    ack_token;
+	const char *reply_to;  uint32_t reply_to_len;
+	const char *headers;   uint16_t headers_len;
+	uint8_t     headers_truncated;
+} nats_ring_msg_t;
+
+int nats_ring_push(nats_ring_t *r, const nats_ring_msg_t *m);
 
 /*
  * Consumer: claim the oldest ready slot and copy it into `*out`.

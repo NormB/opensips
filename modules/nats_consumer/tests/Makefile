@@ -173,7 +173,7 @@ CORE_DEFS := -fPIC -DPIC \
 ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
                     ../nats_msg_ref.c ../nats_sub_config.c \
                     ../nats_handle_registry.c ../nats_ring.c \
-                    ../nats_rpc_slot.c
+                    ../nats_rpc_slot.c ../nats_ack_ipc.c
 test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
 
@@ -184,7 +184,7 @@ test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 ACKIPC_SRCS := test_ack_ipc_actions.c ../nats_consumer_proc.c \
                ../nats_msg_ref.c ../nats_sub_config.c \
                ../nats_handle_registry.c ../nats_ring.c \
-               ../nats_rpc_slot.c
+               ../nats_rpc_slot.c ../nats_ack_ipc.c
 test_ack_ipc_actions: $(ACKIPC_SRCS) ../nats_consumer_proc_internal.h ../nats_ack_ipc.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ACKIPC_SRCS) $(LDFLAGS)
 

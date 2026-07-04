@@ -122,8 +122,18 @@ static void test_published_slot_still_pops(void)
 	ASSERT(r != NULL, "ring created");
 	if (!r) return;
 
-	rc = nats_ring_push(r, "subj", 4, "body", 4,
-		1, 2, 3, 4, 5, 0x1234ULL, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "subj",
+			.subject_len = 4,
+			.data = "body",
+			.data_len = 4,
+			.stream_seq = 1,
+			.consumer_seq = 2,
+			.delivered = 3,
+			.pending = 4,
+			.timestamp_ns = 5,
+			.ack_token = 0x1234ULL,
+		});
 	ASSERT(rc == 0, "push of a real message succeeds");
 
 	signal(SIGALRM, on_alarm);

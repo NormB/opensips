@@ -63,13 +63,20 @@ static void test_roundtrip_cap2(void)
 	 * cross-process fd-corruption hazard); the stub returns -1. */
 	CHECK(nats_ring_eventfd(r) < 0);
 
-	rc = nats_ring_push(r,
-		"orders.new", 10,
-		"hello", 5,
-		1001, 2001, 3, 7, 42424242,
-		0xdeadbeefULL,
-		"reply.queue", 11,
-		NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "orders.new",
+			.subject_len = 10,
+			.data = "hello",
+			.data_len = 5,
+			.stream_seq = 1001,
+			.consumer_seq = 2001,
+			.delivered = 3,
+			.pending = 7,
+			.timestamp_ns = 42424242,
+			.ack_token = 0xdeadbeefULL,
+			.reply_to = "reply.queue",
+			.reply_to_len = 11,
+		});
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 1);
 
@@ -106,15 +113,35 @@ static void test_full_capacity(void)
 	CHECK(r != NULL);
 
 	for (i = 0; i < 4; i++) {
-		rc = nats_ring_push(r, "s", 1, "x", 1,
-			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0, NULL, 0, 0);
+		rc = nats_ring_push(r, &(nats_ring_msg_t){
+				.subject = "s",
+				.subject_len = 1,
+				.data = "x",
+				.data_len = 1,
+				.stream_seq = 0,
+				.consumer_seq = 0,
+				.delivered = 0,
+				.pending = 0,
+				.timestamp_ns = 0,
+				.ack_token = (uint64_t)i,
+			});
 		CHECK(rc == 0);
 	}
 	CHECK(nats_ring_depth(r) == 4);
 
 	/* 5th should fail with -1 (full). */
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 99, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 99,
+		});
 	CHECK(rc == -1);
 
 	/* Pop one, push one, depth stays at 4. */
@@ -123,8 +150,18 @@ static void test_full_capacity(void)
 	CHECK(out.ack_token == 0);
 	CHECK(nats_ring_depth(r) == 3);
 
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 100, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 100,
+		});
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 4);
 
@@ -155,8 +192,18 @@ static void *sp_sc_producer(void *u)
 	uint64_t i;
 	for (i = 0; i < c->n; i++) {
 		for (;;) {
-			int rc = nats_ring_push(c->r, "s", 1, "x", 1,
-				0, 0, 0, 0, 0, i, NULL, 0, NULL, 0, 0);
+			int rc = nats_ring_push(c->r, &(nats_ring_msg_t){
+					.subject = "s",
+					.subject_len = 1,
+					.data = "x",
+					.data_len = 1,
+					.stream_seq = 0,
+					.consumer_seq = 0,
+					.delivered = 0,
+					.pending = 0,
+					.timestamp_ns = 0,
+					.ack_token = i,
+				});
 			if (rc == 0)
 				break;
 			/* ring full, let consumer catch up */
@@ -239,8 +286,18 @@ static void *stress_producer(void *u)
 	for (i = 0; i < STRESS_PER_PROD; i++) {
 		uint64_t tok = TOKEN_MAKE(c->pid, i);
 		for (;;) {
-			int rc = nats_ring_push(c->r, "s", 1, "x", 1,
-				0, 0, 0, 0, 0, tok, NULL, 0, NULL, 0, 0);
+			int rc = nats_ring_push(c->r, &(nats_ring_msg_t){
+					.subject = "s",
+					.subject_len = 1,
+					.data = "x",
+					.data_len = 1,
+					.stream_seq = 0,
+					.consumer_seq = 0,
+					.delivered = 0,
+					.pending = 0,
+					.timestamp_ns = 0,
+					.ack_token = tok,
+				});
 			if (rc == 0)
 				break;
 			sched_yield();
@@ -394,8 +451,18 @@ static void test_wait_semantics(void)
 	CHECK(nats_ring_wait(r, 50) == -1);
 
 	/* Push one -- ring is now non-empty, so wait returns 0 at once. */
-	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 1, NULL, 0, NULL, 0, 0) == 0);
+	CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 1,
+		}) == 0);
 	CHECK(nats_ring_wait(r, 1000) == 0);
 
 	/* Pop the slot; ring empty again -> wait times out. */
@@ -404,10 +471,30 @@ static void test_wait_semantics(void)
 
 	/* Two consecutive pushes: ring stays non-empty across both, so a
 	 * wait still returns 0 immediately. */
-	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 2, NULL, 0, NULL, 0, 0) == 0);
-	CHECK(nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 3, NULL, 0, NULL, 0, 0) == 0);
+	CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 2,
+		}) == 0);
+	CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 3,
+		}) == 0);
 	CHECK(nats_ring_wait(r, 1000) == 0);
 
 	/* Drain both slots and return to empty. */
@@ -432,26 +519,65 @@ static void test_size_limits(void)
 	memset(data_too_big, 'b', sizeof(data_too_big));
 
 	/* subject too big */
-	rc = nats_ring_push(r, subj_ok, NATS_RING_SUBJECT_MAX + 1,
-		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = subj_ok,
+			.subject_len = NATS_RING_SUBJECT_MAX + 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 0,
+		});
 	CHECK(rc == -3);
 
 	/* data too big */
-	rc = nats_ring_push(r, "s", 1,
-		data_too_big, NATS_RING_PAYLOAD_MAX + 1,
-		0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = data_too_big,
+			.data_len = NATS_RING_PAYLOAD_MAX + 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 0,
+		});
 	CHECK(rc == -2);
 
 	/* reply_to too big */
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 0,
-		subj_ok, NATS_RING_SUBJECT_MAX + 1,
-		NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 0,
+			.reply_to = subj_ok,
+			.reply_to_len = NATS_RING_SUBJECT_MAX + 1,
+		});
 	CHECK(rc == -3);
 
 	/* exact maxima succeed */
-	rc = nats_ring_push(r, subj_ok, NATS_RING_SUBJECT_MAX,
-		"x", 1, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = subj_ok,
+			.subject_len = NATS_RING_SUBJECT_MAX,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 0,
+		});
 	CHECK(rc == 0);
 	CHECK(nats_ring_depth(r) == 1);
 
@@ -468,8 +594,18 @@ static void test_destroy_nonempty(void)
 	CHECK(r != NULL);
 
 	for (i = 0; i < 3; i++)
-		CHECK(nats_ring_push(r, "s", 1, "x", 1,
-			0, 0, 0, 0, 0, (uint64_t)i, NULL, 0, NULL, 0, 0) == 0);
+		CHECK(nats_ring_push(r, &(nats_ring_msg_t){
+				.subject = "s",
+				.subject_len = 1,
+				.data = "x",
+				.data_len = 1,
+				.stream_seq = 0,
+				.consumer_seq = 0,
+				.delivered = 0,
+				.pending = 0,
+				.timestamp_ns = 0,
+				.ack_token = (uint64_t)i,
+			}) == 0);
 
 	CHECK(nats_ring_depth(r) == 3);
 
@@ -537,9 +673,20 @@ static void test_headers_roundtrip(void)
 	hdr_buf[0] = 2;
 	hdr_buf[1] = 0;
 
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 7, NULL, 0,
-		hdr_buf, (uint16_t)pos, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 7,
+			.headers = hdr_buf,
+			.headers_len = (uint16_t)pos,
+		});
 	CHECK(rc == 0);
 
 	rc = nats_ring_pop(r, &out);
@@ -552,18 +699,39 @@ static void test_headers_roundtrip(void)
 	CHECK((uint8_t)out.headers[1] == 0);
 
 	/* Push with truncated flag propagated */
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 8, NULL, 0,
-		hdr_buf, (uint16_t)pos, 1);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 8,
+			.headers = hdr_buf,
+			.headers_len = (uint16_t)pos,
+			.headers_truncated = 1,
+		});
 	CHECK(rc == 0);
 	rc = nats_ring_pop(r, &out);
 	CHECK(rc == 0);
 	CHECK(out.headers_truncated == 1);
 
 	/* Push with no headers -- headers_len is 0 and bytes untouched. */
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 9, NULL, 0,
-		NULL, 0, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 9,
+		});
 	CHECK(rc == 0);
 	rc = nats_ring_pop(r, &out);
 	CHECK(rc == 0);
@@ -571,9 +739,20 @@ static void test_headers_roundtrip(void)
 	CHECK(out.headers_truncated == 0);
 
 	/* Overflow -- reject with -4. */
-	rc = nats_ring_push(r, "s", 1, "x", 1,
-		0, 0, 0, 0, 0, 10, NULL, 0,
-		hdr_buf, NATS_RING_HEADERS_MAX + 1, 0);
+	rc = nats_ring_push(r, &(nats_ring_msg_t){
+			.subject = "s",
+			.subject_len = 1,
+			.data = "x",
+			.data_len = 1,
+			.stream_seq = 0,
+			.consumer_seq = 0,
+			.delivered = 0,
+			.pending = 0,
+			.timestamp_ns = 0,
+			.ack_token = 10,
+			.headers = hdr_buf,
+			.headers_len = NATS_RING_HEADERS_MAX + 1,
+		});
 	CHECK(rc == -4);
 
 	nats_ring_destroy(r);

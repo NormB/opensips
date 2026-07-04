@@ -221,18 +221,9 @@ jsCtx            *g_js   = NULL;
  *
  * Wrapped in a static inline so the call sites stay terse; with NULL
  * the bump is a no-op (e.g. early TEST_SHIM init). */
-static inline void hstat_add(nats_handle_t *h, uint64_t *field, uint64_t v)
-{
-	if (!h || !field) return;
-	__atomic_fetch_add(field, v, __ATOMIC_RELAXED);
-}
-
-
 /* ── forward declarations ────────────────────────────────────── */
 
 static int  pull_one_batch(proc_sub_state_t *ss, int budget_ms);
-static int  apply_ack_action(uint64_t token, nats_ack_action_e action,
-	uint32_t delay_ms);
 
 /* ── header serialization ────────────────────────────────────── */
 
@@ -618,15 +609,23 @@ static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
 		return 0;
 	}
 
-	rc = nats_ring_push(ss->ring,
-		subject ? subject : "", (uint32_t)subject_len,
-		data    ? data    : "", (uint32_t)data_len,
-		stream_seq, consumer_seq, delivered, pending,
-		timestamp_ns, ack_token,
-		reply   ? reply   : "", (uint32_t)reply_len,
-		hdr_len > 0 ? hdr_buf : NULL,
-		(uint16_t)(hdr_len > 0 ? hdr_len : 0),
-		(uint8_t)(hdr_truncated ? 1 : 0));
+	rc = nats_ring_push(ss->ring, &(nats_ring_msg_t){
+			.subject = subject ? subject : "",
+			.subject_len = (uint32_t)subject_len,
+			.data = data ? data : "",
+			.data_len = (uint32_t)data_len,
+			.stream_seq = stream_seq,
+			.consumer_seq = consumer_seq,
+			.delivered = delivered,
+			.pending = pending,
+			.timestamp_ns = timestamp_ns,
+			.ack_token = ack_token,
+			.reply_to = reply ? reply : "",
+			.reply_to_len = (uint32_t)reply_len,
+			.headers = hdr_len > 0 ? hdr_buf : NULL,
+			.headers_len = (uint16_t)(hdr_len > 0 ? hdr_len : 0),
+			.headers_truncated = (uint8_t)(hdr_truncated ? 1 : 0),
+		});
 
 	if (rc == 0) {
 		hstat_add(ss->h_ref, &ss->h_ref->msgs_delivered, 1);
@@ -713,257 +712,6 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 out:
 	nats_handle_pending_dec(ss->h_ref);
 	return pushed;
-}
-
-/* ── worker ack hop [P2.1] ───────────────────────────────────── */
-
-/* SHM counters behind the ack_ipc_* MI stats.  The pipe has no
- * readable depth, so depth is derived: sent - drained (floored). */
-typedef struct nats_ack_ipc_stats_blk {
-	_Atomic uint64_t sent;      /* worker: ipc_send_rpc succeeded */
-	_Atomic uint64_t drained;   /* consumer: handler ran */
-	_Atomic uint64_t dropped;   /* worker: send refused */
-} nats_ack_ipc_stats_blk_t;
-
-static nats_ack_ipc_stats_blk_t *g_ack_ipc_stats;
-
-int nats_ack_ipc_stats_init(void)
-{
-	g_ack_ipc_stats = shm_malloc(sizeof(*g_ack_ipc_stats));
-	if (!g_ack_ipc_stats) {
-		LM_ERR("nats_consumer: shm_malloc for ack IPC stats failed\n");
-		return -1;
-	}
-	memset(g_ack_ipc_stats, 0, sizeof(*g_ack_ipc_stats));
-	return 0;
-}
-
-void nats_ack_ipc_stats_destroy(void)
-{
-	if (g_ack_ipc_stats) {
-		shm_free(g_ack_ipc_stats);
-		g_ack_ipc_stats = NULL;
-	}
-}
-
-void nats_ack_ipc_count_sent(int ok)
-{
-	if (!g_ack_ipc_stats)
-		return;
-	atomic_fetch_add_explicit(ok ? &g_ack_ipc_stats->sent
-	                             : &g_ack_ipc_stats->dropped,
-		1, memory_order_relaxed);
-}
-
-uint64_t nats_ack_ipc_enqueued_total(void)
-{
-	return g_ack_ipc_stats ? atomic_load_explicit(&g_ack_ipc_stats->sent,
-		memory_order_relaxed) : 0;
-}
-
-uint64_t nats_ack_ipc_drained_total(void)
-{
-	return g_ack_ipc_stats ? atomic_load_explicit(
-		&g_ack_ipc_stats->drained, memory_order_relaxed) : 0;
-}
-
-uint64_t nats_ack_ipc_dropped_total(void)
-{
-	return g_ack_ipc_stats ? atomic_load_explicit(
-		&g_ack_ipc_stats->dropped, memory_order_relaxed) : 0;
-}
-
-uint32_t nats_ack_ipc_depth(void)
-{
-	uint64_t snt = nats_ack_ipc_enqueued_total();
-	uint64_t drn = nats_ack_ipc_drained_total();
-
-	return snt > drn ? (uint32_t)(snt - drn) : 0;
-}
-
-/* Per-handle ACK_NEXT refill hints: set by the ack handlers on this
- * tick, consumed (and cleared) by the main loop right after the pump.
- * Proc-local single-thread state -- the successor of the old
- * drain_ack_ctx next_bits. */
-static uint64_t g_ack_next_bits[(NATS_REGISTRY_MAX_HANDLES + 63) / 64];
-
-static void ack_next_set(uint16_t handle_idx)
-{
-	if (handle_idx < NATS_REGISTRY_MAX_HANDLES)
-		g_ack_next_bits[handle_idx / 64] |=
-			(uint64_t)1 << (handle_idx % 64);
-}
-
-int nats_ack_next_take(uint16_t handle_idx)
-{
-	if (handle_idx >= NATS_REGISTRY_MAX_HANDLES)
-		return 0;
-	if ((g_ack_next_bits[handle_idx / 64] >> (handle_idx % 64)) & 1) {
-		g_ack_next_bits[handle_idx / 64] &=
-			~((uint64_t)1 << (handle_idx % 64));
-		return 1;
-	}
-	return 0;
-}
-
-/* Apply one worker ack action.  Runs in the consumer process (the
- * only libnats-safe context for JetStream ack calls).  Returns 0 if
- * applied, -1 for a stale token (already released / re-claimed). */
-static int apply_ack_action(uint64_t token, nats_ack_action_e action,
-	uint32_t delay_ms)
-{
-	natsMsg    *nmsg;
-	natsStatus  s;
-	uint16_t           h_idx = nats_ack_token_handle(token);
-	proc_sub_state_t  *cb_ss = (h_idx < NATS_REGISTRY_MAX_HANDLES)
-	                          ? g_subs_by_idx[h_idx] : NULL;
-	nats_handle_t     *cb_h  = cb_ss ? cb_ss->h_ref : NULL;
-
-	nmsg = release_msg_ref(token);
-	if (!nmsg) {
-		/* Stale or already-released.  release_msg_ref logged at DBG. */
-		return -1;
-	}
-
-	switch (action) {
-		case NATS_ACK_ACTION_ACK:
-			s = nats_dl.natsMsg_Ack(nmsg, NULL);
-			if (s == NATS_OK && cb_h)
-				hstat_add(cb_h, &cb_h->acks, 1);
-			break;
-		case NATS_ACK_ACTION_ACK_NEXT:
-			/* nats.c 3.13 does not expose the server's +NXT ack-and-pull
-			 * payload via the public API, so we fall back to:
-			 *   1) synchronous ack (so the broker has definitively seen
-			 *      the ack before we ask for a refill), and
-			 *   2) flag the originating handle so the outer loop runs an
-			 *      extra pull_one_batch() for it on this tick rather
-			 *      than waiting for the next idle wake-up.
-			 * This matches the user-observable semantics of +NXT
-			 * (finish the current message and immediately hand me the
-			 * next one) without depending on library internals. */
-			s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
-			if (s == NATS_OK && cb_h)
-				hstat_add(cb_h, &cb_h->acks, 1);
-			ack_next_set(h_idx);
-			break;
-		case NATS_ACK_ACTION_NAK:
-			s = nats_dl.natsMsg_Nak(nmsg, NULL);
-			if (s == NATS_OK && cb_h)
-				hstat_add(cb_h, &cb_h->naks, 1);
-			break;
-		case NATS_ACK_ACTION_NAK_DELAY:
-			s = nats_dl.natsMsg_NakWithDelay(nmsg,
-				(int64_t)delay_ms * 1000000LL, NULL);
-			if (s == NATS_OK && cb_h)
-				hstat_add(cb_h, &cb_h->naks, 1);
-			break;
-		case NATS_ACK_ACTION_TERM:
-			s = nats_dl.natsMsg_Term(nmsg, NULL);
-			if (s == NATS_OK && cb_h)
-				hstat_add(cb_h, &cb_h->terms, 1);
-			break;
-		case NATS_ACK_ACTION_IN_PROGRESS:
-			s = nats_dl.natsMsg_InProgress(nmsg, NULL);
-			/* in_progress does NOT finalize the message; we must
-			 * keep it alive.  Put it back in the ref table under
-			 * the same token (same handle, slot, and generation). */
-			{
-				uint32_t slot_idx = nats_ack_token_slot(token);
-				uint16_t gen      = nats_ack_token_generation(token);
-				msg_ref_slot_t *slot;
-				if (h_idx < NATS_REGISTRY_MAX_HANDLES &&
-				    g_msg_refs[h_idx].slots &&
-				    slot_idx < g_msg_refs[h_idx].capacity) {
-					slot = &g_msg_refs[h_idx].slots[slot_idx];
-					slot->msg        = nmsg;
-					slot->in_use     = 1;
-					slot->generation = gen;
-					return 0;
-				}
-				/* Fall through to destroy if somehow invalid. */
-			}
-			break;
-		default:
-			LM_WARN("nats_consumer_proc: unknown ack action %u for "
-				"token=0x%016lx\n",
-				(unsigned)action, (unsigned long)token);
-			s = NATS_OK;
-			break;
-	}
-
-	if (s != NATS_OK) {
-		LM_DBG("nats_consumer_proc: ack action=%u token=0x%016lx "
-			"returned %s\n",
-			(unsigned)action, (unsigned long)token,
-			nats_dl.natsStatus_GetText(s));
-	}
-
-	nats_dl.natsMsg_Destroy(nmsg);
-	return 0;
-}
-
-/* The ipc_send_rpc handlers, one per ack verb [P2.1].  param is the
- * raw 64-bit token, except nak_delay whose param is a SHM payload
- * this side frees. */
-static void ack_drained_bump(void)
-{
-	if (g_ack_ipc_stats)
-		atomic_fetch_add_explicit(&g_ack_ipc_stats->drained, 1,
-			memory_order_relaxed);
-}
-
-void nats_ack_ipc_on_ack(int sender, void *param)
-{
-	(void)sender;
-	ack_drained_bump();
-	(void)apply_ack_action((uint64_t)(uintptr_t)param,
-		NATS_ACK_ACTION_ACK, 0);
-}
-
-void nats_ack_ipc_on_ack_next(int sender, void *param)
-{
-	(void)sender;
-	ack_drained_bump();
-	(void)apply_ack_action((uint64_t)(uintptr_t)param,
-		NATS_ACK_ACTION_ACK_NEXT, 0);
-}
-
-void nats_ack_ipc_on_nak(int sender, void *param)
-{
-	(void)sender;
-	ack_drained_bump();
-	(void)apply_ack_action((uint64_t)(uintptr_t)param,
-		NATS_ACK_ACTION_NAK, 0);
-}
-
-void nats_ack_ipc_on_nak_delay(int sender, void *param)
-{
-	nats_ack_nak_delay_t *d = (nats_ack_nak_delay_t *)param;
-
-	(void)sender;
-	ack_drained_bump();
-	if (!d)
-		return;
-	(void)apply_ack_action(d->token, NATS_ACK_ACTION_NAK_DELAY,
-		d->delay_ms);
-	shm_free(d);
-}
-
-void nats_ack_ipc_on_term(int sender, void *param)
-{
-	(void)sender;
-	ack_drained_bump();
-	(void)apply_ack_action((uint64_t)(uintptr_t)param,
-		NATS_ACK_ACTION_TERM, 0);
-}
-
-void nats_ack_ipc_on_in_progress(int sender, void *param)
-{
-	(void)sender;
-	ack_drained_bump();
-	(void)apply_ack_action((uint64_t)(uintptr_t)param,
-		NATS_ACK_ACTION_IN_PROGRESS, 0);
 }
 
 /* [P2.1] Pump the core-IPC pipe: each pending job is one

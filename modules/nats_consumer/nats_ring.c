@@ -292,17 +292,26 @@ uint64_t nats_ring_forced_unwedges(const nats_ring_t *r)
 		memory_order_relaxed) : 0;
 }
 
-int nats_ring_push(nats_ring_t *r,
-                   const char *subject, uint32_t subject_len,
-                   const char *data,    uint32_t data_len,
-                   uint64_t stream_seq, uint64_t consumer_seq,
-                   uint64_t delivered,  uint64_t pending,
-                   int64_t  timestamp_ns,
-                   uint64_t ack_token,
-                   const char *reply_to, uint32_t reply_to_len,
-                   const char *headers,  uint16_t headers_len,
-                   uint8_t headers_truncated)
+int nats_ring_push(nats_ring_t *r, const nats_ring_msg_t *m)
 {
+	const char *subject, *data, *reply_to, *headers;
+	uint32_t subject_len, data_len, reply_to_len;
+	uint64_t stream_seq, consumer_seq, delivered, pending, ack_token;
+	int64_t timestamp_ns;
+	uint16_t headers_len;
+	uint8_t headers_truncated;
+
+	if (!m)
+		return -2;
+	subject = m->subject;           subject_len = m->subject_len;
+	data = m->data;                 data_len = m->data_len;
+	stream_seq = m->stream_seq;     consumer_seq = m->consumer_seq;
+	delivered = m->delivered;       pending = m->pending;
+	timestamp_ns = m->timestamp_ns; ack_token = m->ack_token;
+	reply_to = m->reply_to;         reply_to_len = m->reply_to_len;
+	headers = m->headers;           headers_len = m->headers_len;
+	headers_truncated = m->headers_truncated;
+
 	uint64_t h, t;
 	nats_ring_slot_t *slot;
 	unsigned spins = 0;     /* consumed_gen stall counter */

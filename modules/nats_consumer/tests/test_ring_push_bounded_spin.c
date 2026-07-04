@@ -85,8 +85,18 @@ static void test_stalled_consumer_bails(void)
 	g_timed_out = 0;
 	if (sigsetjmp(g_jmp, 1) == 0) {
 		alarm(3);                  /* generous: the fix returns in <1ms */
-		rc = nats_ring_push(r, "s", 1, "x", 1,
-			0, 0, 0, 0, 0, 7, NULL, 0, NULL, 0, 0);
+		rc = nats_ring_push(r, &(nats_ring_msg_t){
+				.subject = "s",
+				.subject_len = 1,
+				.data = "x",
+				.data_len = 1,
+				.stream_seq = 0,
+				.consumer_seq = 0,
+				.delivered = 0,
+				.pending = 0,
+				.timestamp_ns = 0,
+				.ack_token = 7,
+			});
 		alarm(0);
 	}
 
@@ -114,8 +124,18 @@ static void test_free_slot_still_pushes(void)
 	g_timed_out = 0;
 	if (sigsetjmp(g_jmp, 1) == 0) {
 		alarm(3);
-		rc = nats_ring_push(r, "subj", 4, "body", 4,
-			1, 2, 3, 4, 5, 0x99ULL, NULL, 0, NULL, 0, 0);
+		rc = nats_ring_push(r, &(nats_ring_msg_t){
+				.subject = "subj",
+				.subject_len = 4,
+				.data = "body",
+				.data_len = 4,
+				.stream_seq = 1,
+				.consumer_seq = 2,
+				.delivered = 3,
+				.pending = 4,
+				.timestamp_ns = 5,
+				.ack_token = 0x99ULL,
+			});
 		alarm(0);
 	}
 	ASSERT(!g_timed_out && rc == 0, "push to a free slot succeeds (fast path)");
