@@ -77,7 +77,6 @@
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_redact.h"
 #include "../../lib/nats/nats_validate.h"
-#include "../tls_mgm/api.h"
 
 /* module lifecycle */
 static int mod_init(void);
@@ -106,7 +105,6 @@ int nats_max_reconnect = 60;
  * at connect time (see lib/nats/nats_pool.c: apply_tls_from_mgm).
  * The user module just binds tls_mgm and hands the bind table to
  * lib/nats; cert/CA/key/verify/cipher all come from the domain. */
-static struct tls_mgm_binds tls_api;
 
 static const param_export_t mod_params[] = {
 	{"nats_url",            STR_PARAM, &nats_url},
@@ -310,19 +308,7 @@ static int mod_init(void)
 	 * effect on plaintext (nats://) URLs; tls:// URLs error at
 	 * connect time if tls_mgm isn't bound or the "nats" domain
 	 * isn't defined. */
-	if (find_export("load_tls_mgm", 0)) {
-		if (load_tls_mgm_api(&tls_api) == 0) {
-			nats_pool_set_tls_api(&tls_api);
-			LM_INFO("event_nats: tls_mgm bound; "
-			        "tls:// URLs will use the \"nats\" client domain\n");
-		} else {
-			LM_WARN("event_nats: tls_mgm exports load_tls_mgm but "
-			        "the bind failed; tls:// URLs will not work\n");
-		}
-	} else {
-		LM_INFO("event_nats: tls_mgm not loaded; only nats:// URLs "
-		        "will work (tls:// will error at connect)\n");
-	}
+	nats_pool_bind_tls("event_nats");
 
 	if (nats_pool_register(nats_url, "event_nats",
 			nats_reconnect_wait, nats_max_reconnect) < 0) {

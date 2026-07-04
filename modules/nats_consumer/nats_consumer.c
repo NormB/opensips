@@ -45,7 +45,6 @@
 #include "../../sr_module.h"
 #include "../../dprint.h"
 #include "../../lib/nats/nats_pool.h"
-#include "../tls_mgm/api.h"
 #include "nats_consumer.h"
 #include "nats_handle_parse.h"
 #include "nats_handle_registry.h"
@@ -503,7 +502,6 @@ static const proc_export_t procs[] = {
 /* tls_mgm bind table -- handed to lib/nats so the pool's connect path
  * can look up the "nats" client domain for tls:// URLs.  DEP_SILENT
  * lets plaintext-only deployments load nats_consumer without tls_mgm. */
-static struct tls_mgm_binds tls_api;
 
 static const dep_export_t deps = {
 	{
@@ -550,15 +548,7 @@ static int mod_init(void)
 	 *
 	 * Bind tls_mgm before registering the pool so the "nats" client
 	 * domain is available to the connect path for tls:// URLs. */
-	if (find_export("load_tls_mgm", 0)) {
-		if (load_tls_mgm_api(&tls_api) == 0) {
-			nats_pool_set_tls_api(&tls_api);
-			LM_INFO("nats_consumer: tls_mgm bound\n");
-		} else {
-			LM_WARN("nats_consumer: tls_mgm exports load_tls_mgm but "
-			        "the bind failed; tls:// URLs may not work\n");
-		}
-	}
+	nats_pool_bind_tls("nats_consumer");
 
 	/* Register our own pool so nats_consumer works when loaded WITHOUT
 	 * event_nats / cachedb_nats (those previously had to register first;

@@ -69,7 +69,6 @@
 
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
-#include "../tls_mgm/api.h"
 #include "cachedb_nats_json.h"
 #include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
 #include "cachedb_nats_watch.h"
@@ -153,7 +152,6 @@ int index_resync_interval_secs = 0;
  * connect time (apply_tls_from_mgm in lib/nats); no per-module TLS
  * modparams. */
 static char *nats_url = NULL;
-static struct tls_mgm_binds tls_api;
 
 /* JSON full-text search parameters */
 /* Default uses '_' rather than ':' because NATS-KV rejects ':' in
@@ -533,19 +531,7 @@ static int mod_init(void)
 	 * effect on plaintext (nats://) URLs; tls:// URLs error at
 	 * connect time if tls_mgm isn't bound or the "nats" domain
 	 * isn't defined. */
-	if (find_export("load_tls_mgm", 0)) {
-		if (load_tls_mgm_api(&tls_api) == 0) {
-			nats_pool_set_tls_api(&tls_api);
-			LM_INFO("cachedb_nats: tls_mgm bound; "
-			        "tls:// URLs will use the \"nats\" client domain\n");
-		} else {
-			LM_WARN("cachedb_nats: tls_mgm exports load_tls_mgm but "
-			        "the bind failed; tls:// URLs will not work\n");
-		}
-	} else {
-		LM_INFO("cachedb_nats: tls_mgm not loaded; only nats:// URLs "
-		        "will work (tls:// will error at connect)\n");
-	}
+	nats_pool_bind_tls("cachedb_nats");
 
 	/*
 	 * Register with the NATS connection pool.

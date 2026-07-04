@@ -79,6 +79,7 @@
 #include "../../mem/mem.h"
 #include "../../ut.h"
 #include "nats_pool.h"
+#include "nats_redact.h"
 #include "nats_ca_dir.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
@@ -150,6 +151,30 @@ static struct tls_mgm_binds *_tls_api = NULL;
 void nats_pool_set_tls_api(void *binds)
 {
 	_tls_api = (struct tls_mgm_binds *)binds;
+}
+
+/* The tls_mgm attach ritual, shared by every NATS module's mod_init
+ * (P2.8): look up load_tls_mgm, bind, hand the table to the pool.
+ * Absence of tls_mgm is not an error -- nats:// keeps working; the
+ * connect path errors cleanly on tls:// URLs. */
+void nats_pool_bind_tls(const char *modname)
+{
+	static struct tls_mgm_binds _binds;
+
+	if (find_export("load_tls_mgm", 0)) {
+		if (load_tls_mgm_api(&_binds) == 0) {
+			nats_pool_set_tls_api(&_binds);
+			LM_INFO("%s: tls_mgm bound; tls:// URLs will use "
+				"the \"nats\" client domain\n", modname);
+		} else {
+			LM_WARN("%s: tls_mgm exports load_tls_mgm but the "
+				"bind failed; tls:// URLs will not work\n",
+				modname);
+		}
+	} else {
+		LM_INFO("%s: tls_mgm not loaded; only nats:// URLs will "
+			"work (tls:// will error at connect)\n", modname);
+	}
 }
 
 /* KV handle cache — maps bucket names to kvStore pointers.

@@ -130,6 +130,11 @@ int nats_pool_register(const char *url, const char *module,
  */
 void nats_pool_set_tls_api(void *binds);
 
+/* One-call tls_mgm attach for a NATS module's mod_init: find_export +
+ * load_tls_mgm_api + nats_pool_set_tls_api, with uniform logging.
+ * Safe when tls_mgm is absent. */
+void nats_pool_bind_tls(const char *modname);
+
 /*
  * Get the shared NATS connection for this worker process.
  *
