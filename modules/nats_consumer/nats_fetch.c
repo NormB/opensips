@@ -59,6 +59,7 @@
  */
 
 #include <string.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -562,6 +563,62 @@ static int batch_parse_int(const char *s, int len, int *out)
 	return 0;
 }
 
+/* Option table for nats_fetch_batch(): one row per key (P2.3).
+ * Unknown keys stay silently ignored -- these are runtime script
+ * options, and older cfgs must keep working against newer modules. */
+enum batch_opt_kind { BK_INT, BK_DUR_MS, BK_BOOL01 };
+
+typedef struct batch_opt_ent {
+	const char *name;
+	const char *alias;          /* optional second spelling */
+	enum batch_opt_kind kind;
+	size_t off;                 /* offsetof target in batch_opts_t */
+} batch_opt_ent_t;
+
+static const batch_opt_ent_t batch_opt_table[] = {
+	{ "count",     NULL,         BK_INT,    offsetof(batch_opts_t, count) },
+	/* "expires" (canonical, duration suffix like '100ms', '5s') and
+	 * "expires_ms" (README/admin-XML alias, bare integer of ms);
+	 * batch_parse_duration_ms handles both forms. */
+	{ "expires",   "expires_ms", BK_DUR_MS, offsetof(batch_opts_t, expires_ms) },
+	{ "max_bytes", NULL,         BK_INT,    offsetof(batch_opts_t, max_bytes) },
+	{ "no_wait",   NULL,         BK_BOOL01, offsetof(batch_opts_t, no_wait) },
+	{ NULL, NULL, 0, 0 }
+};
+
+static int batch_apply_opt(batch_opts_t *out, const char *key, int keylen,
+		const char *val, int vallen)
+{
+	const batch_opt_ent_t *e;
+	int *fld;
+
+	for (e = batch_opt_table; e->name; e++)
+		if ((keylen == (int)strlen(e->name)
+				&& memcmp(key, e->name, keylen) == 0)
+		 || (e->alias && keylen == (int)strlen(e->alias)
+				&& memcmp(key, e->alias, keylen) == 0))
+			break;
+	if (!e->name) {
+		/* Unknown key: ignore silently for forward-compat. */
+		LM_DBG("nats_fetch_batch: unknown opt '%.*s'\n", keylen, key);
+		return 0;
+	}
+
+	fld = (int *)((unsigned char *)out + e->off);
+	switch (e->kind) {
+	case BK_INT:
+		return batch_parse_int(val, vallen, fld);
+	case BK_DUR_MS:
+		return batch_parse_duration_ms(val, vallen, fld);
+	case BK_BOOL01:
+		if (vallen != 1 || (val[0] != '0' && val[0] != '1'))
+			return -1;
+		*fld = val[0] - '0';
+		return 0;
+	}
+	return -1;
+}
+
 static int batch_parse_opts(const str *opts, batch_opts_t *out)
 {
 	const char *p, *end, *pair_end, *eq;
@@ -570,6 +627,9 @@ static int batch_parse_opts(const str *opts, batch_opts_t *out)
 	p = opts->s;
 	end = p + opts->len;
 	while (p < end) {
+		const char *key, *val;
+		int keylen, vallen;
+
 		while (p < end && (*p == ' ' || *p == '\t' || *p == ';'))
 			p++;
 		if (p >= end) break;
@@ -578,46 +638,20 @@ static int batch_parse_opts(const str *opts, batch_opts_t *out)
 		eq = memchr(p, '=', pair_end - p);
 		if (!eq) return -1;
 
-		{
-			const char *key = p;
-			int keylen = (int)(eq - p);
-			const char *val = eq + 1;
-			int vallen = (int)(pair_end - val);
-
-			while (keylen > 0 && (key[keylen-1]==' '||key[keylen-1]=='\t'))
-				keylen--;
-			while (vallen > 0 && (val[0]==' '||val[0]=='\t')) {
-				val++; vallen--;
-			}
-			while (vallen > 0 && (val[vallen-1]==' '||val[vallen-1]=='\t'))
-				vallen--;
-
-			if (keylen == 5 && memcmp(key, "count", 5) == 0) {
-				if (batch_parse_int(val, vallen, &out->count) < 0)
-					return -1;
-			} else if ((keylen == 7 && memcmp(key, "expires", 7) == 0)
-				|| (keylen == 10 && memcmp(key, "expires_ms", 10) == 0)) {
-				/* Accept both "expires" (canonical, takes a duration
-				 * suffix like '100ms', '5s') and "expires_ms" (alias
-				 * documented in the README + admin XML; takes a bare
-				 * integer of milliseconds).  batch_parse_duration_ms
-				 * handles both forms. */
-				if (batch_parse_duration_ms(val, vallen,
-						&out->expires_ms) < 0)
-					return -1;
-			} else if (keylen == 9 && memcmp(key, "max_bytes", 9) == 0) {
-				if (batch_parse_int(val, vallen, &out->max_bytes) < 0)
-					return -1;
-			} else if (keylen == 7 && memcmp(key, "no_wait", 7) == 0) {
-				if (vallen == 1 && val[0] == '1') out->no_wait = 1;
-				else if (vallen == 1 && val[0] == '0') out->no_wait = 0;
-				else return -1;
-			} else {
-				/* Unknown key: ignore silently for forward-compat. */
-				LM_DBG("nats_fetch_batch: unknown opt '%.*s'\n",
-					keylen, key);
-			}
+		key = p;
+		keylen = (int)(eq - p);
+		val = eq + 1;
+		vallen = (int)(pair_end - val);
+		while (keylen > 0 && (key[keylen-1]==' '||key[keylen-1]=='\t'))
+			keylen--;
+		while (vallen > 0 && (val[0]==' '||val[0]=='\t')) {
+			val++; vallen--;
 		}
+		while (vallen > 0 && (val[vallen-1]==' '||val[vallen-1]=='\t'))
+			vallen--;
+
+		if (batch_apply_opt(out, key, keylen, val, vallen) < 0)
+			return -1;
 		p = pair_end;
 	}
 	return 0;

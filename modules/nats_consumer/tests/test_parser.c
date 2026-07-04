@@ -128,6 +128,28 @@ static void test_unknown_key(void)
 	if (h) nats_handle_free(h);
 }
 
+/* P2.3: negative counts must be rejected at parse time -- previously a
+ * negative max_deliver/max_ack_pending/rate_limit parsed "successfully"
+ * and was silently treated as unset downstream. */
+static void test_negative_counts_rejected(void)
+{
+	const char *cases[] = {
+		"id=x;stream=S;durable=d;max_deliver=-1",
+		"id=x;stream=S;durable=d;max_ack_pending=-5",
+		"id=x;stream=S;durable=d;rate_limit=-1024",
+		"id=x;stream=S;durable=d;sample_freq=-1",
+	};
+	unsigned i;
+	for (i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+		const char *err = NULL;
+		str cfg = mkstr(cases[i]);
+		nats_handle_t *h = nats_handle_parse(&cfg, &err);
+		CHECK(h == NULL);
+		CHECK(err != NULL);
+		if (h) nats_handle_free(h);
+	}
+}
+
 static void test_two_unknowns(void)
 {
 	const char *err = NULL;
@@ -503,6 +525,7 @@ int main(void)
 	test_multi_filter();
 	test_unknown_key();
 	test_two_unknowns();
+	test_negative_counts_rejected();
 	test_missing_id();
 	test_missing_stream();
 	test_durable_and_ephemeral();

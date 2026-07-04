@@ -48,6 +48,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <errno.h>
+#include <stddef.h>
 
 #include "nats_handle_parse.h"
 
@@ -77,6 +78,7 @@
 #define NATS_RING_CAPACITY_MAX  65536u
 #define ERR_FETCH_BATCH     "fetch_batch out of range 1..4096"
 #define ERR_FETCH_TMO       "fetch_timeout_ms out of range 1..60000"
+#define ERR_NEG_COUNT       "value must not be negative"
 
 /* ── helpers: trim / case-insensitive compare ─────────────────── */
 
@@ -336,14 +338,258 @@ enum {
 
 #define FAIL(_err) do { *err = (_err); goto fail; } while (0)
 
+/* ── key table + per-pair dispatch (P2.3) ─────────────────────────
+ *
+ * One row per config key: dup-flag, value kind and (for scalars) the
+ * target field offset + inclusive range.  Three keys with semantics a
+ * kind can't express (durable/ephemeral type selection, ring_capacity
+ * power-of-two) are dispatched by flag after the generic decode.  The
+ * former 23-branch else-if ladder (CCN 96) is gone; adding a key is
+ * now one table row.
+ */
+
+struct parse_st {
+	uint32_t seen;
+	int have_durable;
+	int have_ephemeral;
+};
+
+enum kv_kind {
+	K_STR,        /* str field, shm-duplicated */
+	K_INT,        /* int field, range-checked */
+	K_UINT32,     /* uint32_t field, range-checked */
+	K_UINT64,     /* uint64_t field */
+	K_BOOL,       /* int field via parse_bool */
+	K_DUR_MS,     /* int field via parse_duration_ms */
+	K_TIME_NS,    /* int64 field via parse_rfc3339_ns */
+	K_DELIVER,
+	K_REPLAY,
+	K_ACK,
+	K_CUSTOM      /* handled by flag in parse_one_pair */
+};
+
+typedef struct kv_ent {
+	const char  *name;
+	uint32_t     flag;
+	enum kv_kind kind;
+	size_t       off;          /* offsetof target in nats_handle_t */
+	long         min, max;     /* inclusive range (K_INT/K_UINT32) */
+	const char  *empty_err;    /* non-NULL: reject empty values */
+	const char  *parse_err;    /* decode failure */
+	const char  *range_err;    /* out-of-range failure */
+} kv_ent_t;
+
+#define HOFF(f) offsetof(nats_handle_t, f)
+
+static const kv_ent_t kv_table[] = {
+	{ "id",              F_ID,           K_STR,     HOFF(id),
+	  0, 0, ERR_MISSING_ID, ERR_OOM, NULL },
+	{ "stream",          F_STREAM,       K_STR,     HOFF(stream),
+	  0, 0, ERR_MISSING_STREAM, ERR_OOM, NULL },
+	{ "durable",         F_DURABLE,      K_STR,     HOFF(durable),
+	  0, 0, ERR_NEED_DUR_EPH, ERR_OOM, NULL },
+	{ "ephemeral",       F_EPHEMERAL,    K_CUSTOM,  0,
+	  0, 0, NULL, ERR_BAD_BOOL, NULL },
+	{ "filter",          F_FILTER,       K_STR,     HOFF(filter),
+	  0, 0, NULL, ERR_OOM, NULL },
+	{ "filters",         F_FILTERS,      K_STR,     HOFF(filters_csv),
+	  0, 0, NULL, ERR_OOM, NULL },
+	{ "deliver_policy",  F_DELIVER,      K_DELIVER, HOFF(deliver_policy),
+	  0, 0, NULL, ERR_BAD_DELIVER, NULL },
+	{ "start_seq",       F_START_SEQ,    K_UINT64,  HOFF(start_seq),
+	  0, 0, NULL, ERR_BAD_UINT, NULL },
+	{ "start_time",      F_START_TIME,   K_TIME_NS, HOFF(start_time_unix_ns),
+	  0, 0, NULL, ERR_BAD_TIME, NULL },
+	{ "replay_policy",   F_REPLAY,       K_REPLAY,  HOFF(replay_policy),
+	  0, 0, NULL, ERR_BAD_REPLAY, NULL },
+	{ "ack_policy",      F_ACK_POLICY,   K_ACK,     HOFF(ack_policy),
+	  0, 0, NULL, ERR_BAD_ACK, NULL },
+	{ "ack_wait",        F_ACK_WAIT,     K_DUR_MS,  HOFF(ack_wait_ms),
+	  0, 0, NULL, ERR_BAD_DURATION, NULL },
+	/* P2.3: negative counts are config errors now (they used to parse
+	 * and silently behave as "unset"). */
+	{ "max_deliver",     F_MAX_DELIVER,  K_INT,     HOFF(max_deliver),
+	  0, INT_MAX, NULL, ERR_BAD_INT, ERR_NEG_COUNT },
+	{ "backoff",         F_BACKOFF,      K_STR,     HOFF(backoff_csv),
+	  0, 0, NULL, ERR_OOM, NULL },
+	{ "max_ack_pending", F_MAX_ACK_PEND, K_INT,     HOFF(max_ack_pending),
+	  0, INT_MAX, NULL, ERR_BAD_INT, ERR_NEG_COUNT },
+	{ "headers_only",    F_HEADERS_ONLY, K_BOOL,    HOFF(headers_only),
+	  0, 0, NULL, ERR_BAD_BOOL, NULL },
+	{ "sample_freq",     F_SAMPLE_FREQ,  K_INT,     HOFF(sample_freq),
+	  0, 100, NULL, ERR_BAD_INT, ERR_SAMPLE_RANGE },
+	{ "rate_limit",      F_RATE_LIMIT,   K_INT,     HOFF(rate_limit_bps),
+	  0, INT_MAX, NULL, ERR_BAD_INT, ERR_NEG_COUNT },
+	{ "inactive_threshold", F_INACTIVE_THR, K_DUR_MS, HOFF(inactive_threshold_ms),
+	  0, 0, NULL, ERR_BAD_DURATION, NULL },
+	{ "js_domain",       F_JS_DOMAIN,    K_STR,     HOFF(js_domain),
+	  0, 0, NULL, ERR_OOM, NULL },
+	{ "api_prefix",      F_API_PREFIX,   K_STR,     HOFF(api_prefix),
+	  0, 0, NULL, ERR_OOM, NULL },
+	{ "ring_capacity",   F_RING_CAPACITY, K_CUSTOM, 0,
+	  0, 0, NULL, ERR_BAD_UINT, NULL },
+	{ "fetch_batch",     F_FETCH_BATCH,  K_UINT32,  HOFF(fetch_batch),
+	  1, 4096, NULL, ERR_BAD_UINT, ERR_FETCH_BATCH },
+	{ "fetch_timeout_ms", F_FETCH_TMO_MS, K_UINT32, HOFF(fetch_timeout_ms),
+	  1, 60000, NULL, ERR_BAD_UINT, ERR_FETCH_TMO },
+	{ NULL, 0, 0, 0, 0, 0, NULL, NULL, NULL }
+};
+
+/* Decode a table-typed scalar into its target field; range-check the
+ * integer kinds.  Returns 0 or -1 with *err set. */
+static int decode_scalar(const kv_ent_t *e, void *fld,
+		const char *val, int vallen, const char **err)
+{
+	switch (e->kind) {
+	case K_STR:
+		if (str_dup_shm((str *)fld, val, vallen) < 0)
+			{ *err = ERR_OOM; return -1; }
+		return 0;
+	case K_INT: {
+		int *ip = (int *)fld;
+		if (parse_int(val, vallen, ip) < 0) break;
+		if (*ip < (int)e->min || *ip > (int)e->max)
+			{ *err = e->range_err; return -1; }
+		return 0;
+	}
+	case K_UINT32: {
+		uint32_t *up = (uint32_t *)fld;
+		if (parse_uint32(val, vallen, up) < 0) break;
+		if (*up < (uint32_t)e->min || *up > (uint32_t)e->max)
+			{ *err = e->range_err; return -1; }
+		return 0;
+	}
+	case K_UINT64:
+		if (parse_uint64(val, vallen, (uint64_t *)fld) < 0) break;
+		return 0;
+	case K_BOOL:
+		if (parse_bool(val, vallen, (int *)fld) < 0) break;
+		return 0;
+	case K_DUR_MS:
+		if (parse_duration_ms(val, vallen, (int *)fld) < 0) break;
+		return 0;
+	case K_TIME_NS:
+		if (parse_rfc3339_ns(val, vallen, (int64_t *)fld) < 0) break;
+		return 0;
+	case K_DELIVER:
+		if (parse_deliver_policy(val, vallen,
+				(nats_deliver_policy_e *)fld) < 0) break;
+		return 0;
+	case K_REPLAY:
+		if (parse_replay_policy(val, vallen,
+				(nats_replay_policy_e *)fld) < 0) break;
+		return 0;
+	case K_ACK:
+		if (parse_ack_policy(val, vallen,
+				(nats_ack_policy_e *)fld) < 0) break;
+		return 0;
+	case K_CUSTOM:
+		break; /* handled by parse_custom() */
+	}
+	*err = e->parse_err;
+	return -1;
+}
+
+/* The two keys a kind can't express: ephemeral (type selection into the
+ * parse state, no handle field) and ring_capacity (power-of-two + SHM
+ * cap rules). */
+static int parse_custom(nats_handle_t *h, struct parse_st *st,
+		const kv_ent_t *e, const char *val, int vallen, const char **err)
+{
+	if (e->flag == F_EPHEMERAL) {
+		int b;
+		if (parse_bool(val, vallen, &b) < 0)
+			{ *err = ERR_BAD_BOOL; return -1; }
+		st->have_ephemeral = b;
+		return 0;
+	}
+
+	/* F_RING_CAPACITY */
+	if (parse_uint32(val, vallen, &h->ring_capacity) < 0)
+		{ *err = ERR_BAD_UINT; return -1; }
+	/* Reject 0/1 and non-power-of-2 now so the registry can trust the
+	 * value at bind time without re-validating. */
+	if (h->ring_capacity < 2 ||
+	    (h->ring_capacity & (h->ring_capacity - 1)) != 0)
+		{ *err = ERR_RING_POW2; return -1; }
+	/* Cap the capacity: each slot is ~17.7 KB of SHM, so an unbounded
+	 * power-of-two (up to 2^31) would let one MI bind request tens of
+	 * GB.  65536 slots is ~1.2 GB. */
+	if (h->ring_capacity > NATS_RING_CAPACITY_MAX)
+		{ *err = ERR_RING_TOO_BIG; return -1; }
+	return 0;
+}
+
+/* Decode one key=value pair through the table.  Returns 0 on success,
+ * -1 with *err set on failure. */
+static int parse_one_pair(nats_handle_t *h, struct parse_st *st,
+		const char *key, int keylen,
+		const char *val, int vallen, const char **err)
+{
+	const kv_ent_t *e;
+	void *fld;
+
+	for (e = kv_table; e->name; e++)
+		if (ieq(key, keylen, e->name))
+			break;
+	if (!e->name) {
+		/* Unknown key: a config error.  (The forward-compat
+		 * extra_json stash was deleted with the persistence layer,
+		 * owner decision 3 -- nothing consumes extras any more, so
+		 * silently accepting typos would only hide
+		 * misconfiguration.) */
+		*err = ERR_UNKNOWN_KEY;
+		return -1;
+	}
+
+	if (st->seen & e->flag) { *err = ERR_DUP_KEY; return -1; }
+	st->seen |= e->flag;
+
+	if (e->empty_err && vallen == 0) { *err = e->empty_err; return -1; }
+
+	if (e->kind == K_CUSTOM)
+		return parse_custom(h, st, e, val, vallen, err);
+
+	fld = (unsigned char *)h + e->off;
+	if (decode_scalar(e, fld, val, vallen, err) < 0)
+		return -1;
+	if (e->flag == F_DURABLE)
+		st->have_durable = 1;
+	return 0;
+}
+
+/* Cross-field rules, applied once all pairs are decoded. */
+static int handle_validate(nats_handle_t *h, const struct parse_st *st,
+		const char **err)
+{
+	if (!(st->seen & F_ID) || h->id.len == 0)
+		{ *err = ERR_MISSING_ID; return -1; }
+	if (!(st->seen & F_STREAM) || h->stream.len == 0)
+		{ *err = ERR_MISSING_STREAM; return -1; }
+
+	if (st->have_durable && st->have_ephemeral)
+		{ *err = ERR_MUT_EXCL; return -1; }
+	if (!st->have_durable && !st->have_ephemeral)
+		{ *err = ERR_NEED_DUR_EPH; return -1; }
+	h->type = st->have_durable ? NATS_CONSUMER_DURABLE
+	                           : NATS_CONSUMER_EPHEMERAL;
+
+	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ &&
+			!(st->seen & F_START_SEQ))
+		{ *err = ERR_NEED_SSEQ; return -1; }
+	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME &&
+			!(st->seen & F_START_TIME))
+		{ *err = ERR_NEED_STIME; return -1; }
+	return 0;
+}
+
 nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 {
 	nats_handle_t *h;
 	const char *p, *end, *pair_end, *eq;
 	const char *key, *val;
 	int keylen, vallen;
-	uint32_t seen = 0;
-	int have_durable = 0, have_ephemeral = 0, ephemeral_val = 0;
+	struct parse_st st = { 0, 0, 0 };
 	static const char *dummy_err = NULL;
 
 	if (!err) err = &dummy_err;
@@ -395,155 +641,12 @@ nats_handle_t *nats_handle_parse(const str *config_str, const char **err)
 
 		p = pair_end;
 
-		/* dispatch */
-		#define SETFLAG(b) do { \
-			if (seen & (b)) FAIL(ERR_DUP_KEY); \
-			seen |= (b); \
-		} while (0)
-
-		if (ieq(key, keylen, "id")) {
-			SETFLAG(F_ID);
-			if (vallen == 0) FAIL(ERR_MISSING_ID);
-			if (str_dup_shm(&h->id, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "stream")) {
-			SETFLAG(F_STREAM);
-			if (vallen == 0) FAIL(ERR_MISSING_STREAM);
-			if (str_dup_shm(&h->stream, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "durable")) {
-			SETFLAG(F_DURABLE);
-			if (vallen == 0) FAIL(ERR_NEED_DUR_EPH);
-			if (str_dup_shm(&h->durable, val, vallen) < 0) FAIL(ERR_OOM);
-			have_durable = 1;
-		} else if (ieq(key, keylen, "ephemeral")) {
-			SETFLAG(F_EPHEMERAL);
-			if (parse_bool(val, vallen, &ephemeral_val) < 0)
-				FAIL(ERR_BAD_BOOL);
-			have_ephemeral = ephemeral_val;
-		} else if (ieq(key, keylen, "filter")) {
-			SETFLAG(F_FILTER);
-			if (str_dup_shm(&h->filter, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "filters")) {
-			SETFLAG(F_FILTERS);
-			if (str_dup_shm(&h->filters_csv, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "deliver_policy")) {
-			SETFLAG(F_DELIVER);
-			if (parse_deliver_policy(val, vallen, &h->deliver_policy) < 0)
-				FAIL(ERR_BAD_DELIVER);
-		} else if (ieq(key, keylen, "start_seq")) {
-			SETFLAG(F_START_SEQ);
-			if (parse_uint64(val, vallen, &h->start_seq) < 0)
-				FAIL(ERR_BAD_UINT);
-		} else if (ieq(key, keylen, "start_time")) {
-			SETFLAG(F_START_TIME);
-			if (parse_rfc3339_ns(val, vallen, &h->start_time_unix_ns) < 0)
-				FAIL(ERR_BAD_TIME);
-		} else if (ieq(key, keylen, "replay_policy")) {
-			SETFLAG(F_REPLAY);
-			if (parse_replay_policy(val, vallen, &h->replay_policy) < 0)
-				FAIL(ERR_BAD_REPLAY);
-		} else if (ieq(key, keylen, "ack_policy")) {
-			SETFLAG(F_ACK_POLICY);
-			if (parse_ack_policy(val, vallen, &h->ack_policy) < 0)
-				FAIL(ERR_BAD_ACK);
-		} else if (ieq(key, keylen, "ack_wait")) {
-			SETFLAG(F_ACK_WAIT);
-			if (parse_duration_ms(val, vallen, &h->ack_wait_ms) < 0)
-				FAIL(ERR_BAD_DURATION);
-		} else if (ieq(key, keylen, "max_deliver")) {
-			SETFLAG(F_MAX_DELIVER);
-			if (parse_int(val, vallen, &h->max_deliver) < 0)
-				FAIL(ERR_BAD_INT);
-		} else if (ieq(key, keylen, "backoff")) {
-			SETFLAG(F_BACKOFF);
-			if (str_dup_shm(&h->backoff_csv, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "max_ack_pending")) {
-			SETFLAG(F_MAX_ACK_PEND);
-			if (parse_int(val, vallen, &h->max_ack_pending) < 0)
-				FAIL(ERR_BAD_INT);
-		} else if (ieq(key, keylen, "headers_only")) {
-			SETFLAG(F_HEADERS_ONLY);
-			if (parse_bool(val, vallen, &h->headers_only) < 0)
-				FAIL(ERR_BAD_BOOL);
-		} else if (ieq(key, keylen, "sample_freq")) {
-			SETFLAG(F_SAMPLE_FREQ);
-			if (parse_int(val, vallen, &h->sample_freq) < 0)
-				FAIL(ERR_BAD_INT);
-			if (h->sample_freq < 0 || h->sample_freq > 100)
-				FAIL(ERR_SAMPLE_RANGE);
-		} else if (ieq(key, keylen, "rate_limit")) {
-			SETFLAG(F_RATE_LIMIT);
-			if (parse_int(val, vallen, &h->rate_limit_bps) < 0)
-				FAIL(ERR_BAD_INT);
-		} else if (ieq(key, keylen, "inactive_threshold")) {
-			SETFLAG(F_INACTIVE_THR);
-			if (parse_duration_ms(val, vallen, &h->inactive_threshold_ms) < 0)
-				FAIL(ERR_BAD_DURATION);
-		} else if (ieq(key, keylen, "js_domain")) {
-			SETFLAG(F_JS_DOMAIN);
-			if (str_dup_shm(&h->js_domain, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "api_prefix")) {
-			SETFLAG(F_API_PREFIX);
-			if (str_dup_shm(&h->api_prefix, val, vallen) < 0) FAIL(ERR_OOM);
-		} else if (ieq(key, keylen, "ring_capacity")) {
-			SETFLAG(F_RING_CAPACITY);
-			if (parse_uint32(val, vallen, &h->ring_capacity) < 0)
-				FAIL(ERR_BAD_UINT);
-			/* Reject 0/1 and non-power-of-2 now so the registry can
-			 * trust the value at bind time without re-validating. */
-			if (h->ring_capacity < 2 ||
-			    (h->ring_capacity & (h->ring_capacity - 1)) != 0)
-				FAIL(ERR_RING_POW2);
-			/* Cap the capacity: each slot is ~17.7 KB of SHM, so an
-			 * unbounded power-of-two (up to 2^31) would let one MI bind
-			 * request tens of GB.  65536 slots is already ~1.2 GB. */
-			if (h->ring_capacity > NATS_RING_CAPACITY_MAX)
-				FAIL(ERR_RING_TOO_BIG);
-		} else if (ieq(key, keylen, "fetch_batch")) {
-			SETFLAG(F_FETCH_BATCH);
-			if (parse_uint32(val, vallen, &h->fetch_batch) < 0)
-				FAIL(ERR_BAD_UINT);
-			/* Sanity bounds: 0 is "use module default"; otherwise
-			 * 1..4096 because nats.c's max-batch is bounded by the
-			 * server's max_ack_pending and we don't want pathologic
-			 * giant pre-allocations on the consumer process. */
-			if (h->fetch_batch == 0 || h->fetch_batch > 4096)
-				FAIL(ERR_FETCH_BATCH);
-		} else if (ieq(key, keylen, "fetch_timeout_ms")) {
-			SETFLAG(F_FETCH_TMO_MS);
-			if (parse_uint32(val, vallen, &h->fetch_timeout_ms) < 0)
-				FAIL(ERR_BAD_UINT);
-			/* 1ms..60s.  Below 1ms makes the Fetch loop hot-spin;
-			 * above 60s the consumer process would not honour shutdown
-			 * for too long. */
-			if (h->fetch_timeout_ms == 0 || h->fetch_timeout_ms > 60000)
-				FAIL(ERR_FETCH_TMO);
-		} else {
-			/* Unknown key: a config error.  (The forward-compat
-			 * extra_json stash was deleted with the persistence
-			 * layer, owner decision 3 -- nothing consumes extras
-			 * any more, so silently accepting typos would only
-			 * hide misconfiguration.) */
-			FAIL(ERR_UNKNOWN_KEY);
-		}
-		#undef SETFLAG
+		if (parse_one_pair(h, &st, key, keylen, val, vallen, err) < 0)
+			goto fail;
 	}
 
-	/* cross-field validation */
-	if (!(seen & F_ID)) FAIL(ERR_MISSING_ID);
-	if (h->id.len == 0) FAIL(ERR_MISSING_ID);
-	if (!(seen & F_STREAM)) FAIL(ERR_MISSING_STREAM);
-	if (h->stream.len == 0) FAIL(ERR_MISSING_STREAM);
-
-	if (have_durable && have_ephemeral) FAIL(ERR_MUT_EXCL);
-	if (!have_durable && !have_ephemeral) FAIL(ERR_NEED_DUR_EPH);
-	h->type = have_durable ? NATS_CONSUMER_DURABLE : NATS_CONSUMER_EPHEMERAL;
-
-	if (h->deliver_policy == NATS_DELIVER_BY_START_SEQ &&
-			!(seen & F_START_SEQ))
-		FAIL(ERR_NEED_SSEQ);
-	if (h->deliver_policy == NATS_DELIVER_BY_START_TIME &&
-			!(seen & F_START_TIME))
-		FAIL(ERR_NEED_STIME);
+	if (handle_validate(h, &st, err) < 0)
+		goto fail;
 
 	return h;
 

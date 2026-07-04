@@ -173,6 +173,32 @@ int _fmt_kind_parse(const char *v, int n)
 	return -1;
 }
 
+/* One row per k=v option (P2.3); a leading bare token is the format
+ * kind shorthand ("csv;eol=lf" == "format=csv;eol=lf"). */
+static int _fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
+	int *kind, int *eol_lf, int *header)
+{
+	if (klen == 6 && memcmp(k, "format", 6) == 0) {
+		int fk = _fmt_kind_parse(v, vlen);
+		if (fk < 0)
+			return -1;
+		*kind = fk;
+		return 0;
+	}
+	if (klen == 3 && memcmp(k, "eol", 3) == 0) {
+		if (vlen == 2 && memcmp(v, "lf", 2) == 0)       *eol_lf = 1;
+		else if (vlen == 4 && memcmp(v, "crlf", 4) == 0) *eol_lf = 0;
+		else return -1;
+		return 0;
+	}
+	if (klen == 6 && memcmp(k, "header", 6) == 0) {
+		if (vlen == 1 && (*v == '0' || *v == '1')) *header = *v - '0';
+		else return -1;
+		return 0;
+	}
+	return -1;              /* unknown option: reject */
+}
+
 int _fmt_opts_parse(const char *s, int len,
 	int *kind, int *eol_lf, int *header)
 {
@@ -202,32 +228,10 @@ int _fmt_opts_parse(const char *s, int len,
 			if (k < 0)
 				return -1;
 			*kind = k;
-		} else {
-			int klen = (int)(eq - tok);
-			const char *v = eq + 1;
-			int vlen = (int)(te - eq - 1);
-			if (klen == 6 && memcmp(tok, "format", 6) == 0) {
-				int k = _fmt_kind_parse(v, vlen);
-				if (k < 0)
-					return -1;
-				*kind = k;
-			} else if (klen == 3 && memcmp(tok, "eol", 3) == 0) {
-				if (vlen == 2 && memcmp(v, "lf", 2) == 0)
-					*eol_lf = 1;
-				else if (vlen == 4 && memcmp(v, "crlf", 4) == 0)
-					*eol_lf = 0;
-				else
-					return -1;
-			} else if (klen == 6 && memcmp(tok, "header", 6) == 0) {
-				if (vlen == 1 && *v == '0')
-					*header = 0;
-				else if (vlen == 1 && *v == '1')
-					*header = 1;
-				else
-					return -1;
-			} else {
-				return -1;
-			}
+		} else if (_fmt_apply_kv(tok, (int)(eq - tok),
+				eq + 1, (int)(te - eq - 1),
+				kind, eol_lf, header) < 0) {
+			return -1;
 		}
 		first = 0;
 	}
