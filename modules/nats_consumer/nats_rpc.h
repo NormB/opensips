@@ -203,6 +203,24 @@ int nats_rpc_staged_serialize(char *out, int cap,
  * buffer end -- the caller may still publish, with whatever headers
  * were applied before the truncation point).
  */
+/* [P2.6] Borrowed view of one reply's buffers -- the inputs of
+ * nats_rpc_cur_set_from_buffers, which copies them into the worker's
+ * current-message slot (spans only borrowed for the call).  Zeroed
+ * members mean "absent". */
+typedef struct nats_rpc_reply_view {
+	uint32_t    handle_idx;
+	const char *subject;   uint32_t subject_len;
+	const char *data;      uint32_t data_len;
+	const char *reply_to;  uint32_t reply_to_len;
+	uint8_t     has_reply;
+	const char *headers;   uint16_t headers_len;
+	uint8_t     headers_truncated;
+} nats_rpc_reply_view_t;
+
+/* Populate the worker's current message from stored reply buffers
+ * (the natsMsg was destroyed back in the libnats callback). */
+void nats_rpc_cur_set_from_buffers(const nats_rpc_reply_view_t *rv);
+
 int nats_rpc_hdr_deserialize_to_msg(const char *buf, int len, void *msg_void);
 
 #endif /* NATS_RPC_H */

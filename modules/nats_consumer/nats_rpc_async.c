@@ -288,18 +288,6 @@ extern const char *nats_rpc_cstr_buf(char *buf, size_t cap,
  * to the outbound natsMsg. */
 extern char *nats_request_id_header;
 
-/* Populate g_cur from the ctx's stored reply buffers.  Mirrors
- * cur_set_from_nats_reply() in nats_rpc.c but reads from byte
- * buffers instead of a natsMsg (the natsMsg was destroyed back in
- * the libnats callback). */
-extern void nats_rpc_cur_set_from_buffers(uint32_t handle_idx,
-                                           const char *subject,  uint32_t slen,
-                                           const char *data,     uint32_t dlen,
-                                           const char *reply_to, uint32_t rlen,
-                                           uint8_t   has_reply,
-                                           const char *headers,  uint16_t hlen,
-                                           uint8_t   hdr_truncated);
-
 /*
  * Per-call wrapper: pairs the worker-private timerfd with the
  * SHM slot.  Lives in pkg memory (worker-local) for the duration
@@ -379,13 +367,19 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 	if (state_obs == NATS_RPC_SLOT_DELIVERED) {
 		/* Got the reply: copy into cur_msg, free everything,
 		 * report success to the script. */
-		nats_rpc_cur_set_from_buffers(0xFFFF,
-			s->reply_subject,  s->reply_subject_len,
-			s->reply_data,     s->reply_data_len,
-			s->reply_to,       s->reply_to_len,
-			s->reply_has_reply_to,
-			s->reply_headers,  s->reply_headers_len,
-			s->reply_headers_truncated);
+		nats_rpc_cur_set_from_buffers(&(nats_rpc_reply_view_t){
+			.handle_idx        = 0xFFFF,
+			.subject           = s->reply_subject,
+			.subject_len       = s->reply_subject_len,
+			.data              = s->reply_data,
+			.data_len          = s->reply_data_len,
+			.reply_to          = s->reply_to,
+			.reply_to_len      = s->reply_to_len,
+			.has_reply         = s->reply_has_reply_to,
+			.headers           = s->reply_headers,
+			.headers_len       = s->reply_headers_len,
+			.headers_truncated = s->reply_headers_truncated,
+		});
 
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_rpc_slot_free(s, w->gen);

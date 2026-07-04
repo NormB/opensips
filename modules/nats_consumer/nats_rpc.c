@@ -822,15 +822,16 @@ void nats_rpc_cur_set_from_nats_reply(natsMsg *reply)
  * natsMsg has already been destroyed back in the libnats callback
  * and the buffers were stashed in the in-flight ctx instead.
  */
-void nats_rpc_cur_set_from_buffers(uint32_t handle_idx,
-                                    const char *subject,  uint32_t slen,
-                                    const char *data,     uint32_t dlen,
-                                    const char *reply_to, uint32_t rlen,
-                                    uint8_t   has_reply,
-                                    const char *headers,  uint16_t hlen,
-                                    uint8_t   hdr_truncated)
+void nats_rpc_cur_set_from_buffers(const nats_rpc_reply_view_t *rv)
 {
 	nats_cur_msg_t *cur = nats_fetch_current();
+	uint32_t handle_idx = rv->handle_idx;
+	const char *subject = rv->subject;   uint32_t slen = rv->subject_len;
+	const char *data = rv->data;         uint32_t dlen = rv->data_len;
+	const char *reply_to = rv->reply_to; uint32_t rlen = rv->reply_to_len;
+	uint8_t has_reply = rv->has_reply;
+	const char *headers = rv->headers;   uint16_t hlen = rv->headers_len;
+	uint8_t hdr_truncated = rv->headers_truncated;
 
 	memset(cur, 0, sizeof(*cur));
 	cur->has_message = 1;
