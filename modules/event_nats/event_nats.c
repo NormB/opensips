@@ -75,6 +75,8 @@
 #include "event_nats_sub.h"
 #include "nats_jetstream.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_redact.h"
+#include "../../lib/nats/nats_validate.h"
 #include "../tls_mgm/api.h"
 
 /* module lifecycle */

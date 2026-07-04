@@ -39,6 +39,7 @@
 #include "../../../mem/mem.h"
 #include "../../../lib/nats/nats_dl.h"
 #include "../../../lib/nats/nats_pool.h"
+#include "../../../lib/nats/nats_validate.h"
 #include "../cachedb_nats.h"
 #include "../cachedb_nats_dbase.h"
 #include "../cachedb_nats_stats.h"

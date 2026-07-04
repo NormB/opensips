@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "nats_pool.h"
+#include "nats_redact.h"
 
 /* Mask written in place of any "scheme://userinfo@" credentials. */
 #define NATS_REDACT_MASK "[redacted]"

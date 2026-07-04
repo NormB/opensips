@@ -333,70 +333,7 @@ int nats_pool_drain_timeout_setter(unsigned int type, void *val);
  */
 extern int nats_pool_kv_op_timeout_ms;
 
-/*
- * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
- *
- * Replaces every "user[:pass]@" segment with the literal string
- * "[redacted]" followed by '@'.  The segment is scrubbed whether or not it
- * follows a "scheme://" prefix (a scheme-less "user:pass@host" token still
- * carries credentials).  Handles comma-separated lists of URLs.  URLs
- * without userinfo are copied unchanged.  Always NUL-terminates @out
- * unless out_sz == 0.
- *
- * @param url      Source URL string.  May be NULL.
- * @param out      Destination buffer.  Must be non-NULL if out_sz > 0.
- * @param out_sz   Size of @out in bytes.  If 0, no write is performed.
- *
- * Examples:
- *   nats://user:pass@h:4222         becomes  nats://[redacted]@h:4222
- *   nats://h:4222                   unchanged
- *   nats://h1,nats://u:p@h2         becomes  nats://h1,nats://[redacted]@h2
- *
- * Thread safety: Pure function on caller-provided memory; safe anywhere.
- */
-void nats_redact_url(const char *url, char *out, size_t out_sz);
 
-/*
- * Validate a NATS subject for use as an outbound publish target.
- *
- * Rejects empty/NULL, embedded NUL, control/whitespace chars, NATS
- * wildcards ('*' and '>'), and ill-formed dot structure (leading,
- * trailing, or consecutive dots).  Length bound is the caller's job
- * (this function is content-only).
- *
- * @param s   Subject bytes (NOT required to be NUL-terminated).
- * @param len Length of @s in bytes.
- *
- * @return 0 if valid for publish, -1 otherwise.
- *
- * Thread safety: Pure function on caller-provided memory.
- */
-int nats_validate_publish_subject(const char *s, int len);
-
-/*
- * Unified validator for the NATS subject/key/name strings used across the
- * modules.  All modes reject an empty/NULL string, an embedded NUL, control
- * chars (< 0x20, 0x7f) and whitespace.  Mode-specific rules:
- *
- *   NATS_VALIDATE_PUBLISH_SUBJECT  concrete publish target: no wildcards;
- *                                  no leading/trailing/consecutive dots.
- *   NATS_VALIDATE_FILTER_SUBJECT   subscribe filter: dots AND wildcards
- *                                  ('*','>') allowed.
- *   NATS_VALIDATE_STREAM_NAME      single token: no '.', '*', '>', '/', '\'.
- *   NATS_VALIDATE_KV_KEY           dots allowed; ':' rejected (reserved as
- *                                  the legacy map separator); no wildcards.
- *
- * Pure function, content-only (re-scans every call -- see the security note
- * on nats_validate_publish_subject).  Returns 0 if valid, -1 otherwise.
- */
-typedef enum {
-	NATS_VALIDATE_PUBLISH_SUBJECT = 0,
-	NATS_VALIDATE_FILTER_SUBJECT,
-	NATS_VALIDATE_STREAM_NAME,
-	NATS_VALIDATE_KV_KEY,
-} nats_validate_mode_t;
-
-int nats_validate(const char *s, int len, nats_validate_mode_t mode);
 
 /*
  * Register a callback for JetStream publish-ack outcomes.

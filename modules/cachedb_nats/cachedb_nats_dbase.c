@@ -61,6 +61,7 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_validate.h"
 #include "../../lib/nats/nats_str.h"
 
 extern int nats_cas_retries;   /* defined in cachedb_nats.c */

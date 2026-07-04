@@ -79,6 +79,7 @@
 #include "cachedb_nats_reg.h"      /* [OBS] registration MI + reap-pass gauges */
 #include "cachedb_nats_kvobs.h"    /* [KVOBS] generic stream/KV introspection MI */
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_redact.h"
 #include "../../timer.h"
 
 #include "../../evi/evi.h"

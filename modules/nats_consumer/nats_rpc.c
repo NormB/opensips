@@ -80,6 +80,7 @@
 #include "../../pvar.h"
 #include "../../sr_module.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_validate.h"
 
 #include "nats_fetch.h"
 #include "nats_rpc.h"

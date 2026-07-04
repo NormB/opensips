@@ -55,6 +55,7 @@ typedef int                            natsStatus;
 #include "../../async.h"
 #include "../../lib/list.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_validate.h"
 #include <nats/nats.h>
 #endif
 

@@ -36,6 +36,7 @@
 #include "../../dprint.h"
 #include "../../mi/mi.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_validate.h"
 #include "nats_jetstream.h"
 
 /* Named JetStream API error codes (jsErrCode), replacing the raw literals

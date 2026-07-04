@@ -11,6 +11,7 @@
  */
 
 #include "nats_pool.h"
+#include "nats_validate.h"
 
 /*
  * Validate a NATS subject as it would appear in a publish call.

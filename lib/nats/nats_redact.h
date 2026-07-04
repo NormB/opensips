@@ -1,0 +1,54 @@
+/*
+ * Copyright (C) 2026 OpenSIPS Solutions
+ *
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ */
+
+/*
+ * nats_redact.h — URL credential redaction for log lines (P2.8 split
+ * out of nats_pool.h; implementation in nats_redact.c).
+ */
+
+#ifndef NATS_REDACT_H
+#define NATS_REDACT_H
+
+#include <stddef.h>
+
+/*
+ * Redact userinfo (user[:pass]@) from NATS URL strings before logging.
+ *
+ * Replaces every "user[:pass]@" segment with the literal string
+ * "[redacted]" followed by '@'.  The segment is scrubbed whether or not it
+ * follows a "scheme://" prefix (a scheme-less "user:pass@host" token still
+ * carries credentials).  Handles comma-separated lists of URLs.  URLs
+ * without userinfo are copied unchanged.  Always NUL-terminates @out
+ * unless out_sz == 0.
+ *
+ * @param url      Source URL string.  May be NULL.
+ * @param out      Destination buffer.  Must be non-NULL if out_sz > 0.
+ * @param out_sz   Size of @out in bytes.  If 0, no write is performed.
+ *
+ * Examples:
+ *   nats://user:pass@h:4222         becomes  nats://[redacted]@h:4222
+ *   nats://h:4222                   unchanged
+ *   nats://h1,nats://u:p@h2         becomes  nats://h1,nats://[redacted]@h2
+ *
+ * Thread safety: Pure function on caller-provided memory; safe anywhere.
+ */
+void nats_redact_url(const char *url, char *out, size_t out_sz);
+
+#endif /* NATS_REDACT_H */
