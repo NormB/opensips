@@ -42,6 +42,7 @@
 #include "cachedb_nats_dbase.h"          /* kv_bucket / kv_replicas / ...    */
 #include "cachedb_nats_json_internal.h"  /* walkers + _pk_target_key + dict  */
 #include "cachedb_nats_fmt.h"
+#include "cachedb_nats_emit.h"
 #include "cachedb_nats_reg.h"
 
 extern char *fts_json_prefix;            /* cachedb_nats.c                   */
@@ -214,25 +215,6 @@ int _reg_filter_parse(const char *s, int len, struct reg_filter *f)
 			return -1;
 	}
 	return 0;
-}
-
-/* [FMT] shared bits for the table-emitting handlers */
-static const char *_fmt_name(int kind)
-{
-	return kind == FMT_CSV ? "csv" : kind == FMT_TXT ? "txt" : "json";
-}
-
-/* attach format + data to the response object; frees the blob */
-static int _fmt_attach(mi_item_t *obj, int kind, char *blob, int blen)
-{
-	int rc = -1;
-	if (blob &&
-	    add_mi_string(obj, MI_SSTR("format"),
-			(char *)_fmt_name(kind), (int)strlen(_fmt_name(kind))) == 0 &&
-	    add_mi_string(obj, MI_SSTR("data"), blob, blen) == 0)
-		rc = 0;
-	free(blob);
-	return rc;
 }
 
 void _reg_page(long total, long limit, long offset, long *start, long *count)
@@ -570,6 +552,32 @@ static int _reg_summary_cb(const struct reg_row_info *ri, void *arg)
 	return 0;
 }
 
+/* the summary response envelope: bucket + totals + scan stats.  0/-1. */
+static int _reg_summary_meta(mi_item_t *obj,
+	const struct reg_scan_totals *tot, time_t now)
+{
+	if (add_mi_string(obj, MI_SSTR("bucket"), kv_bucket,
+			(int)strlen(kv_bucket)) < 0 ||
+	    add_mi_number(obj, MI_SSTR("aors"), tot->rows) < 0 ||
+	    add_mi_number(obj, MI_SSTR("contacts"), tot->contacts) < 0 ||
+	    add_mi_number(obj, MI_SSTR("active_contacts"), tot->active) < 0 ||
+	    add_mi_number(obj, MI_SSTR("expired_contacts"), tot->expired) < 0 ||
+	    add_mi_number(obj, MI_SSTR("permanent_contacts"), tot->permanent) < 0)
+		return -1;
+	if (tot->soonest != REG_NO_EXPIRY) {
+		if (add_mi_number(obj, MI_SSTR("soonest_expiry"),
+				(double)tot->soonest) < 0 ||
+		    add_mi_number(obj, MI_SSTR("soonest_expiry_in"),
+				(double)(tot->soonest - now)) < 0)
+			return -1;
+	}
+	if (add_mi_number(obj, MI_SSTR("scanned_keys"), tot->keys) < 0 ||
+	    add_mi_number(obj, MI_SSTR("other_docs"), tot->other) < 0 ||
+	    add_mi_number(obj, MI_SSTR("scan_ms"), tot->ms) < 0)
+		return -1;
+	return 0;
+}
+
 mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 	struct mi_handler *async_hdl)
 {
@@ -579,16 +587,12 @@ mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 	struct reg_summary_ctx *ctx;
 	int domains = 0, i;
 	time_t now = time(NULL);
-
-	str fmtp = {NULL, 0};
-	int fk = FMT_JSON, f_eol = 0, f_hdr = 1;
+	int fk, f_eol, f_hdr;
 
 	(void)async_hdl;
 	if (try_get_mi_int_param(params, "domains", &domains) < 0)
 		domains = 0;
-	/* [FMT] optional trailing format param: "<fmt>[;eol=..][;header=..]" */
-	if (try_get_mi_string_param(params, "format", &fmtp.s, &fmtp.len) == 0 &&
-	    fmtp.s && _fmt_opts_parse(fmtp.s, fmtp.len, &fk, &f_eol, &f_hdr) < 0)
+	if (nats_mi_fmt_param(params, &fk, &f_eol, &f_hdr) < 0)
 		return init_mi_error(400, MI_SSTR("bad format (json|csv|txt"
 			"[;eol=lf|crlf][;header=0|1])"));
 
@@ -606,84 +610,61 @@ mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (add_mi_string(obj, MI_SSTR("bucket"), kv_bucket,
-			(int)strlen(kv_bucket)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("aors"), tot.rows) < 0 ||
-	    add_mi_number(obj, MI_SSTR("contacts"), tot.contacts) < 0 ||
-	    add_mi_number(obj, MI_SSTR("active_contacts"), tot.active) < 0 ||
-	    add_mi_number(obj, MI_SSTR("expired_contacts"), tot.expired) < 0 ||
-	    add_mi_number(obj, MI_SSTR("permanent_contacts"), tot.permanent) < 0)
-		goto oom;
-	if (tot.soonest != REG_NO_EXPIRY) {
-		if (add_mi_number(obj, MI_SSTR("soonest_expiry"),
-				(double)tot.soonest) < 0 ||
-		    add_mi_number(obj, MI_SSTR("soonest_expiry_in"),
-				(double)(tot.soonest - now)) < 0)
-			goto oom;
-	}
-	if (add_mi_number(obj, MI_SSTR("scanned_keys"), tot.keys) < 0 ||
-	    add_mi_number(obj, MI_SSTR("other_docs"), tot.other) < 0 ||
-	    add_mi_number(obj, MI_SSTR("scan_ms"), tot.ms) < 0)
+	if (_reg_summary_meta(obj, &tot, now) < 0)
 		goto oom;
 
-	if (fk != FMT_JSON) {
-		/* [FMT] one table: the totals record, then per-domain records */
+	if (fk != FMT_JSON || ctx->want_domains) {
+		/* [P2.4] ONE walk: table = totals record + per-domain records;
+		 * json = just the domains array (totals live at top level, the
+		 * `scope` cell and the empty expired/permanent trailers are
+		 * table-structural) */
 		static const char *COLS[] = {"scope", "domain", "aors", "contacts",
 			"active", "expired", "permanent"};
-		struct fmt_table t;
-		char *blob;
-		int blen;
+		struct nats_emit em;
+		int rc = 0;
 
-		fmt_init(&t, fk, f_eol, f_hdr, COLS, 7);
-		fmt_str(&t, "total", 5);
-		fmt_empty(&t);
-		fmt_int(&t, tot.rows);
-		fmt_int(&t, tot.contacts);
-		fmt_int(&t, tot.active);
-		fmt_int(&t, tot.expired);
-		fmt_int(&t, tot.permanent);
-		fmt_end_record(&t);
+		if (nats_emit_open(&em, obj, MI_SSTR("domains"),
+				fk, f_eol, f_hdr, COLS, 7) < 0)
+			goto oom;
+		if (em.table) {
+			rc |= nats_emit_rec(&em);
+			rc |= nats_emit_lit(&em, "total", 5);
+			rc |= nats_emit_absent(&em, MI_SSTR("domain"));
+			rc |= nats_emit_i64(&em, MI_SSTR("aors"), tot.rows);
+			rc |= nats_emit_i64(&em, MI_SSTR("contacts"), tot.contacts);
+			rc |= nats_emit_i64(&em, MI_SSTR("active"), tot.active);
+			rc |= nats_emit_i64(&em, MI_SSTR("expired"), tot.expired);
+			rc |= nats_emit_i64(&em, MI_SSTR("permanent"), tot.permanent);
+			rc |= nats_emit_end(&em);
+		}
 		if (ctx->want_domains) {
-			for (i = 0; i < ctx->n_dom; i++) {
-				fmt_str(&t, "domain", 6);
-				fmt_str(&t, ctx->dom[i].d, ctx->dom[i].dlen);
-				fmt_int(&t, ctx->dom[i].aors);
-				fmt_int(&t, ctx->dom[i].contacts);
-				fmt_int(&t, ctx->dom[i].active);
-				fmt_empty(&t);
-				fmt_empty(&t);
-				fmt_end_record(&t);
+			for (i = 0; i < ctx->n_dom && rc == 0; i++) {
+				rc |= nats_emit_rec(&em);
+				rc |= nats_emit_lit(&em, "domain", 6);
+				rc |= nats_emit_str(&em, MI_SSTR("domain"),
+					ctx->dom[i].d, ctx->dom[i].dlen);
+				rc |= nats_emit_i64(&em, MI_SSTR("aors"),
+					ctx->dom[i].aors);
+				rc |= nats_emit_i64(&em, MI_SSTR("contacts"),
+					ctx->dom[i].contacts);
+				rc |= nats_emit_i64(&em, MI_SSTR("active_contacts"),
+					ctx->dom[i].active);
+				rc |= nats_emit_absent(&em, MI_SSTR("expired"));
+				rc |= nats_emit_absent(&em, MI_SSTR("permanent"));
+				rc |= nats_emit_end(&em);
 			}
 		}
-		blob = fmt_take(&t, &blen);
-		if (_fmt_attach(obj, fk, blob, blen) < 0)
+		if (rc < 0) {
+			nats_emit_abort(&em);
 			goto oom;
-		free(ctx);
-		return resp;
-	}
-
-	if (ctx->want_domains) {
-		mi_item_t *arr = add_mi_array(obj, MI_SSTR("domains"));
-		if (!arr)
-			goto oom;
-		for (i = 0; i < ctx->n_dom; i++) {
-			mi_item_t *d = add_mi_object(arr, NULL, 0);
-			if (!d)
-				goto oom;
-			if (add_mi_string(d, MI_SSTR("domain"),
-					ctx->dom[i].d, ctx->dom[i].dlen) < 0 ||
-			    add_mi_number(d, MI_SSTR("aors"), ctx->dom[i].aors) < 0 ||
-			    add_mi_number(d, MI_SSTR("contacts"),
-					ctx->dom[i].contacts) < 0 ||
-			    add_mi_number(d, MI_SSTR("active_contacts"),
-					ctx->dom[i].active) < 0)
-				goto oom;
 		}
-		if (ctx->dom_overflow_aors &&
-		    add_mi_number(obj, MI_SSTR("domains_overflow_aors"),
-				ctx->dom_overflow_aors) < 0)
+		if (nats_emit_close(&em, obj) < 0)
 			goto oom;
 	}
+	if (fk == FMT_JSON && ctx->want_domains && ctx->dom_overflow_aors &&
+	    add_mi_number(obj, MI_SSTR("domains_overflow_aors"),
+			ctx->dom_overflow_aors) < 0)
+		goto oom;
 	free(ctx);
 	return resp;
 
@@ -791,11 +772,27 @@ static void _reg_list_ctx_free(struct reg_list_ctx *c)
 	free(c->rows);
 }
 
+/* the list response envelope: match counts, page, scan stats.  0/-1. */
+static int _reg_list_meta(mi_item_t *obj, const struct reg_list_ctx *ctx,
+	const struct reg_scan_totals *tot, long start, long count)
+{
+	if (add_mi_number(obj, MI_SSTR("matched"), ctx->n) < 0 ||
+	    add_mi_number(obj, MI_SSTR("returned"), count) < 0 ||
+	    add_mi_number(obj, MI_SSTR("offset"), start) < 0 ||
+	    add_mi_number(obj, MI_SSTR("scanned_aors"), tot->rows) < 0 ||
+	    add_mi_number(obj, MI_SSTR("scan_ms"), tot->ms) < 0)
+		return -1;
+	if (ctx->truncated &&
+	    add_mi_bool(obj, MI_SSTR("truncated"), 1) < 0)
+		return -1;
+	return 0;
+}
+
 mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	struct mi_handler *async_hdl)
 {
 	mi_response_t *resp = NULL;
-	mi_item_t *obj, *arr;
+	mi_item_t *obj;
 	str fstr = {NULL, 0};
 	struct reg_filter f;
 	struct reg_scan_totals tot;
@@ -835,76 +832,51 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (add_mi_number(obj, MI_SSTR("matched"), ctx.n) < 0 ||
-	    add_mi_number(obj, MI_SSTR("returned"), count) < 0 ||
-	    add_mi_number(obj, MI_SSTR("offset"), start) < 0 ||
-	    add_mi_number(obj, MI_SSTR("scanned_aors"), tot.rows) < 0 ||
-	    add_mi_number(obj, MI_SSTR("scan_ms"), tot.ms) < 0)
-		goto oom;
-	if (ctx.truncated &&
-	    add_mi_bool(obj, MI_SSTR("truncated"), 1) < 0)
+	if (_reg_list_meta(obj, &ctx, &tot, start, count) < 0)
 		goto oom;
 
-	if (f.format != FMT_JSON) {
-		/* [FMT] one data blob instead of the aors array */
+	{
+		/* [P2.4] ONE walk; json rows land in the `aors` array, table
+		 * rows in the format/data blob */
 		static const char *COLS[] = {"aor", "contacts", "active", "expired",
 			"permanent", "expires_next", "expires_in", "last_mod"};
-		struct fmt_table t;
-		char *blob;
-		int blen;
+		struct nats_emit em;
+		int rc = 0;
 
-		fmt_init(&t, f.format, f.eol_lf, f.header, COLS, 8);
-		for (i = start; i < start + count; i++) {
+		if (nats_emit_open(&em, obj, MI_SSTR("aors"),
+				f.format, f.eol_lf, f.header, COLS, 8) < 0)
+			goto oom;
+		for (i = start; i < start + count && rc == 0; i++) {
 			struct reg_row_info *r = &ctx.rows[i];
-			fmt_str(&t, r->aor, r->aor_len);
-			fmt_int(&t, r->n_contacts);
-			fmt_int(&t, r->n_active);
-			fmt_int(&t, r->n_expired);
-			fmt_int(&t, r->n_perm);
+
+			rc |= nats_emit_rec(&em);
+			rc |= nats_emit_str(&em, MI_SSTR("aor"),
+				r->aor, r->aor_len);
+			rc |= nats_emit_i64(&em, MI_SSTR("contacts"), r->n_contacts);
+			rc |= nats_emit_i64(&em, MI_SSTR("active"), r->n_active);
+			rc |= nats_emit_i64(&em, MI_SSTR("expired"), r->n_expired);
+			rc |= nats_emit_i64(&em, MI_SSTR("permanent"), r->n_perm);
 			if (r->soonest_exp != REG_NO_EXPIRY) {
-				fmt_int(&t, r->soonest_exp);
-				fmt_int(&t, r->soonest_exp - now);
+				rc |= nats_emit_i64(&em, MI_SSTR("expires_next"),
+					r->soonest_exp);
+				rc |= nats_emit_i64(&em, MI_SSTR("expires_in"),
+					r->soonest_exp - now);
 			} else {
-				fmt_empty(&t);
-				fmt_empty(&t);
+				rc |= nats_emit_absent(&em, MI_SSTR("expires_next"));
+				rc |= nats_emit_absent(&em, MI_SSTR("expires_in"));
 			}
 			if (r->last_mod)
-				fmt_int(&t, r->last_mod);
+				rc |= nats_emit_i64(&em, MI_SSTR("last_mod"),
+					r->last_mod);
 			else
-				fmt_empty(&t);
-			fmt_end_record(&t);
+				rc |= nats_emit_absent(&em, MI_SSTR("last_mod"));
+			rc |= nats_emit_end(&em);
 		}
-		blob = fmt_take(&t, &blen);
-		if (_fmt_attach(obj, f.format, blob, blen) < 0)
+		if (rc < 0) {
+			nats_emit_abort(&em);
 			goto oom;
-		_reg_list_ctx_free(&ctx);
-		return resp;
-	}
-
-	arr = add_mi_array(obj, MI_SSTR("aors"));
-	if (!arr)
-		goto oom;
-	for (i = start; i < start + count; i++) {
-		struct reg_row_info *r = &ctx.rows[i];
-		mi_item_t *it = add_mi_object(arr, NULL, 0);
-		if (!it)
-			goto oom;
-		if (add_mi_string(it, MI_SSTR("aor"),
-				(char *)r->aor, r->aor_len) < 0 ||
-		    add_mi_number(it, MI_SSTR("contacts"), r->n_contacts) < 0 ||
-		    add_mi_number(it, MI_SSTR("active"), r->n_active) < 0 ||
-		    add_mi_number(it, MI_SSTR("expired"), r->n_expired) < 0 ||
-		    add_mi_number(it, MI_SSTR("permanent"), r->n_perm) < 0)
-			goto oom;
-		if (r->soonest_exp != REG_NO_EXPIRY) {
-			if (add_mi_number(it, MI_SSTR("expires_next"),
-					(double)r->soonest_exp) < 0 ||
-			    add_mi_number(it, MI_SSTR("expires_in"),
-					(double)(r->soonest_exp - now)) < 0)
-				goto oom;
 		}
-		if (r->last_mod &&
-		    add_mi_number(it, MI_SSTR("last_mod"), (double)r->last_mod) < 0)
+		if (nats_emit_close(&em, obj) < 0)
 			goto oom;
 	}
 	_reg_list_ctx_free(&ctx);
@@ -934,6 +906,35 @@ static int _add_mi_cdb_val(mi_item_t *to, const str *name, const cdb_val_t *v)
 	default:
 		return 0;                    /* nested dicts handled by caller */
 	}
+}
+
+/* the "expires" int of a contact dict; like the json scan, the LAST
+ * occurrence wins.  0 found, -1 absent/non-int (caller fails closed). */
+static int _contact_dict_exp(const cdb_dict_t *ct, int64_t *exp)
+{
+	struct list_head *_;
+	cdb_pair_t *fld;
+	int have = -1;
+
+	list_for_each (_, ct) {
+		fld = list_entry(_, cdb_pair_t, list);
+		if (fld->key.name.len != 7 ||
+		    memcmp(fld->key.name.s, "expires", 7) != 0)
+			continue;
+		if (fld->val.type == CDB_INT32) {
+			*exp = fld->val.val.i32; have = 0;
+		} else if (fld->val.type == CDB_INT64) {
+			*exp = fld->val.val.i64; have = 0;
+		}
+	}
+	return have;
+}
+
+static const char *_reg_state_str(int64_t exp, time_t now, int grace)
+{
+	int st = _reg_contact_state(exp, now, grace);
+	return st == REG_C_PERMANENT ? "permanent" :
+	       st == REG_C_ACTIVE ? "active" : "expired";
 }
 
 /* [FMT] emit one named field of a contact dict into the table (string ->
@@ -967,6 +968,96 @@ static void _show_fmt_field(struct fmt_table *t, const cdb_dict_t *ct,
 	fmt_empty(t);
 }
 
+/* the show response envelope: aor, key, KV entry meta, row meta.  0/-1. */
+static int _show_meta(mi_item_t *obj, const str *aor, const char *key,
+	kvEntry *e, int64_t row_exp, int64_t schema)
+{
+	if (add_mi_string(obj, MI_SSTR("aor"), aor->s, aor->len) < 0 ||
+	    add_mi_string(obj, MI_SSTR("key"), (char *)key,
+			(int)strlen(key)) < 0 ||
+	    add_mi_number(obj, MI_SSTR("revision"),
+			(double)nats_dl.kvEntry_Revision(e)) < 0 ||
+	    add_mi_number(obj, MI_SSTR("created"),
+			(double)(nats_dl.kvEntry_Created(e) / 1000000000LL)) < 0 ||
+	    add_mi_number(obj, MI_SSTR("row_exp"), (double)row_exp) < 0 ||
+	    add_mi_number(obj, MI_SSTR("schema_version"), (double)schema) < 0)
+		return -1;
+	return 0;
+}
+
+/* [FMT] one fixed-16-column table record per contact */
+static void _show_contact_fmt(struct fmt_table *t, const str *aor,
+	const cdb_pair_t *ct, time_t now)
+{
+	int64_t exp = -1;
+
+	fmt_str(t, aor->s, aor->len);
+	fmt_str(t, ct->key.name.s, ct->key.name.len);
+	_show_fmt_field(t, &ct->val.val.dict, "contact", 7);
+	if (_contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
+		const char *sn = _reg_state_str(exp, now, nats_reap_grace);
+		fmt_str(t, sn, (int)strlen(sn));
+		fmt_int(t, exp);
+		if (exp > 0)
+			fmt_int(t, exp - now);
+		else
+			fmt_empty(t);
+	} else {
+		fmt_str(t, "expired", 7);            /* fail closed */
+		fmt_empty(t);
+		fmt_empty(t);
+	}
+	_show_fmt_field(t, &ct->val.val.dict, "q", 1);
+	_show_fmt_field(t, &ct->val.val.dict, "cseq", 4);
+	_show_fmt_field(t, &ct->val.val.dict, "callid", 6);
+	_show_fmt_field(t, &ct->val.val.dict, "ua", 2);
+	_show_fmt_field(t, &ct->val.val.dict, "sock", 4);
+	_show_fmt_field(t, &ct->val.val.dict, "received", 8);
+	_show_fmt_field(t, &ct->val.val.dict, "path", 4);
+	_show_fmt_field(t, &ct->val.val.dict, "flags", 5);
+	_show_fmt_field(t, &ct->val.val.dict, "cflags", 6);
+	_show_fmt_field(t, &ct->val.val.dict, "last_mod", 8);
+	fmt_end_record(t);
+}
+
+/* json: one object per contact -- id + every scalar field in STORED order,
+ * then the computed state / expires_in.  0 ok, -1 OOM. */
+static int _show_contact_mi(mi_item_t *arr, const cdb_pair_t *ct, time_t now)
+{
+	mi_item_t *it;
+	struct list_head *_;
+	cdb_pair_t *fld;
+	int64_t exp = -1;
+
+	it = add_mi_object(arr, NULL, 0);
+	if (!it)
+		return -1;
+	if (add_mi_string(it, MI_SSTR("id"),
+			ct->key.name.s, ct->key.name.len) < 0)
+		return -1;
+	list_for_each (_, &ct->val.val.dict) {
+		fld = list_entry(_, cdb_pair_t, list);
+		if (fld->val.type == CDB_DICT)
+			continue;
+		if (_add_mi_cdb_val(it, &fld->key.name, &fld->val) < 0)
+			return -1;
+	}
+	if (_contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
+		const char *sn = _reg_state_str(exp, now, nats_reap_grace);
+		if (add_mi_string(it, MI_SSTR("state"),
+				(char *)sn, (int)strlen(sn)) < 0)
+			return -1;
+		if (exp > 0 &&
+		    add_mi_number(it, MI_SSTR("expires_in"),
+				(double)(exp - now)) < 0)
+			return -1;
+	} else if (add_mi_string(it, MI_SSTR("state"),
+			MI_SSTR("expired")) < 0) {
+		return -1;                           /* fail closed */
+	}
+	return 0;
+}
+
 mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	struct mi_handler *async_hdl)
 {
@@ -985,17 +1076,14 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	cdb_pair_t *pair;
 	int64_t row_exp = 0, schema = 0;
 	time_t now = time(NULL);
-
-	str fmtp = {NULL, 0};
-	int fk = FMT_JSON, f_eol = 0, f_hdr = 1;
+	int fk, f_eol, f_hdr;
 	struct fmt_table ftab;
 	int fmt_active = 0;
 
 	(void)async_hdl;
 	if (get_mi_string_param(params, "aor", &aor.s, &aor.len) < 0)
 		return init_mi_error(400, MI_SSTR("missing aor"));
-	if (try_get_mi_string_param(params, "format", &fmtp.s, &fmtp.len) == 0 &&
-	    fmtp.s && _fmt_opts_parse(fmtp.s, fmtp.len, &fk, &f_eol, &f_hdr) < 0)
+	if (nats_mi_fmt_param(params, &fk, &f_eol, &f_hdr) < 0)
 		return init_mi_error(400, MI_SSTR("bad format (json|csv|txt"
 			"[;eol=lf|crlf][;header=0|1])"));
 
@@ -1034,14 +1122,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (add_mi_string(obj, MI_SSTR("aor"), aor.s, aor.len) < 0 ||
-	    add_mi_string(obj, MI_SSTR("key"), key, (int)strlen(key)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("revision"),
-			(double)nats_dl.kvEntry_Revision(e)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("created"),
-			(double)(nats_dl.kvEntry_Created(e) / 1000000000LL)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("row_exp"), (double)row_exp) < 0 ||
-	    add_mi_number(obj, MI_SSTR("schema_version"), (double)schema) < 0)
+	if (_show_meta(obj, &aor, key, e, row_exp, schema) < 0)
 		goto oom;
 
 	if (fk != FMT_JSON) {
@@ -1058,114 +1139,22 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	}
 
 	list_for_each (_, &dict) {
+		struct list_head *__;
+		cdb_pair_t *ct;
+
 		pair = list_entry(_, cdb_pair_t, list);
-		if (pair->key.name.len == 8 &&
-		    memcmp(pair->key.name.s, "contacts", 8) == 0 &&
-		    pair->val.type == CDB_DICT) {
-			struct list_head *__;
-			cdb_pair_t *ct;
-			list_for_each (__, &pair->val.val.dict) {
-				mi_item_t *it;
-				struct list_head *___;
-				cdb_pair_t *fld;
-				int64_t exp = -1;
-				int have_exp = 0;
-
-				ct = list_entry(__, cdb_pair_t, list);
-				if (ct->val.type != CDB_DICT)
-					continue;
-				if (fmt_active) {
-					/* [FMT] one record per contact */
-					int64_t exp = -1;
-					int have_exp = 0;
-					struct list_head *___f;
-					cdb_pair_t *fldf;
-
-					fmt_str(&ftab, aor.s, aor.len);
-					fmt_str(&ftab, ct->key.name.s, ct->key.name.len);
-					_show_fmt_field(&ftab, &ct->val.val.dict,
-						"contact", 7);
-					list_for_each (___f, &ct->val.val.dict) {
-						fldf = list_entry(___f, cdb_pair_t, list);
-						if (fldf->key.name.len == 7 &&
-						    memcmp(fldf->key.name.s, "expires", 7) == 0) {
-							if (fldf->val.type == CDB_INT32) {
-								exp = fldf->val.val.i32; have_exp = 1;
-							} else if (fldf->val.type == CDB_INT64) {
-								exp = fldf->val.val.i64; have_exp = 1;
-							}
-						}
-					}
-					if (have_exp) {
-						int stc = _reg_contact_state(exp, now,
-							nats_reap_grace);
-						const char *sn = stc == REG_C_PERMANENT ?
-							"permanent" : stc == REG_C_ACTIVE ?
-							"active" : "expired";
-						fmt_str(&ftab, sn, (int)strlen(sn));
-						fmt_int(&ftab, exp);
-						if (exp > 0)
-							fmt_int(&ftab, exp - now);
-						else
-							fmt_empty(&ftab);
-					} else {
-						fmt_str(&ftab, "expired", 7);  /* fail closed */
-						fmt_empty(&ftab);
-						fmt_empty(&ftab);
-					}
-					_show_fmt_field(&ftab, &ct->val.val.dict, "q", 1);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "cseq", 4);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "callid", 6);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "ua", 2);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "sock", 4);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "received", 8);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "path", 4);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "flags", 5);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "cflags", 6);
-					_show_fmt_field(&ftab, &ct->val.val.dict, "last_mod", 8);
-					fmt_end_record(&ftab);
-					continue;
-				}
-				it = add_mi_object(arr, NULL, 0);
-				if (!it)
-					goto oom;
-				if (add_mi_string(it, MI_SSTR("id"),
-						ct->key.name.s, ct->key.name.len) < 0)
-					goto oom;
-				list_for_each (___, &ct->val.val.dict) {
-					fld = list_entry(___, cdb_pair_t, list);
-					if (fld->val.type == CDB_DICT)
-						continue;
-					if (_add_mi_cdb_val(it, &fld->key.name,
-							&fld->val) < 0)
-						goto oom;
-					if (fld->key.name.len == 7 &&
-					    memcmp(fld->key.name.s, "expires", 7) == 0) {
-						if (fld->val.type == CDB_INT32) {
-							exp = fld->val.val.i32; have_exp = 1;
-						} else if (fld->val.type == CDB_INT64) {
-							exp = fld->val.val.i64; have_exp = 1;
-						}
-					}
-				}
-				if (have_exp) {
-					int st = _reg_contact_state(exp, now,
-						nats_reap_grace);
-					const char *sn = st == REG_C_PERMANENT ?
-						"permanent" : st == REG_C_ACTIVE ?
-						"active" : "expired";
-					if (add_mi_string(it, MI_SSTR("state"),
-							(char *)sn, (int)strlen(sn)) < 0)
-						goto oom;
-					if (exp > 0 &&
-					    add_mi_number(it, MI_SSTR("expires_in"),
-							(double)(exp - now)) < 0)
-						goto oom;
-				} else if (add_mi_string(it, MI_SSTR("state"),
-						MI_SSTR("expired")) < 0) {
-					goto oom;   /* fail-closed, like the read path */
-				}
-			}
+		if (pair->key.name.len != 8 ||
+		    memcmp(pair->key.name.s, "contacts", 8) != 0 ||
+		    pair->val.type != CDB_DICT)
+			continue;
+		list_for_each (__, &pair->val.val.dict) {
+			ct = list_entry(__, cdb_pair_t, list);
+			if (ct->val.type != CDB_DICT)
+				continue;
+			if (fmt_active)
+				_show_contact_fmt(&ftab, &aor, ct, now);
+			else if (_show_contact_mi(arr, ct, now) < 0)
+				goto oom;
 		}
 	}
 
@@ -1173,7 +1162,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 		int blen;
 		char *blob = fmt_take(&ftab, &blen);
 		fmt_active = 0;
-		if (_fmt_attach(obj, fk, blob, blen) < 0)
+		if (nats_emit_attach_blob(obj, fk, blob, blen) < 0)
 			goto oom;
 	}
 

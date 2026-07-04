@@ -52,6 +52,7 @@
 #include "cachedb_nats_dbase.h"          /* kv_bucket default                */
 #include "cachedb_nats_reg.h"            /* _reg_page (shared pagination)    */
 #include "cachedb_nats_fmt.h"            /* [FMT] csv/txt table rendering    */
+#include "cachedb_nats_emit.h"           /* [P2.4] one-walk row emitter      */
 #include "cachedb_nats_kvobs.h"
 
 /* ==================================================================== */
@@ -155,24 +156,6 @@ int _kvobs_bucket_of_stream(const char *stream, int len,
 /* MI handlers                                                          */
 /* ==================================================================== */
 
-/* [FMT] attach format + data to the response object; frees the blob */
-static const char *_kvobs_fmt_name(int kind)
-{
-	return kind == FMT_CSV ? "csv" : kind == FMT_TXT ? "txt" : "json";
-}
-static int _kvobs_fmt_attach(mi_item_t *obj, int kind, char *blob, int blen)
-{
-	int rc = -1;
-	if (blob &&
-	    add_mi_string(obj, MI_SSTR("format"),
-			(char *)_kvobs_fmt_name(kind),
-			(int)strlen(_kvobs_fmt_name(kind))) == 0 &&
-	    add_mi_string(obj, MI_SSTR("data"), blob, blen) == 0)
-		rc = 0;
-	free(blob);
-	return rc;
-}
-
 static const char *_storage_name(int st)
 {
 	return st == js_MemoryStorage ? "memory" : "file";
@@ -202,7 +185,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 	struct mi_handler *async_hdl)
 {
 	mi_response_t *resp = NULL;
-	mi_item_t *obj, *arr;
+	mi_item_t *obj;
 	str fstr = {NULL, 0};
 	struct kvobs_filter f;
 	jsCtx *js;
@@ -256,70 +239,49 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 	    add_mi_number(obj, MI_SSTR("returned"), count) < 0 ||
 	    add_mi_number(obj, MI_SSTR("offset"), start) < 0)
 		goto oom;
-	if (f.format != FMT_JSON) {
+	{
+		/* [P2.4] ONE walk; json rows land in the `streams` array,
+		 * table rows in the format/data blob */
 		static const char *COLS[] = {"name", "kv_bucket", "messages",
 			"bytes", "subjects", "consumers", "storage"};
-		struct fmt_table t;
-		char *blob;
-		int blen;
+		struct nats_emit em;
+		int rc = 0;
 
-		fmt_init(&t, f.format, f.eol_lf, f.header, COLS, 7);
-		for (i = start; i < start + count; i++) {
+		if (nats_emit_open(&em, obj, MI_SSTR("streams"),
+				f.format, f.eol_lf, f.header, COLS, 7) < 0)
+			goto oom;
+		for (i = start; i < start + count && rc == 0; i++) {
 			jsStreamInfo *si = match[i];
 			const char *name = si->Config->Name;
-			const char *bk; int bl;
 			const char *stn = _storage_name(si->Config->Storage);
+			const char *bk; int bl;
 
-			fmt_str(&t, name, (int)strlen(name));
+			rc |= nats_emit_rec(&em);
+			rc |= nats_emit_str(&em, MI_SSTR("name"),
+				name, (int)strlen(name));
 			if (_kvobs_bucket_of_stream(name, (int)strlen(name),
 					&bk, &bl) == 0)
-				fmt_str(&t, bk, bl);
+				rc |= nats_emit_str(&em, MI_SSTR("kv_bucket"),
+					bk, bl);
 			else
-				fmt_empty(&t);
-			fmt_int(&t, (long long)si->State.Msgs);
-			fmt_int(&t, (long long)si->State.Bytes);
-			fmt_int(&t, (long long)si->State.NumSubjects);
-			fmt_int(&t, (long long)si->State.Consumers);
-			fmt_str(&t, stn, (int)strlen(stn));
-			fmt_end_record(&t);
+				rc |= nats_emit_absent(&em, MI_SSTR("kv_bucket"));
+			rc |= nats_emit_i64(&em, MI_SSTR("messages"),
+				(long long)si->State.Msgs);
+			rc |= nats_emit_i64(&em, MI_SSTR("bytes"),
+				(long long)si->State.Bytes);
+			rc |= nats_emit_i64(&em, MI_SSTR("subjects"),
+				(long long)si->State.NumSubjects);
+			rc |= nats_emit_i64(&em, MI_SSTR("consumers"),
+				(long long)si->State.Consumers);
+			rc |= nats_emit_str(&em, MI_SSTR("storage"),
+				stn, (int)strlen(stn));
+			rc |= nats_emit_end(&em);
 		}
-		blob = fmt_take(&t, &blen);
-		if (_kvobs_fmt_attach(obj, f.format, blob, blen) < 0)
+		if (rc < 0) {
+			nats_emit_abort(&em);
 			goto oom;
-		free(match);
-		nats_dl.jsStreamInfoList_Destroy(list);
-		return resp;
-	}
-
-	arr = add_mi_array(obj, MI_SSTR("streams"));
-	if (!arr)
-		goto oom;
-	for (i = start; i < start + count; i++) {
-		jsStreamInfo *si = match[i];
-		const char *name = si->Config->Name;
-		const char *bk; int bl;
-		mi_item_t *it = add_mi_object(arr, NULL, 0);
-
-		if (!it)
-			goto oom;
-		if (add_mi_string(it, MI_SSTR("name"),
-				(char *)name, (int)strlen(name)) < 0)
-			goto oom;
-		if (_kvobs_bucket_of_stream(name, (int)strlen(name),
-				&bk, &bl) == 0 &&
-		    add_mi_string(it, MI_SSTR("kv_bucket"), (char *)bk, bl) < 0)
-			goto oom;
-		if (add_mi_number(it, MI_SSTR("messages"),
-				(double)si->State.Msgs) < 0 ||
-		    add_mi_number(it, MI_SSTR("bytes"),
-				(double)si->State.Bytes) < 0 ||
-		    add_mi_number(it, MI_SSTR("subjects"),
-				(double)si->State.NumSubjects) < 0 ||
-		    add_mi_number(it, MI_SSTR("consumers"),
-				(double)si->State.Consumers) < 0 ||
-		    add_mi_string(it, MI_SSTR("storage"),
-				(char *)_storage_name(si->Config->Storage),
-				(int)strlen(_storage_name(si->Config->Storage))) < 0)
+		}
+		if (nats_emit_close(&em, obj) < 0)
 			goto oom;
 	}
 	free(match);
@@ -347,15 +309,12 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 	jsStreamInfo *si = NULL;
 	jsErrCode jerr = 0;
 	int i;
-
-	str fmtp = {NULL, 0};
-	int fk = FMT_JSON, f_eol = 0, f_hdr = 1;
+	int fk, f_eol, f_hdr;
 
 	(void)async_hdl;
 	if (get_mi_string_param(params, "stream", &name.s, &name.len) < 0)
 		return init_mi_error(400, MI_SSTR("missing stream"));
-	if (try_get_mi_string_param(params, "format", &fmtp.s, &fmtp.len) == 0 &&
-	    fmtp.s && _fmt_opts_parse(fmtp.s, fmtp.len, &fk, &f_eol, &f_hdr) < 0)
+	if (nats_mi_fmt_param(params, &fk, &f_eol, &f_hdr) < 0)
 		return init_mi_error(400, MI_SSTR("bad format (json|csv|txt"
 			"[;eol=lf|crlf][;header=0|1])"));
 	if (name.len <= 0 || name.len >= (int)sizeof(sname))
@@ -446,7 +405,7 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 #undef KVLINE_I
 		}
 		blob = fmt_take(&t, &blen);
-		if (_kvobs_fmt_attach(obj, fk, blob, blen) < 0)
+		if (nats_emit_attach_blob(obj, fk, blob, blen) < 0)
 			goto oom;
 		nats_dl.jsStreamInfo_Destroy(si);
 		return resp;
@@ -516,6 +475,73 @@ static int _key_name_cmp(const void *a, const void *b)
 	return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
 
+/* glob-filter + sort the live keys into a fresh malloc'd view (may stay
+ * NULL when there is nothing to match).  Match count, or -1 on OOM. */
+static long _kv_keys_match(const kvKeysList *keys, int have_keys,
+	const struct kvobs_filter *f, const char ***match_out)
+{
+	const char **match;
+	long n = 0, i;
+
+	*match_out = NULL;
+	if (!have_keys || keys->Count <= 0)
+		return 0;
+	match = malloc(keys->Count * sizeof(*match));
+	if (!match)
+		return -1;
+	for (i = 0; i < keys->Count; i++) {
+		if (!keys->Keys[i])
+			continue;
+		if (f->key_glob[0] &&
+		    fnmatch(f->key_glob, keys->Keys[i], 0) != 0)
+			continue;
+		match[n++] = keys->Keys[i];
+	}
+	qsort(match, n, sizeof(*match), _key_name_cmp);
+	*match_out = match;
+	return n;
+}
+
+/* the kv_keys response envelope: bucket + counts + page.  0/-1. */
+static int _kv_keys_meta(mi_item_t *obj, const char *bucket, long live,
+	long n, long start, long count)
+{
+	if (add_mi_string(obj, MI_SSTR("bucket"),
+			(char *)bucket, (int)strlen(bucket)) < 0 ||
+	    add_mi_number(obj, MI_SSTR("live_keys"), (double)live) < 0 ||
+	    add_mi_number(obj, MI_SSTR("matched"), n) < 0 ||
+	    add_mi_number(obj, MI_SSTR("returned"), count) < 0 ||
+	    add_mi_number(obj, MI_SSTR("offset"), start) < 0)
+		return -1;
+	return 0;
+}
+
+/* detail=1: one Get for @key -- revision/created/size; a key that vanished
+ * mid-scan gets three empty table cells, or a json `note`. */
+static int _kv_key_detail(struct nats_emit *em, kvStore *kv, const char *key)
+{
+	kvEntry *e = NULL;
+	int rc = 0;
+
+	if (nats_dl.kvStore_Get(&e, kv, key) == NATS_OK) {
+		rc |= nats_emit_i64(em, MI_SSTR("revision"),
+			(long long)nats_dl.kvEntry_Revision(e));
+		rc |= nats_emit_i64(em, MI_SSTR("created"),
+			(long long)(nats_dl.kvEntry_Created(e) / 1000000000LL));
+		rc |= nats_emit_i64(em, MI_SSTR("size"),
+			nats_dl.kvEntry_ValueLen(e));
+		nats_dl.kvEntry_Destroy(e);
+	} else if (em->table) {
+		rc |= nats_emit_absent(em, MI_SSTR("revision"));
+		rc |= nats_emit_absent(em, MI_SSTR("created"));
+		rc |= nats_emit_absent(em, MI_SSTR("size"));
+	} else {
+		rc |= nats_emit_str(em, MI_SSTR("note"),
+			MI_SSTR("vanished mid-scan"));
+	}
+	return rc;
+}
+
 mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 	struct mi_handler *async_hdl)
 {
@@ -554,109 +580,56 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 		return init_mi_error(503, MI_SSTR("key listing failed"));
 	}
 
-	if (s == NATS_OK && keys.Count > 0) {
-		match = malloc(keys.Count * sizeof(*match));
-		if (!match) {
-			nats_dl.kvKeysList_Destroy(&keys);
-			nats_dl.kvStore_Destroy(kv);
-			return init_mi_error(500, MI_SSTR("out of memory"));
-		}
-		for (i = 0; i < keys.Count; i++) {
-			if (!keys.Keys[i])
-				continue;
-			if (f.key_glob[0] &&
-			    fnmatch(f.key_glob, keys.Keys[i], 0) != 0)
-				continue;
-			match[n++] = keys.Keys[i];
-		}
-		qsort(match, n, sizeof(*match), _key_name_cmp);
+	n = _kv_keys_match(&keys, s == NATS_OK, &f, &match);
+	if (n < 0) {
+		nats_dl.kvKeysList_Destroy(&keys);
+		nats_dl.kvStore_Destroy(kv);
+		return init_mi_error(500, MI_SSTR("out of memory"));
 	}
 	_reg_page(n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (add_mi_string(obj, MI_SSTR("bucket"),
-			(char *)bucket, (int)strlen(bucket)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("live_keys"),
-			(double)(s == NATS_OK ? keys.Count : 0)) < 0 ||
-	    add_mi_number(obj, MI_SSTR("matched"), n) < 0 ||
-	    add_mi_number(obj, MI_SSTR("returned"), count) < 0 ||
-	    add_mi_number(obj, MI_SSTR("offset"), start) < 0)
+	if (_kv_keys_meta(obj, bucket, s == NATS_OK ? keys.Count : 0,
+			n, start, count) < 0)
 		goto oom;
-	if (f.format != FMT_JSON) {
-		static const char *COLS1[] = {"key"};
-		static const char *COLS4[] = {"key", "revision", "created", "size"};
-		struct fmt_table t;
-		char *blob;
-		int blen;
-
-		fmt_init(&t, f.format, f.eol_lf, f.header,
-			f.detail ? COLS4 : COLS1, f.detail ? 4 : 1);
-		for (i = start; i < start + count; i++) {
-			fmt_str(&t, match[i], (int)strlen(match[i]));
-			if (f.detail) {
-				kvEntry *e = NULL;
-				if (nats_dl.kvStore_Get(&e, kv, match[i]) == NATS_OK) {
-					fmt_int(&t, (long long)nats_dl.kvEntry_Revision(e));
-					fmt_int(&t, (long long)(nats_dl.kvEntry_Created(e)
-						/ 1000000000LL));
-					fmt_int(&t, nats_dl.kvEntry_ValueLen(e));
-					nats_dl.kvEntry_Destroy(e);
-				} else {
-					fmt_empty(&t);
-					fmt_empty(&t);
-					fmt_empty(&t);
-				}
-			}
-			fmt_end_record(&t);
-		}
-		blob = fmt_take(&t, &blen);
-		if (_kvobs_fmt_attach(obj, f.format, blob, blen) < 0)
+	if (f.format == FMT_JSON && !f.detail) {
+		/* the plain page is a BARE string array, not objects */
+		arr = add_mi_array(obj, MI_SSTR("keys"));
+		if (!arr)
 			goto oom;
-		free(match);
-		if (s == NATS_OK)
-			nats_dl.kvKeysList_Destroy(&keys);
-		nats_dl.kvStore_Destroy(kv);
-		return resp;
-	}
-
-	arr = add_mi_array(obj, MI_SSTR("keys"));
-	if (!arr)
-		goto oom;
-	for (i = start; i < start + count; i++) {
-		if (!f.detail) {
+		for (i = start; i < start + count; i++)
 			if (add_mi_string(arr, NULL, 0, (char *)match[i],
 					(int)strlen(match[i])) < 0)
 				goto oom;
-			continue;
+	} else {
+		/* [P2.4] ONE walk for the table pages and the json detail
+		 * page; detail=1 does one Get per RETURNED key (bounded by
+		 * the limit cap) */
+		static const char *COLS1[] = {"key"};
+		static const char *COLS4[] = {"key", "revision", "created", "size"};
+		struct nats_emit em;
+		int rc = 0;
+
+		if (nats_emit_open(&em, obj, MI_SSTR("keys"),
+				f.format, f.eol_lf, f.header,
+				f.detail ? COLS4 : COLS1, f.detail ? 4 : 1) < 0)
+			goto oom;
+		for (i = start; i < start + count && rc == 0; i++) {
+			rc |= nats_emit_rec(&em);
+			rc |= nats_emit_str(&em, MI_SSTR("key"),
+				match[i], (int)strlen(match[i]));
+			if (f.detail)
+				rc |= _kv_key_detail(&em, kv, match[i]);
+			rc |= nats_emit_end(&em);
 		}
-		/* detail=1: one Get per RETURNED key (bounded by the limit cap) */
-		{
-			kvEntry *e = NULL;
-			mi_item_t *it = add_mi_object(arr, NULL, 0);
-			if (!it)
-				goto oom;
-			if (add_mi_string(it, MI_SSTR("key"), (char *)match[i],
-					(int)strlen(match[i])) < 0)
-				goto oom;
-			if (nats_dl.kvStore_Get(&e, kv, match[i]) == NATS_OK) {
-				if (add_mi_number(it, MI_SSTR("revision"),
-						(double)nats_dl.kvEntry_Revision(e)) < 0 ||
-				    add_mi_number(it, MI_SSTR("created"),
-						(double)(nats_dl.kvEntry_Created(e)
-							/ 1000000000LL)) < 0 ||
-				    add_mi_number(it, MI_SSTR("size"),
-						(double)nats_dl.kvEntry_ValueLen(e)) < 0) {
-					nats_dl.kvEntry_Destroy(e);
-					goto oom;
-				}
-				nats_dl.kvEntry_Destroy(e);
-			} else if (add_mi_string(it, MI_SSTR("note"),
-					MI_SSTR("vanished mid-scan")) < 0) {
-				goto oom;
-			}
+		if (rc < 0) {
+			nats_emit_abort(&em);
+			goto oom;
 		}
+		if (nats_emit_close(&em, obj) < 0)
+			goto oom;
 	}
 	free(match);
 	if (s == NATS_OK)

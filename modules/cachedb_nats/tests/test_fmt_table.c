@@ -17,7 +17,9 @@
  *
  *   gcc -DFMT_CURRENT ... -> naive formatter: no quoting, no sanitizing,
  *                            LF-only, header always, options unparsed => RED.
- *   gcc ...               -> the FIXED formatter => GREEN.
+ *   gcc ...               -> the PRODUCTION formatter (../cachedb_nats_fmt.c
+ *                            compiled directly -- no carried copy, P2.4)
+ *                            => GREEN.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_fmt_table test_fmt_table.c
  */
@@ -25,9 +27,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum fmt_kind { FMT_JSON = 0, FMT_CSV = 1, FMT_TXT = 2 };
+#ifndef FMT_CURRENT
 
-/* ─── carried copies of the production formatter (cachedb_nats_fmt.c) ─── */
+#include "../cachedb_nats_fmt.c"
+
+#else /* FMT_CURRENT: the naive pre-[FMT] formatter, kept as RED evidence */
+
+enum fmt_kind { FMT_JSON = 0, FMT_CSV = 1, FMT_TXT = 2 };
 
 struct fmt_table {
 	char *buf;
@@ -60,14 +66,7 @@ static int _fmt_put(struct fmt_table *t, const char *p, int n)
 
 static void _fmt_eol(struct fmt_table *t)
 {
-#ifdef FMT_CURRENT
 	_fmt_put(t, "\n", 1);                      /* LF only */
-#else
-	if (t->eol_lf)
-		_fmt_put(t, "\n", 1);
-	else
-		_fmt_put(t, "\r\n", 2);
-#endif
 }
 
 static void _fmt_sep(struct fmt_table *t)
@@ -77,41 +76,9 @@ static void _fmt_sep(struct fmt_table *t)
 	_fmt_put(t, t->kind == FMT_CSV ? "," : "\t", 1);
 }
 
-/* csv: RFC 4180 quoting; txt: TAB/CR/LF in the value -> one space */
 static void _fmt_value(struct fmt_table *t, const char *s, int n)
 {
-#ifdef FMT_CURRENT
 	_fmt_put(t, s, n);                         /* verbatim, no protection */
-#else
-	int i, needs_quote = 0;
-
-	if (t->kind == FMT_TXT) {
-		for (i = 0; i < n; i++) {
-			char c = s[i];
-			if (c == '\t' || c == '\r' || c == '\n')
-				c = ' ';
-			_fmt_put(t, &c, 1);
-		}
-		return;
-	}
-	for (i = 0; i < n; i++)
-		if (s[i] == ',' || s[i] == '"' || s[i] == '\r' || s[i] == '\n') {
-			needs_quote = 1;
-			break;
-		}
-	if (!needs_quote) {
-		_fmt_put(t, s, n);
-		return;
-	}
-	_fmt_put(t, "\"", 1);
-	for (i = 0; i < n; i++) {
-		if (s[i] == '"')
-			_fmt_put(t, "\"\"", 2);
-		else
-			_fmt_put(t, &s[i], 1);
-	}
-	_fmt_put(t, "\"", 1);
-#endif
 }
 
 static void fmt_str(struct fmt_table *t, const char *s, int n)
@@ -145,11 +112,7 @@ static int fmt_init(struct fmt_table *t, int kind, int eol_lf, int header,
 	memset(t, 0, sizeof(*t));
 	t->kind = kind;
 	t->eol_lf = eol_lf;
-#ifdef FMT_CURRENT
-	header = 1;                                /* flag ignored */
-#endif
-	if (!header)
-		return 0;
+	(void)header;                              /* flag ignored: always on */
 	if (kind == FMT_TXT)
 		_fmt_put(t, "# ", 2);
 	for (i = 0; i < ncols; i++) {
@@ -177,81 +140,15 @@ static char *fmt_take(struct fmt_table *t, int *out_len)
 	return b;
 }
 
-/* ─── format option parsing: bare kind, or ';' tokens (FMT-5) ────── */
-
-static int _fmt_kind_parse(const char *v, int n)
-{
-	if (n == 4 && memcmp(v, "json", 4) == 0) return FMT_JSON;
-	if (n == 3 && memcmp(v, "csv", 3) == 0)  return FMT_CSV;
-	if (n == 3 && memcmp(v, "txt", 3) == 0)  return FMT_TXT;
-	return -1;
-}
-
-/* "<fmt>[;eol=lf|crlf][;header=0|1]" or "format=<fmt>;..."; 0 ok / -1 bad */
 static int _fmt_opts_parse(const char *s, int len,
 	int *kind, int *eol_lf, int *header)
 {
 	*kind = FMT_JSON; *eol_lf = 0; *header = 1;
-#ifdef FMT_CURRENT
-	(void)s; (void)len; return 0;              /* unparsed */
-#else
-	{
-		const char *p = s, *end = s + len;
-		int first = 1;
-		while (p < end) {
-			const char *tok = p, *eq, *te;
-			while (p < end && *p != ';')
-				p++;
-			te = p;
-			if (p < end)
-				p++;
-			while (tok < te && (*tok == ' ' || *tok == '\t')) tok++;
-			while (te > tok && (te[-1] == ' ' || te[-1] == '\t')) te--;
-			if (tok == te)
-				continue;
-			for (eq = tok; eq < te && *eq != '='; eq++)
-				;
-			if (eq == te) {
-				int k;
-				if (!first)
-					return -1;             /* bare kind only leads */
-				k = _fmt_kind_parse(tok, (int)(te - tok));
-				if (k < 0)
-					return -1;
-				*kind = k;
-			} else {
-				int klen = (int)(eq - tok);
-				const char *v = eq + 1;
-				int vlen = (int)(te - eq - 1);
-				if (klen == 6 && memcmp(tok, "format", 6) == 0) {
-					int k = _fmt_kind_parse(v, vlen);
-					if (k < 0)
-						return -1;
-					*kind = k;
-				} else if (klen == 3 && memcmp(tok, "eol", 3) == 0) {
-					if (vlen == 2 && memcmp(v, "lf", 2) == 0)
-						*eol_lf = 1;
-					else if (vlen == 4 && memcmp(v, "crlf", 4) == 0)
-						*eol_lf = 0;
-					else
-						return -1;
-				} else if (klen == 6 && memcmp(tok, "header", 6) == 0) {
-					if (vlen == 1 && *v == '0')
-						*header = 0;
-					else if (vlen == 1 && *v == '1')
-						*header = 1;
-					else
-						return -1;
-				} else {
-					return -1;
-				}
-			}
-			first = 0;
-		}
-		return 0;
-	}
-#endif
+	(void)s; (void)len;
+	return 0;                                  /* unparsed */
 }
+
+#endif /* FMT_CURRENT */
 
 /* ─── harness ─────────────────────────────────────────────────────── */
 
@@ -275,7 +172,7 @@ int main(void)
 #ifdef FMT_CURRENT
 	printf("== carried copy: FMT_CURRENT (naive) ==\n");
 #else
-	printf("== carried copy: FIXED formatter ==\n");
+	printf("== production TU: FIXED formatter ==\n");
 #endif
 
 	printf("[FMT-5] csv basics: header, CRLF, plain fields:\n");
