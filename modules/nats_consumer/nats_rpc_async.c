@@ -391,9 +391,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		/* Consumer-side abandon (publish failed, etc.).  Tear
 		 * down and report timeout / connection-lost based on
 		 * pool state. */
-		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
-		int      cur_conn  = nats_pool_is_connected();
-		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
+		int disc = nats_epoch_lost(&s->epoch_at_start);
 
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_rpc_slot_free(s, w->gen);
@@ -416,9 +414,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 	 * surface -1 even though the async core has no built-in
 	 * timeout for raw FDs.  Otherwise re-arm and keep polling. */
 	if (now_us_monotonic() >= w->deadline_us) {
-		uint32_t cur_epoch = (uint32_t)nats_pool_get_reconnect_epoch();
-		int      cur_conn  = nats_pool_is_connected();
-		int      disc = !cur_conn || cur_epoch != s->epoch_at_start;
+		int disc = nats_epoch_lost(&s->epoch_at_start);
 
 		/* Claim the timeout only if we actually WIN the INFLIGHT ->
 		 * ABANDONED CAS.  If abandon() reports any other state the consumer
@@ -597,7 +593,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		slot->corr_id[0] = '\0';
 		slot->corr_id_len = 0;
 	}
-	slot->epoch_at_start = (uint32_t)nats_pool_get_reconnect_epoch();
+	nats_epoch_save(&slot->epoch_at_start);
 	ipc_gen = atomic_load_explicit(&slot->generation,
 		memory_order_relaxed);
 	/* [P2.2] Stamp the per-call deadline into the slot BEFORE the

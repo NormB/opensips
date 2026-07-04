@@ -44,6 +44,7 @@
 #define CACHEDB_NATS_H
 
 #include <nats/nats.h>
+#include "../../lib/nats/nats_epoch.h"
 #include "../../cachedb/cachedb.h"
 #include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
 
@@ -77,11 +78,9 @@ typedef struct _nats_cachedb_con {
                                          * allocated, freed on destroy).
                                          * Corresponds to the "database"
                                          * portion of the cachedb URL. */
-    int kv_epoch;                       /* Reconnect epoch at which this
-                                         * kv handle was obtained.  Compared
-                                         * against nats_pool_get_reconnect_epoch()
-                                         * to detect staleness.  See
-                                         * nats_con_refresh_kv(). */
+    nats_epoch_t kv_epoch;              /* [P2.8] epoch tag of the kv
+                                         * handle (lib/nats/nats_epoch.h);
+                                         * see nats_con_refresh_kv(). */
 } nats_cachedb_con;
 
 /*

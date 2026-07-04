@@ -883,7 +883,7 @@ void mark_orphan_retired_handles(void)
 void nats_consumer_proc_main(int rank)
 {
 	int retry_fd;
-	int baseline_epoch;
+	nats_epoch_t proc_epoch;   /* [P2.8] tag of the current sub set */
 
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
@@ -930,7 +930,7 @@ void nats_consumer_proc_main(int rank)
 		}
 	}
 
-	baseline_epoch = nats_pool_get_reconnect_epoch();
+	nats_epoch_save(&proc_epoch);
 
 	/* Blocking-idle timerfd -- armed each idle round to cap how long
 	 * we sleep when there is no worker ack traffic.  If timerfd_create
@@ -956,7 +956,7 @@ void nats_consumer_proc_main(int rank)
 
 	LM_INFO("nats_consumer_proc: pool ready, ipc_fd=%d retry_fd=%d, "
 		"baseline_epoch=%d, entering main loop\n",
-		IPC_FD_READ_SELF, retry_fd, baseline_epoch);
+		IPC_FD_READ_SELF, retry_fd, proc_epoch.seen);
 
 	if (nats_consumer_hb) {
 		atomic_store_explicit(&nats_consumer_hb->consumer_pid,
@@ -996,11 +996,11 @@ void nats_consumer_proc_main(int rank)
 		 *    failure mode where nats.c has internally re-plumbed
 		 *    everything but our old Subscription* still points at a
 		 *    dead context. */
-		cur_epoch = nats_pool_get_reconnect_epoch();
-		if (cur_epoch != baseline_epoch) {
+		cur_epoch = nats_epoch_snapshot();
+		if (!nats_epoch_current(&proc_epoch)) {
 			LM_INFO("nats_consumer_proc: reconnect detected "
 				"(epoch %d -> %d); refreshing all subscriptions\n",
-				baseline_epoch, cur_epoch);
+				proc_epoch.seen, cur_epoch);
 			for (ss = g_subs; ss; ss = ss->next) {
 				if (ss->sub) {
 					nats_dl.natsSubscription_Unsubscribe(ss->sub);
@@ -1015,7 +1015,9 @@ void nats_consumer_proc_main(int rank)
 				}
 				ss->dirty = 1;
 			}
-			baseline_epoch = cur_epoch;
+			/* adopt the PRE-refresh snapshot: a reconnect landing
+			 * mid-loop re-triggers this block next tick [P2.8] */
+			nats_epoch_adopt(&proc_epoch, cur_epoch);
 		}
 
 		/* 0b. Async-RPC inbox retry.  The one-shot subscribe before the

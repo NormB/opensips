@@ -107,7 +107,7 @@ static nats_cachedb_con *nats_new_connection(struct cachedb_id *id)
 		pkg_free(con);
 		return NULL;
 	}
-	con->kv_epoch = nats_pool_get_reconnect_epoch();
+	nats_epoch_save(&con->kv_epoch);
 
 	LM_DBG("NATS cachedb connection created for bucket '%s'\n", kv_bucket);
 	return con;
@@ -150,8 +150,10 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 		return -1;
 	}
 
-	epoch = nats_pool_get_reconnect_epoch();
-	if (epoch == ncon->kv_epoch && ncon->kv)
+	/* [P2.8] refresh protocol: snapshot BEFORE the acquire, adopt only
+	 * after success (nats_epoch.h documents why -- this was P0.1). */
+	epoch = nats_epoch_snapshot();
+	if (nats_epoch_current(&ncon->kv_epoch) && ncon->kv)
 		return 0;  /* still valid */
 
 	/* Reconnection occurred (or a previous refresh failed) — get a fresh
@@ -168,7 +170,7 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}
-	ncon->kv_epoch = epoch;
+	nats_epoch_adopt(&ncon->kv_epoch, epoch);
 
 	LM_INFO("refreshed KV handle (epoch %d)\n", epoch);
 	return 0;

@@ -68,6 +68,7 @@
 #define NATS_RPC_SLOT_H
 
 #include <stdint.h>
+#include "../../lib/nats/nats_epoch.h"   /* epoch_at_start tag [P2.8] */
 #include <stddef.h>
 #include <stdatomic.h>
 
@@ -177,7 +178,7 @@ typedef struct nats_rpc_slot {
 	/* Snapshot of the pool reconnect-epoch at claim time.  The
 	 * worker resume compares against the current value to surface
 	 * -2 (connection lost) if a reconnect intervened. */
-	uint32_t epoch_at_start;
+	nats_epoch_t epoch_at_start;   /* [P2.8] lib/nats/nats_epoch.h */
 
 	/* Per-claim generation, bumped on every FREE -> CLAIMED
 	 * transition.  Echoed in the reply-inbox subject (see

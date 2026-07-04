@@ -43,6 +43,8 @@
 #ifndef NATS_POOL_H
 #define NATS_POOL_H
 
+#include "nats_epoch.h"   /* epoch idiom + the two liveness accessors [P2.8] */
+
 #include <nats/nats.h>
 
 /*
@@ -218,8 +220,10 @@ void nats_pool_unregister(void);
  *
  * Thread safety: Safe to call from any OpenSIPS process context.
  *                Reads volatile/atomic state.
+ *
+ * Declared in nats_epoch.h (included below) so SHM-struct headers can
+ * embed the epoch tag without the full pool surface [P2.8].
  */
-int nats_pool_is_connected(void);
 
 /*
  * P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
@@ -274,8 +278,9 @@ const char *nats_pool_get_server_info(void);
  *          practice).
  *
  * Thread safety: Safe to call from any thread (atomic read).
+ *
+ * Declared in nats_epoch.h (included below) [P2.8].
  */
-int nats_pool_get_reconnect_epoch(void);
 
 /*
  * Return 1 if the calling OpenSIPS process should initialize NATS,

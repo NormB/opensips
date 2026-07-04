@@ -327,19 +327,20 @@ void nats_consumer_process(int rank)
 	 * survived the reconnect on the broker side report
 	 * nats_dl.natsSubscription_IsValid()=true and are left alone. */
 	{
-		int last_epoch = nats_pool_get_reconnect_epoch();
+		nats_epoch_t sub_epoch;   /* [P2.8] tag of the live sub set */
 		int prev_connected = nats_pool_is_connected();
 
+		nats_epoch_save(&sub_epoch);
 		for (;;) {
 			sleep(5);
 
-			int cur_epoch = nats_pool_get_reconnect_epoch();
+			int cur_epoch = nats_epoch_snapshot();
 			int cur_connected = nats_pool_is_connected();
 
-			if (cur_epoch != last_epoch) {
+			if (!nats_epoch_current(&sub_epoch)) {
 				LM_INFO("NATS consumer: reconnect detected (epoch "
 					"%d -> %d); checking subscriptions\n",
-					last_epoch, cur_epoch);
+					sub_epoch.seen, cur_epoch);
 				for (i = 0; i < nats_subscription_count; i++) {
 					nats_subscription_t *sub =
 						&nats_subscriptions[i];
@@ -363,7 +364,7 @@ void nats_consumer_process(int rank)
 							nats_dl.natsStatus_GetText(s));
 					}
 				}
-				last_epoch = cur_epoch;
+				nats_epoch_adopt(&sub_epoch, cur_epoch);
 			}
 
 			if (prev_connected && !cur_connected) {

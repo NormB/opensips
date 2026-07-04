@@ -328,7 +328,7 @@ static void _watcher_loop(void)
 	kvWatchOptions  opts;
 	kvStore        *kv;
 	kvWatcher      *w;
-	int             last_epoch;
+	nats_epoch_t    watch_epoch;   /* [P2.8] tag of this build's KV */
 	int             prefix_len;
 	int             builds = 0;   /* successful watcher (re)builds so far */
 
@@ -345,7 +345,7 @@ static void _watcher_loop(void)
 		if (!atomic_load(&_watcher_running))
 			break;
 
-		last_epoch = nats_pool_get_reconnect_epoch();
+		nats_epoch_save(&watch_epoch);
 
 		/* ---- Get fresh KV handle + rebuild search index ----
 		 * After every reconnect the old KV handle is stale.  We obtain
@@ -409,7 +409,7 @@ static void _watcher_loop(void)
 			NATS_CDB_STATS_INC(watcher_restarts);
 
 		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d)\n",
-			_num_patterns, last_epoch);
+			_num_patterns, watch_epoch.seen);
 
 		/* ---- Event loop ----
 		 * Process live KV updates until a reconnect or disconnect
@@ -432,13 +432,13 @@ static void _watcher_loop(void)
 			/* Check for reconnect -- epoch changed means connection
 			 * was lost and restored; our KV handle and watcher are
 			 * stale. Break out for a full rebuild. */
-			if (nats_pool_get_reconnect_epoch() != last_epoch) {
+			if (!nats_epoch_current(&watch_epoch)) {
 				/* Memory barrier: ensure subsequent KV operations
 				 * (the rebuild path above) see the new connection
 				 * state established by the reconnect callback thread. */
 				atomic_thread_fence(memory_order_acquire);
 				LM_INFO("watcher: reconnect detected (epoch %d->%d), "
-					"restarting\n", last_epoch,
+					"restarting\n", watch_epoch.seen,
 					nats_pool_get_reconnect_epoch());
 				break;
 			}
