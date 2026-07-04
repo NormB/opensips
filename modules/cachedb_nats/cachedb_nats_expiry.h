@@ -174,4 +174,8 @@ enum reap_action _reap_row_action(int n_live_survivors);
  * would leave no expiry mechanism at all. */
 int _reap_interval_guard(int interval);
 
+/* [P2.7] The reaper timer body (P9 host): registered from mod_init,
+ * runs in the core timer process; the SINGLE expiry mechanism. */
+void nats_cdb_reaper_tick(unsigned int ticks, void *param);
+
 #endif /* CACHEDB_NATS_EXPIRY_H */

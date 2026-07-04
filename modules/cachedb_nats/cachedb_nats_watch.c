@@ -727,3 +727,37 @@ void nats_watcher_proc_main(int rank)
 
 	LM_INFO("NATS watcher proc exiting\n");
 }
+
+/*
+ * Periodic full-index resync handler, registered when
+ * index_resync_interval_secs > 0. Acquires a fresh KV handle from the
+ * pool and rebuilds the JSON-FTS search index in place. Skips silently
+ * when NATS is disconnected; the next reconnect (or the next tick)
+ * will retry.
+ */
+void nats_cdb_periodic_resync(unsigned int ticks, void *param)
+{
+	kvStore *kv;
+
+	(void)ticks; (void)param;
+
+	/* Do NOT gate on the pool's process-local "connected" flag: this
+	 * handler runs in the OpenSIPS timer process, which never calls
+	 * nats_pool_get() on its own, so that flag is permanently 0 and every
+	 * tick used to be skipped (the periodic rebuild never ran).
+	 * nats_pool_get_kv() lazily establishes the connection on first use;
+	 * if the broker is genuinely down it returns NULL and we skip just
+	 * this tick, retrying on the next. */
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv) {
+		LM_DBG("periodic resync: no KV handle (broker down?); "
+			"skipping tick\n");
+		return;
+	}
+
+	if (cdbn_fts.rebuild(kv, fts_json_prefix) < 0)
+		LM_WARN("periodic resync: index rebuild failed\n");
+	else
+		LM_DBG("periodic resync: index rebuilt\n");
+}

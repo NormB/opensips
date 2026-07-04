@@ -61,4 +61,9 @@ extern int kv_watch_count;
  */
 void nats_watcher_proc_main(int rank);
 
+/* [P2.7] Periodic FTS index resync timer body (registered from
+ * mod_init when the FTS module is bound and
+ * index_resync_interval_secs > 0).  Runs in the core timer process. */
+void nats_cdb_periodic_resync(unsigned int ticks, void *param);
+
 #endif /* CACHEDB_NATS_WATCH_H */

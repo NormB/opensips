@@ -87,8 +87,6 @@
 static int mod_init(void);
 static int child_init(int rank);
 static void destroy(void);
-static void _nats_cdb_periodic_resync(unsigned int ticks, void *param);
-static void _nats_cdb_reaper_tick(unsigned int ticks, void *param);   /* P9 reaper host */
 
 /* script function wrappers (implementations in cachedb_nats_native.c) */
 static int w_nats_kv_history_wrap(struct sip_msg *msg, str *key,
@@ -499,12 +497,16 @@ static int _nats_url_insecure(const char *url)
 	return (!is_tls || !has_creds) ? 1 : 0;
 }
 
-static int mod_init(void)
+/* ── mod_init phases [P2.7] ─────────────────────────────────────────
+ * The 150-line init is four independent phases; each returns 0/-1 and
+ * fails the boot loudly.  Order matters: params before pool (fail
+ * closed before any network state), pool before engine (the engine
+ * callbacks assume a registered pool config), services last (timers /
+ * procs / events reference everything above). */
+
+/* Phase 1: validate operator parameters -- fail closed at boot. */
+static int init_check_params(void)
 {
-	cachedb_engine cde;
-
-	LM_NOTICE("initializing module cachedb_nats ...\n");
-
 	/* P8 [REV-7 / TTL-SOLUTION-SPEC.md §5.3]: kv_ttl becomes the KV bucket's
 	 * MaxAge (nats_pool.c: kvCfg.TTL).  Stream MaxAge takes precedence over
 	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS
@@ -526,6 +528,12 @@ static int mod_init(void)
 		       nats_expired_linger);
 		return -1;
 	}
+	return 0;
+}
+
+/* Phase 2: TLS bind + connection-URL resolution + pool registration. */
+static int init_pool(void)
+{
 	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
 	 * pool's connect path can look up the "nats" client domain.  No
 	 * effect on plaintext (nats://) URLs; tls:// URLs error at
@@ -619,6 +627,14 @@ static int mod_init(void)
 		}
 	}
 
+	return 0;
+}
+
+/* Phase 3: cachedb engine + stats registration. */
+static int init_engine(void)
+{
+	cachedb_engine cde;
+
 	/* populate cachedb engine */
 	memset(&cde, 0, sizeof(cachedb_engine));
 
@@ -655,6 +671,13 @@ static int mod_init(void)
 		return -1;
 	}
 
+	return 0;
+}
+
+/* Phase 4: optional FTS bind, timers (resync + reaper), watcher proc,
+ * E_NATS_KV_CHANGE registration. */
+static int init_services(void)
+{
 	/* Bind the optional FTS/search-index module (P1.2 split).  The
 	 * module owns the SHM index + intern table (allocated in ITS
 	 * mod_init, pre-fork); we only take its API here.  Without it,
@@ -678,7 +701,7 @@ static int mod_init(void)
 	 * Only meaningful with the FTS module bound. */
 	if (cdbn_fts_on && index_resync_interval_secs > 0) {
 		if (register_timer("nats_cdb_resync",
-				_nats_cdb_periodic_resync, NULL,
+				nats_cdb_periodic_resync, NULL,
 				index_resync_interval_secs, 0) < 0) {
 			LM_ERR("failed to register periodic resync timer\n");
 			return -1;
@@ -718,7 +741,7 @@ static int mod_init(void)
 			nats_reap_interval);
 		return -1;
 	}
-	if (register_timer("nats_cdb_reaper", _nats_cdb_reaper_tick, NULL,
+	if (register_timer("nats_cdb_reaper", nats_cdb_reaper_tick, NULL,
 			nats_reap_interval, 0) < 0) {
 		LM_ERR("failed to register reaper timer\n");
 		return -1;
@@ -736,6 +759,17 @@ static int mod_init(void)
 		if (evi_kv_change_id == EVI_ERROR)
 			LM_WARN("cannot register E_NATS_KV_CHANGE event\n");
 	}
+
+	return 0;
+}
+
+static int mod_init(void)
+{
+	LM_NOTICE("initializing module cachedb_nats ...\n");
+
+	if (init_check_params() < 0 || init_pool() < 0 ||
+	    init_engine() < 0 || init_services() < 0)
+		return -1;
 
 	LM_INFO("cachedb_nats: bucket=%s replicas=%d history=%d ttl=%d\n",
 		kv_bucket, kv_replicas, kv_history, kv_ttl);
@@ -872,234 +906,15 @@ static void destroy(void)
 	nats_cdb_stats_destroy();
 }
 
-/*
- * Periodic full-index resync handler, registered when
- * index_resync_interval_secs > 0. Acquires a fresh KV handle from the
- * pool and rebuilds the JSON-FTS search index in place. Skips silently
- * when NATS is disconnected; the next reconnect (or the next tick)
- * will retry.
- */
-static void _nats_cdb_periodic_resync(unsigned int ticks, void *param)
-{
-	kvStore *kv;
 
-	(void)ticks; (void)param;
-
-	/* Do NOT gate on the pool's process-local "connected" flag: this
-	 * handler runs in the OpenSIPS timer process, which never calls
-	 * nats_pool_get() on its own, so that flag is permanently 0 and every
-	 * tick used to be skipped (the periodic rebuild never ran).
-	 * nats_pool_get_kv() lazily establishes the connection on first use;
-	 * if the broker is genuinely down it returns NULL and we skip just
-	 * this tick, retrying on the next. */
-	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
-		(int64_t)kv_ttl);
-	if (!kv) {
-		LM_DBG("periodic resync: no KV handle (broker down?); "
-			"skipping tick\n");
-		return;
-	}
-
-	if (cdbn_fts.rebuild(kv, fts_json_prefix) < 0)
-		LM_WARN("periodic resync: index rebuild failed\n");
-	else
-		LM_DBG("periodic resync: index rebuilt\n");
-}
 
 /* ------------------------------------------------------------------ */
 /*   P9 reaper host (SPEC §4.3A [REV-1/16])                           */
 /* ------------------------------------------------------------------ */
 
-/* CAS-guarded publish-delete of a KV key [REV-16].  Publishes a KV-Operation:DEL
- * marker for "$KV.<bucket>.<key>" with ExpectLastSubjectSeq=@rev, so a
- * concurrent re-REGISTER that bumped the head between our read and this delete
- * makes the delete FAIL (jerr 10071) instead of destroying the renew.  A blind
- * kvStore_Delete() would lose that race -- never use it here.
- * Returns 0 deleted, 1 CAS-lost (a renew won -- leave the key), -1 on error. */
-static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
-	uint64_t rev)
-{
-	char subj[512];
-	natsMsg *m = NULL;
-	jsPubAck *pa = NULL;
-	jsErrCode je = 0;
-	jsPubOptions o;
-	natsStatus s;
 
-	if (nats_kv_key_to_subject(bucket, key, subj, sizeof subj) < 0)
-		return -1;
-	if (nats_dl.natsMsg_Create(&m, subj, NULL, NULL, 0) != NATS_OK)
-		return -1;
-	if (nats_dl.natsMsgHeader_Set(m, "KV-Operation", NATS_KV_OP_DEL) != NATS_OK) {
-		nats_dl.natsMsg_Destroy(m);
-		return -1;
-	}
-	nats_dl.jsPubOptions_Init(&o);
-	o.ExpectLastSubjectSeq = rev;             /* CAS predicate */
-	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
-	nats_dl.jsPubAck_Destroy(pa);
-	nats_dl.natsMsg_Destroy(m);
-	if (s == NATS_OK)
-		return 0;
-	if (je == 10071)                          /* JSStreamWrongLastSequenceErr */
-		return 1;                         /* a concurrent renew won the race */
-	LM_DBG("reaper: CAS-delete '%s' failed: %s (jerr=%d)\n",
-		key, nats_dl.natsStatus_GetText(s), je);
-	return -1;
-}
 
-/* The reaper tick: scan the bucket once, and for each DUE usrloc row either
- * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.  Runs
- * in the OpenSIPS timer process (like the resync handler) -- so it does NOT gate
- * on nats_pool_is_connected() (that flag is process-local and always 0 here);
- * a NULL KV/JS handle means the broker is down and we skip just this tick.
- *
- * Independent of the search index [REV-17]: enumeration is a direct
- * kvStore_Keys() over the bucket, so the reaper works with enable_search_index=0.
- * Malformed/poison rows are LEFT in place (the read path alarms them); permanent
- * and not-yet-due rows are skipped by the cheap row_exp due-gate. */
-static void _nats_cdb_reaper_tick(unsigned int ticks, void *param)
-{
-	kvStore *kv;
-	jsCtx *js;
-	kvKeysList keys;
-	natsStatus s;
-	time_t now;
-	int i, prefix_len, reaped = 0;
-	/* [HREV-3] physical-reclamation slack: the skew margin plus the
-	 * operator's retention window -- without the linger term the reaper
-	 * would reclaim rows the TTL path was told to keep. */
-	const int slack = nats_reap_grace + nats_expired_linger;
-	/* [OBS/D-OBS-2] pass gauges: the scan below Gets every prefixed key
-	 * anyway, so bucket-wide registration totals are free here.  "active"
-	 * uses grace only (visibility semantics), independent of the slack. */
-	long g_keys = 0, g_aors = 0, g_contacts = 0, g_active = 0,
-	     g_perm = 0, g_due = 0;
-	struct timespec g_t0, g_t1;
 
-	(void)ticks; (void)param;
-	clock_gettime(CLOCK_MONOTONIC, &g_t0);
-
-	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
-	if (!kv) {
-		LM_DBG("reaper: no KV handle (broker down?); skipping tick\n");
-		return;
-	}
-	js = nats_pool_get_js();
-	if (!js) {
-		LM_DBG("reaper: no JetStream ctx; skipping tick\n");
-		return;
-	}
-
-	now = time(NULL);
-	prefix_len = (fts_json_prefix && *fts_json_prefix)
-		? (int)strlen(fts_json_prefix) : 0;
-
-	memset(&keys, 0, sizeof(keys));
-	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
-	if (s == NATS_NOT_FOUND)
-		return;                           /* empty bucket */
-	if (s != NATS_OK) {
-		LM_DBG("reaper: kvStore_Keys failed: %s\n",
-			nats_dl.natsStatus_GetText(s));
-		return;
-	}
-
-	for (i = 0; i < keys.Count; i++) {
-		const char *key = keys.Keys[i];
-		kvEntry *e = NULL;
-		const char *val;
-		int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
-		int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
-		uint64_t rev;
-		char *proj;
-
-		if (!key)
-			continue;
-		/* only our usrloc rows; never touch another consumer's keys. */
-		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
-			continue;
-		g_keys++;
-		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
-			continue;                     /* mid-delete / vanished -> skip */
-		val = nats_dl.kvEntry_ValueString(e);
-		vlen = nats_dl.kvEntry_ValueLen(e);
-		rev = nats_dl.kvEntry_Revision(e);
-
-		/* [OBS] pass gauges (visibility semantics: grace only); n_before
-		 * feeds the contacts_pruned tally in the survivors branch. */
-		n_before = 0;
-		{
-			struct reg_row_info g_ri;
-			if (val && vlen > 0 &&
-			    _reg_row_scan(val, vlen, now, nats_reap_grace,
-					NULL, 0, NULL, 0, &g_ri) == 0) {
-				g_aors++;
-				g_contacts += g_ri.n_contacts;
-				g_active   += g_ri.n_active;
-				g_perm     += g_ri.n_perm;
-				n_before = g_ri.n_contacts;
-			}
-		}
-
-		/* cheap due-gate: skip permanent / not-yet-due rows without a
-		 * full reprojection (row_exp == min contact expiry). */
-		if (_reap_row_due_json(val, vlen, now, slack) == 0) {
-			nats_dl.kvEntry_Destroy(e);
-			continue;
-		}
-		g_due++;
-		proj = _reap_project_survivors(val, vlen, now, slack,
-			&n_surv, &plen, &p_row_exp, &p_all_same);
-		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
-		if (!proj)
-			continue;                     /* malformed/poison: read path alarms it */
-		if (n_surv < 0) {                     /* not a usrloc row */
-			free(proj);
-			continue;
-		}
-		if (n_surv == 0) {
-			if (_reap_cas_delete(js, kv_bucket, key, rev) == 0) {
-				NATS_CDB_STATS_INC(rows_reaped);
-				reaped++;
-			}
-		} else {
-			/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
-			 * the pruned row goes through the one row-write helper (CAS
-			 * publish, conflict-classified).  The reaper defers index
-			 * convergence to the watcher (no index code). */
-			uint64_t newrev = 0;
-			if (nats_kv_write_row_cas(kv, kv_bucket, key, proj, plen, rev,
-					&newrev) == 0) {
-				NATS_CDB_STATS_INC(rows_reaped);
-				/* [OBS] bindings physically removed by this survivor-write */
-				if (n_before > n_surv)
-					NATS_CDB_STATS_ADD(contacts_pruned,
-						n_before - n_surv);
-				reaped++;
-			}
-			/* CAS conflict / error: a concurrent writer won; retry next tick */
-		}
-		free(proj);
-	}
-	nats_dl.kvKeysList_Destroy(&keys);
-
-	/* [OBS/D-OBS-2] publish the pass gauges (single writer: this process) */
-	clock_gettime(CLOCK_MONOTONIC, &g_t1);
-	NATS_CDB_STATS_SET(reap_last_run, (unsigned long)time(NULL));
-	NATS_CDB_STATS_SET(reap_last_ms,
-		(g_t1.tv_sec - g_t0.tv_sec) * 1000
-		+ (g_t1.tv_nsec - g_t0.tv_nsec) / 1000000);
-	NATS_CDB_STATS_SET(reap_last_keys, g_keys);
-	NATS_CDB_STATS_SET(reap_last_aors, g_aors);
-	NATS_CDB_STATS_SET(reap_last_contacts, g_contacts);
-	NATS_CDB_STATS_SET(reap_last_active, g_active);
-	NATS_CDB_STATS_SET(reap_last_permanent, g_perm);
-	NATS_CDB_STATS_SET(reap_last_due, g_due);
-
-	if (reaped)
-		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
-}
 
 /**
  * w_nats_kv_history_wrap() -- Script wrapper for nats_kv_history().

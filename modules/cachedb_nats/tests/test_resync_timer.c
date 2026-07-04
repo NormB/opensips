@@ -44,15 +44,15 @@ static int grep_in_function(const char *path, const char *fn, const char *needle
 
 int main(void)
 {
-	const char *src = "../cachedb_nats.c";
+	const char *src = "../cachedb_nats_watch.c";   /* [P2.7] body moved */
 
-	ASSERT(grep_in_function(src, "_nats_cdb_periodic_resync",
+	ASSERT(grep_in_function(src, "nats_cdb_periodic_resync",
 		"nats_pool_is_connected") == 0,
 		"resync handler no longer gates on the process-local _connected flag");
-	ASSERT(grep_in_function(src, "_nats_cdb_periodic_resync",
+	ASSERT(grep_in_function(src, "nats_cdb_periodic_resync",
 		"nats_pool_get_kv") >= 1,
 		"resync handler lazily connects via nats_pool_get_kv");
-	ASSERT(grep_in_function(src, "_nats_cdb_periodic_resync",
+	ASSERT(grep_in_function(src, "nats_cdb_periodic_resync",
 		"cdbn_fts.rebuild") >= 1,
 		"resync handler still rebuilds the index");
 
