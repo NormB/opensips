@@ -49,19 +49,3 @@ else
 	endif
 endif
 
-# --- Capability probe: per-key KV TTL API (nats.c PR #1000) --------------
-# The NATS modules reference kvStore_CreateStringWithTTL (lib/nats' dlopen
-# table + cachedb_nats' TTL write path).  A libnats that is PRESENT but
-# predates PR #1000 satisfies the header check above, then fails deep in the
-# C compile of lib/nats/nats_dl.c with a cryptic "kvStore_CreateStringWithTTL
-# undeclared".  Probe the DETECTED headers (same CFLAGS the build uses) for
-# the symbol now, so lib/nats/Makefile and the module Makefiles can flag a
-# too-old libnats with an actionable message instead of failing obscurely.
-# NATS_HAS_KV_TTL := yes iff the detected libnats declares the API.
-ifeq ($(NATS_FOUND),yes)
-# NOTE: keep this line free of any literal '#'.  make treats '#' as a comment
-# even inside $(shell ...), so an '#include' here makes older make (4.2, the
-# Ubuntu 20.04 CI) swallow the closing ')' -> "unterminated call to function
-# 'shell'".  We force the header with -include instead of an in-source #include.
-NATS_HAS_KV_TTL := $(shell printf 'void *_osips_nats_ttl_probe(void){ return (void *)&kvStore_CreateStringWithTTL; }\n' | $(CC) $(NATS_CFLAGS) -include nats/nats.h -fsyntax-only -x c - >/dev/null 2>&1 && echo yes)
-endif
