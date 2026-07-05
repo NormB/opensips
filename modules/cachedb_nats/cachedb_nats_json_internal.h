@@ -131,7 +131,7 @@ void _row_strip_private_keys(cdb_dict_t *row_dict);
  * merged @json only those contacts THIS update set/unset (@pairs) whose own
  * `expires != 0 && expires + grace <= now` — never an untouched merged-in
  * contact (the drop set is built solely from @pairs).  @grace is the max-skew
- * margin S (nats_reap_grace).  Returns a fresh doc (caller frees), unchanged
+ * margin S (nats_reap_grace).  Returns a fresh pkg doc (caller pkg_frees), unchanged
  * when nothing is due; NULL on error. */
 char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	time_t now, int grace, int *out_len);
@@ -157,7 +157,7 @@ void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace);
 
 /* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
  * cachedb_nats-private row_exp / schema_version top-level peers over the
- * merged contact set.  Returns a freshly malloc'd document (caller frees):
+ * merged contact set.  Returns a fresh pkg_malloc'd document (caller pkg_frees):
  * a usrloc row (top-level "contacts" object present) gets row_exp = min of the
  * non-zero per-contact `expires` (0 if any permanent, int64, no 2038 clamp)
  * and schema_version=1, replacing any stale peers; a document with no

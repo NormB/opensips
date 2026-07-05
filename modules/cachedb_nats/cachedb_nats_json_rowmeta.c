@@ -218,7 +218,7 @@ int _contact_expires(const char *vstart, const char *vend, int64_t *out)
 }
 
 /* Collect every contact's integer `expires` from a "contacts" object slice
- * [vstart,vend) into a freshly malloc'd array (caller frees *out_arr).
+ * [vstart,vend) into a fresh pkg array (caller pkg_frees *out_arr).
  * Returns 0 on success (possibly 0 entries), -1 on malformed input. */
 static int _row_collect_expiries(const char *vstart, const char *vend,
 	int64_t **out_arr, int *out_n)
@@ -238,26 +238,26 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
 		int64_t e;
 
 		p = _skip_ws(p, vend);
-		if (p >= vend) { free(arr); return -1; }
+		if (p >= vend) { pkg_free(arr); return -1; }
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
 
 		p = _parse_json_string(p, vend, &name, &nlen); /* contact subkey */
-		if (!p) { free(arr); return -1; }
+		if (!p) { pkg_free(arr); return -1; }
 		p = _skip_ws(p, vend);
-		if (p >= vend || *p != ':') { free(arr); return -1; }
+		if (p >= vend || *p != ':') { pkg_free(arr); return -1; }
 		p++;
 		p = _skip_ws(p, vend);
 		cvs = p;
 		p = _skip_json_value(p, vend);
-		if (!p) { free(arr); return -1; }
+		if (!p) { pkg_free(arr); return -1; }
 
 		if (_contact_expires(cvs, p, &e) == 0) {
 			if (n == cap) {
 				int ncap = cap ? cap * 2 : 8;
-				int64_t *na = realloc(arr, ncap * sizeof(*na));
-				if (!na) { free(arr); return -1; }
+				int64_t *na = pkg_realloc(arr, ncap * sizeof(*na));
+				if (!na) { pkg_free(arr); return -1; }
 				arr = na;
 				cap = ncap;
 			}
@@ -272,7 +272,7 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
 /* Recompute the cachedb_nats-private `row_exp` / `schema_version` top-level
  * peers over the merged contact set (SPEC §3.3/§4.1 step 3, [REV-34/REV-25]).
  *
- * Returns a freshly malloc'd document (caller frees):
+ * Returns a fresh pkg_malloc'd document (caller pkg_frees):
  *   - usrloc row (has a top-level "contacts" object): every top-level field is
  *     copied through except any stale "row_exp"/"schema_version", which are
  *     re-emitted fresh (row_exp from min(expires), schema_version=1).
@@ -354,7 +354,7 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 
 	/* Non-usrloc document: return verbatim, never re-shape it. */
 	if (!c_vs) {
-		char *copy = malloc(len + 1);
+		char *copy = pkg_malloc(len + 1);
 		if (!copy)
 			return NULL;
 		memcpy(copy, json, len);
@@ -380,7 +380,7 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 		if (out_n_contacts) *out_n_contacts = n_exp;
 		if (out_all_same)   *out_all_same = (n_exp <= 1) ? 1 : all_same;
 	}
-	free(exps);
+	pkg_free(exps);
 
 	/* Pass 2: copy through every top-level field except the private peers,
 	 * then append freshly computed row_exp + schema_version. */
@@ -408,7 +408,7 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 	return _sink_take(&s, out_len);
 
 fail:
-	free(s.buf);
+	pkg_free(s.buf);
 	return NULL;
 }
 
@@ -685,7 +685,7 @@ static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve
 }
 
 /* Copy @json through, dropping subkeys @ids from the top-level "contacts"
- * object.  Returns a fresh doc (caller frees), or NULL on error/OOM. */
+ * object.  Returns a fresh pkg doc (caller pkg_frees), or NULL on error/OOM. */
 static char *_contacts_drop_subkeys(const char *json, int len,
 	const char **ids, const int *id_lens, int n_ids, int *out_len)
 {
@@ -730,7 +730,7 @@ static char *_contacts_drop_subkeys(const char *json, int len,
 	if (_sink_putc(&s, '}') < 0) goto fail;
 	return _sink_take(&s, out_len);
 fail:
-	free(s.buf);
+	pkg_free(s.buf);
 	return NULL;
 }
 
@@ -739,7 +739,7 @@ fail:
  * drop set is built solely from @pairs (the touched subkeys), so an untouched
  * merged-in contact is never even considered — no collateral cross-node delete.
  * A pair's subkey equals the stored contact key (base64, escape-free).  Returns
- * a fresh doc (caller frees): unchanged when nothing is due.  NULL on error. */
+ * a fresh pkg doc (caller pkg_frees): unchanged when nothing is due.  NULL on error. */
 char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	time_t now, int grace, int *out_len)
 {
@@ -768,7 +768,7 @@ char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 		}
 	}
 	if (n == 0) {
-		char *copy = malloc(len + 1);
+		char *copy = pkg_malloc(len + 1);
 		if (!copy) return NULL;
 		memcpy(copy, json, len);
 		copy[len] = '\0';

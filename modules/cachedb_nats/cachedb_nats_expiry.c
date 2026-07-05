@@ -46,6 +46,7 @@
 #include <nats/nats.h>
 
 #include "../../dprint.h"
+#include "../../mem/mem.h"   /* [P3.5] pkg buffers on the projection path */
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"     /* nats_pool_get_js */
 #include "cachedb_nats.h"          /* cdbn_fts_on (resync gate) */
@@ -471,7 +472,7 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 			_find_contacts_flag_cb, &has_contacts) < 0)
 		return NULL;
 	if (!has_contacts) {                       /* non-usrloc doc -> skip */
-		char *copy = malloc(len + 1);
+		char *copy = pkg_malloc(len + 1);
 		if (!copy)
 			return NULL;
 		memcpy(copy, json, len);
@@ -506,14 +507,14 @@ char *_reap_project_survivors(const char *json, int len, time_t now, int grace,
 	 * expose the TTL eligibility inputs (n_survivors == n_contacts). */
 	final = _row_finalize_metadata(tmp, tmp_len, out_len,
 		out_row_exp, NULL, out_all_same);
-	free(tmp);
+	pkg_free(tmp);
 	if (!final)
 		return NULL;
 	if (n_survivors)
 		*n_survivors = n_surv;
 	return final;
 fail:
-	free(s.buf);
+	pkg_free(s.buf);
 	return NULL;
 }
 
@@ -669,7 +670,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		if (!proj)
 			continue;                     /* malformed/poison: read path alarms it */
 		if (n_surv < 0) {                     /* not a usrloc row */
-			free(proj);
+			pkg_free(proj);
 			continue;
 		}
 		if (n_surv == 0) {
@@ -694,7 +695,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			}
 			/* CAS conflict / error: a concurrent writer won; retry next tick */
 		}
-		free(proj);
+		pkg_free(proj);
 	}
 	nats_dl.kvKeysList_Destroy(&keys);
 

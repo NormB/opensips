@@ -74,7 +74,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
  * rowmeta TU; exposed here so the reaper timer host in cachedb_nats.c can drive
  * them over each stored row before any CAS write/delete.
  *   _reap_project_survivors(): drop DUE contacts, recompute row_exp, return a
- *     fresh document (caller frees); *n_survivors = survivor count (0 => the row
+ *     fresh document (caller pkg_frees); *n_survivors = survivor count (0 => the row
  *     is fully due, CAS-delete the key; -1 => not a usrloc row, skip).  NULL on
  *     malformed/OOM.
  *   _reap_row_due_json(): cheap due-gate over the stored row_exp — 1 due, 0 not

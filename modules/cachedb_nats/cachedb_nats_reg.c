@@ -1094,18 +1094,18 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
-		if (key_heap) free(key);
+		if (key_heap) pkg_free(key);
 		return init_mi_error(503, MI_SSTR("NATS unavailable"));
 	}
 	if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK) {
-		if (key_heap) free(key);
+		if (key_heap) pkg_free(key);
 		return init_mi_error(404, MI_SSTR("no such registration"));
 	}
 	val = nats_dl.kvEntry_ValueString(e);
 	vlen = nats_dl.kvEntry_ValueLen(e);
 	if (!val || vlen <= 0) {
 		nats_dl.kvEntry_Destroy(e);
-		if (key_heap) free(key);
+		if (key_heap) pkg_free(key);
 		return init_mi_error(404,
 			MI_SSTR("expired (server delete marker present)"));
 	}
@@ -1113,7 +1113,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	INIT_LIST_HEAD(&dict);
 	if (_safe_json_to_dict(val, vlen, &dict) != 0) {
 		nats_dl.kvEntry_Destroy(e);
-		if (key_heap) free(key);
+		if (key_heap) pkg_free(key);
 		return init_mi_error(500, MI_SSTR("stored value is not valid JSON"));
 	}
 	_row_patch_last_mod_int64(val, vlen, &dict);
@@ -1169,7 +1169,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 
 	cdb_free_entries(&dict, osips_pkg_free);
 	nats_dl.kvEntry_Destroy(e);
-	if (key_heap) free(key);
+	if (key_heap) pkg_free(key);
 	return resp;
 
 oom:
@@ -1177,7 +1177,7 @@ oom:
 		fmt_free(&ftab);
 	cdb_free_entries(&dict, osips_pkg_free);
 	nats_dl.kvEntry_Destroy(e);
-	if (key_heap) free(key);
+	if (key_heap) pkg_free(key);
 	if (resp)
 		free_mi_response(resp);
 	return init_mi_error(500, MI_SSTR("out of memory"));

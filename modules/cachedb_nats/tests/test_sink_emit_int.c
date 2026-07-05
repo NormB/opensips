@@ -36,8 +36,11 @@ void dprint(int level, int facility, const char *module, const char *func,
   (void)stderr_fmt; (void)syslog_fmt; (void)format; }
 void *mem_block = NULL;
 static void *blk_malloc(void *b, unsigned long n) { (void)b; return malloc(n); }
+static void *blk_realloc(void *b, void *p, unsigned long n)
+{ (void)b; return realloc(p, n); }
 static void blk_free(void *b, void *p) { (void)b; free(p); }
 void *(*gen_pkg_malloc)(void *blk, unsigned long size) = blk_malloc;
+void *(*gen_pkg_realloc)(void *blk, void *p, unsigned long size) = blk_realloc;
 void (*gen_pkg_free)(void *blk, void *p) = blk_free;
 
 /* symbols the ser TU references but this test never reaches */

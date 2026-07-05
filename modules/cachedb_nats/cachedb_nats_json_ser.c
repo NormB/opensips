@@ -130,7 +130,7 @@ int _sink_init(json_sink_t *s, int initial)
 	s->cap = initial > 16 ? initial : 16;
 	s->len = 0;
 	s->oom = 0;
-	s->buf = malloc(s->cap);
+	s->buf = pkg_malloc(s->cap);
 	if (!s->buf) { s->oom = 1; return -1; }
 	s->buf[0] = '\0';
 	return 0;
@@ -147,7 +147,7 @@ static int _sink_grow(json_sink_t *s, int need)
 		if (newcap > INT_MAX / 2) { s->oom = 1; return -1; }
 		newcap *= 2;
 	}
-	nb = realloc(s->buf, newcap);
+	nb = pkg_realloc(s->buf, newcap);
 	if (!nb) { s->oom = 1; return -1; }
 	s->buf = nb;
 	s->cap = newcap;
@@ -272,12 +272,12 @@ int _sink_emit_int(json_sink_t *s, int64_t v)
 }
 
 /* Transfer ownership of the buffer to the caller; sink resets to empty.
- * Caller frees the returned pointer with free(). */
+ * Caller frees the returned pointer with pkg_free(). */
 char *_sink_take(json_sink_t *s, int *out_len)
 {
 	char *r;
 	if (s->oom) {
-		free(s->buf);
+		pkg_free(s->buf);
 		s->buf = NULL; s->len = 0; s->cap = 0;
 		return NULL;
 	}
@@ -365,13 +365,13 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 
 /* Backwards-compatible wrapper: serialize dict into a malloc'd JSON
  * object string.  Replaces the old per-pair-_json_apply_pair pattern
- * with a single growable buffer; caller still frees with free(). */
+ * with a single growable buffer; caller still frees with pkg_free(). */
 char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 {
 	json_sink_t s;
 	if (_sink_init(&s, 256) < 0) return NULL;
 	if (_sink_emit_cdb_dict(&s, dict) < 0) {
-		free(s.buf);
+		pkg_free(s.buf);
 		return NULL;
 	}
 	return _sink_take(&s, out_len);
@@ -417,7 +417,7 @@ int _kv_key_validate(const char *enc, int enc_len)
 }
 
 /* Encode @in into NATS-KV-safe form with '=HH' escape for unsafe
- * bytes. Caller must free(). NATS-KV subject tokens reject
+ * bytes. Caller must pkg_free(). NATS-KV subject tokens reject
  * characters outside [-./_=a-zA-Z0-9]; usrloc AoRs commonly contain
  * '@' which would otherwise produce kvStore "Invalid Argument"
  * errors and silently drop every REGISTER. The encoding is
@@ -427,7 +427,7 @@ char *_kv_encode_key(const char *in, int in_len, int *out_len)
 	static const char hex[] = "0123456789ABCDEF";
 	int i, w = 0;
 	int cap = in_len * 3 + 1;
-	char *out = malloc(cap);
+	char *out = pkg_malloc(cap);
 	if (!out) return NULL;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
@@ -449,8 +449,8 @@ char *_kv_encode_key(const char *in, int in_len, int *out_len)
  * into @stackbuf if it fits, otherwise into a heap buffer.  Avoids the two
  * mallocs the PK fast path otherwise pays per usrloc read/write for
  * typically <100-byte keys.  Returns the key pointer (stackbuf or heap) and
- * sets *heap to 1 when heap-allocated, or NULL on OOM.  Free with:
- *   if (heap) free(ptr);
+ * sets *heap to 1 when heap-allocated (pkg), or NULL on OOM.  Free with:
+ *   if (heap) pkg_free(ptr);
  */
 char *_pk_target_key(const char *val, int val_len,
 	char *stackbuf, int stackcap, int *heap)
@@ -466,7 +466,7 @@ char *_pk_target_key(const char *val, int val_len,
 	if (max_total <= stackcap) {
 		buf = stackbuf;
 	} else {
-		buf = malloc(max_total);
+		buf = pkg_malloc(max_total);
 		if (!buf)
 			return NULL;
 		*heap = 1;
@@ -492,7 +492,7 @@ char *_pk_target_key(const char *val, int val_len,
 /* Build a malloc'd seed JSON document {"<field>":"<val>"} for the
  * first-insert path. Both field name and value are RFC 8259 escaped.
  * If field is NULL/empty, returns "{}" so the doc is still a valid JSON
- * object. Returns NULL on error. Caller must free(). */
+ * object. Returns NULL on error. Caller must pkg_free(). */
 char *_build_seed_doc(const char *field, int flen,
 	const char *val, int vlen, int *out_len)
 {
@@ -501,7 +501,7 @@ char *_build_seed_doc(const char *field, int flen,
 	int new_len;
 
 	if (flen <= 0 || !field) {
-		buf = malloc(3);
+		buf = pkg_malloc(3);
 		if (!buf) return NULL;
 		memcpy(buf, "{}", 3);
 		*out_len = 2;
@@ -510,10 +510,10 @@ char *_build_seed_doc(const char *field, int flen,
 	if (flen > (INT_MAX - 16) / 6 || vlen > (INT_MAX - 16) / 6)
 		return NULL;
 
-	esc_field = malloc(flen * 6 + 1);
-	esc_val   = malloc((vlen > 0 ? vlen : 1) * 6 + 1);
+	esc_field = pkg_malloc(flen * 6 + 1);
+	esc_val   = pkg_malloc((vlen > 0 ? vlen : 1) * 6 + 1);
 	if (!esc_field || !esc_val) {
-		free(esc_field); free(esc_val);
+		pkg_free(esc_field); pkg_free(esc_val);
 		return NULL;
 	}
 	esc_field_len = _json_escape(field, flen, esc_field, flen * 6 + 1);
@@ -521,13 +521,13 @@ char *_build_seed_doc(const char *field, int flen,
 		? _json_escape(val, vlen, esc_val, vlen * 6 + 1)
 		: 0;
 	if (esc_field_len < 0 || esc_val_len < 0) {
-		free(esc_field); free(esc_val);
+		pkg_free(esc_field); pkg_free(esc_val);
 		return NULL;
 	}
 
 	new_len = 2 + esc_field_len + 3 + esc_val_len + 2;
-	buf = malloc(new_len + 1);
-	if (!buf) { free(esc_field); free(esc_val); return NULL; }
+	buf = pkg_malloc(new_len + 1);
+	if (!buf) { pkg_free(esc_field); pkg_free(esc_val); return NULL; }
 	buf[0] = '{';
 	buf[1] = '"';
 	memcpy(buf + 2, esc_field, esc_field_len);
@@ -538,7 +538,7 @@ char *_build_seed_doc(const char *field, int flen,
 	buf[2 + esc_field_len + 3 + esc_val_len]     = '"';
 	buf[2 + esc_field_len + 3 + esc_val_len + 1] = '}';
 	buf[new_len] = '\0';
-	free(esc_field); free(esc_val);
+	pkg_free(esc_field); pkg_free(esc_val);
 	*out_len = new_len;
 	return buf;
 }

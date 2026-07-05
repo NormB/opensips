@@ -102,20 +102,20 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			LM_DBG("PK query: AoR encodes to invalid subject "
 				"(encoded len %d) -> empty result\n",
 				(int)strlen(enc));
-			if (key_heap) free(target_key);
+			if (key_heap) pkg_free(target_key);
 			return 0;   /* empty result, not an error */
 		}
 	}
 
 	s = nats_dl.kvStore_Get(&entry, ncon->kv, target_key);
 	if (s == NATS_NOT_FOUND) {
-		if (key_heap) free(target_key);
+		if (key_heap) pkg_free(target_key);
 		return 0;   /* empty result, not an error */
 	}
 	if (s != NATS_OK) {
 		LM_WARN("PK kvStore_Get failed for '%s': %s\n",
 			target_key, nats_dl.natsStatus_GetText(s));
-		if (key_heap) free(target_key);
+		if (key_heap) pkg_free(target_key);
 		return -1;
 	}
 	data = nats_dl.kvEntry_ValueString(entry);
@@ -130,7 +130,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			"object); failing the lookup rather than masking "
 			"corruption as an empty AoR\n", target_key, data_len);
 		nats_dl.kvEntry_Destroy(entry);
-		if (key_heap) free(target_key);
+		if (key_heap) pkg_free(target_key);
 		return -1;
 	}
 	if (vclass == NATS_VAL_OBJECT) {
@@ -138,7 +138,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		if (!row) {
 			LM_ERR("no pkg memory for cdb_row_t\n");
 			nats_dl.kvEntry_Destroy(entry);
-			if (key_heap) free(target_key);
+			if (key_heap) pkg_free(target_key);
 			return -1;
 		}
 		if (_safe_json_to_dict(data, data_len, &row->dict) != 0) {
@@ -146,7 +146,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 				"'%s'\n", target_key);
 			pkg_free(row);
 			nats_dl.kvEntry_Destroy(entry);
-			if (key_heap) free(target_key);
+			if (key_heap) pkg_free(target_key);
 			return -1;
 		}
 		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
@@ -162,7 +162,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		list_add_tail(&row->list, &res->rows);
 	}
 	nats_dl.kvEntry_Destroy(entry);
-	if (key_heap) free(target_key);
+	if (key_heap) pkg_free(target_key);
 	return 0;
 }
 
@@ -392,8 +392,8 @@ static void _free_apply_ops(apply_op_t *ops, int n)
 {
 	int i;
 	for (i = 0; i < n; i++)
-		free(ops[i].owned);
-	free(ops);
+		pkg_free(ops[i].owned);
+	pkg_free(ops);
 }
 
 /* Translate cdb_pair_t types into the inline apply_op_t representation.
@@ -410,11 +410,12 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 	list_for_each(pos, pairs) n++;
 	if (n == 0) {
 		*out_count = 0;
-		return calloc(1, 1); /* non-NULL sentinel */
+		return pkg_malloc(1); /* non-NULL sentinel */
 	}
 
-	ops = calloc(n, sizeof *ops);
+	ops = pkg_malloc((size_t)n * sizeof *ops);
 	if (!ops) return NULL;
+	memset(ops, 0, (size_t)n * sizeof *ops);
 
 	i = 0;
 	list_for_each(pos, pairs) {
@@ -635,7 +636,7 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 
 /* Single-pass apply: copy the input doc through to a fresh malloc'd
  * buffer, applying every cdb_pair_t in @pairs.  Returns NULL on
- * malformed input or any error.  Caller frees with free(). */
+ * malformed input or any error.  Caller frees with pkg_free(). */
 /* Per-field body of _apply_pairs_one_pass, invoked by the shared
  * top-level iterator [P2.5].  Routes each existing field through the
  * matching op (replace / drop / subkey-merge / verbatim copy). */
@@ -778,7 +779,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 out:
 	_free_apply_ops(ops, n_ops);
 	if (rc != 0) {
-		free(s.buf);
+		pkg_free(s.buf);
 		return NULL;
 	}
 	/* [P3.5] surface the sink's length -- the caller threads it
@@ -835,14 +836,14 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 			LM_ERR("update: AoR encodes to an invalid NATS subject "
 				"(empty/edge-dot token; encoded len %d) -- rejecting "
 				"the save\n", enc_len);
-			free(enc);
+			pkg_free(enc);
 			return NULL;
 		}
 		if (fts_json_prefix && *fts_json_prefix) {
 			int plen = fts_json_prefix_len;   /* [P3.6] cached */
 			target_key = pkg_malloc(plen + enc_len + 1);
 			if (!target_key) {
-				free(enc);
+				pkg_free(enc);
 				LM_ERR("update: pkg_malloc for target_key "
 					"failed (prefix '%s' + %d-byte encoded "
 					"value, total %d bytes)\n",
@@ -856,7 +857,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 		} else {
 			target_key = pkg_malloc(enc_len + 1);
 			if (!target_key) {
-				free(enc);
+				pkg_free(enc);
 				LM_ERR("update: pkg_malloc for target_key "
 					"failed (no prefix, %d-byte encoded "
 					"value, total %d bytes)\n",
@@ -866,7 +867,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 			memcpy(target_key, enc, enc_len);
 			target_key[enc_len] = '\0';
 		}
-		free(enc);
+		pkg_free(enc);
 	}
 
 	return target_key;
@@ -976,7 +977,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	 * CAS success — that lets us remove only the
 	 * (field:value) entries this key was actually in,
 	 * rather than walking the whole index. */
-	json_buf = malloc(data_len + 1);
+	json_buf = pkg_malloc(data_len + 1);
 	if (!json_buf) {
 		LM_ERR("update: malloc for old-JSON snapshot "
 			"failed (key '%s', %d bytes; needed for "
@@ -1003,7 +1004,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 			"(value %d bytes, strlen %d) -- refusing to merge/writeback "
 			"a truncated document\n",
 			target_key, data_len, (int)strlen(json_buf));
-		free(json_buf);
+		pkg_free(json_buf);
 		return -1;
 	}
 
@@ -1053,10 +1054,10 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 			nats_reap_grace + nats_expired_linger, &new_len);
 		if (!hygiened) {
 			LM_ERR("write hygiene failed for key '%s'\n", target_key);
-			free(new_json);
+			pkg_free(new_json);
 			return -1;
 		}
-		free(new_json);
+		pkg_free(new_json);
 		new_json = hygiened;
 	}
 
@@ -1072,10 +1073,10 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		if (!finalized) {
 			LM_ERR("failed to finalize row metadata (row_exp) "
 				"for key '%s'\n", target_key);
-			free(new_json);
+			pkg_free(new_json);
 			return -1;
 		}
-		free(new_json);
+		pkg_free(new_json);
 		new_json = finalized;
 	}
 
@@ -1090,7 +1091,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 			"bytes, over nats_max_value_size=%d; save failed "
 			"(existing bindings intact, not truncated)\n",
 			target_key, new_len, nats_max_value_size);
-		free(new_json);
+		pkg_free(new_json);
 		return -1;
 	}
 
@@ -1111,11 +1112,11 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		}
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
-		free(new_json);
+		pkg_free(new_json);
 		return 0;
 	}
 
-	free(new_json);
+	pkg_free(new_json);
 	return rc;   /* 1 = CAS conflict (outer loop re-reads+retries), -1 = fatal */
 }
 
@@ -1244,7 +1245,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 
 		rc = _update_apply_and_cas(ncon, target_key, json_buf,
 			json_len, pairs, rev);
-		free(json_buf);
+		pkg_free(json_buf);
 		json_buf = NULL;
 		if (rc == 0) {
 			pkg_free(target_key);
