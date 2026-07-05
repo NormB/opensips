@@ -93,6 +93,14 @@ int main(void)
 			"nats_consumer.c defines inflight getter");
 		ASSERT(file_contains(h, "nats_inbound_dropped_oversize"),
 			"nats_consumer.h declares the inbound getters");
+
+		/* [P3.7] silent drops are not silent: both drop branches emit
+		 * a rate-limited warning.  The delivery callback runs on a
+		 * libnats thread where dprint is off-limits (same rule as the
+		 * pool callbacks), so the warning rides the raw-write path,
+		 * gated once per interval. */
+		ASSERT(file_contains(c, "_drop_warn_unsafe"),
+			"drop branches emit the rate-limited unsafe warning");
 	}
 
 	/* ---- production wiring: MI surfaces the counters ------------- */

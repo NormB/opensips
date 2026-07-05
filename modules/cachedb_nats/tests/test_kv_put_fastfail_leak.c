@@ -93,6 +93,8 @@ int validate_kv_key(const str *s)
 { return (s && s->s && s->len > 0) ? 0 : -1; }
 int nats_con_refresh_kv(nats_cachedb_con *ncon)
 { (void)ncon; return 0; }
+void nats_cdb_disconnected_warn(const char *op)   /* [P3.7] no-op seam */
+{ (void)op; }
 
 /* MI plumbing: referenced by the raw-query MI paths, never reached */
 mi_response_t *init_mi_result_object(mi_item_t **obj_out)

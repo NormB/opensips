@@ -104,6 +104,11 @@ typedef struct _nats_cachedb_con {
  */
 int nats_con_refresh_kv(nats_cachedb_con *ncon);
 
+/* [P3.7] One shared, rate-limited (30s/process) WARN for the module's
+ * KV-op disconnect fast-fails; the per-call lines stay DBG.  @op names
+ * the failing operation class for the log line. */
+void nats_cdb_disconnected_warn(const char *op);
+
 /*
  * CacheDB init callback — called by the cachedb framework when a
  * "nats" cachedb URL is first used.

@@ -523,9 +523,10 @@ static void _watcher_loop(void)
 					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
 					 * REV-26] observability: a server-side TTL expiry
 					 * surfaces (cnats <=3.12) as an empty-value Put;
-					 * log it at INFO so operators — and the joint
-					 * reaper⊕watcher e2e — can SEE the watcher drop the
-					 * in-SHM index entry for a vanished key.  The
+					 * [P3.7] logged at DBG: it fires once per expired
+					 * registration on the watcher hot path (a steady
+					 * per-expiry stream at scale), exactly like its
+					 * delete/purge sibling below.  The
 					 * "was indexed -> removed" membership outcome is the
 					 * authoritative signal that the index (not just the
 					 * read-path filter) released the key; num_documents is
@@ -536,7 +537,7 @@ static void _watcher_loop(void)
 					 * Delete/Purge markers from our own writes are
 					 * frequent, so they stay at DBG to avoid log spam. */
 					if (op == kvOp_Put)
-						LM_INFO("watcher: MaxAge tombstone (empty-value) "
+						LM_DBG("watcher: MaxAge tombstone (empty-value) "
 							"on '%s' -> index entry %s (num_documents "
 							"%d->%d)\n", key,
 							was_indexed ? "removed (was indexed)"

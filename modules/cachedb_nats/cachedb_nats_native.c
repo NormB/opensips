@@ -52,6 +52,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
 #include "cachedb_nats_expiry.h"
 #include "../../lib/nats/nats_str.h"
 #include "../../mi/mi.h"
@@ -103,7 +104,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	char key_buf[NATS_NATIVE_KEY_BUF];
 	char *buf;
 	int buf_size = NATS_HISTORY_BUF;
-	int pos, i, entry_count;
+	int pos, i, entry_count, hist_trunc;
 	pv_value_t val;
 
 	if (!key || !result_var) {
@@ -115,6 +116,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 
 	/* Fast-fail when the broker is down (see the other w_nats_kv_* ops). */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("kv_history");   /* [P3.7] */
 		LM_DBG("NATS disconnected — kv_history deferred (fast-fail)\n");
 		return -1;
 	}
@@ -154,6 +156,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 	}
 
 	pos = 0;
+	hist_trunc = 0;
 
 	/* snprintf() returns the number of bytes it WOULD have written, which
 	 * on truncation exceeds the size limit and can push `pos` past
@@ -164,10 +167,10 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 #define HIST_ADVANCE(...) do { \
 		int _w = snprintf(buf + pos, (size_t)(buf_size - pos), \
 			__VA_ARGS__); \
-		if (_w < 0) { pos = buf_size - 1; } \
+		if (_w < 0) { pos = buf_size - 1; hist_trunc = 1; } \
 		else { \
 			pos += _w; \
-			if (pos >= buf_size) pos = buf_size - 1; \
+			if (pos >= buf_size) { pos = buf_size - 1; hist_trunc = 1; } \
 		} \
 	} while (0)
 
@@ -215,6 +218,22 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 
 	HIST_ADVANCE("]");
 #undef HIST_ADVANCE
+
+	/* [P3.7] the 8 KB clamp used to truncate SILENTLY -- the script
+	 * then parses an incomplete (often malformed) JSON array with no
+	 * hint why.  Rate-limited WARN + per-call DBG. */
+	if (i < entry_count)
+		hist_trunc = 1;
+	if (hist_trunc) {
+		static time_t rl_trunc;
+		if (nats_rl_pass(&rl_trunc, time(NULL), 30))
+			LM_WARN("kv_history('%s'): history JSON exceeds "
+				"NATS_HISTORY_BUF (%d bytes) -- result truncated "
+				"at %d/%d entries (repeats suppressed for 30s)\n",
+				key_buf, NATS_HISTORY_BUF, i, entry_count);
+		LM_DBG("kv_history('%s'): truncated at %d/%d entries\n",
+			key_buf, i, entry_count);
+	}
 
 	nats_dl.kvEntryList_Destroy(&list);
 
@@ -278,6 +297,7 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 	 * on a disconnected pool blocks the SIP worker and can hit cnats's
 	 * "free(): invalid pointer" reconnect race. */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
 		return -1;
 	}
@@ -422,6 +442,7 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 	 * copy — a bare return after the copy would
 	 * leak the heap buffer on every call for the whole outage. */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
 		return -1;
 	}
@@ -511,6 +532,7 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	 * copy — a bare return after the copy would
 	 * leak the heap buffer on every call for the whole outage. */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
 		return -1;
 	}
@@ -612,6 +634,7 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 	 * on a disconnected pool blocks the SIP worker and can hit cnats's
 	 * "free(): invalid pointer" reconnect race. */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
 		return -1;
 	}
@@ -671,6 +694,7 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	 * on a disconnected pool blocks the SIP worker and can hit cnats's
 	 * "free(): invalid pointer" reconnect race. */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred (fast-fail)\n");
 		return -1;
 	}

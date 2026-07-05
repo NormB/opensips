@@ -80,6 +80,7 @@
 #include "../../pvar.h"
 #include "../../sr_module.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_rl.h"  /* [P3.7] rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 
 #include "nats_fetch.h"
@@ -931,8 +932,15 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	 * restriction -- for the full timeout_ms.  Mirror w_nats_fetch's
 	 * disconnected fast-fail instead. */
 	if (!nats_pool_is_connected()) {
-		LM_WARN("nats_request: NATS disconnected; failing fast "
-			"instead of blocking %d ms\n", tmo);
+		/* [P3.7] rate-limited WARN + per-call DBG: during an outage
+		 * this fires per request per worker -- the old per-call WARN
+		 * flooded the log at exactly the moment the box was unhappy. */
+		static time_t rl_disc;
+		if (nats_rl_pass(&rl_disc, time(NULL), 30))
+			LM_WARN("nats_request: NATS disconnected; failing fast "
+				"instead of blocking %d ms (repeats suppressed "
+				"for 30s)\n", tmo);
+		LM_DBG("nats_request: NATS disconnected; failing fast\n");
 		nats_rpc_staged_clear();
 		return -3;
 	}

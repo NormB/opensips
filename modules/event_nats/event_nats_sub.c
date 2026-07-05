@@ -34,6 +34,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <stdatomic.h>
 
 #include "../../dprint.h"
@@ -381,6 +382,32 @@ void nats_consumer_process(int rank)
 /* ── nats.c message callback ─────────────────────────────────────── */
 
 /*
+ * [P3.7] Rate-limited drop warning, safe for the nats.c I/O thread.
+ * The two admission-control branches below used to drop SILENTLY
+ * (only the MI counters moved); but this callback may not call LM_*
+ * (dprint is not warranted reentrant against the worker thread's
+ * logging -- the same rule the lib/nats pool callbacks follow), so
+ * the warning rides a raw write(2) to stderr, once per 30s per drop
+ * class.  The authoritative signal remains the MI counters
+ * (inbound_dropped_oversize / inbound_dropped_backpressure).
+ */
+static void _drop_warn_unsafe(time_t *rl_slot, const char *line, size_t len)
+{
+	time_t now = time(NULL);
+
+	/* benign race: two library threads may both pass right at the
+	 * boundary and emit one extra line */
+	if (*rl_slot != 0 && now >= *rl_slot && now - *rl_slot < 30)
+		return;
+	*rl_slot = now;
+	if (write(STDERR_FILENO, line, len) < 0) {
+		/* stderr may be closed under a daemonized start; the MI
+		 * counters still carry the signal */
+	}
+}
+
+
+/*
  * Called by nats.c on its internal I/O thread when a message arrives.
  * MUST NOT call OpenSIPS APIs (LM_*, pkg_malloc, etc.) — only SHM
  * operations and ipc_dispatch_rpc().
@@ -408,9 +435,15 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	/* Reject oversized payloads: a flood of huge messages would otherwise
 	 * exhaust SHM. */
 	if (data_len > NATS_EVENT_MAX_DATA) {
+		static time_t rl_oversize;
+		static const char warn[] = "WARNING: event_nats: dropping "
+			"oversize NATS event(s) (see MI inbound_dropped_oversize; "
+			"repeats suppressed for 30s)\n";
+
 		if (g_inbound)
 			atomic_fetch_add_explicit(&g_inbound->dropped_oversize, 1,
 				memory_order_relaxed);
+		_drop_warn_unsafe(&rl_oversize, warn, sizeof(warn) - 1);
 		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
@@ -419,8 +452,14 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 	 * SHM + IPC jobs faster than the workers drain them. */
 	if (g_inbound && atomic_load_explicit(&g_inbound->inflight,
 			memory_order_relaxed) >= NATS_EVENT_MAX_INFLIGHT) {
+		static time_t rl_backpressure;
+		static const char warn[] = "WARNING: event_nats: dropping NATS "
+			"event(s) under backpressure (workers not draining; see MI "
+			"inbound_dropped_backpressure; repeats suppressed for 30s)\n";
+
 		atomic_fetch_add_explicit(&g_inbound->dropped_backpressure, 1,
 			memory_order_relaxed);
+		_drop_warn_unsafe(&rl_backpressure, warn, sizeof(warn) - 1);
 		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}

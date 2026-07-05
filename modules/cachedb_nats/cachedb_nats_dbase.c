@@ -61,10 +61,27 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 #include "../../lib/nats/nats_str.h"
 
 extern int nats_cas_retries;   /* defined in cachedb_nats.c */
+
+/* [P3.7] One shared, rate-limited WARN for every KV-op disconnect
+ * fast-fail in this module (the per-call lines stay DBG).  Before this
+ * a broker outage was invisible at the default log level: all 13
+ * fast-fail sites logged DBG only, and the pool's own transition
+ * callbacks may only raw-write to stderr (often /dev/null under a
+ * daemonized start).  One process-wide slot so an outage costs one
+ * WARN line per 30s per process, whatever mix of ops is failing. */
+void nats_cdb_disconnected_warn(const char *op)
+{
+	static time_t rl_disc;
+
+	if (nats_rl_pass(&rl_disc, time(NULL), 30))
+		LM_WARN("NATS disconnected -- failing %s fast (repeats "
+			"suppressed for 30s; per-call detail at DBG)\n", op);
+}
 
 /**
  * nats_new_connection() — allocate and initialise a NATS cachedb connection.
@@ -145,6 +162,7 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 	 * nats.c's internal I/O thread (race between reconnection cleanup
 	 * and our KV operations). */
 	if (!nats_pool_is_connected()) {
+		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
 		LM_DBG("NATS disconnected — KV operation deferred\n");
 		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;

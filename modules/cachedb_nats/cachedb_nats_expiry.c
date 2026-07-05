@@ -197,9 +197,18 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 				*out_rev = rev;
 			return TTL_DONE;
 		}
-		if (_pub_status(s) == TTL_PUB_CONN_DOWN)
+		if (_pub_status(s) == TTL_PUB_CONN_DOWN) {
+			/* [P3.7] outage itself is covered by the pool transition
+			 * + rate-limited fast-fail WARNs; per-write detail DBG */
+			LM_DBG("nats_kv_put_row: create of '%s.%s' failed, "
+				"broker down: %s\n", bucket, key,
+				nats_dl.natsStatus_GetText(s));
 			return TTL_FAIL_SAVE;
+		}
 		/* key already exists (a concurrent create won) -> re-read + retry */
+		LM_DBG("nats_kv_put_row: create of '%s.%s' lost to a concurrent "
+			"create (%s); retrying\n", bucket, key,
+			nats_dl.natsStatus_GetText(s));
 		return TTL_RETRY;
 	}
 
@@ -217,7 +226,34 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	nats_dl.jsPubAck_Destroy(pa);
 	nats_dl.natsMsg_Destroy(m);
 
-	return _ttl_classify(_pub_status(s), je);
+	{
+		enum ttl_outcome out = _ttl_classify(_pub_status(s), je);
+
+		/* [P3.7] this is the PRIMARY usrloc write path -- a failed
+		 * save used to produce zero diagnostics.  A CAS conflict is
+		 * normal contention (DBG); broker-down is covered by the
+		 * transition WARNs (DBG here); anything else fails the save
+		 * and gets the full libnats detail: status text + jsErrCode
+		 * (10077 = message-TTL unsupported, 10052 = bad request --
+		 * the classes that bit during the 2.11 TTL bring-up) +
+		 * bucket/key so the operator can find the row. */
+		if (out == TTL_RETRY) {
+			LM_DBG("nats_kv_put_row: CAS conflict on '%s.%s' at rev "
+				"%llu; retrying\n", bucket, key,
+				(unsigned long long)cas_seq);
+		} else if (out == TTL_FAIL_SAVE) {
+			if (_pub_status(s) == TTL_PUB_CONN_DOWN)
+				LM_DBG("nats_kv_put_row: CAS write of '%s.%s' "
+					"failed, broker down: %s\n", bucket, key,
+					nats_dl.natsStatus_GetText(s));
+			else
+				LM_ERR("nats_kv_put_row: CAS write of '%s.%s' "
+					"failed: %s (jsErrCode %d) -- failing the "
+					"save\n", bucket, key,
+					nats_dl.natsStatus_GetText(s), (int)je);
+		}
+		return out;
+	}
 }
 
 /* The §2.0 usrloc-row write entry point.  All writers (registration update,

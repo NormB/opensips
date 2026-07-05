@@ -116,6 +116,27 @@ int main(void)
 		free(body);
 	}
 
+	/* --- [P3.7] outage logging policy on the fast-fail sites ---
+	 * A broker outage used to WARN once PER REQUEST from every SIP
+	 * worker (log flood at exactly the moment the box is unhappy).
+	 * Policy: rate-limited WARN (nats_rl_pass gate) + DBG per call. */
+	body = func_body("../nats_rpc.c",
+		"int w_nats_request(struct sip_msg *msg");
+	if (body) {
+		ASSERT(pos_of(body, "nats_rl_pass(") >= 0,
+			"sync fast-fail WARN is rate-limited (nats_rl_pass)");
+		ASSERT(pos_of(body, "LM_DBG(\"nats_request: NATS disconnected") >= 0,
+			"sync fast-fail keeps a per-call DBG");
+		free(body);
+	}
+	body = func_body("../nats_rpc_async.c",
+		"int w_nats_request_async(struct sip_msg *msg");
+	if (body) {
+		ASSERT(pos_of(body, "nats_rl_pass(") >= 0,
+			"async fast-fail WARN is rate-limited (nats_rl_pass)");
+		free(body);
+	}
+
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);
 	return g_fails == 0 ? 0 : 1;

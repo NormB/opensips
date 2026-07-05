@@ -58,6 +58,7 @@ typedef int                            natsStatus;
 #include "../../async.h"
 #include "../../lib/list.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 #include <nats/nats.h>
 #endif
@@ -575,7 +576,12 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	 * guaranteed to burn its entire timeout -- during an outage every
 	 * call would otherwise eat a slice of the bounded slot pool. */
 	if (!nats_pool_is_connected()) {
-		LM_WARN("nats_request[async]: NATS disconnected; failing fast\n");
+		/* [P3.7] rate-limited WARN + per-call DBG (see nats_rpc.c). */
+		static time_t rl_disc;
+		if (nats_rl_pass(&rl_disc, time(NULL), 30))
+			LM_WARN("nats_request[async]: NATS disconnected; failing "
+				"fast (repeats suppressed for 30s)\n");
+		LM_DBG("nats_request[async]: NATS disconnected; failing fast\n");
 		nats_rpc_staged_clear();
 		return -2;
 	}
