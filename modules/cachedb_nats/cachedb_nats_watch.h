@@ -61,9 +61,16 @@ extern int kv_watch_count;
  */
 void nats_watcher_proc_main(int rank);
 
-/* [P2.7] Periodic FTS index resync timer body (registered from
- * mod_init when the FTS module is bound and
- * index_resync_interval_secs > 0).  Runs in the core timer process. */
+/* [P3.3] Shared bring-up for the module's dedicated processes (KV
+ * watcher + reaper): arms PR_SET_PDEATHSIG(SIGKILL), closes the
+ * fork-vs-parent-death race via a getppid() re-check, and lazily opens
+ * the per-process NATS connection.  @who tags the log lines.  Returns
+ * 0 to proceed, -1 when the caller must exit. */
+int nats_cdb_dedicated_proc_guard(const char *who);
+
+/* [P2.7] Periodic FTS index resync pass body.  [P3.3] Runs in the
+ * dedicated reaper process (hosted next to the reaper pass -- see
+ * nats_cdb_reaper_proc_main), no longer in the core timer process. */
 void nats_cdb_periodic_resync(unsigned int ticks, void *param);
 
 #endif /* CACHEDB_NATS_WATCH_H */

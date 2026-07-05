@@ -174,8 +174,48 @@ enum reap_action _reap_row_action(int n_live_survivors);
  * would leave no expiry mechanism at all. */
 int _reap_interval_guard(int interval);
 
-/* [P2.7] The reaper timer body (P9 host): registered from mod_init,
- * runs in the core timer process; the SINGLE expiry mechanism. */
+/* [P2.7] The reaper pass body (P9 host); the SINGLE expiry mechanism.
+ * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main),
+ * NOT the shared core timer process -- a full-bucket pass (kvStore_Keys +
+ * per-key Get + CAS) at scale would stall usrloc/tm/dialog timers
+ * system-wide.  The (ticks, param) signature is kept from its
+ * register_timer era so the body needs no churn. */
 void nats_cdb_reaper_tick(unsigned int ticks, void *param);
+
+/* [P3.3] Dedicated reaper process entry point (proc_export_t, same
+ * pattern as the KV watcher).  Hosts BOTH periodic O(bucket) jobs: the
+ * reaper pass every nats_reap_interval and -- when the FTS module is
+ * bound and index_resync_interval_secs > 0 -- the periodic index
+ * resync.  Never returns. */
+void nats_cdb_reaper_proc_main(int rank);
+
+/*
+ * [P3.3] Due-scheduler for the reaper process's periodic jobs.  Plain
+ * elapsed-interval gating: a job fires when its interval is positive
+ * and at least one full interval has passed since its stamp; firing
+ * resets the stamp to @now (never to now - k*interval, so a stalled
+ * process runs each due job ONCE on catch-up, no burst).  Intervals
+ * <= 0 disable the job.  Process-local, single-threaded.
+ */
+typedef struct nats_cdb_proc_sched {
+	time_t last_reap;
+	time_t last_resync;
+} nats_cdb_proc_sched_t;
+
+static inline void nats_cdb_proc_sched_due(nats_cdb_proc_sched_t *sc,
+	time_t now, int reap_iv, int resync_iv,
+	int *run_reap, int *run_resync)
+{
+	*run_reap   = 0;
+	*run_resync = 0;
+	if (reap_iv > 0 && now - sc->last_reap >= reap_iv) {
+		*run_reap = 1;
+		sc->last_reap = now;
+	}
+	if (resync_iv > 0 && now - sc->last_resync >= resync_iv) {
+		*run_resync = 1;
+		sc->last_resync = now;
+	}
+}
 
 #endif /* CACHEDB_NATS_EXPIRY_H */

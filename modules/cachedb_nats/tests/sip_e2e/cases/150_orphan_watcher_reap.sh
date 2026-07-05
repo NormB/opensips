@@ -81,6 +81,14 @@ fi
 check "dedicated watcher proc forked + logged startup" ok \
     "watcher pid=$WATCHER"
 
+# [P3.3] The reaper runs in its own dedicated proc too (always forked);
+# same startup-log contract, same PDEATHSIG guard.
+REAPER=$(sed -nE 's/.*reaper proc starting \(pid=([0-9]+).*/\1/p' \
+    "$ORPHAN_LOG" 2>/dev/null | tail -1)
+check "dedicated reaper proc forked + logged startup" \
+    $([ -n "$REAPER" ] && echo ok || echo fail) \
+    "reaper pid=${REAPER:-none}"
+
 # Real master = watcher's parent.  /proc/<pid>/status PPid: line is
 # the canonical kernel-truth source.
 MASTER=$(awk '/^PPid:/ {print $2; exit}' "/proc/$WATCHER/status" 2>/dev/null)
@@ -113,10 +121,28 @@ done
 check "watcher reaped within 5s of master SIGKILL" "$REAPED" \
     "watcher pid=$WATCHER ppid_at_check=$(awk '/^PPid:/ {print $2}' /proc/$WATCHER/status 2>/dev/null)"
 
+# [P3.3] The reaper proc rides the same PDEATHSIG guard.
+if [ -n "$REAPER" ]; then
+    DEADLINE=$(($(date +%s) + 5))
+    R_REAPED=fail
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        if ! kill -0 "$REAPER" 2>/dev/null; then
+            R_REAPED=ok
+            break
+        fi
+        sleep 0.2
+    done
+    check "reaper proc reaped within 5s of master SIGKILL" "$R_REAPED" \
+        "reaper pid=$REAPER"
+fi
+
 # Belt-and-suspenders: if it's still alive, kill it so the suite
 # doesn't leave an orphan polluting the next case.
 if kill -0 "$WATCHER" 2>/dev/null; then
     kill -9 "$WATCHER" 2>/dev/null
+fi
+if [ -n "$REAPER" ] && kill -0 "$REAPER" 2>/dev/null; then
+    kill -9 "$REAPER" 2>/dev/null
 fi
 pkill -9 -f "opensips -F -f $ORPHAN_CFG" 2>/dev/null
 

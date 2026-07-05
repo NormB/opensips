@@ -64,10 +64,14 @@ int main(void)
 		"index_resync_on_reconnect"),
 		"watcher consults index_resync_on_reconnect on epoch change");
 
-	/* Timer registered when interval > 0 */
-	ASSERT(file_contains("../cachedb_nats.c",
-		"register_timer"),
-		"periodic resync timer registered in mod_init");
+	/* [P3.3] The periodic resync no longer rides the shared core timer
+	 * process: it is hosted by the dedicated reaper process, gated on
+	 * the same interval modparam. */
+	ASSERT(!file_contains("../cachedb_nats.c", "register_timer"),
+		"no shared-core-timer registration remains in mod_init");
+	ASSERT(file_contains("../cachedb_nats_expiry.c",
+		"index_resync_interval_secs"),
+		"the reaper proc consults index_resync_interval_secs");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

@@ -41,13 +41,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>  /* [P3.3] getpid/getppid/sleep (reaper proc) */
 
 #include <nats/nats.h>
 
 #include "../../dprint.h"
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"     /* nats_pool_get_js */
+#include "cachedb_nats.h"          /* cdbn_fts_on (resync gate) */
 #include "cachedb_nats_dbase.h"    /* kv_bucket / kv_replicas / ... */
+#include "cachedb_nats_watch.h"    /* [P3.3] proc guard + resync body */
 #include "cachedb_nats_reg.h"      /* _reg_row_scan (reaper due-check) */
 #include "cachedb_nats_stats.h"    /* NATS_CDB_STATS_* (reaper counters) */
 #include "cachedb_nats_expiry.h"
@@ -520,11 +523,11 @@ static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
 	return -1;
 }
 
-/* The reaper tick: scan the bucket once, and for each DUE usrloc row either
- * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.  Runs
- * in the OpenSIPS timer process (like the resync handler) -- so it does NOT gate
- * on nats_pool_is_connected() (that flag is process-local and always 0 here);
- * a NULL KV/JS handle means the broker is down and we skip just this tick.
+/* The reaper pass: scan the bucket once, and for each DUE usrloc row either
+ * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.
+ * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main
+ * below).  It still does not gate on nats_pool_is_connected(): a NULL KV/JS
+ * handle means the broker is down and we skip just this pass.
  *
  * Independent of the search index [REV-17]: enumeration is a direct
  * kvStore_Keys() over the bucket, so the reaper works with enable_search_index=0.
@@ -671,4 +674,61 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 
 	if (reaped)
 		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
+}
+
+/* ── [P3.3] dedicated reaper process ─────────────────────────────── */
+
+/* Owned by cachedb_nats.c (modparams / mod_init state). */
+extern int nats_reap_interval;
+extern int index_resync_interval_secs;
+
+/*
+ * nats_cdb_reaper_proc_main() -- dedicated-process host for the
+ * module's periodic O(bucket) jobs: the reaper pass (kvStore_Keys +
+ * per-key Get + CAS prune) and, when the FTS module is bound and
+ * index_resync_interval_secs > 0, the periodic index resync.
+ *
+ * [P3.3] Both used to run as register_timer callbacks in the SHARED
+ * core timer process; at 100k AoRs one pass holds that process for
+ * tens of seconds, stalling usrloc/tm/dialog timers system-wide.
+ * Here they stall only this process, and a slow pass simply delays
+ * the next one (the due-scheduler resets stamps to "now", so there is
+ * never a catch-up burst).
+ *
+ * Single instance, single thread against the connection pool -- the
+ * same safety argument as the watcher proc.  Never returns; shutdown
+ * rides the core's SIGTERM delivery, orphaning is prevented by the
+ * shared PDEATHSIG guard.
+ */
+void nats_cdb_reaper_proc_main(int rank)
+{
+	nats_cdb_proc_sched_t sc;
+	int run_reap, run_resync;
+	/* resync is a config-time constant per process lifetime: modparams
+	 * and the FTS bind both happen in mod_init, pre-fork. */
+	const int resync_iv = (cdbn_fts_on && index_resync_interval_secs > 0)
+		? index_resync_interval_secs : 0;
+
+	(void)rank;
+
+	LM_INFO("NATS reaper proc starting (pid=%d, ppid=%d): reap every "
+		"%d s%s\n", (int)getpid(), (int)getppid(), nats_reap_interval,
+		resync_iv > 0 ? ", index resync hosted here too" : "");
+
+	if (nats_cdb_dedicated_proc_guard("reaper") < 0)
+		return;
+
+	/* register_timer semantics preserved: first fire one full interval
+	 * after startup, not immediately. */
+	sc.last_reap = sc.last_resync = time(NULL);
+
+	for (;;) {
+		sleep(1);
+		nats_cdb_proc_sched_due(&sc, time(NULL), nats_reap_interval,
+			resync_iv, &run_reap, &run_resync);
+		if (run_reap)
+			nats_cdb_reaper_tick(0, NULL);
+		if (run_resync)
+			nats_cdb_periodic_resync(0, NULL);
+	}
 }

@@ -79,7 +79,6 @@
 #include "cachedb_nats_kvobs.h"    /* [KVOBS] generic stream/KV introspection MI */
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_redact.h"
-#include "../../timer.h"
 
 #include "../../evi/evi.h"
 
@@ -417,19 +416,28 @@ static const dep_export_t deps = {
 	},
 };
 
-/* dedicated KV watcher process — the ONLY watcher mode.
+/* Dedicated module processes.  exports.procs takes exactly one array,
+ * chosen at runtime in mod_init (the core's start_module_procs() walks
+ * exports.procs only after init_modules returns, so the late binding
+ * is safe):
  *
- * Declared unconditionally so the symbol resolves at link time, but
- * only attached to module_exports.procs at runtime in mod_init when
- * enable_search_index=1 and at least one kv_watch pattern is set.  The
- * core's start_module_procs() walks exports.procs after init_modules
- * returns, so the late binding is safe.
+ * "NATS Reaper" [P3.3] -- ALWAYS forked (the reaper is the single
+ *   expiry mechanism): its O(bucket) pass (kvStore_Keys + per-key Get
+ *   + CAS prune) must not run in the shared core timer process, where
+ *   at scale one pass stalls usrloc/tm/dialog timers system-wide.
+ *   The same process hosts the periodic FTS index resync when enabled.
  *
- * Single instance ("no" = 1) -- one watcher is enough; multiplying
- * watchers does not parallelise the per-event cost (see the design-repo SCALING.md
- * "Re-examining option 2 (watcher)") and would just multiply broker
- * delivery cost. */
-static const proc_export_t nats_watcher_procs[] = {
+ * "NATS Watcher" -- the ONLY watcher mode, forked when at least one
+ *   kv_watch pattern is set.  Single instance ("no" = 1): one watcher
+ *   is enough; multiplying watchers does not parallelise the per-event
+ *   cost (see the design-repo SCALING.md "Re-examining option 2
+ *   (watcher)") and would just multiply broker delivery cost. */
+static const proc_export_t nats_reaper_procs[] = {
+	{ "NATS Reaper", 0, 0, nats_cdb_reaper_proc_main, 1, 0 },
+	{ 0, 0, 0, 0, 0, 0 }
+};
+static const proc_export_t nats_reaper_watcher_procs[] = {
+	{ "NATS Reaper",  0, 0, nats_cdb_reaper_proc_main, 1, 0 },
 	{ "NATS Watcher", 0, 0, nats_watcher_proc_main, 1, 0 },
 	{ 0, 0, 0, 0, 0, 0 }
 };
@@ -674,7 +682,8 @@ static int init_engine(void)
 	return 0;
 }
 
-/* Phase 4: optional FTS bind, timers (resync + reaper), watcher proc,
+/* Phase 4: optional FTS bind, dedicated procs (reaper always; +watcher
+ * when kv_watch is set) hosting the reap/resync passes [P3.3],
  * E_NATS_KV_CHANGE registration. */
 static int init_services(void)
 {
@@ -698,42 +707,18 @@ static int init_services(void)
 
 	/* Periodic index resync: optional belt-and-braces rebuild for
 	 * deployments that want a hard upper bound on index staleness.
-	 * Only meaningful with the FTS module bound. */
-	if (cdbn_fts_on && index_resync_interval_secs > 0) {
-		if (register_timer("nats_cdb_resync",
-				nats_cdb_periodic_resync, NULL,
-				index_resync_interval_secs, 0) < 0) {
-			LM_ERR("failed to register periodic resync timer\n");
-			return -1;
-		}
-		LM_INFO("cachedb_nats: periodic index resync every %d s\n",
-			index_resync_interval_secs);
-	}
+	 * Only meaningful with the FTS module bound.  [P3.3] Hosted by the
+	 * dedicated reaper process (attached below), NOT the shared core
+	 * timer process -- a full-bucket rebuild there stalls every other
+	 * module's timers. */
+	if (cdbn_fts_on && index_resync_interval_secs > 0)
+		LM_INFO("cachedb_nats: periodic index resync every %d s "
+			"(in the reaper process)\n", index_resync_interval_secs);
 
-	/* attach the dedicated watcher process to the module exports when
-	 * the index is enabled AND at least one kv_watch pattern was
-	 * configured.  This is the ONLY watcher mode: the process runs a
-	 * single thread against the connection pool, so it has none of the
-	 * pool races the removed in-worker pthread mode had.
-	 * start_module_procs() (in main_loop) reads exports.procs AFTER
-	 * init_modules returns, so this late assignment is safe and is the
-	 * cleanest way to keep the proc declaration runtime-conditional
-	 * without forking when it isn't wanted. */
-	if (kv_watch_count > 0) {
-		exports.procs = nats_watcher_procs;
-		LM_INFO("cachedb_nats: dedicated KV watcher process "
-			"ENABLED (%d kv_watch pattern(s))%s\n", kv_watch_count,
-			cdbn_fts_on ? "" : " — E_NATS_KV_CHANGE only "
-			"(FTS module not loaded)");
-	} else {
-		LM_INFO("cachedb_nats: no kv_watch pattern configured; "
-			"KV watcher process NOT forked\n");
-	}
-
-	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): register the periodic
-	 * CAS-prune timer.  Index-independent (enumerates via kvStore_Keys), so
-	 * it runs regardless of enable_search_index.  The reaper is the SINGLE
-	 * expiry mechanism (P1.5), so a non-positive interval is refused. */
+	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): the reaper is the
+	 * SINGLE expiry mechanism (P1.5), so a non-positive interval is
+	 * refused.  Index-independent (enumerates via kvStore_Keys), so it
+	 * runs regardless of enable_search_index. */
 	if (_reap_interval_guard(nats_reap_interval) < 0) {
 		LM_ERR("nats_reap_interval=%d disables the reaper, the only "
 			"expiry mechanism -- expired bindings would never be "
@@ -741,13 +726,31 @@ static int init_services(void)
 			nats_reap_interval);
 		return -1;
 	}
-	if (register_timer("nats_cdb_reaper", nats_cdb_reaper_tick, NULL,
-			nats_reap_interval, 0) < 0) {
-		LM_ERR("failed to register reaper timer\n");
-		return -1;
+
+	/* [P3.3] Attach the dedicated processes: the reaper process is
+	 * unconditional (it hosts the O(bucket) reap + resync passes,
+	 * keeping them out of the shared core timer process); the KV
+	 * watcher joins it when at least one kv_watch pattern was
+	 * configured.  This is the ONLY watcher mode: the process runs a
+	 * single thread against the connection pool, so it has none of the
+	 * pool races the removed in-worker pthread mode had.
+	 * start_module_procs() (in main_loop) reads exports.procs AFTER
+	 * init_modules returns, so this late assignment is safe and is the
+	 * cleanest way to keep the proc selection runtime-conditional. */
+	if (kv_watch_count > 0) {
+		exports.procs = nats_reaper_watcher_procs;
+		LM_INFO("cachedb_nats: dedicated KV watcher process "
+			"ENABLED (%d kv_watch pattern(s))%s\n", kv_watch_count,
+			cdbn_fts_on ? "" : " — E_NATS_KV_CHANGE only "
+			"(FTS module not loaded)");
+	} else {
+		exports.procs = nats_reaper_procs;
+		LM_INFO("cachedb_nats: no kv_watch pattern configured; "
+			"KV watcher process NOT forked\n");
 	}
 	LM_INFO("cachedb_nats: reaper ENABLED, scan every %d s "
-		"(grace %d s)\n", nats_reap_interval, nats_reap_grace);
+		"(grace %d s, dedicated process)\n",
+		nats_reap_interval, nats_reap_grace);
 
 	/* Register E_NATS_KV_CHANGE event in mod_init (pre-fork, runs once)
 	 * so it exists before startup_route's subscribe_event() and before
