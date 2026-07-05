@@ -350,6 +350,19 @@ int nats_registry_count(void);
 int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
                           void *user);
 
+/* [P3.4] Iterate WITHOUT holding registry locks during cb: the live
+ * handles are snapshotted + pending_ops-pinned under the locks, the
+ * locks drop, then cb runs per pinned handle (pin released after each
+ * call; on early-stop the remaining pins are still released).  Unlike
+ * nats_registry_foreach, cb MAY bind/unbind/reap.  A handle retired
+ * after the snapshot is still visited on valid memory -- cb keeps its
+ * own h->retire check.  Handles bound after the snapshot are picked up
+ * on the caller's next pass.  For callbacks that block (network I/O):
+ * the reconcile pass.  Falls back to the locked walk on snapshot-alloc
+ * failure. */
+int nats_registry_foreach_unlocked(int (*cb)(nats_handle_t *h, void *user),
+                                   void *user);
+
 /* Iterate the retire list (handles unbound but not yet reaped), calling
  * cb(h, user) for each; a non-zero return stops the walk and is returned.
  * Walks under the retire read lock, so cb must NOT bind/unbind/reap or

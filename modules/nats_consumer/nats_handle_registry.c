@@ -662,6 +662,73 @@ out:
 	return rc;
 }
 
+/*
+ * [P3.4] Lock-free variant for callbacks that do slow work (the
+ * reconcile pass runs JetStream network calls, seconds each against a
+ * slow broker).  Under nats_registry_foreach() that work runs inside
+ * the global+bucket READ locks; combined with rwlock writer priority,
+ * one queued unbind then blocks every SIP-worker fetch lookup for the
+ * duration.  Here the locks are held only for a pointer snapshot:
+ * each live handle takes a pending_ops pin (the lookup_ref pattern --
+ * reap cannot free a pinned handle), the locks drop, and the callback
+ * runs pinned but lock-free.
+ *
+ * A handle bound after the snapshot is simply visited on the caller's
+ * next pass; a handle retired after the snapshot is still visited
+ * (valid memory under the pin) -- callbacks keep their own
+ * `h->retire` check, exactly as reconcile_subs_cb always has.
+ *
+ * If the snapshot allocation fails we fall back to the locked walk:
+ * availability of the reconcile pass beats the lock-hold optimisation
+ * on a box that is out of pkg memory.
+ */
+int nats_registry_foreach_unlocked(int (*cb)(nats_handle_t *h, void *user),
+                                   void *user)
+{
+	nats_handle_t **snap, *cur;
+	int i, n = 0, cap, rc = 0;
+
+	if (!g_registry || !cb)
+		return 0;
+
+	cap = nats_registry_count() + 8;   /* races with bind: see below */
+	snap = pkg_malloc((size_t)cap * sizeof(*snap));
+	if (!snap) {
+		LM_WARN("foreach_unlocked: snapshot alloc (%d slots) failed; "
+			"falling back to the locked walk\n", cap);
+		return nats_registry_foreach(cb, user);
+	}
+
+	lock_start_read(g_registry->global_lock);
+	for (i = 0; i < g_registry->bucket_count; i++) {
+		nats_bucket_t *b = &g_registry->buckets[i];
+		lock_start_read(b->lock);
+		for (cur = b->head; cur; cur = cur->next) {
+			if (n >= cap) {
+				/* a bind raced the count snapshot; the overflow
+				 * handles get visited on the next pass (the
+				 * reconcile pass runs every tick) */
+				break;
+			}
+			nats_handle_pending_inc(cur);
+			snap[n++] = cur;
+		}
+		lock_stop_read(b->lock);
+	}
+	lock_stop_read(g_registry->global_lock);
+
+	/* Visit phase: NO registry locks held.  On early-stop keep
+	 * looping to release the remaining pins. */
+	for (i = 0; i < n; i++) {
+		if (rc == 0)
+			rc = cb(snap[i], user);
+		nats_handle_pending_dec(snap[i]);
+	}
+
+	pkg_free(snap);
+	return rc;
+}
+
 int nats_registry_foreach_retired(int (*cb)(nats_handle_t *h, void *user),
                                   void *user)
 {

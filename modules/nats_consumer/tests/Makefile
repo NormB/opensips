@@ -15,6 +15,7 @@ ACKTOK_SRCS := test_ack_token.c
 SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
 WAKEIPC_SRCS := test_rpc_wake_ipc.c $(SHIM) ../nats_rpc_wake.c
+UNLOCKED_SRCS := test_registry_foreach_unlocked.c $(SHIM) ../nats_handle_registry.c
 REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
 ADVPARSE_SRCS := test_parser_adversarial.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
 SLOTLIFE_SRCS := test_rpc_slot_lifecycle.c $(SHIM) ../nats_rpc_slot.c
@@ -63,7 +64,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc test_registry_foreach_unlocked
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -116,6 +117,14 @@ test_rpc_ipc_pack: test_rpc_ipc_pack.c ../nats_rpc_ipc.h
 # (recorded ipc_send_rpc seam lives in the test).
 test_rpc_wake_ipc: $(WAKEIPC_SRCS) test_shim.h ../nats_rpc_wake.h ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -o $@ $(WAKEIPC_SRCS) $(LDFLAGS)
+
+# [P3.4] Lock-free registry walk for the reconcile pass: handles are
+# snapshotted+pinned (pending_ops) under the locks, visited with NO
+# locks held (cb may unbind/reap -- deadlock under the locked foreach).
+# ASan on: a reap freeing a still-pinned handle is a UAF this test
+# derefs into.
+test_registry_foreach_unlocked: $(UNLOCKED_SRCS) test_shim.h ../nats_handle_registry.h
+	$(CC) $(CFLAGS) -fsanitize=address -o $@ $(UNLOCKED_SRCS) $(LDFLAGS)
 
 # Slot-reuse reply-misdelivery: on_inbox_reply pins the claim (INFLIGHT ->
 # DELIVERING) before writing reply_* + re-checking generation, so a worker that
@@ -357,6 +366,7 @@ check: all
 	./test_rpc_ipc_generation
 	./test_rpc_ipc_pack
 	./test_rpc_wake_ipc
+	./test_registry_foreach_unlocked
 	./test_rpc_reply_pin
 	./test_parser_adversarial
 	./test_rpc_slot_lifecycle

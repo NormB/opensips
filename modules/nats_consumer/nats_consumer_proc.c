@@ -1034,8 +1034,16 @@ void nats_consumer_proc_main(int rank)
 
 		/* 1. Reconcile subscriptions with the registry.  New binds
 		 *    land here on the next tick; dirty subs are rebuilt in
-		 *    place. */
-		(void)nats_registry_foreach(reconcile_subs_cb, NULL);
+		 *    place.  [P3.4] The unlocked walk: reconcile runs
+		 *    JetStream calls (seconds each against a slow broker),
+		 *    which must not hold the registry read locks -- writer
+		 *    priority would let one queued MI unbind stall every
+		 *    SIP-worker fetch lookup for the duration.  Handles are
+		 *    pending_ops-pinned instead; reconcile_subs_cb's retire
+		 *    check covers the unbind-after-snapshot race and the
+		 *    retire teardown sweep below destroys any sub a raced
+		 *    ensure created for a freshly-retired handle. */
+		(void)nats_registry_foreach_unlocked(reconcile_subs_cb, NULL);
 
 		/* 2. Fetch + push for every live subscription.  A ring-full
 		 *    handle contributes 0 to any_work so the idle sleep
