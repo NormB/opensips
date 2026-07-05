@@ -47,7 +47,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
                   test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget \
-                  test_rpc_wake_ipc
+                  test_rpc_wake_ipc test_p36_alloc_policy
 
 all: test_registry test_parser test_ring test_ack_token \
      test_request_route_restriction \
@@ -64,7 +64,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc test_registry_foreach_unlocked
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc test_registry_foreach_unlocked test_p36_alloc_policy
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -117,6 +117,11 @@ test_rpc_ipc_pack: test_rpc_ipc_pack.c ../nats_rpc_ipc.h
 # (recorded ipc_send_rpc seam lives in the test).
 test_rpc_wake_ipc: $(WAKEIPC_SRCS) test_shim.h ../nats_rpc_wake.h ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -o $@ $(WAKEIPC_SRCS) $(LDFLAGS)
+
+# [P3.6] Small hot-path policies: fetch resume params in pkg (worker-
+# local), request_id_header length cached at mod_init.  Source patterns.
+test_p36_alloc_policy: test_p36_alloc_policy.c
+	$(CC) -g -O0 -Wall -o $@ $<
 
 # [P3.4] Lock-free registry walk for the reconcile pass: handles are
 # snapshotted+pinned (pending_ops) under the locks, visited with NO
@@ -367,6 +372,7 @@ check: all
 	./test_rpc_ipc_pack
 	./test_rpc_wake_ipc
 	./test_registry_foreach_unlocked
+	./test_p36_alloc_policy
 	./test_rpc_reply_pin
 	./test_parser_adversarial
 	./test_rpc_slot_lifecycle

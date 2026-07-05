@@ -93,6 +93,7 @@
  * paths can read the current value at request time.  Empty /
  * NULL disables auto-staging. */
 extern char *nats_request_id_header;
+extern int   nats_request_id_header_len;   /* [P3.6] cached at mod_init */
 
 /* ── shared helpers ──────────────────────────────────────────── */
 
@@ -970,7 +971,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 			nats_rpc_async_request_id_set(id_buf, id_len);
 			if (nats_request_id_header && nats_request_id_header[0]) {
 				str hname = { nats_request_id_header,
-					(int)strlen(nats_request_id_header) };
+					nats_request_id_header_len };
 				str hval  = { id_buf, id_len };
 				(void)nats_rpc_staged_set_if_absent(&hname, &hval);
 			}

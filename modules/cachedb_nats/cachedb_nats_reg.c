@@ -46,6 +46,7 @@
 #include "cachedb_nats_reg.h"
 
 extern char *fts_json_prefix;            /* cachedb_nats.c                   */
+extern int   fts_json_prefix_len;        /* [P3.6] cached at mod_init        */
 extern int   nats_reap_grace;
 /* kv_bucket / kv_replicas / kv_history / kv_ttl come from cachedb_nats_dbase.h */
 
@@ -443,7 +444,7 @@ static int _reg_scan_bucket(const struct reg_filter *f, reg_row_cb cb,
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	prefix_len = (fts_json_prefix && *fts_json_prefix)
-		? (int)strlen(fts_json_prefix) : 0;
+		? fts_json_prefix_len : 0;
 
 	memset(&keys, 0, sizeof(keys));
 	s = nats_dl.kvStore_Keys(&keys, kv, NULL);

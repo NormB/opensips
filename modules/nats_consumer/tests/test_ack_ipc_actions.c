@@ -215,6 +215,41 @@ int main(void)
 	CHECK(nats_ack_next_take(H_IDX) == 1, "refill hint set for the handle");
 	CHECK(nats_ack_next_take(H_IDX) == 0, "take() clears the hint");
 
+	printf("[P3.6] ack_next AckSync budget: a burst degrades to async Ack:\n");
+	{
+		/* Each AckSync is a full broker round-trip executed serially
+		 * inside the consumer's IPC drain; a worker-side burst of
+		 * nats_ack_next() used to head-of-line-block every other ack
+		 * and the fetch sweep behind N x RTT.  Budget: the first
+		 * NATS_ACK_SYNC_PER_TICK_MAX per tick stay synchronous (the
+		 * broker has definitively seen them before the refill pull),
+		 * the rest degrade to async Ack -- same at-least-once
+		 * semantics, no serial RTT pileup.  The consumer loop resets
+		 * the budget each iteration via nats_ack_ipc_tick_reset(). */
+		int sync0, ack0, i;
+
+		nats_ack_ipc_tick_reset();
+		sync0 = rec.ack_sync; ack0 = rec.ack;
+		for (i = 0; i < NATS_ACK_SYNC_PER_TICK_MAX + 2; i++) {
+			tok = stash((natsMsg *)&fake1);
+			nats_ack_ipc_on_ack_next(0, tok_param(tok));
+		}
+		CHECK(rec.ack_sync == sync0 + NATS_ACK_SYNC_PER_TICK_MAX,
+			"burst: first NATS_ACK_SYNC_PER_TICK_MAX acks are AckSync");
+		CHECK(rec.ack == ack0 + 2,
+			"burst: past the budget the ack degrades to async Ack");
+		CHECK(nats_ack_next_take(H_IDX) == 1,
+			"refill hint still set by the degraded acks");
+		(void)nats_ack_next_take(H_IDX);
+
+		nats_ack_ipc_tick_reset();
+		tok = stash((natsMsg *)&fake1);
+		nats_ack_ipc_on_ack_next(0, tok_param(tok));
+		CHECK(rec.ack_sync == sync0 + NATS_ACK_SYNC_PER_TICK_MAX + 1,
+			"tick reset restores the AckSync budget");
+		(void)nats_ack_next_take(H_IDX);
+	}
+
 	printf("[P2.1] in_progress: keeps the message alive under the SAME token:\n");
 	tok = stash((natsMsg *)&fake2);
 	{

@@ -53,6 +53,7 @@
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
+extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 extern int   nats_reap_grace;      /* defined in cachedb_nats.c (max-skew S) */
 extern int   nats_expired_linger;  /* [HREV-3] physical-retention window     */
@@ -95,7 +96,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	 * result (not an error). Validate the encoded AoR portion (past the prefix). */
 	{
 		int plen = (fts_json_prefix && *fts_json_prefix)
-			? (int)strlen(fts_json_prefix) : 0;
+			? fts_json_prefix_len : 0;
 		const char *enc = target_key + plen;
 		if (_kv_key_validate(enc, (int)strlen(enc)) < 0) {
 			LM_DBG("PK query: AoR encodes to invalid subject "
@@ -836,7 +837,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 			return NULL;
 		}
 		if (fts_json_prefix && *fts_json_prefix) {
-			int plen = strlen(fts_json_prefix);
+			int plen = fts_json_prefix_len;   /* [P3.6] cached */
 			target_key = pkg_malloc(plen + enc_len + 1);
 			if (!target_key) {
 				free(enc);

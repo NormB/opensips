@@ -292,6 +292,7 @@ extern const char *nats_rpc_cstr_buf(char *buf, size_t cap,
  * callers can still mint and read the id but no header is added
  * to the outbound natsMsg. */
 extern char *nats_request_id_header;
+extern int   nats_request_id_header_len;   /* [P3.6] cached at mod_init */
 
 /*
  * Per-call wrapper: pairs the worker-private timerfd with the
@@ -565,7 +566,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 		nats_rpc_async_request_id_set(id_buf, id_len);
 		if (nats_request_id_header && nats_request_id_header[0]) {
 			str hname = { nats_request_id_header,
-				(int)strlen(nats_request_id_header) };
+				nats_request_id_header_len };
 			str hval  = { id_buf, id_len };
 			(void)nats_rpc_staged_set_if_absent(&hname, &hval);
 		}

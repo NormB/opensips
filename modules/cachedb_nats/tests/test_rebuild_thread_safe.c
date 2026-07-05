@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Regression test: nats_json_index_rebuild() runs on the watcher pthread
+ * Policy test [P3.6]: nats_json_index_rebuild() runs on a dedicated-proc main thread
  * (cachedb_nats_watch.c calls it for the post-reconnect / periodic resync).
  * pkg memory is per-process and NOT thread-safe, so its transient scratch
  * arrays (the shadow bucket array and the old-bucket snapshot) MUST be
@@ -76,17 +76,30 @@ int main(void)
 	ASSERT(body != NULL, "found nats_json_index_rebuild body");
 	if (!body) { fprintf(stderr, "\n=== FAILS=%d ===\n", g_fails); return 1; }
 
-	/* The invariant: no pkg on the watcher-pthread rebuild path. */
-	ASSERT(count(body, "pkg_malloc(") == 0,
-		"rebuild uses no pkg_malloc (watcher-pthread thread-safety)");
-	ASSERT(count(body, "pkg_free(") == 0,
-		"rebuild uses no pkg_free (watcher-pthread thread-safety)");
-
-	/* It must still allocate its scratch -- via shm (thread-safe). */
-	ASSERT(count(body, "shm_malloc(") >= 2,
-		"rebuild allocates shadow + old-bucket scratch via shm_malloc");
-	ASSERT(count(body, "shm_free(") >= 2,
-		"rebuild releases its scratch via shm_free");
+	/* [P3.6] The scratch arrays (shadow buckets + old-buckets
+	 * snapshot) are process-private and the rebuild runs on the MAIN
+	 * thread of a dedicated proc (the watcher process; the periodic
+	 * resync host [P3.3]) -- the in-worker watcher PTHREAD that once
+	 * made pkg unsafe here is long gone (P0.2), so pkg is legal,
+	 * skips two global-shm-lock round-trips per rebuild, and makes
+	 * leaks visible to pkg stats.  pkg OOM falls back to shm
+	 * (availability over the optimisation): both allocators must
+	 * appear, pkg first. */
+	ASSERT(count(body, "_scratch_alloc(") >= 2,
+		"rebuild allocates both scratch arrays via _scratch_alloc");
+	ASSERT(count(body, "_scratch_free(") >= 2,
+		"scratch is released via the owner-aware _scratch_free");
+	{
+		char *helper = body_after(src, "_scratch_alloc(size_t bytes");
+		ASSERT(helper != NULL, "found the _scratch_alloc helper");
+		if (helper) {
+			ASSERT(count(helper, "pkg_malloc(") >= 1,
+				"scratch prefers pkg (dedicated-proc main thread)");
+			ASSERT(count(helper, "shm_malloc(") >= 1,
+				"pkg OOM falls back to shm (availability)");
+			free(helper);
+		}
+	}
 
 	free(body);
 

@@ -1073,7 +1073,9 @@ void nats_consumer_proc_main(int rank)
 		 *    core-IPC pipe [P2.1], then honour any ACK_NEXT refill
 		 *    hints the ack handlers set on this tick -- the extra
 		 *    pull runs now instead of waiting for the next idle
-		 *    wake-up (fallback for the missing +NXT payload API). */
+		 *    wake-up (fallback for the missing +NXT payload API).
+		 *    [P3.6] fresh AckSync budget for this tick's drain. */
+		nats_ack_ipc_tick_reset();
 		if (pump_worker_ipc())
 			any_work = 1;
 		for (ss = g_subs; ss; ss = ss->next) {

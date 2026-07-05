@@ -1496,6 +1496,38 @@ int nats_json_index_remove_fields(const char *key,
  *
  * Returns the number of documents re-indexed, or -1 on error.
  */
+/* [P3.6] Scratch allocator for the rebuild's two process-private
+ * bucket arrays.  The rebuild runs on the MAIN thread of a dedicated
+ * proc (the watcher process; the periodic resync host) -- the
+ * in-worker watcher PTHREAD that once forced shm here is gone (P0.2),
+ * so pkg is legal, skips a global-shm-lock round-trip per array, and
+ * makes leaks visible to pkg stats.  pkg OOM falls back to shm
+ * (availability over the optimisation); *in_shm records the owner so
+ * the matching free routes correctly. */
+static void *_scratch_alloc(size_t bytes, int *in_shm)
+{
+	void *p = pkg_malloc(bytes);
+
+	if (p) {
+		*in_shm = 0;
+		return p;
+	}
+	LM_WARN("rebuild scratch: pkg_malloc(%zu) failed; falling back "
+		"to shm\n", bytes);
+	*in_shm = 1;
+	return shm_malloc(bytes);
+}
+
+static void _scratch_free(void *p, int in_shm)
+{
+	if (!p)
+		return;
+	if (in_shm)
+		shm_free(p);
+	else
+		pkg_free(p);
+}
+
 /* Snapshot-callback adapter for nats_json_index_rebuild: indexes
  * into the caller-owned shadow rather than the global index. */
 struct _rebuild_snapshot_ctx {
@@ -1522,6 +1554,7 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	struct _rebuild_snapshot_ctx ctx;
 	int count;
 	nats_idx_entry **old_buckets;
+	int shadow_in_shm = 0, old_in_shm = 0;
 	int old_num;
 	unsigned int b;
 	nats_idx_entry *e, *next;
@@ -1539,17 +1572,14 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	 * because no other thread can reach `shadow` -- we pass it
 	 * explicitly through _index_add_into.
 	 *
-	 * These scratch arrays MUST be shm_malloc, not pkg_malloc: this
-	 * function runs on the watcher pthread (cachedb_nats_watch.c), and
-	 * pkg memory is per-process and NOT thread-safe -- a pkg_malloc here
-	 * races the SIP worker's main-thread pkg use and corrupts the pkg
-	 * free list (manifesting as a spurious "out of pkg memory" with the
-	 * pool nearly empty).  shm_malloc takes the shm lock and is safe. */
+	 * [P3.6] These scratch arrays are process-private and this
+	 * function runs on the MAIN thread of a dedicated proc, so they
+	 * go through _scratch_alloc (pkg preferred, shm fallback). */
 	memset(&shadow, 0, sizeof(shadow));
 	buckets_bytes = sizeof(nats_idx_entry *) * (size_t)nats_idx_buckets;
-	shadow.buckets = shm_malloc(buckets_bytes);
+	shadow.buckets = _scratch_alloc(buckets_bytes, &shadow_in_shm);
 	if (!shadow.buckets) {
-		LM_ERR("rebuild: shm_malloc for shadow buckets failed "
+		LM_ERR("rebuild: scratch alloc for shadow buckets failed "
 			"(%d buckets, %zu bytes)\n",
 			nats_idx_buckets, buckets_bytes);
 		return -1;
@@ -1578,7 +1608,7 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 				e = next;
 			}
 		}
-		shm_free(shadow.buckets);
+		_scratch_free(shadow.buckets, shadow_in_shm);
 		return -1;
 	}
 
@@ -1594,11 +1624,11 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	 * shadow.buckets into it.  This avoids forcing a SHM realloc
 	 * while shards are locked. */
 	_idx_lock_all(g_idx);
-	old_buckets = shm_malloc(buckets_bytes);   /* shm: watcher-pthread safe */
+	old_buckets = _scratch_alloc(buckets_bytes, &old_in_shm);
 	if (!old_buckets) {
 		_idx_unlock_all(g_idx);
-		shm_free(shadow.buckets);
-		LM_ERR("rebuild: shm_malloc for old-buckets snapshot "
+		_scratch_free(shadow.buckets, shadow_in_shm);
+		LM_ERR("rebuild: scratch alloc for old-buckets snapshot "
 			"failed (%d buckets, %zu bytes)\n",
 			nats_idx_buckets, buckets_bytes);
 		return -1;
@@ -1622,8 +1652,8 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 			e = next;
 		}
 	}
-	shm_free(old_buckets);
-	shm_free(shadow.buckets);
+	_scratch_free(old_buckets, old_in_shm);
+	_scratch_free(shadow.buckets, shadow_in_shm);
 
 	/* The shadow rebuild populated the forward index but not the reverse
 	 * map; clear it so it can't carry stale records.  It repopulates as

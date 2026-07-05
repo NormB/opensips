@@ -520,6 +520,7 @@ fail:
 extern int   nats_reap_grace;
 extern int   nats_expired_linger;
 extern char *fts_json_prefix;
+extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
 
 /* CAS-guarded publish-delete of a KV key [REV-16].  Publishes a KV-Operation:DEL
  * marker for "$KV.<bucket>.<key>" with ExpectLastSubjectSeq=@rev, so a
@@ -604,7 +605,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 
 	now = time(NULL);
 	prefix_len = (fts_json_prefix && *fts_json_prefix)
-		? (int)strlen(fts_json_prefix) : 0;
+		? fts_json_prefix_len : 0;
 
 	memset(&keys, 0, sizeof(keys));
 	s = nats_dl.kvStore_Keys(&keys, kv, NULL);

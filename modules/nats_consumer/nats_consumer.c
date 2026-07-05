@@ -310,6 +310,11 @@ int nats_consumer_poison_max_deliver = 0;
  * the worker's outbound buffer. */
 char *nats_request_id_header = "X-Request-Id";
 
+/* [P3.6] strlen(nats_request_id_header), computed ONCE at mod_init --
+ * the modparam is immutable after startup, yet both RPC start paths
+ * used to re-measure it per request.  0 when auto-staging is off. */
+int nats_request_id_header_len;
+
 /* NATS connection parameters.  nats_consumer registers its own pool so it
  * works when loaded WITHOUT event_nats / cachedb_nats; the lib/nats pool
  * merges registrations when several NATS modules are loaded.  When nats_url
@@ -541,6 +546,11 @@ struct module_exports exports = {
 static int mod_init(void)
 {
 	LM_INFO("nats_consumer %s initializing\n", NATS_CONSUMER_VERSION);
+
+	/* [P3.6] cache the request-id header length (config constant;
+	 * the RPC start paths consume it per request). */
+	nats_request_id_header_len = nats_request_id_header
+		? (int)strlen(nats_request_id_header) : 0;
 
 	/* Bind tls_mgm if loaded; hand the bind table to lib/nats so the
 	 * pool's connect path can look up the "nats" client domain.  No

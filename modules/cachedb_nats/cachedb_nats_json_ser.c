@@ -51,6 +51,7 @@
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
+extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 
 
@@ -444,7 +445,7 @@ char *_pk_target_key(const char *val, int val_len,
 {
 	static const char hex[] = "0123456789ABCDEF";
 	int plen = (fts_json_prefix && *fts_json_prefix)
-		? (int)strlen(fts_json_prefix) : 0;
+		? fts_json_prefix_len : 0;
 	int max_total = plen + val_len * 3 + 1;   /* worst-case encode */
 	char *buf;
 	int i, w;

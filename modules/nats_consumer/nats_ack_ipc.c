@@ -133,6 +133,23 @@ int nats_ack_next_take(uint16_t handle_idx)
 	return 0;
 }
 
+/* [P3.6] AckSync budget per consumer tick.  Each natsMsg_AckSync is a
+ * full broker round-trip executed serially inside the IPC drain; a
+ * worker-side burst of nats_ack_next() used to head-of-line-block
+ * every other queued ack AND the fetch sweep behind N x RTT.  The
+ * first NATS_ACK_SYNC_PER_TICK_MAX ack_nexts per tick keep the
+ * synchronous "broker definitively saw the ack before the refill"
+ * ordering; past the budget the ack degrades to the async
+ * natsMsg_Ack -- identical at-least-once semantics (the sync form
+ * only narrows a crash-window redelivery), no RTT pileup.  Reset by
+ * the consumer main loop each iteration. */
+static int g_ack_sync_this_tick;
+
+void nats_ack_ipc_tick_reset(void)
+{
+	g_ack_sync_this_tick = 0;
+}
+
 /* Apply one worker ack action.  Runs in the consumer process (the
  * only libnats-safe context for JetStream ack calls).  Returns 0 if
  * applied, -1 for a stale token (already released / re-claimed). */
@@ -161,15 +178,20 @@ static int apply_ack_action(uint64_t token, nats_ack_action_e action,
 		case NATS_ACK_ACTION_ACK_NEXT:
 			/* nats.c 3.13 does not expose the server's +NXT ack-and-pull
 			 * payload via the public API, so we fall back to:
-			 *   1) synchronous ack (so the broker has definitively seen
-			 *      the ack before we ask for a refill), and
+			 *   1) an ack (synchronous while the per-tick budget lasts
+			 *      -- see g_ack_sync_this_tick above -- so the broker
+			 *      has definitively seen it before we ask for a
+			 *      refill; async past the budget), and
 			 *   2) flag the originating handle so the outer loop runs an
 			 *      extra pull_one_batch() for it on this tick rather
 			 *      than waiting for the next idle wake-up.
 			 * This matches the user-observable semantics of +NXT
 			 * (finish the current message and immediately hand me the
 			 * next one) without depending on library internals. */
-			s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
+			if (++g_ack_sync_this_tick <= NATS_ACK_SYNC_PER_TICK_MAX)
+				s = nats_dl.natsMsg_AckSync(nmsg, NULL, NULL);
+			else
+				s = nats_dl.natsMsg_Ack(nmsg, NULL);
 			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->acks, 1);
 			ack_next_set(h_idx);

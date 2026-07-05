@@ -159,6 +159,12 @@ static char *nats_url = NULL;
  * convention requires a different separator. */
 char *fts_json_prefix = "json_";
 
+/* [P3.6] strlen(fts_json_prefix), stamped once in init_check_params --
+ * the prefix is a config constant, yet the usrloc read/write/serialize
+ * paths, the watch loop, the reg scan and the reaper each re-measured
+ * it per operation/event/pass. */
+int fts_json_prefix_len;
+
 /* Compare-and-swap retry count for atomic counter increments
  * (nats_cache_add) and JSON field updates (nats_cache_update).
  * Each retry costs one round-trip to the NATS server.  Default 10
@@ -515,6 +521,10 @@ static int _nats_url_insecure(const char *url)
 /* Phase 1: validate operator parameters -- fail closed at boot. */
 static int init_check_params(void)
 {
+	/* [P3.6] cache the prefix length (config constant; consumed on
+	 * every usrloc read/write, watch event and reap pass). */
+	fts_json_prefix_len = fts_json_prefix ? (int)strlen(fts_json_prefix) : 0;
+
 	/* P8 [REV-7 / TTL-SOLUTION-SPEC.md §5.3]: kv_ttl becomes the KV bucket's
 	 * MaxAge (nats_pool.c: kvCfg.TTL).  Stream MaxAge takes precedence over
 	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS

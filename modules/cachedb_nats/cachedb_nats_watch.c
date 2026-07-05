@@ -90,6 +90,7 @@ extern int index_resync_on_reconnect;
  * -Wredundant-decls under -Werror.  fts_json_prefix isn't yet in a
  * header, so it stays as a single extern below. */
 extern char *fts_json_prefix;
+extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
 
 /* ---- watcher state (process-local to the dedicated watcher proc) ---- */
 static atomic_int      _watcher_running = 0;
@@ -332,7 +333,7 @@ static void _watcher_loop(void)
 	int             prefix_len;
 	int             builds = 0;   /* successful watcher (re)builds so far */
 
-	prefix_len = fts_json_prefix ? (int)strlen(fts_json_prefix) : 0;
+	prefix_len = fts_json_prefix_len;   /* [P3.6] cached */
 
 	while (atomic_load(&_watcher_running)) {
 

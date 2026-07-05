@@ -71,7 +71,7 @@
 #include "../../dprint.h"
 #include "../../async.h"
 #include "../../pvar.h"
-#include "../../mem/shm_mem.h"
+#include "../../mem/mem.h"
 #include "../../sr_module.h"
 #include "../../lib/nats/nats_pool.h"
 
@@ -379,7 +379,7 @@ static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
 		/* worker-private timerfd: ask the core to close it for us. */
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
-		shm_free(p);
+		pkg_free(p);
 		return 1;    /* script rc=1, "got a message" */
 	}
 
@@ -392,7 +392,7 @@ static int resume_nats_fetch(int fd, struct sip_msg *msg, void *param)
 			set_last_error("connection lost");
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
-		shm_free(p);
+		pkg_free(p);
 		return disc ? -2 : -1;
 	}
 
@@ -490,13 +490,16 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 
-	p = (nats_fetch_async_param_t *)shm_malloc(sizeof(*p));
+	/* [P3.6] worker-local: allocated here, freed by THIS worker's
+	 * resume -- pkg (bounded by -M, leak-visible), like the rpc_async
+	 * call wrap.  It never crosses a process boundary. */
+	p = (nats_fetch_async_param_t *)pkg_malloc(sizeof(*p));
 	if (!p) {
 		LM_ERR("nats_fetch_async: oom for resume param\n");
 		close(tfd);
 		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
-		return -6;     /* internal: shm oom */
+		return -6;     /* internal: pkg oom */
 	}
 	p->handle_idx  = h->index;
 	p->ring        = h->ring;
@@ -847,7 +850,7 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 	if (g_batch.count > 0) {
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
-		shm_free(p);
+		pkg_free(p);
 		return g_batch.count;
 	}
 
@@ -860,7 +863,7 @@ static int resume_nats_fetch_batch(int fd, struct sip_msg *msg, void *param)
 			set_last_error("connection lost");
 		async_status = ASYNC_DONE_CLOSE_FD;
 		nats_handle_pending_dec(p->h_ref);
-		shm_free(p);
+		pkg_free(p);
 		return disc ? -2 : -1;
 	}
 
@@ -960,12 +963,13 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 
-	p = (nats_batch_async_param_t *)shm_malloc(sizeof(*p));
+	/* [P3.6] worker-local, like the single-fetch param above. */
+	p = (nats_batch_async_param_t *)pkg_malloc(sizeof(*p));
 	if (!p) {
 		close(tfd);
 		nats_handle_pending_dec(h);
 		async_status = ASYNC_NO_IO;
-		return -6;     /* internal: shm oom */
+		return -6;     /* internal: pkg oom */
 	}
 	p->handle_idx  = h->index;
 	p->cap         = cap;
