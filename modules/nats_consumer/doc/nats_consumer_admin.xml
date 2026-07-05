@@ -834,16 +834,19 @@ route {
         <section id="param_async_rpc_poll_ms">
             <title><varname>async_rpc_poll_ms</varname> (integer)</title>
             <para>
-                Poll interval, in milliseconds, of the per-call
-                worker-private timerfd that the async
-                <function>nats_request()</function> resume uses to check its
-                SHM slot for the reply.  Lower values reduce reply latency at
-                the cost of more timer wake-ups per in-flight call; the value
-                is clamped to the range 1..1000.
+                Tick interval, in milliseconds, of the per-call
+                worker-private guard timerfd behind an async
+                <function>nats_request()</function>.  The reply itself does
+                not wait for this timer: the consumer process signals the
+                calling worker over OpenSIPS IPC the moment the reply is
+                delivered (or the call is abandoned), so the resume runs at
+                wire latency.  The guard tick only bounds how quickly a
+                request timeout - or a lost wake signal - is noticed; the
+                value is clamped to the range 1..1000.
             </para>
             <para>
-                <emphasis>Default value is <quote>1</quote>
-                (millisecond).</emphasis>
+                <emphasis>Default value is <quote>100</quote>
+                (milliseconds).</emphasis>
             </para>
         </section>
 

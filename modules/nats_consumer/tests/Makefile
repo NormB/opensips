@@ -14,6 +14,7 @@ XPROC_SRCS  := test_ring_xproc_wakeup.c $(SHIM) ../nats_ring.c
 ACKTOK_SRCS := test_ack_token.c
 SUBJECT_SRCS := test_rpc_subject.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 IPCGEN_SRCS  := test_rpc_ipc_generation.c $(SHIM) ../nats_rpc_slot.c
+WAKEIPC_SRCS := test_rpc_wake_ipc.c $(SHIM) ../nats_rpc_wake.c
 REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
 ADVPARSE_SRCS := test_parser_adversarial.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
 SLOTLIFE_SRCS := test_rpc_slot_lifecycle.c $(SHIM) ../nats_rpc_slot.c
@@ -44,7 +45,8 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget
+                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget \
+                  test_rpc_wake_ipc
 
 all: test_registry test_parser test_ring test_ack_token \
      test_request_route_restriction \
@@ -61,7 +63,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -107,6 +109,13 @@ test_rpc_ipc_generation: $(IPCGEN_SRCS) test_shim.h ../nats_rpc_slot.h ../nats_r
 # roundtrip, field isolation, NULL-encoding.  Pure header logic.
 test_rpc_ipc_pack: test_rpc_ipc_pack.c ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -fsanitize=address -o $@ test_rpc_ipc_pack.c $(LDFLAGS)
+
+# [P3.1] Reply wake over core IPC: the per-worker wake registry + the
+# on_wake handler (pokes the registered guard timerfd on a matching
+# generation, silent no-op otherwise) + the consumer-side send helper
+# (recorded ipc_send_rpc seam lives in the test).
+test_rpc_wake_ipc: $(WAKEIPC_SRCS) test_shim.h ../nats_rpc_wake.h ../nats_rpc_ipc.h
+	$(CC) $(CFLAGS) -o $@ $(WAKEIPC_SRCS) $(LDFLAGS)
 
 # Slot-reuse reply-misdelivery: on_inbox_reply pins the claim (INFLIGHT ->
 # DELIVERING) before writing reply_* + re-checking generation, so a worker that
@@ -347,6 +356,7 @@ check: all
 	./test_ring_xproc_wakeup
 	./test_rpc_ipc_generation
 	./test_rpc_ipc_pack
+	./test_rpc_wake_ipc
 	./test_rpc_reply_pin
 	./test_parser_adversarial
 	./test_rpc_slot_lifecycle

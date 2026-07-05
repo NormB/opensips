@@ -47,11 +47,11 @@
  * mapped by every child via the standard OpenSIPS shm_mem
  * mechanism so workers and the consumer process share one view.
  *
- * There is no per-slot fd: the wake mechanism is a per-call
- * worker-private timerfd poll (see nats_rpc_slot.h).  The consumer
- * publishes a reply by writing reply_* and storing the slot state
- * DELIVERED; the worker learns of it on its next timerfd tick by
- * reading slot->state.  No fd is signalled from either side.
+ * There is no per-slot fd: the consumer publishes a reply by writing
+ * reply_* and storing the slot state DELIVERED, then [P3.1] IPC-wakes
+ * the claiming worker (slot->owner_proc), whose handler pokes the
+ * call's private guard timerfd; the coarse guard tick backstops a
+ * lost wake (see nats_rpc_slot.h / nats_rpc_wake.h).
  */
 static nats_rpc_slot_t *g_slots;
 static uint32_t         g_slot_total;
@@ -186,6 +186,10 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 			atomic_store_explicit(&s->claimed_at_us,
 				_slot_now_us(), memory_order_relaxed);
 			atomic_store_explicit(&s->deadline_us, 0,
+				memory_order_relaxed);
+			/* [P3.1] no wake owner until the worker stamps
+			 * its process_no just before publish */
+			atomic_store_explicit(&s->owner_proc, -1,
 				memory_order_relaxed);
 			return s;
 		}

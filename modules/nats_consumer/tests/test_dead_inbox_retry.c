@@ -124,10 +124,18 @@ int main(void)
 		ASSERT(grep_in_function(c, "publish_slot",
 				"nats_rpc_consumer_inbox_ready") >= 1,
 			"publish_slot checks inbox readiness before publishing");
-		/* the abandon transition (CAS to ABANDONED) is the fail-fast */
+		/* the abandon transition is the fail-fast: publish_slot calls
+		 * the shared helper, whose body performs the gen-safe CAS to
+		 * ABANDONED (and [P3.1] IPC-wakes the claiming worker) */
 		ASSERT(grep_in_function(c, "publish_slot",
-				"NATS_RPC_SLOT_ABANDONED") >= 1,
+				"slot_abandon_and_wake") >= 1,
 			"publish_slot abandons the slot when it cannot publish");
+		ASSERT(grep_in_function(c, "slot_abandon_and_wake",
+				"NATS_RPC_SLOT_ABANDONED") >= 1,
+			"the abandon helper performs the CAS to ABANDONED");
+		ASSERT(grep_in_function(c, "slot_abandon_and_wake",
+				"nats_rpc_wake_send") >= 1,
+			"the abandon helper IPC-wakes the claiming worker");
 	}
 
 	/* ---- main loop retries the subscribe (not just once) -------- */

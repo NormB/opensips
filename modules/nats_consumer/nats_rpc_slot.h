@@ -30,16 +30,18 @@
  *   context that already runs libnats safely) and hands off
  *   in-flight state between worker and consumer via SHM.
  *
- * Wake mechanism (worker-private timerfd poll)
+ * Wake mechanism (IPC wake + worker-private guard timerfd) [P3.1]
  *   OpenSIPS's reactor cannot register fork-inherited eventfds
- *   (see commit 8eae39a5b1).  Instead, each async call creates
- *   a fresh worker-private timerfd that fires every
- *   NATS_RPC_ASYNC_POLL_MS milliseconds; the resume function
- *   reads the slot's atomic state on each tick.  When the
- *   consumer writes the reply into the slot and transitions
- *   state to DELIVERED, the worker's next poll pick-up returns
- *   the reply.  Latency floor is the poll interval; CPU floor
- *   is one timerfd tick per in-flight call.
+ *   (see commit 8eae39a5b1).  Instead, each async call creates a
+ *   fresh worker-private timerfd registered with the reactor, and
+ *   the resume function reads the slot's atomic state whenever it
+ *   fires.  When the consumer transitions the slot to DELIVERED
+ *   (or abandons it) it IPC-signals the claiming worker
+ *   (slot->owner_proc) via nats_rpc_wake_send(); the worker-side
+ *   handler pokes the call's timerfd to fire immediately, so the
+ *   reply resumes at wire latency.  The timer's own coarse tick
+ *   (async_rpc_poll_ms, default 100 ms) only bounds how late a
+ *   lost wake or a timeout is noticed.
  *
  * State machine
  *
@@ -174,6 +176,15 @@ typedef struct nats_rpc_slot {
 	 * owning worker writes them. */
 	_Atomic long long claimed_at_us;
 	_Atomic long long deadline_us;
+
+	/* [P3.1] process_no of the claiming worker: the destination for
+	 * the consumer's reply-delivered / abandoned IPC wake
+	 * (nats_rpc_wake_send).  Reset to -1 by claim(); stamped by the
+	 * worker just before publish, like deadline_us.  Atomic because
+	 * the consumer process reads it while a worker may be re-claiming
+	 * the slot; a wake sent from a stale read is dropped by the
+	 * generation check in the receiving worker's registry. */
+	_Atomic int owner_proc;
 
 	/* Snapshot of the pool reconnect-epoch at claim time.  The
 	 * worker resume compares against the current value to surface

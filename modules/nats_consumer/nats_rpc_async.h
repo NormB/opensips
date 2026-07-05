@@ -80,8 +80,10 @@ int nats_rpc_async_request_id_user_set(const char *id, int len);
 int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
 
-/* Per-call timerfd poll interval (ms), tunable via the nats_consumer
- * "async_rpc_poll_ms" modparam.  Clamped to [1, 1000] when used. */
+/* Per-call guard-timerfd tick interval (ms), tunable via the
+ * nats_consumer "async_rpc_poll_ms" modparam.  [P3.1] Replies resume
+ * via the consumer's IPC wake; this tick only bounds timeout /
+ * lost-wake detection.  Clamped to [1, 1000] when used. */
 extern int nats_rpc_async_poll_ms;
 
 #endif /* NATS_RPC_ASYNC_H */

@@ -28,7 +28,10 @@
  *  sync path (uuidv7 mint, $nats_request_id stash/consume).  It uses
  *  the consumer-routed SHM-slot transport (nats_rpc_slot.c +
  *  nats_rpc_ipc.c, serviced in the consumer process by
- *  nats_rpc_consumer.c) and yields the worker on a private timerfd.
+ *  nats_rpc_consumer.c) and yields the worker on a private timerfd
+ *  that [P3.1] acts as a coarse timeout guard: the consumer IPC-wakes
+ *  the worker on delivery (nats_rpc_wake.c), so replies resume at
+ *  wire latency and the timer only backstops lost wakes/timeouts.
  *  No libnats subscription is ever created on a SIP worker: running
  *  one on a worker is exactly the pattern that crashes libnats 3.x on
  *  aarch64 (see nats_rpc_async.h).
@@ -83,6 +86,7 @@ typedef int                            natsStatus;
 #include "nats_rpc_async.h"
 #include "nats_rpc_slot.h"
 #include "nats_rpc_ipc.h"       /* nats_rpc_ipc_pack */
+#include "nats_rpc_wake.h"      /* [P3.1] reply wake registry */
 #include "nats_rpc_consumer.h"  /* nats_rpc_ipc_on_publish + counters */
 #include "nats_consumer_proc.h" /* nats_consumer_proc_no */
 
@@ -312,14 +316,13 @@ typedef struct nats_rpc_call_wrap {
 #define NATS_RPC_DELIVERING_GRACE_US  (5LL * 1000000LL)   /* 5 s */
 #endif
 
-/* Default tick interval for the timerfd poll.  1 ms gives sub-ms p50 with
- * a measurable CPU cost (1000 wakes/sec per in-flight call). */
-#define NATS_RPC_ASYNC_POLL_NS 1000000L   /* 1 ms */
-
-/* Runtime poll interval in ms (modparam "async_rpc_poll_ms"); a larger
- * value trades reply latency for fewer timer wakeups under load.  Clamped
- * to [1, 1000] when first used. */
-int nats_rpc_async_poll_ms = 1;
+/* Runtime guard-tick interval in ms (modparam "async_rpc_poll_ms").
+ * [P3.1] The reply itself arrives via the consumer's IPC wake at wire
+ * latency; this timer only bounds how late a LOST wake or a timeout is
+ * noticed, so the default is deliberately coarse (100 ms = 10 wakes/s
+ * per in-flight call instead of the old 1000).  Clamped to [1, 1000]
+ * when first used. */
+int nats_rpc_async_poll_ms = 100;
 
 static long _async_poll_ns(void)
 {
@@ -337,12 +340,12 @@ static int64_t now_us_monotonic(void)
 }
 
 /*
- * Resume function for the worker-private timerfd-poll transport.
+ * Resume function for the slot transport.
  *
- * Fires on every tick of the per-call timerfd OR when the
- * async-core timeout expires (was_timeout=1).  The slot's
- * atomic state is the source of truth: if DELIVERED, copy the
- * reply and return 1; if still INFLIGHT and we haven't timed
+ * Fires on the consumer's IPC wake (which pokes the per-call guard
+ * timerfd -- see nats_rpc_wake.c) or on the timer's own coarse tick.
+ * The slot's atomic state is the source of truth: if DELIVERED, copy
+ * the reply and return 1; if still INFLIGHT and we haven't timed
  * out, ASYNC_CONTINUE to keep polling; if timed out, transition
  * to ABANDONED and return -1 (or -2 on connection lost).
  */
@@ -389,6 +392,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		});
 
 		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_wake_unregister(s->slot_idx);
 		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return 1;
@@ -401,6 +405,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		int disc = nats_epoch_lost(&s->epoch_at_start);
 
 		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_wake_unregister(s->slot_idx);
 		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return disc ? -2 : -1;
@@ -428,6 +433,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 				"(the orphan reaper reclaims the slot)\n",
 				(unsigned)s->slot_idx);
 			async_status = ASYNC_DONE_CLOSE_FD;
+			nats_rpc_wake_unregister(s->slot_idx);
 			pkg_free(w);
 			return -2;
 		}
@@ -451,6 +457,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 			return 0;
 		}
 		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_wake_unregister(s->slot_idx);
 		nats_rpc_slot_free(s, w->gen);
 		pkg_free(w);
 		return disc ? -2 : -1;
@@ -475,7 +482,7 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
  *      the consumer's IPC drain acquires this) and enqueue the
  *      slot_idx on the worker -> consumer IPC.
  *   6. Create a worker-private timerfd that ticks every
- *      NATS_RPC_ASYNC_POLL_NS ns.  Compute the per-call deadline
+ *      async_rpc_poll_ms ms.  Compute the per-call deadline
  *      from timeout_ms (caps the polling loop).
  *   7. Allocate a pkg wrapper, hand control to the reactor:
  *      async_status = timerfd, ctx->resume_f =
@@ -628,6 +635,11 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	atomic_store_explicit(&slot->deadline_us,
 		now_us_monotonic() + (int64_t)tmo_ms * 1000,
 		memory_order_relaxed);
+	/* [P3.1] Stamp ourselves as the wake destination BEFORE the
+	 * CLAIMED->INFLIGHT release: the consumer IPC-signals this
+	 * process the moment it delivers (or abandons) the reply. */
+	atomic_store_explicit(&slot->owner_proc, process_no,
+		memory_order_relaxed);
 
 	LM_DBG("nats_request[async]: filled slot, about to publish\n");
 	if (nats_rpc_slot_publish(slot) < 0) {
@@ -710,6 +722,14 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	wrap->timerfd     = tfd;
 	wrap->deadline_us = now_us_monotonic() + (int64_t)tmo_ms * 1000;
 	wrap->gen         = ipc_gen;
+
+	/* [P3.1] Track the call in the per-worker wake registry (sized
+	 * from the clamped pool total, not the raw modparam) so the
+	 * consumer's delivered/abandoned IPC signal can poke our guard
+	 * timerfd.  Failure (OOM) is non-fatal: the reply is then picked
+	 * up on the coarse guard tick, exactly as before the wake. */
+	if (nats_rpc_wake_init(nats_rpc_slot_total_count()) == 0)
+		(void)nats_rpc_wake_register(slot->slot_idx, ipc_gen, tfd);
 
 	/* Hand off to the reactor.  The staged headers were
 	 * "consumed" when we built the slot; clear the staging area

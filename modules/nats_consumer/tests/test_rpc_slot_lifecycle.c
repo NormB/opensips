@@ -55,6 +55,11 @@ int main(void)
 	CHECK(a != NULL, "claim returns a slot");
 	CHECK(a && state_of(a) == NATS_RPC_SLOT_CLAIMED, "claimed slot is CLAIMED");
 	CHECK(nats_rpc_slot_inflight_count() == 1, "inflight == 1 after claim");
+	/* [P3.1] a fresh claim carries no wake owner until the worker
+	 * stamps its process_no just before publish. */
+	CHECK(a && atomic_load_explicit(&a->owner_proc,
+			memory_order_relaxed) == -1,
+		"claim resets owner_proc to -1 (no wake owner yet)");
 
 	/* pool is now full (1 slot) -> next claim returns NULL. */
 	b = nats_rpc_slot_claim();
@@ -80,9 +85,16 @@ int main(void)
 	CHECK(nats_rpc_slot_lookup(a->slot_idx) == NULL,
 		"lookup on a freed (FREE) slot is NULL");
 
-	/* the slot is reusable after free. */
+	/* the slot is reusable after free.  A stale owner_proc from the
+	 * previous claim must not leak into the new one: a consumer-side
+	 * wake for the old claim would otherwise target whatever worker
+	 * owned the slot last. */
+	if (a) atomic_store_explicit(&a->owner_proc, 17, memory_order_relaxed);
 	b = nats_rpc_slot_claim();
 	CHECK(b == a, "the freed slot is re-claimed (reuse)");
+	CHECK(b && atomic_load_explicit(&b->owner_proc,
+			memory_order_relaxed) == -1,
+		"re-claim clears a stale owner_proc from the previous claim");
 	nats_rpc_slot_free(b,
 		atomic_load_explicit(&(b)->generation, memory_order_relaxed));
 

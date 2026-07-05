@@ -41,6 +41,7 @@
 #include "nats_rpc_slot.h"
 #include "nats_rpc_subject.h" /* reply-subject build/parse + generation */
 #include "nats_rpc_ipc.h"
+#include "nats_rpc_wake.h" /* [P3.1] IPC-wake the claiming worker */
 #include "nats_ring.h"     /* NATS_RING_*_MAX */
 #include "nats_rpc.h"      /* nats_rpc_hdr_deserialize_to_msg */
 
@@ -74,10 +75,12 @@ static int  g_inbox_prefix_len;
  *
  * We only touch the SHM slot (via the slot_idx parsed from the
  * reply subject suffix): copy the reply payload into the slot,
- * transition state INFLIGHT -> DELIVERED with release ordering.
- * The worker side polls slot->state on each tick of a
- * worker-private timerfd; we do not signal any fd from this
- * callback.
+ * transition state INFLIGHT -> DELIVERED with release ordering,
+ * then [P3.1] IPC-wake the claiming worker so its resume runs at
+ * wire latency instead of on the next guard tick (calling
+ * ipc_send_rpc from a libnats thread follows the established
+ * event_nats pattern).  A lost wake is covered by the worker's
+ * coarse guard timerfd.
  */
 static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
                             natsMsg *msg, void *closure)
@@ -222,13 +225,24 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 		s->reply_headers_truncated = (uint8_t)(trunc ? 1 : 0);
 	}
 
-	/* Publish: DELIVERING -> DELIVERED with release ordering so the worker's
-	 * next timerfd tick observes the reply_* writes above.  The slot is pinned
-	 * (only we transition out of DELIVERING) and the generation was validated
-	 * while pinned, so a plain release store is correct and race-free -- the
-	 * worker consumes this reply for exactly the claim it was minted for. */
-	atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
-		memory_order_release);
+	/* Publish: DELIVERING -> DELIVERED with release ordering so the worker
+	 * observes the reply_* writes above.  The slot is pinned (only we
+	 * transition out of DELIVERING) and the generation was validated while
+	 * pinned, so a plain release store is correct and race-free -- the
+	 * worker consumes this reply for exactly the claim it was minted for.
+	 *
+	 * [P3.1] Read the wake destination while still pinned (the worker
+	 * cannot free/re-claim a DELIVERING slot, so owner_proc is stably
+	 * ours here), then signal it AFTER the release store.  A refused
+	 * send just means the worker resumes on its guard tick. */
+	{
+		int owner = atomic_load_explicit(&s->owner_proc,
+			memory_order_relaxed);
+
+		atomic_store_explicit(&s->state, NATS_RPC_SLOT_DELIVERED,
+			memory_order_release);
+		(void)nats_rpc_wake_send(owner, slot_idx, gen);
+	}
 
 	nats_dl.natsMsg_Destroy(msg);
 }
@@ -369,6 +383,33 @@ uint32_t nats_rpc_ipc_depth(void)
 }
 
 /*
+ * Consumer-side fail-fast: CAS INFLIGHT -> ABANDONED and, when the CAS
+ * wins, [P3.1] IPC-wake the claiming worker so it surfaces the failure
+ * immediately instead of waiting out its guard tick.  The CAS (rather
+ * than a blind store) matters: the worker may have already timed out,
+ * freed the slot, and another caller re-claimed it -- a blind store
+ * would clobber the new claimer's state.  owner/generation are read
+ * BEFORE the CAS; if the slot was re-claimed in that window the CAS
+ * targets the new (also INFLIGHT) claim -- the same pre-existing
+ * check-then-CAS window as before -- and the wake it emits carries a
+ * generation the receiving worker's registry validates, so a stale
+ * wake is dropped there.
+ */
+static void slot_abandon_and_wake(nats_rpc_slot_t *s)
+{
+	int      owner = atomic_load_explicit(&s->owner_proc,
+		memory_order_relaxed);
+	uint32_t gen   = atomic_load_explicit(&s->generation,
+		memory_order_relaxed);
+	int      expected = NATS_RPC_SLOT_INFLIGHT;
+
+	if (atomic_compare_exchange_strong_explicit(
+			&s->state, &expected, NATS_RPC_SLOT_ABANDONED,
+			memory_order_release, memory_order_relaxed))
+		(void)nats_rpc_wake_send(owner, s->slot_idx, gen);
+}
+
+/*
  * Build the outbound natsMsg from a slot's out_* fields and
  * publish it with reply-to pointing at our inbox subject so the
  * remote responder echoes a reply back into us.
@@ -418,10 +459,7 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	 * slot now (CAS INFLIGHT -> ABANDONED, gen-safe against a re-claim) so
 	 * the caller fails fast; the main loop keeps retrying the subscribe. */
 	if (!nats_rpc_consumer_inbox_ready()) {
-		int expected = NATS_RPC_SLOT_INFLIGHT;
-		(void)atomic_compare_exchange_strong_explicit(
-			&s->state, &expected, NATS_RPC_SLOT_ABANDONED,
-			memory_order_release, memory_order_relaxed);
+		slot_abandon_and_wake(s);
 		LM_WARN("nats_rpc_consumer: reply inbox down; abandoning RPC "
 			"slot %u instead of publishing to a deaf inbox\n",
 			(unsigned)s->slot_idx);
@@ -441,19 +479,7 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	if (n < 0) {
 		LM_ERR("nats_rpc_consumer: reply-subject build failed for slot %u "
 			"(overflow or missing corr_id)\n", (unsigned)s->slot_idx);
-		{
-			/* CAS INFLIGHT -> ABANDONED.  The worker may have
-			 * already timed out, freed the slot, and another
-			 * caller may have re-CLAIMed it; in that case a blind
-			 * store would clobber the new claimer's state.  See
-			 * the matching commentary in on_inbox_reply above. */
-			int expected = NATS_RPC_SLOT_INFLIGHT;
-			(void)atomic_compare_exchange_strong_explicit(
-				&s->state, &expected,
-				NATS_RPC_SLOT_ABANDONED,
-				memory_order_release,
-				memory_order_relaxed);
-		}
+		slot_abandon_and_wake(s);
 		return;
 	}
 
@@ -462,19 +488,7 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	if (s->out_subject_len > NATS_RING_SUBJECT_MAX) {
 		LM_ERR("nats_rpc_consumer: subject overflow on slot %u\n",
 			(unsigned)s->slot_idx);
-		{
-			/* CAS INFLIGHT -> ABANDONED.  The worker may have
-			 * already timed out, freed the slot, and another
-			 * caller may have re-CLAIMed it; in that case a blind
-			 * store would clobber the new claimer's state.  See
-			 * the matching commentary in on_inbox_reply above. */
-			int expected = NATS_RPC_SLOT_INFLIGHT;
-			(void)atomic_compare_exchange_strong_explicit(
-				&s->state, &expected,
-				NATS_RPC_SLOT_ABANDONED,
-				memory_order_release,
-				memory_order_relaxed);
-		}
+		slot_abandon_and_wake(s);
 		return;
 	}
 	memcpy(subj_c, s->out_subject, s->out_subject_len);
@@ -485,19 +499,7 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	if (st != NATS_OK || !out) {
 		LM_ERR("nats_rpc_consumer: natsMsg_Create failed for slot %u: %s\n",
 			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
-		{
-			/* CAS INFLIGHT -> ABANDONED.  The worker may have
-			 * already timed out, freed the slot, and another
-			 * caller may have re-CLAIMed it; in that case a blind
-			 * store would clobber the new claimer's state.  See
-			 * the matching commentary in on_inbox_reply above. */
-			int expected = NATS_RPC_SLOT_INFLIGHT;
-			(void)atomic_compare_exchange_strong_explicit(
-				&s->state, &expected,
-				NATS_RPC_SLOT_ABANDONED,
-				memory_order_release,
-				memory_order_relaxed);
-		}
+		slot_abandon_and_wake(s);
 		return;
 	}
 
@@ -515,25 +517,12 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	if (st != NATS_OK) {
 		LM_ERR("nats_rpc_consumer: PublishMsg failed for slot %u: %s\n",
 			(unsigned)s->slot_idx, nats_dl.natsStatus_GetText(st));
-		{
-			/* CAS INFLIGHT -> ABANDONED.  The worker may have
-			 * already timed out, freed the slot, and another
-			 * caller may have re-CLAIMed it; in that case a blind
-			 * store would clobber the new claimer's state.  See
-			 * the matching commentary in on_inbox_reply above. */
-			int expected = NATS_RPC_SLOT_INFLIGHT;
-			(void)atomic_compare_exchange_strong_explicit(
-				&s->state, &expected,
-				NATS_RPC_SLOT_ABANDONED,
-				memory_order_release,
-				memory_order_relaxed);
-		}
+		slot_abandon_and_wake(s);
 		return;
 	}
 	/* Slot stays INFLIGHT; the reply (matching reply_subject)
-	 * will land in on_inbox_reply and transition the slot to
-	 * DELIVERED.  The worker side polls the slot state on each
-	 * tick of its private timerfd; no fd signaling needed. */
+	 * will land in on_inbox_reply, transition the slot to
+	 * DELIVERED and [P3.1] IPC-wake the claiming worker. */
 }
 
 /* The ipc_send_rpc handler for one worker->consumer publish request
@@ -554,10 +543,7 @@ void nats_rpc_ipc_on_publish(int sender, void *param)
 	if (!nc) {
 		nats_rpc_slot_t *s = nats_rpc_slot_lookup(slot_idx);
 		if (s && nats_rpc_slot_entry_is_current(s, generation)) {
-			int expected = NATS_RPC_SLOT_INFLIGHT;
-			(void)atomic_compare_exchange_strong_explicit(
-				&s->state, &expected, NATS_RPC_SLOT_ABANDONED,
-				memory_order_release, memory_order_relaxed);
+			slot_abandon_and_wake(s);
 			LM_WARN("nats_rpc_consumer: connection lost before "
 				"publish; abandoning RPC slot %u\n",
 				(unsigned)slot_idx);
