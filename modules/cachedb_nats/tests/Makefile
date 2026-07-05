@@ -62,6 +62,11 @@ CORE_DEFS := -fPIC -DPIC \
 test_json_foreach: EXTRA := $(CORE_DEFS)
 test_json_foreach: ../cachedb_nats_json_walk.c ../cachedb_nats_json_internal.h
 
+# [P3.5] _sink_emit_int divide-loop: links the REAL ser TU and
+# characterizes every edge value (incl. INT64_MIN) against printf.
+test_sink_emit_int: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_ser.c -D_GNU_SOURCE
+test_sink_emit_int: ../cachedb_nats_json_ser.c ../cachedb_nats_json_internal.h
+
 # P0.1: kv_epoch must not latch on a failed refresh — links the real
 # nats_con_refresh_kv() from ../cachedb_nats_dbase.c with a fake pool.
 test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c
@@ -91,7 +96,7 @@ TESTS_TSAN_SAFE = test_json_escape \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
                   test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts \
-                  test_kv_key_validate test_row_exp_compute test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_fetch_marker test_ttl_write_invariant test_remove_stub test_index_count test_schema_version_legacy test_kv_ttl_legacy_bucket test_index_add_idempotent
+                  test_kv_key_validate test_row_exp_compute test_p35_len_threading test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_ttl_fetch_marker test_ttl_write_invariant test_remove_stub test_index_count test_schema_version_legacy test_kv_ttl_legacy_bucket test_index_add_idempotent
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is

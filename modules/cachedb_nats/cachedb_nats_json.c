@@ -696,7 +696,7 @@ static int _apply_field_cb(const char *fname, int flen,
 }
 
 static char *_apply_pairs_one_pass(const char *json, int json_len,
-	const cdb_dict_t *pairs)
+	const cdb_dict_t *pairs, int *out_len)
 {
 	json_sink_t s;
 	apply_op_t *ops = NULL;
@@ -781,7 +781,9 @@ out:
 		free(s.buf);
 		return NULL;
 	}
-	return _sink_take(&s, NULL);
+	/* [P3.5] surface the sink's length -- the caller threads it
+	 * through instead of re-measuring the document. */
+	return _sink_take(&s, out_len);
 }
 
 /* Resolve the document key for an update: non-PK filters try the
@@ -879,7 +881,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
  * create lost a race), -1 on fatal error (logged; caller cleans up). */
 static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	const cdb_filter_t *row_filter, const char *target_key,
-	char **out_json, uint64_t *out_rev)
+	char **out_json, int *out_len, uint64_t *out_rev)
 {
 	kvEntry *entry = NULL;
 	natsStatus s;
@@ -921,6 +923,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 		}
 
 		*out_json = seed;       /* hand off ownership (merge base only) */
+		*out_len  = seed_len;
 		*out_rev = 0;           /* the "no prior message" sentinel      */
 		return 0;
 	}
@@ -962,6 +965,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 			return -1;
 		}
 		*out_json = seed;          /* *out_rev already = the marker's revision */
+		*out_len  = seed_len;
 		return 0;
 	}
 
@@ -1004,6 +1008,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	}
 
 	*out_json = json_buf;
+	*out_len  = data_len;   /* [P3.5] == strlen(json_buf), validated above */
 	return 0;
 }
 
@@ -1013,11 +1018,11 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
  * the new one).  Returns 1 on a CAS conflict the caller should retry,
  * -1 on fatal error.  @json_buf stays owned by the caller. */
 static int _update_apply_and_cas(nats_cachedb_con *ncon,
-	const char *target_key, const char *json_buf,
+	const char *target_key, const char *json_buf, int old_len,
 	const cdb_dict_t *pairs, uint64_t rev)
 {
-	int old_len = (int)strlen(json_buf);
 	char *new_json;
+	int new_len = 0;
 	uint64_t new_rev;
 	int rc;
 	int64_t f_row_exp = 0;            /* P8 §5: per-message-TTL eligibility */
@@ -1030,7 +1035,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * the input doc once, and writes the merged result into
 	 * one growable sink buffer.  We keep the input buffer
 	 * (json_buf) alive for the targeted index removal below. */
-	new_json = _apply_pairs_one_pass(json_buf, old_len, pairs);
+	new_json = _apply_pairs_one_pass(json_buf, old_len, pairs, &new_len);
 	if (!new_json) {
 		LM_ERR("failed to apply pairs in single pass\n");
 		return -1;
@@ -1044,8 +1049,8 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * concurrent sibling's row rewrite. */
 	{
 		char *hygiened = _row_drop_expired_own(new_json,
-			(int)strlen(new_json), pairs, time(NULL),
-			nats_reap_grace + nats_expired_linger, NULL);
+			new_len, pairs, time(NULL),
+			nats_reap_grace + nats_expired_linger, &new_len);
 		if (!hygiened) {
 			LM_ERR("write hygiene failed for key '%s'\n", target_key);
 			free(new_json);
@@ -1062,7 +1067,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * unchanged. */
 	{
 		char *finalized = _row_finalize_metadata(new_json,
-			(int)strlen(new_json), NULL,
+			new_len, &new_len,
 			&f_row_exp, &f_n_contacts, &f_all_same);
 		if (!finalized) {
 			LM_ERR("failed to finalize row metadata (row_exp) "
@@ -1079,17 +1084,14 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * its bindings) untouched, rather than hit the NATS payload cap mid-write
 	 * (a broker error) or silently truncate.  Fatal (no CAS retry): the value
 	 * would be identical on every retry. */
-	{
-		int vlen = (int)strlen(new_json);
-		if (!_value_size_ok(vlen, nats_max_value_size)) {
-			NATS_CDB_STATS_INC(value_oversize_rejected);
-			LM_ERR("update rejected: merged value for key '%s' is %d "
-				"bytes, over nats_max_value_size=%d; save failed "
-				"(existing bindings intact, not truncated)\n",
-				target_key, vlen, nats_max_value_size);
-			free(new_json);
-			return -1;
-		}
+	if (!_value_size_ok(new_len, nats_max_value_size)) {
+		NATS_CDB_STATS_INC(value_oversize_rejected);
+		LM_ERR("update rejected: merged value for key '%s' is %d "
+			"bytes, over nats_max_value_size=%d; save failed "
+			"(existing bindings intact, not truncated)\n",
+			target_key, new_len, nats_max_value_size);
+		free(new_json);
+		return -1;
 	}
 
 	/* [§2.0]: write back through the one row-write helper (CAS publish,
@@ -1097,7 +1099,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * Index maintenance stays HERE (R8): the reaper defers to the watcher, but
 	 * the registration worker keeps the index authoritative inline. */
 	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
-		new_json, (int)strlen(new_json), rev, &new_rev);
+		new_json, new_len, rev, &new_rev);
 	if (rc == 0) {
 		if (rev == 0)                 /* [HREV-2] first-insert create landed */
 			NATS_CDB_STATS_INC(create_doc);
@@ -1105,8 +1107,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
 		if (cdbn_fts_on) {
 			cdbn_fts.remove_fields(target_key, json_buf, old_len);
-			cdbn_fts.add(target_key, new_json,
-				(int)strlen(new_json));
+			cdbn_fts.add(target_key, new_json, new_len);
 		}
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
@@ -1148,6 +1149,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	nats_cachedb_con *ncon;
 	char *target_key = NULL;
 	char *json_buf = NULL;
+	int json_len = 0;
 	uint64_t rev = 0;
 	int retries, attempt = 0;
 	int rc;
@@ -1230,7 +1232,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		attempt++;
 
 		rc = _update_fetch_or_seed(ncon, row_filter, target_key,
-			&json_buf, &rev);
+			&json_buf, &json_len, &rev);
 		if (rc < 0) {
 			pkg_free(target_key);
 			return -1;
@@ -1241,7 +1243,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		}
 
 		rc = _update_apply_and_cas(ncon, target_key, json_buf,
-			pairs, rev);
+			json_len, pairs, rev);
 		free(json_buf);
 		json_buf = NULL;
 		if (rc == 0) {

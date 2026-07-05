@@ -253,10 +253,22 @@ int _sink_emit_raw_string(json_sink_t *s, const char *p, int n)
 
 int _sink_emit_int(json_sink_t *s, int64_t v)
 {
-	char tmp[32];
-	int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
-	if (n < 0 || n >= (int)sizeof(tmp)) { s->oom = 1; return -1; }
-	return _sink_write(s, tmp, n);
+	/* [P3.5] plain divide-loop: the old per-field "%lld" formatter
+	 * parsed a format string for every integer of every row (expires,
+	 * cseq, last_mod, row_exp, ... a dozen per REGISTER).  The
+	 * negative arm negates via unsigned arithmetic so INT64_MIN is
+	 * well-defined. */
+	char     tmp[24];               /* -9223372036854775808 = 20 chars */
+	char    *p = tmp + sizeof(tmp);
+	uint64_t u = (v < 0) ? -(uint64_t)v : (uint64_t)v;
+
+	do {
+		*--p = (char)('0' + (u % 10));
+		u /= 10;
+	} while (u);
+	if (v < 0)
+		*--p = '-';
+	return _sink_write(s, p, (int)(tmp + sizeof(tmp) - p));
 }
 
 /* Transfer ownership of the buffer to the caller; sink resets to empty.
