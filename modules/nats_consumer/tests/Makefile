@@ -44,7 +44,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail
+                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget
 
 all: test_registry test_parser test_ring test_ack_token \
      test_request_route_restriction \
@@ -61,7 +61,7 @@ all: test_registry test_parser test_ring test_ack_token \
      test_retired_no_sub_reap test_sub_identity_match \
      test_fetch_budget test_ring_wake_one \
      test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin
+     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -201,6 +201,10 @@ test_proc_tu_split: test_proc_tu_split.c
 # Broker-down fast-fail: sync nats_request must not block a timer/event
 # process for the full timeout; async submit must not burn an RPC slot.
 test_request_fastfail: test_request_fastfail.c
+	$(CC) -g -O0 -Wall -o $@ $<
+
+# [P3.2] blocking-budget source-pattern: fetch bail + DELIVERING bound.
+test_blocking_budget: test_blocking_budget.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
 # Behavioural + source-pattern: the fetch sweep is budgeted by handle count
@@ -376,6 +380,7 @@ check: all
 	./test_ensure_backoff
 	./test_proc_tu_split
 	./test_request_fastfail
+	./test_blocking_budget
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

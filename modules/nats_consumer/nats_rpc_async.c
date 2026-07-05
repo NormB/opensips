@@ -305,6 +305,13 @@ typedef struct nats_rpc_call_wrap {
 	                                 * against an orphan-reaped slot [P2.2] */
 } nats_rpc_call_wrap_t;
 
+/* [P3.2] How long past its deadline a worker keeps polling a slot the
+ * consumer has pinned DELIVERING before giving up (the pin resolves in
+ * microseconds when the delivery thread is alive). */
+#ifndef NATS_RPC_DELIVERING_GRACE_US
+#define NATS_RPC_DELIVERING_GRACE_US  (5LL * 1000000LL)   /* 5 s */
+#endif
+
 /* Default tick interval for the timerfd poll.  1 ms gives sub-ms p50 with
  * a measurable CPU cost (1000 wakes/sec per in-flight call). */
 #define NATS_RPC_ASYNC_POLL_NS 1000000L   /* 1 ms */
@@ -403,9 +410,27 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		/* The consumer has pinned our claim and is writing the reply right
 		 * now.  Not ready yet -- and we must NOT abandon+free the slot under
 		 * the pin (that would break the consumer's exclusive DELIVERING ->
-		 * DELIVERED transition).  Keep polling even past the deadline: the
+		 * DELIVERED transition).  Keep polling past the deadline: the
 		 * transition is a few instructions on the consumer thread, so the
-		 * next tick delivers an at-the-wire reply rather than dropping it. */
+		 * next tick delivers an at-the-wire reply rather than dropping it.
+		 *
+		 * [P3.2] ... but not FOREVER.  If the consumer's libnats thread
+		 * dies mid-delivery the pin never resolves and this worker would
+		 * poll for the process lifetime.  Past deadline + a generous
+		 * grace, stop polling and surface -2; the slot is deliberately
+		 * NOT freed under the pin -- the [P2.2] orphan reaper reclaims
+		 * it (generation-guarded) once its own slack expires. */
+		if (now_us_monotonic() >=
+		    w->deadline_us + NATS_RPC_DELIVERING_GRACE_US) {
+			LM_ERR("nats_request[async]: reply pinned DELIVERING "
+				"past deadline+grace on slot %u -- consumer "
+				"delivery thread gone?  Abandoning the wait "
+				"(the orphan reaper reclaims the slot)\n",
+				(unsigned)s->slot_idx);
+			async_status = ASYNC_DONE_CLOSE_FD;
+			pkg_free(w);
+			return -2;
+		}
 		async_status = ASYNC_CONTINUE;
 		return 0;
 	}

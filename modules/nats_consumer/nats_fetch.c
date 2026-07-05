@@ -304,6 +304,15 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 				ret = cur_set_from_slot(h->index, &slot);
 				goto out;
 			}
+			/* [P3.2] the 100 ms slicing existed "to re-check the
+			 * connection" but never did -- a worker could sit out
+			 * the full timeout against a dead broker.  Bail early:
+			 * nothing can arrive while the pool is down. */
+			if (!nats_pool_is_connected()) {
+				LM_DBG("nats_fetch: broker down mid-wait; "
+					"returning early\n");
+				break;
+			}
 			slice = tmo - waited;
 			if (slice > 100) slice = 100; /* re-check connection */
 			(void)nats_ring_wait(h->ring, slice);

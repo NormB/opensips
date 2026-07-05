@@ -212,7 +212,13 @@ int nats_pool_drain_timeout_setter(modparam_t type, void *val)
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
  * like usrloc so a slow-but-connected broker can't block a SIP worker for
  * the full default. */
-int nats_pool_kv_op_timeout_ms = 0;
+/* [P3.2] Non-zero DEFAULT: the usrloc update path is two synchronous
+ * KV round-trips per REGISTER; with cnats's library default (5 s) a
+ * slow-but-connected broker can hold a SIP worker ~10 s per attempt.
+ * 1000 ms bounds the per-REGISTER worst case at ~2 s; operators can
+ * still widen it (or set <= 0 for the library default) via the
+ * cachedb_nats kv_op_timeout_ms modparam. */
+int nats_pool_kv_op_timeout_ms = 1000;
 
 /* ----------------------------------------------------------------
  * Helpers
@@ -936,6 +942,27 @@ natsConnection *nats_pool_get(void)
 					"continuing degraded with background "
 					"connect retries\n");
 				break;
+			}
+
+			/* [P3.2] Non-transient failure classes: retrying cannot
+			 * succeed until an operator fixes configuration (TLS
+			 * material, credentials, malformed options).  Fail the
+			 * boot NOW instead of burning max_reconnect x sleep
+			 * (~minutes) in every process's child_init.  Broker
+			 * reachability problems never land here -- they surface
+			 * as NATS_NOT_YET_CONNECTED above (degraded start). */
+			if (s == NATS_SSL_ERROR ||
+			    s == NATS_CONNECTION_AUTH_FAILED ||
+			    s == NATS_INVALID_ARG) {
+				char stack_buf[1024];
+				nats_dl.nats_GetLastErrorStack(stack_buf,
+					sizeof(stack_buf));
+				LM_ERR("NATS pool: non-transient connect failure "
+					"(%s [%s]) -- fix the TLS/auth/URL "
+					"configuration; not retrying\n",
+					nats_dl.natsStatus_GetText(s),
+					stack_buf[0] ? stack_buf : "no detail");
+				goto error;
 			}
 
 			attempts++;

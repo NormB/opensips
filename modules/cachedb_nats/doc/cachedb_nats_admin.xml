@@ -724,13 +724,15 @@ modparam("cachedb_nats", "max_reconnect", 30)
 		Per-operation timeout, in milliseconds, for KV get/put/update
 		calls issued from a SIP worker (e.g. the usrloc read/write path),
 		so a slow-but-connected broker cannot block a worker for the full
-		library default.  A value <emphasis role="bold">&lt;= 0</emphasis>
-		uses the <filename>lib/nats</filename> pool default (no extra
-		per-operation cap).
+		library default (5 s).  The usrloc update path performs two
+		synchronous round-trips per REGISTER, so the per-REGISTER worst
+		case is roughly twice this value.  A value
+		<emphasis role="bold">&lt;= 0</emphasis> removes the cap (cnats
+		library default applies).
 	</para>
 	<para>
-		<emphasis>Default value is <quote>0</quote> (use the pool
-		default).</emphasis>
+		<emphasis>Default value is <quote>1000</quote> (ms; bounds the
+		per-REGISTER worst case at ~2 s).</emphasis>
 	</para>
 	</section>
 
