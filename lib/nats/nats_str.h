@@ -62,13 +62,12 @@ static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 		LM_ERR("string too long (%d >= %zu)\n", s->len, buf_size);
 		return -1;
 	}
-	/* Reject an embedded NUL: the caller hands the resulting C string to the
-	 * NATS *String KV API (kvStore_PutString / CreateString / UpdateString),
-	 * which stops at the first NUL and would SILENTLY TRUNCATE a NUL-bearing
-	 * value on write while the length-aware read path preserves it -- a lossy
-	 * set/get round-trip.  Fail closed instead (keys never legitimately carry
-	 * a NUL; the usrloc row payload uses length-aware natsMsg_Create, not this
-	 * helper). */
+	/* Reject an embedded NUL: the resulting buffer is handed to C-string
+	 * NATS APIs as a KEY / subject / bucket name, which stop at the first
+	 * NUL -- a truncated key reads/writes SOMEBODY ELSE'S entry.  Fail
+	 * closed (keys never legitimately carry a NUL).  VALUES no longer pass
+	 * through here: the set paths ride the length-aware kvStore_Put/
+	 * Create/Update [P3.6], which carry embedded NULs verbatim. */
 	if (memchr(s->s, '\0', s->len)) {
 		LM_ERR("string contains an embedded NUL (%d bytes) -- refusing "
 			"(the NATS C-string KV API would silently truncate it)\n",

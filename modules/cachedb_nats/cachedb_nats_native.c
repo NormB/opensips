@@ -419,10 +419,6 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 	uint64_t rev;
 	char bucket_buf[NATS_NATIVE_KEY_BUF];
 	char key_buf[NATS_NATIVE_KEY_BUF];
-	char val_buf[NATS_NATIVE_VAL_BUF];
-	char *val_ptr = val_buf;
-	int val_heap = 0;
-	int rc;
 
 	if (!bucket || !key || !value) {
 		LM_ERR("null parameter\n");
@@ -447,45 +443,29 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		return -1;
 	}
 
-	/* null-terminate value, heap-alloc if too large for stack buf */
-	if (value->s && value->len > 0) {
-		if ((size_t)value->len >= sizeof(val_buf)) {
-			val_ptr = pkg_malloc(value->len + 1);
-			if (!val_ptr) {
-				LM_ERR("no more pkg memory for value\n");
-				return -1;
-			}
-			val_heap = 1;
-		}
-		memcpy(val_ptr, value->s, value->len);
-		val_ptr[value->len] = '\0';
-	} else {
-		val_ptr[0] = '\0';
-	}
-
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
 		LM_ERR("failed to get KV store for bucket '%s'\n",
 			bucket_buf[0] ? bucket_buf : kv_bucket);
-		rc = -1;
-		goto out;
+		return -1;
 	}
 
-	s = nats_dl.kvStore_PutString(&rev, kv, key_buf, val_ptr);
+	/* [P3.6] length-aware write: the value travels as (ptr,len)
+	 * uncopied -- the old NUL-termination copy (stack, or a pkg alloc
+	 * per >4 KB value) fed kvStore_PutString, which would also
+	 * silently truncate an embedded-NUL value. */
+	s = nats_dl.kvStore_Put(&rev, kv, key_buf,
+		(value->s && value->len > 0) ? value->s : NULL,
+		value->len > 0 ? value->len : 0);
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_PutString failed for '%s': %s\n",
+		LM_ERR("kvStore_Put failed for '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
-		rc = -1;
-		goto out;
+		return -1;
 	}
 
 	LM_DBG("nats_kv_put '%s' rev=%llu\n", key_buf, (unsigned long long)rev);
-	rc = 1;
-out:
-	if (val_heap)
-		pkg_free(val_ptr);
-	return rc;
+	return 1;
 }
 
 /**
@@ -509,9 +489,6 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	uint64_t new_rev = 0;
 	char bucket_buf[NATS_NATIVE_KEY_BUF];
 	char key_buf[NATS_NATIVE_KEY_BUF];
-	char val_buf[NATS_NATIVE_VAL_BUF];
-	char *val_ptr = val_buf;
-	int val_heap = 0;
 	int rc;
 
 	if (!bucket || !key || !value || !expected_rev) {
@@ -537,22 +514,6 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		return -1;
 	}
 
-	/* null-terminate value */
-	if (value->s && value->len > 0) {
-		if ((size_t)value->len >= sizeof(val_buf)) {
-			val_ptr = pkg_malloc(value->len + 1);
-			if (!val_ptr) {
-				LM_ERR("no more pkg memory for value\n");
-				return -1;
-			}
-			val_heap = 1;
-		}
-		memcpy(val_ptr, value->s, value->len);
-		val_ptr[value->len] = '\0';
-	} else {
-		val_ptr[0] = '\0';
-	}
-
 	kv = nats_pool_get_kv(bucket_buf[0] ? bucket_buf : kv_bucket,
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv) {
@@ -573,9 +534,12 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 	 * non-retryable error.  got_entry=1: an existing row updated at rev. */
 	{
 		jsCtx *js = nats_pool_get_js();
+		/* [P3.6] the value rides (ptr,len) into the CAS write
+		 * uncopied -- nats_kv_put_row is length-aware end to end. */
 		enum ttl_outcome o = nats_kv_put_row(js, kv,
 			bucket_buf[0] ? bucket_buf : kv_bucket, key_buf,
-			val_ptr, value->len > 0 ? value->len : 0,
+			(value->s && value->len > 0) ? value->s : NULL,
+			value->len > 0 ? value->len : 0,
 			/*got_entry=*/1, (uint64_t)*expected_rev, &new_rev);
 
 		if (o == TTL_RETRY) {
@@ -596,8 +560,6 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		key_buf, (unsigned long long)new_rev, *expected_rev);
 	rc = 1;
 out:
-	if (val_heap)
-		pkg_free(val_ptr);
 	return rc;
 }
 

@@ -397,16 +397,12 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 	natsStatus s;
 	uint64_t rev;
 	char key_buf[NATS_KEY_BUF_SIZE];
-	char *val_buf = NULL;
-	char val_stack[NATS_VAL_BUF_SIZE];
-	int use_heap = 0;
 
 	if (!con || !attr || !val) {
 		LM_ERR("null parameter\n");
 		return -1;
 	}
-	/* A negative length would wrap to a huge size_t in the stack-vs-heap
-	 * decision below and pkg_malloc(val->len + 1) would under/over-allocate. */
+	/* A negative length would reach kvStore_Put as a garbage size. */
 	if (val->len < 0) {
 		LM_ERR("negative value length (%d)\n", val->len);
 		return -1;
@@ -436,27 +432,16 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 			"NATS KV uses bucket-level TTL on this path\n",
 			expires);
 
-	/* null-terminate the value — use stack buffer or heap for large values */
-	if ((size_t)val->len < sizeof(val_stack)) {
-		val_buf = val_stack;
-	} else {
-		val_buf = pkg_malloc(val->len + 1);
-		if (!val_buf) {
-			LM_ERR("no more pkg memory for value (%d bytes)\n", val->len);
-			return -1;
-		}
-		use_heap = 1;
-	}
-	memcpy(val_buf, val->s, val->len);
-	val_buf[val->len] = '\0';
-
-	s = nats_dl.kvStore_PutString(&rev, ncon->kv, key_buf, val_buf);
-
-	if (use_heap)
-		pkg_free(val_buf);
+	/* [P3.6] length-aware write: the value travels as (ptr,len) --
+	 * the old NUL-termination copy (stack or a pkg alloc per >4 KB
+	 * set) existed solely to feed kvStore_PutString, which would
+	 * also silently truncate an embedded-NUL value. */
+	s = nats_dl.kvStore_Put(&rev, ncon->kv, key_buf,
+		(val->s && val->len > 0) ? val->s : NULL,
+		val->len > 0 ? val->len : 0);
 
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_PutString failed for key '%s': %s\n",
+		LM_ERR("kvStore_Put failed for key '%s': %s\n",
 			key_buf, nats_dl.natsStatus_GetText(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;

@@ -62,6 +62,11 @@ NATS_DL_FN(kvStatus_History)
 NATS_DL_FN(kvStatus_Replicas)
 NATS_DL_FN(kvStatus_TTL)
 NATS_DL_FN(kvStatus_Values)
+NATS_DL_FN(kvStore_Create)
+/* [P3.6] length-aware create/put/update: VALUES travel as (ptr,len) --
+ * no NUL-termination copy at the call site, no cnats-internal strlen,
+ * and embedded-NUL values are carried instead of silently truncated.
+ * Keys/subjects stay NUL-terminated C strings (nats_str_to_buf). */
 NATS_DL_FN(kvStore_CreateString)
 /* [PR #1000] create-if-absent carrying a per-key TTL; re-creates over a
  * DEL/PURGE/MaxAge marker first-attempt AND keeps the TTL (Phase B). */
@@ -72,8 +77,10 @@ NATS_DL_FN(kvStore_History)
 NATS_DL_FN(kvStore_Keys)
 NATS_DL_FN(kvStore_KeysWithFilters)
 NATS_DL_FN(kvStore_Purge)
+NATS_DL_FN(kvStore_Put)
 NATS_DL_FN(kvStore_PutString)
 NATS_DL_FN(kvStore_Status)
+NATS_DL_FN(kvStore_Update)
 NATS_DL_FN(kvStore_UpdateString)
 NATS_DL_FN(kvStore_WatchAll)
 NATS_DL_FN(kvStore_WatchMulti)

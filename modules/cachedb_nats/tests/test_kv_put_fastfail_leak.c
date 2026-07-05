@@ -129,14 +129,19 @@ jsCtx *nats_pool_get_js(void) { return (jsCtx *)0x2001; }
 static enum ttl_outcome fake_put_row_outcome = TTL_DONE;
 static int put_row_calls;
 
+static const char *put_row_last_json;
+static int         put_row_last_len;
+
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
 	int got_entry, uint64_t entry_rev, uint64_t *out_rev)
 {
-	(void)js; (void)kv; (void)bucket; (void)key; (void)json;
-	(void)json_len; (void)got_entry; (void)entry_rev;
+	(void)js; (void)kv; (void)bucket; (void)key;
+	(void)got_entry; (void)entry_rev;
 	put_row_calls++;
+	put_row_last_json = json;
+	put_row_last_len  = json_len;
 	if (out_rev) *out_rev = 7;
 	return fake_put_row_outcome;
 }
@@ -153,6 +158,14 @@ static natsStatus fake_kvStore_Get(kvEntry **e, kvStore *kv, const char *k)
 static natsStatus fake_kvStore_PutString(uint64_t *rev, kvStore *kv,
 	const char *k, const char *v)
 { (void)kv; (void)k; (void)v; if (rev) *rev = 3; return NATS_OK; }
+/* [P3.6] the length-aware Put: records (data, len) so the test can
+ * prove the ORIGINAL bytes travel uncopied, embedded NUL included. */
+static const void *put_last_data;
+static int         put_last_len;
+static natsStatus fake_kvStore_Put(uint64_t *rev, kvStore *kv,
+	const char *k, const void *data, int len)
+{ (void)kv; (void)k; put_last_data = data; put_last_len = len;
+  if (rev) *rev = 3; return NATS_OK; }
 static const char *fake_kvEntry_ValueString(const kvEntry *e)
 { (void)e; return fake_entry_val; }
 static int fake_kvEntry_ValueLen(const kvEntry *e)
@@ -196,6 +209,7 @@ int main(void)
 	/* install the libnats fakes into the dl table */
 	nats_dl.kvStore_Get = fake_kvStore_Get;
 	nats_dl.kvStore_PutString = fake_kvStore_PutString;
+	nats_dl.kvStore_Put = fake_kvStore_Put;
 	nats_dl.kvEntry_ValueString = fake_kvEntry_ValueString;
 	nats_dl.kvEntry_ValueLen = fake_kvEntry_ValueLen;
 	nats_dl.kvEntry_Revision = fake_kvEntry_Revision;
@@ -236,18 +250,42 @@ int main(void)
 	ASSERT(rc == -1 && pkg_live == 0,
 		"disconnected kv_put with small value: -1, no pkg delta");
 
-	/* 4. connected happy paths keep working and stay balanced */
+	/* 4. connected happy paths: [P3.6] the value rides the
+	 * length-aware kvStore_Put UNCOPIED -- no pkg traffic even for a
+	 * >4 KB value (the old copy existed solely to gain a NUL). */
 	fake_connected = 1;
-	pkg_live = 0;
+	pkg_live = 0; pkg_allocs = 0;
+	put_last_data = NULL; put_last_len = -1;
 	rc = w_nats_kv_put(DUMMY_MSG, &bucket, &key, &bigval);
 	ASSERT(rc == 1, "connected kv_put (8 KB) succeeds");
-	ASSERT(pkg_live == 0, "connected kv_put frees its heap copy");
+	ASSERT(pkg_live == 0 && pkg_allocs == 0,
+		"connected kv_put makes NO value copy at all");
+	ASSERT(put_last_data == (const void *)bigval.s &&
+	       put_last_len == bigval.len,
+		"kv_put hands the ORIGINAL (ptr,len) to the length-aware Put");
 
 	put_row_calls = 0;
-	pkg_live = 0;
+	pkg_live = 0; pkg_allocs = 0;
 	rc = w_nats_kv_update(DUMMY_MSG, &bucket, &key, &bigval, &expected_rev);
 	ASSERT(rc == 1 && put_row_calls == 1, "connected kv_update succeeds");
-	ASSERT(pkg_live == 0, "connected kv_update frees its heap copy");
+	ASSERT(pkg_live == 0 && pkg_allocs == 0,
+		"connected kv_update makes NO value copy at all");
+	ASSERT(put_row_last_json == bigval.s && put_row_last_len == bigval.len,
+		"kv_update hands the ORIGINAL (ptr,len) into the CAS write");
+
+	/* 4a. embedded NUL: the *String API silently truncated such a
+	 * value at the NUL; the length-aware call must carry ALL bytes. */
+	{
+		str nulval;
+		nulval.s = "abc\0def";
+		nulval.len = 7;
+		put_last_data = NULL; put_last_len = -1;
+		rc = w_nats_kv_put(DUMMY_MSG, &bucket, &key, &nulval);
+		ASSERT(rc == 1, "kv_put accepts an embedded-NUL value");
+		ASSERT(put_last_len == 7 &&
+		       put_last_data == (const void *)nulval.s,
+			"all 7 bytes (NUL included) reach the broker write");
+	}
 
 	/* 4b. empty value: no allocation on any arm */
 	{

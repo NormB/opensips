@@ -191,7 +191,9 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	pred = _ttl_cas_predicate(got_entry, json_len, entry_rev, 0, &cas_seq);
 
 	if (pred == TTL_CAS_NO_MESSAGE) {
-		s = nats_dl.kvStore_CreateString(&rev, kv, key, json);
+		/* [P3.6] length-aware create: json_len is already in hand;
+		 * the *String form re-measured the full document. */
+		s = nats_dl.kvStore_Create(&rev, kv, key, json, json_len);
 		if (s == NATS_OK) {
 			if (out_rev)
 				*out_rev = rev;
