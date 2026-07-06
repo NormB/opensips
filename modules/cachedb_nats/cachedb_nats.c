@@ -292,18 +292,30 @@ static const param_export_t params[] = {
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
-	/* Shared lib/nats shutdown drain timeout, ms.  Merged by MAX across
-	 * modules (see nats_pool_drain_timeout_setter), not last-writer-wins. */
+	/* Shared lib/nats shutdown drain timeout, ms (ONE pool value; see
+	 * nats_pool_drain_timeout_decide for the merge contract).  [P4.5]
+	 * canonical name first; the old cdb_ spelling stays as an alias. */
+	{"drain_timeout_ms",            INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_drain_timeout_setter},
 	{"cdb_drain_timeout_ms",        INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
+	/* [P4.5] canonical names (the redundant nats_ prefix inside a
+	 * module already called cachedb_nats is dropped); the prefixed
+	 * spellings stay as aliases so existing configs keep loading. */
+	{"cas_retries",             INT_PARAM,         &nats_cas_retries},
 	{"nats_cas_retries",        INT_PARAM,         &nats_cas_retries},
+	{"reap_grace",              INT_PARAM,         &nats_reap_grace},
 	{"nats_reap_grace",         INT_PARAM,         &nats_reap_grace},
+	{"reap_interval",           INT_PARAM,         &nats_reap_interval},
 	{"nats_reap_interval",      INT_PARAM,         &nats_reap_interval},
+	{"expired_linger",          INT_PARAM,         &nats_expired_linger},
 	{"nats_expired_linger",     INT_PARAM,         &nats_expired_linger},
+	{"max_value_size",          INT_PARAM,         &nats_max_value_size},
 	{"nats_max_value_size",     INT_PARAM,         &nats_max_value_size},
 	{"kv_watch",        STR_PARAM|USE_FUNC_PARAM, (void *)&set_watch_pattern},
+	{"reconnect_wait_ms",   INT_PARAM,             &nats_cdb_reconnect_wait_ms},
 	{"reconnect_wait",      INT_PARAM,             &nats_cdb_reconnect_wait_ms},
 	{"max_reconnect",       INT_PARAM,             &nats_cdb_max_reconnect},
 	{0, 0, 0}

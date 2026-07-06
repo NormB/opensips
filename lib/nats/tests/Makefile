@@ -14,7 +14,7 @@ TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_p
         test_kv_op_timeout test_reconnect_jitter \
         test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix \
         test_epoch_wrapper test_blocking_budget \
-        test_nats_rank test_rl test_doc_truth
+        test_nats_rank test_rl test_doc_truth test_drain_merge
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -49,6 +49,10 @@ test_rl: test_rl.c ../nats_rl.h
 # [P4.1/P4.3/P4.7] README + pool-doctrine truth-lock (source patterns).
 test_doc_truth: test_doc_truth.c ../README.md ../nats_pool.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ test_doc_truth.c
+
+# [P4.5] drain-timeout merge decision (header inline) + setter WARN lock.
+test_drain_merge: test_drain_merge.c ../nats_pool.h
+	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_drain_merge.c
 
 test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_subject_cache.c ../nats_validate.o
@@ -140,6 +144,7 @@ check: all
 	./test_kv_ttl_probe_matrix
 	./test_rl
 	./test_doc_truth
+	./test_drain_merge
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the

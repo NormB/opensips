@@ -29,7 +29,7 @@
 			<listitem><para>
 				<emphasis role="bold">Atomic CAS counters</emphasis> —
 				<function>cache_add</function> and <function>cache_sub</function>
-				use compare-and-swap with a configurable retry budget (<varname>nats_cas_retries</varname> default 10), giving safe concurrent
+				use compare-and-swap with a configurable retry budget (<varname>cas_retries</varname> default 10), giving safe concurrent
 				counter increments from multiple &osips; worker processes.
 			</para></listitem>
 			<listitem><para>
@@ -303,7 +303,7 @@ modparam("cachedb_nats", "kv_replicas", 1)
 		buckets</emphasis> unless you use
 		<function>nats_kv_history()</function>.  Expiry is performed by
 		the periodic cleanup scan (the reaper) — see
-		<varname>nats_reap_interval</varname>.
+		<varname>reap_interval</varname>.
 	</para>
 	<para>
 		Raise this only if your script uses
@@ -481,8 +481,12 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 	</para>
 	</section>
 
-	<section id="param_nats_cas_retries" xreflabel="nats_cas_retries">
-	<title><varname>nats_cas_retries</varname> (integer)</title>
+	<section id="param_cas_retries" xreflabel="cas_retries">
+	<title><varname>cas_retries</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_cas_retries</quote> is kept as a working
+		alias; new configurations should use <quote>cas_retries</quote>.
+	</para>
 	<para>
 		Number of compare-and-swap retries used by atomic counter
 		increments (<function>cache_add()</function>) and JSON field
@@ -571,9 +575,13 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 	</para>
 	</section>
 
-	<section id="param_cdb_drain_timeout_ms"
-		xreflabel="cdb_drain_timeout_ms">
-	<title><varname>cdb_drain_timeout_ms</varname> (integer)</title>
+	<section id="param_drain_timeout_ms"
+		xreflabel="drain_timeout_ms">
+	<title><varname>drain_timeout_ms</varname> (integer)</title>
+	<para>
+		The former name <quote>cdb_drain_timeout_ms</quote> is kept as a working
+		alias; new configurations should use <quote>drain_timeout_ms</quote>.
+	</para>
 	<para>
 		Shutdown drain timeout in milliseconds for the shared
 		<emphasis>lib/nats</emphasis> connection pool.
@@ -592,8 +600,12 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 	</para>
 	</section>
 
-	<section id="param_reconnect_wait" xreflabel="reconnect_wait">
-	<title><varname>reconnect_wait</varname> (integer)</title>
+	<section id="param_reconnect_wait_ms" xreflabel="reconnect_wait_ms">
+	<title><varname>reconnect_wait_ms</varname> (integer)</title>
+	<para>
+		The former name <quote>reconnect_wait</quote> is kept as a working
+		alias; new configurations should use <quote>reconnect_wait_ms</quote>.
+	</para>
 	<para>
 		The time in milliseconds to wait between reconnection attempts when
 		the NATS connection is lost.  Applies to the shared connection pool
@@ -605,10 +617,10 @@ modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.org:4222/
 		</emphasis>
 	</para>
 	<example>
-	<title>Set <varname>reconnect_wait</varname> parameter</title>
+	<title>Set <varname>reconnect_wait_ms</varname> parameter</title>
 	<programlisting format="linespecific">
 ...
-modparam("cachedb_nats", "reconnect_wait", 1000)
+modparam("cachedb_nats", "reconnect_wait_ms", 1000)
 ...
 	</programlisting>
 	</example>
@@ -638,8 +650,12 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</example>
 	</section>
 
-	<section id="param_nats_reap_interval" xreflabel="nats_reap_interval">
-	<title><varname>nats_reap_interval</varname> (integer)</title>
+	<section id="param_reap_interval" xreflabel="reap_interval">
+	<title><varname>reap_interval</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_reap_interval</quote> is kept as a working
+		alias; new configurations should use <quote>reap_interval</quote>.
+	</para>
 	<para>
 		Period, in seconds, of the reaper pass that CAS-prunes expired
 		bindings from the bucket.  The reaper is the module's single
@@ -659,13 +675,17 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</para>
 	</section>
 
-	<section id="param_nats_reap_grace" xreflabel="nats_reap_grace">
-	<title><varname>nats_reap_grace</varname> (integer)</title>
+	<section id="param_reap_grace" xreflabel="reap_grace">
+	<title><varname>reap_grace</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_reap_grace</quote> is kept as a working
+		alias; new configurations should use <quote>reap_grace</quote>.
+	</para>
 	<para>
 		Clock-skew slack, in seconds, applied to every expiry decision
 		(the write-side expiry hygiene, the read-side filter and the
 		reaper).  A binding is treated as expired only once it is more
-		than <varname>nats_reap_grace</varname> seconds past its TTL, so
+		than <varname>reap_grace</varname> seconds past its TTL, so
 		a node whose clock leads its peers never deletes or hides another
 		node's still-live registration.  Set this to at least the real
 		maximum clock skew between the nodes sharing the bucket.
@@ -675,14 +695,18 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</para>
 	</section>
 
-	<section id="param_nats_expired_linger" xreflabel="nats_expired_linger">
-	<title><varname>nats_expired_linger</varname> (integer)</title>
+	<section id="param_expired_linger" xreflabel="expired_linger">
+	<title><varname>expired_linger</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_expired_linger</quote> is kept as a working
+		alias; new configurations should use <quote>expired_linger</quote>.
+	</para>
 	<para>
 		How long, in seconds, an <emphasis>expired</emphasis> registration
 		record stays physically present in the bucket after it stops being
 		served.  This is a retention-policy knob with
 		<emphasis role="bold">zero effect on call routing</emphasis>: once
-		a contact's time is up (plus the <varname>nats_reap_grace</varname>
+		a contact's time is up (plus the <varname>reap_grace</varname>
 		clock-skew margin) it is never used again, whatever this is set to.
 	</para>
 	<para>
@@ -708,8 +732,12 @@ modparam("cachedb_nats", "max_reconnect", 30)
 	</para>
 	</section>
 
-	<section id="param_nats_max_value_size" xreflabel="nats_max_value_size">
-	<title><varname>nats_max_value_size</varname> (integer)</title>
+	<section id="param_max_value_size" xreflabel="max_value_size">
+	<title><varname>max_value_size</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_max_value_size</quote> is kept as a working
+		alias; new configurations should use <quote>max_value_size</quote>.
+	</para>
 	<para>
 		Maximum stored value size, in bytes, for a usrloc row.  An
 		oversize row is detected before the CAS write and the offending
@@ -1074,7 +1102,7 @@ cache_remove("nats", "call.$ci");
 	<title>cache_add — atomic counter increment</title>
 	<para>
 		Atomically increments an integer counter stored in the KV bucket.
-		The operation uses compare-and-swap (CAS) with up to <varname>nats_cas_retries</varname> retry
+		The operation uses compare-and-swap (CAS) with up to <varname>cas_retries</varname> retry
 		attempts, safely handling concurrent increments from multiple &osips;
 		worker processes.  If the key does not yet exist it is created with
 		an initial value equal to <emphasis>increment</emphasis>.
@@ -1102,7 +1130,7 @@ xlog("$fU has $var(call_count) active calls\n");
 	<para>
 		Atomically decrements an integer counter.  Equivalent to
 		<function>cache_add</function> with a negated increment value.
-		Uses the same <varname>nats_cas_retries</varname> budget as <function>cache_add</function> (default 10).
+		Uses the same <varname>cas_retries</varname> budget as <function>cache_add</function> (default 10).
 	</para>
 	<example>
 	<title><function>cache_sub</function> with nats</title>
@@ -1500,7 +1528,7 @@ xlog("bucket info: $var(info)\n");
 		<listitem><para>
 			<emphasis>cas_exhausted</emphasis> — total
 			cdbf calls that ran out of
-			<varname>nats_cas_retries</varname> attempts and
+			<varname>cas_retries</varname> attempts and
 			dropped the write.  Should be 0 in steady state;
 			any non-zero value means writes were lost.
 		</para></listitem>
@@ -1531,7 +1559,7 @@ xlog("bucket info: $var(info)\n");
 		<varname>_aors</varname> / <varname>_contacts</varname> /
 		<varname>_active</varname> / <varname>_permanent</varname> /
 		<varname>_due</varname>.  These refresh every
-		<varname>nats_reap_interval</varname> seconds and are the
+		<varname>reap_interval</varname> seconds and are the
 		recommended monitoring feed for registration counts (poll this, not
 		<function>nats_reg_summary</function>, on large buckets).
 	</para>
@@ -1574,9 +1602,9 @@ xlog("bucket info: $var(info)\n");
 		<function>ul_dump</function> is empty by design, because records are
 		freed from memory after every flush).  Reports AoR and contact
 		counts split by state: <emphasis>active</emphasis> (would be served:
-		unexpired, or within the <varname>nats_reap_grace</varname> margin),
+		unexpired, or within the <varname>reap_grace</varname> margin),
 		<emphasis>expired</emphasis> (still stored — lingering per
-		<varname>nats_expired_linger</varname>, or awaiting cleanup) and
+		<varname>expired_linger</varname>, or awaiting cleanup) and
 		<emphasis>permanent</emphasis>, plus the soonest upcoming expiry and
 		scan cost.  With the optional <varname>domains</varname>=1 parameter
 		it adds a per-domain breakdown (the part after the last

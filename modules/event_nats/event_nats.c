@@ -109,11 +109,17 @@ int nats_max_reconnect = 60;
 static const param_export_t mod_params[] = {
 	{"nats_url",            STR_PARAM, &nats_url},
 	{"jetstream",           INT_PARAM, &nats_jetstream},
+	/* [P4.5] canonical _ms name first; the unsuffixed spelling stays
+	 * as an alias (the value was always milliseconds). */
+	{"reconnect_wait_ms",   INT_PARAM, &nats_reconnect_wait},
 	{"reconnect_wait",      INT_PARAM, &nats_reconnect_wait},
 	{"max_reconnect",       INT_PARAM, &nats_max_reconnect},
-	/* Tunable shutdown drain timeout, ms.  Merged by MAX with
-	 * cachedb_nats's cdb_drain_timeout_ms (see nats_pool_drain_timeout_setter)
-	 * so the longest grace wins regardless of module load order. */
+	/* Tunable shutdown drain timeout, ms (ONE pool value shared with
+	 * cachedb_nats; see nats_pool_drain_timeout_decide for the merge
+	 * contract).  [P4.5] canonical name first; the old nats_ spelling
+	 * stays as an alias. */
+	{"drain_timeout_ms",      INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_drain_timeout_setter},
 	{"nats_drain_timeout_ms", INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,

@@ -188,9 +188,13 @@ modparam("event_nats", "jetstream", 1)
             </example>
         </section>
 
-        <!-- reconnect_wait -->
-        <section id="param_reconnect_wait">
-            <title><varname>reconnect_wait</varname> (integer)</title>
+        <!-- reconnect_wait_ms -->
+        <section id="param_reconnect_wait_ms">
+            <title><varname>reconnect_wait_ms</varname> (integer)</title>
+	<para>
+		The former name <quote>reconnect_wait</quote> is kept as a working
+		alias; new configurations should use <quote>reconnect_wait_ms</quote>.
+	</para>
             <para>
                 Time in milliseconds to wait between consecutive connection
                 attempts during <function>child_init()</function> startup.
@@ -206,7 +210,7 @@ modparam("event_nats", "jetstream", 1)
             <example>
                 <title>Set reconnect wait to 1 second</title>
                 <programlisting format="linespecific">
-modparam("event_nats", "reconnect_wait", 1000)
+modparam("event_nats", "reconnect_wait_ms", 1000)
                 </programlisting>
             </example>
         </section>
@@ -219,7 +223,7 @@ modparam("event_nats", "reconnect_wait", 1000)
                 <function>child_init()</function> startup before the worker
                 stops waiting for the broker.  If the NATS server is not
                 reachable within
-                <varname>max_reconnect</varname> * <varname>reconnect_wait</varname>
+                <varname>max_reconnect</varname> * <varname>reconnect_wait_ms</varname>
                 milliseconds, <function>child_init()</function> logs a warning
                 and starts in a <emphasis>degraded</emphasis> state (it returns
                 <varname>0</varname>, not <varname>-1</varname>): the &osips;
@@ -308,8 +312,12 @@ modparam("event_nats", "nats_url", "tls://nats.example.org:4222")
             </para>
         </section>
 
-        <section id="param_nats_drain_timeout_ms">
-            <title><varname>nats_drain_timeout_ms</varname> (integer)</title>
+        <section id="param_drain_timeout_ms">
+            <title><varname>drain_timeout_ms</varname> (integer)</title>
+	<para>
+		The former name <quote>nats_drain_timeout_ms</quote> is kept as a working
+		alias; new configurations should use <quote>drain_timeout_ms</quote>.
+	</para>
             <para>
                 Shutdown drain timeout, in milliseconds, for the shared
                 <filename>lib/nats</filename> connection pool.  When
@@ -334,7 +342,7 @@ modparam("event_nats", "nats_url", "tls://nats.example.org:4222")
             <example>
                 <title>Raise drain timeout for high-latency broker</title>
                 <programlisting format="linespecific">
-modparam("event_nats", "nats_drain_timeout_ms", 15000)
+modparam("event_nats", "drain_timeout_ms", 15000)
                 </programlisting>
             </example>
         </section>
@@ -1070,7 +1078,7 @@ loadmodule "event_nats.so"
 modparam("event_nats", "nats_url",
     "nats://nats-1.example.com:4222,nats://nats-2.example.com:4222,nats://nats-3.example.com:4222")
 modparam("event_nats", "jetstream",       1)
-modparam("event_nats", "reconnect_wait",  2000)
+modparam("event_nats", "reconnect_wait_ms",  2000)
 modparam("event_nats", "max_reconnect",   60)
                 </programlisting>
             </example>

@@ -190,21 +190,35 @@ static int            _kv_cache_cnt = 0;
 /* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
 int nats_pool_drain_timeout_ms = 5000;
 
-/* Drain-timeout modparam setter shared by event_nats (nats_drain_timeout_ms)
- * and cachedb_nats (cdb_drain_timeout_ms), which both target this one global.
- * Take the MAX across registrants so the longest-configured shutdown grace
- * wins regardless of module load order (mirrors the reconnect-param merge in
- * nats_pool_register), instead of last-writer-wins. */
+/* Drain-timeout modparam setter shared by event_nats and cachedb_nats
+ * (canonical name `drain_timeout_ms`; the old per-module spellings
+ * nats_drain_timeout_ms / cdb_drain_timeout_ms are kept as aliases).
+ * Both target this one global; the merge contract lives in
+ * nats_pool_drain_timeout_decide() (nats_pool.h): the first explicit
+ * value replaces the default -- including below it -- and further
+ * registrants max-merge, WARNing when a lower explicit value loses. */
 int nats_pool_drain_timeout_setter(modparam_t type, void *val)
 {
-	int v;
+	static int _drain_explicit = 0;
+	int v, merged;
+
 	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
-		LM_ERR("nats drain_timeout: must be an integer\n");
+		LM_ERR("drain_timeout_ms: must be an integer\n");
 		return -1;
 	}
 	v = (int)(long)val;
-	if (v > nats_pool_drain_timeout_ms)
-		nats_pool_drain_timeout_ms = v;
+	if (v < 0) {
+		LM_ERR("drain_timeout_ms: %d is negative\n", v);
+		return -1;
+	}
+	merged = nats_pool_drain_timeout_decide(nats_pool_drain_timeout_ms,
+		_drain_explicit, v);
+	if (_drain_explicit && merged != v)
+		LM_WARN("drain_timeout_ms=%d is below another module's %d; "
+			"the shared shutdown grace keeps the max (%d)\n",
+			v, nats_pool_drain_timeout_ms, merged);
+	nats_pool_drain_timeout_ms = merged;
+	_drain_explicit = 1;
 	return 0;
 }
 
@@ -1373,8 +1387,8 @@ void nats_pool_destroy(void)
 			LM_WARN("NATS pool: connection drain returned %s "
 				"after %d ms; in-flight JetStream publishes "
 				"may not have acked before destroy.  Raise "
-				"nats_drain_timeout_ms (event_nats) or "
-				"cdb_drain_timeout_ms (cachedb_nats) if you "
+				"drain_timeout_ms (event_nats or "
+				"cachedb_nats) if you "
 				"are seeing ack loss on shutdown.\n",
 				nats_dl.natsStatus_GetText(ds), budget_ms);
 		}

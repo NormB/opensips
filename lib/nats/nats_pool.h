@@ -329,9 +329,27 @@ int nats_pool_should_init(int rank);
  */
 extern int nats_pool_drain_timeout_ms;
 
-/* Shared modparam setter for the drain timeout: both event_nats and
- * cachedb_nats register it (INT_PARAM|USE_FUNC_PARAM) so the value is merged
- * by MAX across modules instead of last-writer-wins.  `type` is modparam_t
+/* [P4.5] Merge decision for the shared drain timeout, pure and
+ * header-inline so the contract is unit-testable (tests/
+ * test_drain_merge.c).  The FIRST explicit modparam value replaces
+ * the built-in default outright -- an operator's choice out-ranks the
+ * default, including BELOW it (the old setter max-merged against the
+ * 5000 ms default, silently ignoring e.g. drain_timeout_ms=2000).
+ * Across MULTIPLE explicit registrants the max wins: the longest
+ * configured shutdown grace, order-independent. */
+static inline int nats_pool_drain_timeout_decide(int current_ms,
+	int have_explicit, int proposed_ms)
+{
+	if (!have_explicit)
+		return proposed_ms;
+	return proposed_ms > current_ms ? proposed_ms : current_ms;
+}
+
+/* Shared modparam setter for the drain timeout: event_nats and
+ * cachedb_nats both register it (INT_PARAM|USE_FUNC_PARAM) under the
+ * canonical name `drain_timeout_ms` (old per-module spellings kept as
+ * aliases), so the ONE pool value is merged via the decide helper
+ * above instead of last-writer-wins.  `type` is modparam_t
  * (== unsigned int); spelled out here so this header stays free of the heavy
  * sr_module.h include that the standalone lib unit-tests cannot satisfy. */
 int nats_pool_drain_timeout_setter(unsigned int type, void *val);
