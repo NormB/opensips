@@ -14,7 +14,7 @@ TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_p
         test_kv_op_timeout test_reconnect_jitter \
         test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix \
         test_epoch_wrapper test_blocking_budget \
-        test_nats_rank test_rl
+        test_nats_rank test_rl test_doc_truth
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
@@ -45,6 +45,10 @@ test_nats_rank: test_nats_rank.c ../nats_rank.o
 # [P3.7] header-only one-per-interval log gate (outage logging policy).
 test_rl: test_rl.c ../nats_rl.h
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_rl.c
+
+# [P4.1/P4.3/P4.7] README + pool-doctrine truth-lock (source patterns).
+test_doc_truth: test_doc_truth.c ../README.md ../nats_pool.c
+	$(CC) $(CFLAGS) $(ASAN) -o $@ test_doc_truth.c
 
 test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_validate_subject_cache.c ../nats_validate.o
@@ -135,6 +139,7 @@ check: all
 	./test_async_first_connect
 	./test_kv_ttl_probe_matrix
 	./test_rl
+	./test_doc_truth
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the

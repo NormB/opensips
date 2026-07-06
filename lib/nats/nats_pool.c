@@ -40,11 +40,10 @@
  * connection management.  The disconnect/reconnect callbacks
  * (_pool_disconnected_cb, _pool_reconnected_cb) and the JetStream async
  * publish ack handler (_js_pub_ack_handler) run on these nats.c-internal
- * threads, NOT on an OpenSIPS process.  This is critical because OpenSIPS
- * APIs (LM_*, pkg_malloc, shm_malloc) depend on per-process state
- * (process_no, pkg memory pool) that does not exist in nats.c threads.
- * Calling them causes SIGABRT.  Only atomic ops, write(), and nats.c APIs
- * are safe in callbacks.
+ * threads, NOT on an OpenSIPS process main thread.  LM_* and pkg_malloc
+ * are forbidden there (per-process / main-thread-only state); atomic
+ * ops, write(), nats.c APIs, and the shm_malloc + ipc_dispatch_rpc
+ * handoff are safe — see the callback-doctrine block below [P4.3].
  *
  * ## Design
  *
@@ -109,9 +108,10 @@
 
 /**
  * Pool configuration structure, allocated in shared memory.
- * Set during mod_init (pre-fork) and read-only after fork.
- * The only exception is the TLS probe in nats_pool_get() which may
- * rewrite tls:// URLs to nats:// — guarded by a static flag.
+ * Set during mod_init (pre-fork) and read-only after fork.  (The TLS
+ * probe in nats_pool_get() only READS it; the historical tls://
+ * -> nats:// URL rewrite is gone — TLS-less libnats now fails hard,
+ * never downgrades.)
  */
 typedef struct nats_pool_cfg {
 	char *servers[NATS_POOL_MAX_SERVERS]; /* shm-allocated URL strings */
@@ -346,26 +346,32 @@ err_free_partial:
  * nats.c callbacks (run on nats.c internal I/O thread)
  *
  * CRITICAL: These callbacks run on a thread created by nats.c, NOT
- * an OpenSIPS process.  OpenSIPS APIs (LM_*, pkg_malloc, shm_malloc)
- * must NOT be called here — they rely on per-process state (process_no,
- * pkg memory pool) that doesn't exist in nats.c's threads.  Calling
- * them causes SIGABRT (free(): invalid pointer).
+ * an OpenSIPS process main thread.  [P4.3 doctrine]
  *
  * Safe operations in these callbacks:
  *   - C11 atomic ops (atomic_store, atomic_exchange, atomic_fetch_add)
- *   - POSIX write() for logging to stderr
+ *   - POSIX write() for logging to stderr (see nats_pool_unsafe_log)
  *   - nats.c API calls (natsConnection_GetConnectedUrl, etc.)
+ *   - shm_malloc/shm_free + ipc_dispatch_rpc: the shm allocator locks
+ *     with a process-shared gen_lock and the IPC pipe write is a
+ *     bounded atomic write(2), so copying a payload into SHM and
+ *     dispatching it to a worker IS the sanctioned foreign-thread
+ *     handoff — event_nats_sub.c's message callback and the watcher's
+ *     _raise_kv_change_event are the canonical pattern.  Caveat: on
+ *     DBG_MALLOC / SHM_EXTRA_STATS builds the shm wrappers touch
+ *     process_no-indexed accounting; if such a build is ever the
+ *     target, re-verify this path before shipping.
  *
- * Unsafe operations (will crash):
- *   - LM_ERR, LM_INFO, LM_DBG, etc.
- *   - pkg_malloc, pkg_free
- *   - shm_malloc, shm_free
- *   - Any OpenSIPS API that accesses process_no or pkg memory
+ * Unsafe operations (will crash or corrupt):
+ *   - LM_ERR, LM_INFO, LM_DBG, etc. (dprint is not warranted
+ *     reentrant against the process main thread's logging)
+ *   - pkg_malloc, pkg_free (per-process, lockless — main thread only)
+ *   - Any OpenSIPS API that assumes the process main thread
  *
- * The pattern used here is "lazy invalidation": callbacks set atomic
- * flags, and the main process thread checks them on the next API call
- * to perform the actual work (cache clearing, logging, etc.) in a
- * safe context.
+ * For state signals the pattern here is "lazy invalidation":
+ * callbacks set atomic flags, and the main process thread checks them
+ * on the next API call to perform the actual work (cache clearing,
+ * logging, etc.) in a safe context.
  * ---------------------------------------------------------------- */
 
 /**
@@ -815,15 +821,17 @@ natsConnection *nats_pool_get(void)
 		_lib_initialized = 1;
 	}
 
-	/* TLS probe: If tls:// URLs were configured, check whether nats.c
+	/* TLS probe: if tls:// URLs were configured, check whether nats.c
 	 * was built with TLS support.  nats.c parses the URL scheme —
-	 * tls:// triggers TLS internally.  If nats.c lacks TLS,
-	 * SetServers with tls:// URLs returns NATS_ILLEGAL_STATE.
+	 * tls:// triggers TLS internally; a TLS-less build rejects the
+	 * URLs (NATS_ILLEGAL_STATE) at SetServers.
 	 *
-	 * The URL rewrite modifies pool_cfg (SHM), so it must run exactly
-	 * once.  The static _tls_probed flag ensures the first child process
-	 * to reach here does the probe; others see use_tls already cleared.
-	 * This is safe because child processes are forked sequentially. */
+	 * _tls_probed is a PER-PROCESS static: every process that reaches
+	 * here runs the probe once on its own first connect.  That is
+	 * fine — the probe is read-only (a throwaway natsOptions), cheap,
+	 * and idempotent; on a TLS-less libnats every process fails hard
+	 * with the same guidance.  No cross-process coordination is
+	 * needed or implied. */
 	if (pool_cfg->use_tls) {
 		static int _tls_probed = 0;
 		if (!_tls_probed) {
