@@ -23,6 +23,20 @@ ensure_stack() {
         echo "  run: (cd $(dirname ${COMPOSE_FILE}) && docker compose up -d)"
         exit 77
     fi
+    # Readiness, not just existence: the first case after `compose up`
+    # used to race a still-booting opensips -- its MI bind then failed
+    # silently and the case timed out on a handle that never existed
+    # (test_batch bit this whenever it drew the first slot).  Same FIFO
+    # poll restart_opensips_clean uses.
+    local deadline=$(( $(date +%s) + 30 ))
+    while [ "$(date +%s)" -lt "${deadline}" ]; do
+        if ${COMPOSE} exec -T opensips test -p /var/run/opensips/mi.fifo                 >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "WARN: opensips MI FIFO not ready 30s after ensure_stack" >&2
+    return 1
 }
 
 # Restart the opensips container and wait for the MI FIFO to come back.
@@ -96,11 +110,21 @@ mi_send() {
 nats_bind() {
     local id="$1"; local stream="$2"; shift 2
     local cfg="id=${id};stream=${stream}"
-    local kv
+    local kv out
     for kv in "$@"; do
         cfg="${cfg};${kv}"
     done
-    mi_send nats_consumer:nats_consumer_bind "{\"config\":\"${cfg}\"}"
+    out=$(mi_send nats_consumer:nats_consumer_bind "{\"config\":\"${cfg}\"}")
+    # A silent bind failure turns into a 25 s downstream timeout with a
+    # baffling "handle never appeared" symptom; fail HERE instead.  The
+    # success envelope carries "result"; anything else (empty reply =
+    # MI not up, or an "error" member) is a bind failure.
+    if ! printf '%s' "${out}" | grep -q '"result"'; then
+        echo "nats_bind ${id}: MI bind failed: ${out:-<no reply>}" >&2
+        printf '%s' "${out}"
+        return 1
+    fi
+    printf '%s' "${out}"
 }
 
 # Unbind a handle by id.

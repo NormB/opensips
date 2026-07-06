@@ -516,16 +516,46 @@ static int build_consumer_config(nats_handle_t *h, proc_sub_state_t *ss,
 	 * side / GC'd) and is being recreated with deliver_policy=all would
 	 * otherwise replay the ENTIRE stream from sequence 1 -- a flood
 	 * proportional to stream size.  If we have already delivered messages,
-	 * bias the recreate to resume just past the last one instead. */
+	 * bias the recreate to resume just past the last one instead.
+	 *
+	 * The watermark is only meaningful for the SAME stream incarnation:
+	 * if the broker lost the stream since we last delivered (restart on
+	 * memory storage, operator rm + re-create, backup restore), its
+	 * sequences restart at 1 and a stale resume point would SILENTLY
+	 * SKIP every new message until the sequence grows past it.  Check
+	 * the incarnation (jsStreamInfo.Created) before biasing; on a
+	 * mismatch drop the watermark and let the configured policy replay
+	 * -- correct for a recreated stream. */
 	if (is_rebuild && ss && ss->last_stream_seq > 0 &&
 	    h->deliver_policy == NATS_DELIVER_ALL) {
-		LM_WARN("nats_consumer_proc: recreating consumer '%.*s' with "
-			"deliver_policy=all would replay the whole stream; biasing "
-			"to resume from stream_seq %llu\n",
-			(int)h->id.len, h->id.s,
-			(unsigned long long)(ss->last_stream_seq + 1));
-		cc->DeliverPolicy = js_DeliverByStartSequence;
-		cc->OptStartSeq   = ss->last_stream_seq + 1;
+		int64_t cur_created = 0;
+		jsStreamInfo *si = NULL;
+
+		if (nats_dl.js_GetStreamInfo(&si, g_js, stream_c, NULL,
+				NULL) == NATS_OK && si) {
+			cur_created = si->Created;
+			nats_dl.jsStreamInfo_Destroy(si);
+		}
+		if (nats_rebuild_bias_stale(ss->stream_created_ns,
+				cur_created)) {
+			LM_WARN("nats_consumer_proc: stream '%s' is a different "
+				"incarnation than the one handle '%.*s' delivered "
+				"from (recreated/restored; sequences restarted) -- "
+				"dropping the resume watermark (%llu) and replaying "
+				"per deliver_policy\n",
+				stream_c, (int)h->id.len, h->id.s,
+				(unsigned long long)ss->last_stream_seq);
+			ss->last_stream_seq   = 0;
+			ss->stream_created_ns = 0;
+		} else {
+			LM_WARN("nats_consumer_proc: recreating consumer '%.*s' with "
+				"deliver_policy=all would replay the whole stream; biasing "
+				"to resume from stream_seq %llu\n",
+				(int)h->id.len, h->id.s,
+				(unsigned long long)(ss->last_stream_seq + 1));
+			cc->DeliverPolicy = js_DeliverByStartSequence;
+			cc->OptStartSeq   = ss->last_stream_seq + 1;
+		}
 	}
 
 	/* Shaping + ephemeral options.  nats.c uses ns for InactiveThreshold. */
@@ -760,6 +790,22 @@ int ensure_subscription_for_handle(nats_handle_t *h)
 	ss->backoff_arr     = a.backoff_arr;
 	ss->filters_arr     = a.filters_arr;
 	ss->filters_arr_len = a.filters_len;
+
+	/* Stamp the stream incarnation the new subscription (and every
+	 * delivery watermark it will advance) belongs to -- consumed by
+	 * the rebuild bias above.  One extra round-trip on the cold
+	 * bind/rebuild path only; 0 (unknown) on failure keeps the
+	 * historical bias behavior. */
+	{
+		jsStreamInfo *si = NULL;
+
+		ss->stream_created_ns = 0;
+		if (nats_dl.js_GetStreamInfo(&si, g_js, a.stream_c, NULL,
+				NULL) == NATS_OK && si) {
+			ss->stream_created_ns = si->Created;
+			nats_dl.jsStreamInfo_Destroy(si);
+		}
+	}
 
 	/* Publish the subscription pointer back to the handle so MI can
 	 * introspect it (read-only).  This is a process-local pointer the

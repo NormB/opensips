@@ -82,6 +82,15 @@ need() {
 [ -f "$TREE_ROOT/modules/nats_consumer/nats_consumer.so" ] || skip "nats_consumer.so not built"
 [ -f "$TREE_ROOT/modules/event_nats/event_nats.so" ] || skip "event_nats.so not built (nats_consumer depends on it for the pool registration)"
 [ -f "$TREE_ROOT/modules/tls_mgm/tls_mgm.so" ] || skip "tls_mgm.so not built"
+
+# A libnats built WITHOUT TLS makes the pool fail hard on tls:// URLs
+# (no silent plaintext downgrade) -- the case then "fails" for an
+# environmental reason.  TLS-built libnats dynamic-links libssl;
+# detect via ldd and skip with the reason otherwise.
+LIBNATS_PATH="$(ldconfig -p 2>/dev/null | awk '/libnats\.so /{print $NF; exit}')"
+if [ -n "${LIBNATS_PATH}" ] && ! ldd "${LIBNATS_PATH}" 2>/dev/null | grep -q libssl; then
+    skip "libnats at ${LIBNATS_PATH} was built without TLS (no libssl linkage); rebuild with -DNATS_BUILD_WITH_TLS=ON"
+fi
 [ -f "$TREE_ROOT/modules/tls_openssl/tls_openssl.so" ] || skip "tls_openssl.so not built"
 [ -f "$TREE_ROOT/modules/mi_datagram/mi_datagram.so" ] || skip "mi_datagram.so not built (test polls MI for assertions)"
 need openssl

@@ -398,10 +398,13 @@ else
 fi
 
 # Defensive: no errors slipped through B's log (A's log is allowed
-# to contain shutdown noise from the SIGTERM).
-if grep -E "ERROR.*nats|CRITICAL" "${WORKDIR}/B.log" >/dev/null 2>&1; then
+# to contain shutdown noise from the SIGTERM).  set_core_dump's
+# CRITICAL is environmental noise: it fires whenever the harness runs
+# under `ulimit -c 0` (deliberate on tmpfs boxes -- SIGKILL cases
+# would otherwise OOM /tmp with cores) and says nothing about NATS.
+if grep -E "ERROR.*nats|CRITICAL" "${WORKDIR}/B.log"         | grep -v 'set_core_dump' | grep -q .; then
     fail "fatal errors in instance B log"
-    grep -E "ERROR.*nats|CRITICAL" "${WORKDIR}/B.log" | head -5 | sed 's/^/  B| /'
+    grep -E "ERROR.*nats|CRITICAL" "${WORKDIR}/B.log"         | grep -v 'set_core_dump' | head -5 | sed 's/^/  B| /'
 else
     pass "no fatal errors in survivor instance log"
 fi

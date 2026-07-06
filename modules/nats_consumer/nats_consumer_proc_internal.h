@@ -75,6 +75,15 @@ typedef struct proc_sub_state {
 	 * replaying the whole stream under deliver_policy=all. */
 	uint64_t              last_stream_seq;
 
+	/* Stream incarnation the watermark above belongs to
+	 * (jsStreamInfo.Created, ns since epoch; 0 = unknown).  Stamped on
+	 * every successful subscribe.  The rebuild bias is only valid for
+	 * the SAME incarnation: a recreated stream restarts its sequences
+	 * at 1, and resuming at a stale watermark would silently skip
+	 * every new message until the sequence grows past it (bit us via
+	 * test_reconnect.sh: broker restart on memory storage). */
+	int64_t               stream_created_ns;
+
 	/* Subscription-refresh bookkeeping. */
 	int                   dirty;   /* 1 iff the subscription needs
 	                                 * rebuild (epoch bump or broker
@@ -179,5 +188,21 @@ void free_proc_sub_strings(proc_sub_state_t *ss);
 int ensure_subscription_for_handle(nats_handle_t *h);
 /* Registry-walk callback: reconcile g_subs with the bound handles. */
 int reconcile_subs_cb(nats_handle_t *h, void *user);
+
+/*
+ * 1 iff the rebuild's anti-replay resume bias must be DROPPED because
+ * the stream is a different incarnation than the one the delivery
+ * watermark came from (recreated / restored: sequences restarted).
+ * Either side unknown (0) keeps the historical bias behavior --
+ * fail-open to the cheaper wrong-direction (a possible replay) rather
+ * than the silent-skip direction.  Unit-locked in
+ * tests/test_rebuild_bias_stale.c; end-to-end in test_reconnect.sh.
+ */
+static inline int nats_rebuild_bias_stale(int64_t stamped_created_ns,
+	int64_t current_created_ns)
+{
+	return stamped_created_ns != 0 && current_created_ns != 0 &&
+		stamped_created_ns != current_created_ns;
+}
 
 #endif /* NATS_CONSUMER_PROC_INTERNAL_H */

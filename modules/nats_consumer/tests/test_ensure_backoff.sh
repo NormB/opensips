@@ -68,13 +68,20 @@ sleep "${OBSERVE_S}"
 # broker may reject at either step; missing-stream surfaces as
 # js_PullSubscribe).  The parenthesised argument is the durable
 # name, which here equals our ID.
+# Match the failure by its MESSAGE text (the js_AddConsumer /
+# js_PullSubscribe "... failed" lines carrying our handle id), NOT by
+# the dprint function prefix: the emitting function has already been
+# renamed once by a refactor (ensure_subscription_for_handle ->
+# pull_subscribe_with_workaround), which silently zeroed this count
+# and let the case rot as a "known failure".
 attempts=$(${COMPOSE} logs --no-color opensips 2>/dev/null \
     | awk -v anchor="${BIND_ANCHOR}" -v id="${ID}" '
         # Reset on every anchor match.  Container logs span multiple
         # test runs (compose restart doesnt truncate journald output);
         # we want failures only after the most recent bind.
         index($0, anchor) > 0 { seen=1; n=0; next }
-        seen && /ERROR:nats_consumer:ensure_subscription_for_handle/ &&
+        seen && /ERROR:nats_consumer:/ &&
+                /js_(AddConsumer|PullSubscribe)\(/ && / failed/ &&
                 index($0, "(\047" id "\047)") > 0 { n++ }
         END { print n+0 }')
 

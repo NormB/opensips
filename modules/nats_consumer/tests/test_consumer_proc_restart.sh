@@ -52,7 +52,6 @@ loadmodule "event_nats.so"
 modparam("event_nats", "nats_url", "${NATS_URL}")
 
 loadmodule "nats_consumer.so"
-modparam("nats_consumer", "persist_handles", 0)
 
 route {
     sl_send_reply(200, "ok");
