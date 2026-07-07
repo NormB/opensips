@@ -196,7 +196,11 @@ static int            _kv_cache_cnt = 0;
  * answer. */
 static int _kv_tbm_req = 0;
 static int _kv_tbm_state = -1;
-static int64_t _kv_tbm_marker_ns = 0;   /* delete-marker TTL for the create */
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+/* delete-marker TTL for the create; only referenced when libnats can
+ * express the flag (clang -Werror flags it as unused otherwise). */
+static int64_t _kv_tbm_marker_ns = 0;
+#endif
 
 /* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
 int nats_pool_drain_timeout_ms = 5000;
