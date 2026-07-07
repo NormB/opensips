@@ -13,6 +13,7 @@ TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_p
         test_js_pending_cap test_pool_refcount \
         test_kv_op_timeout test_reconnect_jitter \
         test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix \
+        test_kv_tbm_probe \
         test_epoch_wrapper test_blocking_budget \
         test_nats_rank test_rl test_doc_truth test_drain_merge
 

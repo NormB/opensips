@@ -49,3 +49,18 @@ else
 	endif
 endif
 
+
+# Feature probe: kvConfig.AllowMsgTTLBelowMarker (fork libnats,
+# branch feature/kv-allow-msg-ttl-below-marker).  Compile-only check
+# against the checked-in probe source lib/nats/nats_probe_tbm.c -- a
+# checked-in file rather than inline C in $(shell) because a literal
+# '#' inside a make function call breaks make 4.2 (Main CI).
+# C_INCLUDE_PATH from the environment participates automatically, so
+# the probe and the real compile always see the same headers.
+ifeq ($(NATS_FOUND),yes)
+NATS_TBM_PROBE := $(dir $(lastword $(MAKEFILE_LIST)))nats_probe_tbm.c
+NATS_HAS_TBM := $(shell $(CC) $(NATS_CFLAGS) -fsyntax-only $(NATS_TBM_PROBE) >/dev/null 2>&1 && echo yes)
+ifeq ($(NATS_HAS_TBM),yes)
+	DEFS += -DLIBNATS_HAS_TTL_BELOW_MARKER
+endif
+endif

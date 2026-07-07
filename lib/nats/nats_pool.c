@@ -187,6 +187,17 @@ typedef struct {
 static kv_cache_entry _kv_cache[NATS_POOL_MAX_KV_BUCKETS];
 static int            _kv_cache_cnt = 0;
 
+/* kv_ttl_below_marker support probe [see nats_pool.h].
+ * _kv_tbm_req: a module asked (modparam) for allow_msg_ttl_below_marker
+ * on bucket creation.  _kv_tbm_state: -1 unprobed, 0 unsupported (broker
+ * rejected the flag, or a pre-existing bucket lacks it), 1 supported.
+ * Per-process statics, same as the rest of the pool: every process that
+ * touches the bucket probes the same broker and latches the same
+ * answer. */
+static int _kv_tbm_req = 0;
+static int _kv_tbm_state = -1;
+static int64_t _kv_tbm_marker_ns = 0;   /* delete-marker TTL for the create */
+
 /* See nats_pool.h — module-tunable shutdown drain timeout, ms. */
 int nats_pool_drain_timeout_ms = 5000;
 
@@ -1177,6 +1188,48 @@ int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps)
 	return 0;
 }
 
+/* kv_ttl_below_marker request + probe [TTL-BELOW-MARKER].
+ *
+ * The fork nats-server honors per-key TTLs shorter than LimitMarkerTTL on
+ * History>1 buckets when the bucket's backing stream carries
+ * allow_msg_ttl_below_marker.  A STOCK server rejects the flag as an
+ * unknown config field at stream create -- that rejection IS the support
+ * probe: the bucket-create path below retries without the flag and
+ * latches UNSUPPORTED, so the module keeps working (reaper-only expiry
+ * semantics) with one loud WARN instead of a broken bucket.
+ *
+ * The flag is only valid together with a delete-marker TTL
+ * (subject_delete_marker_ttl > 0 -- the server validates that), so the
+ * request carries @marker_ttl_secs and the bucket create sets BOTH; the
+ * flag-less retry after a rejection drops both again (the marker TTL is
+ * pointless under reaper-only semantics, and dropping it also keeps the
+ * retry acceptable to pre-2.11 brokers that know neither field).
+ *
+ * Without libnats support compiled in (LIBNATS_HAS_TTL_BELOW_MARKER from
+ * lib/nats/Makefile.nats's probe of kvConfig), the request latches
+ * UNSUPPORTED immediately: the field cannot even be expressed. */
+void nats_pool_kv_request_ttl_below_marker(int marker_ttl_secs)
+{
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+	_kv_tbm_req = 1;
+	_kv_tbm_marker_ns = (int64_t)(marker_ttl_secs > 0
+			? marker_ttl_secs : 30) * 1000000000LL;
+#else
+	(void)marker_ttl_secs;
+	_kv_tbm_req = 0;
+	_kv_tbm_state = 0;
+	LM_WARN("NATS pool: kv_ttl_below_marker requested but this libnats "
+		"has no kvConfig.AllowMsgTTLBelowMarker (need the fork branch "
+		"feature/kv-allow-msg-ttl-below-marker); per-key TTLs on "
+		"history-keeping buckets stay reaper-only\n");
+#endif
+}
+
+int nats_pool_kv_ttl_below_marker_state(void)
+{
+	return _kv_tbm_state;
+}
+
 kvStore *nats_pool_get_kv(const char *bucket, int replicas,
                           int history, int64_t ttl_secs)
 {
@@ -1247,8 +1300,41 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		kvCfg.History = history > 0 ? history : 1;
 		if (ttl_secs > 0)
 			kvCfg.TTL = ttl_secs * 1000000000LL; /* seconds to nanos */
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+		if (_kv_tbm_req) {
+			/* the flag requires a delete-marker TTL server-side */
+			kvCfg.LimitMarkerTTL = _kv_tbm_marker_ns;
+			kvCfg.AllowMsgTTLBelowMarker = true;
+		}
+#endif
 
 		s = nats_dl.js_CreateKeyValue(&kv, _js, &kvCfg);
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+		if (s != NATS_OK && _kv_tbm_req && kvCfg.AllowMsgTTLBelowMarker) {
+			/* [TTL-BELOW-MARKER probe] a stock broker rejects the
+			 * unknown config field; retry WITHOUT the flag.  Retry
+			 * success proves the flag was the problem -> latch
+			 * UNSUPPORTED (retry failure is a genuine error and
+			 * falls through to the plain error path, state stays
+			 * unprobed for the next attempt). */
+			LM_WARN("NATS pool: KV bucket '%s' create with "
+				"allow_msg_ttl_below_marker rejected (%s: %s); "
+				"retrying without it -- broker lacks the option, "
+				"per-key TTLs on history-keeping buckets stay "
+				"reaper-only\n",
+				bucket, nats_dl.natsStatus_GetText(s),
+				nats_dl.nats_GetLastError(NULL));
+			kvCfg.AllowMsgTTLBelowMarker = false;
+			kvCfg.LimitMarkerTTL = 0;
+			kv = NULL;
+			s = nats_dl.js_CreateKeyValue(&kv, _js, &kvCfg);
+			if (s == NATS_OK)
+				_kv_tbm_state = 0;
+		} else if (s == NATS_OK && _kv_tbm_req &&
+				kvCfg.AllowMsgTTLBelowMarker) {
+			_kv_tbm_state = 1;
+		}
+#endif
 		if (s != NATS_OK) {
 			LM_ERR("NATS pool: KV bucket '%s' create failed: %s\n",
 				bucket, nats_dl.natsStatus_GetText(s));
@@ -1260,6 +1346,30 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 			(long long)ttl_secs);
 	} else {
 		LM_DBG("NATS pool: bound to existing KV bucket '%s'\n", bucket);
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+		/* [TTL-BELOW-MARKER probe, bind path] the bucket pre-exists:
+		 * its backing stream config decides the latch.  Read it once
+		 * per process (state stays latched afterwards). */
+		if (_kv_tbm_req && _kv_tbm_state < 0) {
+			char stream[160];
+			jsStreamInfo *si = NULL;
+			jsErrCode jerr = 0;
+			snprintf(stream, sizeof(stream), "KV_%s", bucket);
+			if (nats_dl.js_GetStreamInfo(&si, _js, stream, NULL,
+					&jerr) == NATS_OK && si && si->Config) {
+				_kv_tbm_state =
+					si->Config->AllowMsgTTLBelowMarker ? 1 : 0;
+				if (_kv_tbm_state == 0)
+					LM_WARN("NATS pool: pre-existing KV bucket "
+						"'%s' lacks allow_msg_ttl_below_marker; "
+						"recreate it to enable per-key TTLs on "
+						"history-keeping buckets (reaper-only "
+						"until then)\n", bucket);
+			}
+			if (si)
+				nats_dl.jsStreamInfo_Destroy(si);
+		}
+#endif
 	}
 
 	/* Cache the handle for future lookups */

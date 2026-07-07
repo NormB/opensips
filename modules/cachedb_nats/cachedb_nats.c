@@ -118,6 +118,14 @@ int kv_replicas = 3;
  * consumers, accepting reaper-only (scan-based) expiry. */
 int kv_history = 1;
 int kv_ttl = 0;
+/* [TTL-BELOW-MARKER] request the fork nats-server's
+ * allow_msg_ttl_below_marker option on bucket creation, so per-key TTLs
+ * shorter than the marker TTL are honored on History>1 buckets (the
+ * TTL-HISTORY rollback root cause).  Stock brokers reject the unknown
+ * field; the pool probes that rejection (flag-less retry) and latches
+ * UNSUPPORTED with a WARN -- expiry then stays reaper-only, exactly as
+ * with the knob off.  Default 0: no behavior change. */
+int kv_ttl_below_marker = 0;
 /* Multi-instance index coordination knobs.
  *
  * index_resync_on_reconnect (default 1):
@@ -290,6 +298,7 @@ static const param_export_t params[] = {
 	{"kv_replicas",    INT_PARAM,                 &kv_replicas},
 	{"kv_history",     INT_PARAM,                 &kv_history},
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
+	{"kv_ttl_below_marker", INT_PARAM,            &kv_ttl_below_marker},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
 	/* Shared lib/nats shutdown drain timeout, ms (ONE pool value; see
@@ -570,6 +579,14 @@ static int init_pool(void)
 	 * connect time if tls_mgm isn't bound or the "nats" domain
 	 * isn't defined. */
 	nats_pool_bind_tls("cachedb_nats");
+
+	/* [TTL-BELOW-MARKER] hand the modparam request to the pool BEFORE any
+	 * bucket use; the probe itself runs at the first bucket create/bind
+	 * (child_init) and its outcome is surfaced there.  The 30 s marker
+	 * TTL matches the fork-server default expectations; it only shapes
+	 * how long delete markers linger for watchers. */
+	if (kv_ttl_below_marker)
+		nats_pool_kv_request_ttl_below_marker(30);
 
 	/*
 	 * Register with the NATS connection pool.
@@ -860,6 +877,29 @@ static int child_init(int rank)
 		 * misbehave on it, so nothing to surface beyond the MaxAge
 		 * check above. */
 		(void)mmps;
+
+		/* [TTL-BELOW-MARKER] surface the probe outcome once.  The
+		 * probe ran inside nats_pool_get_kv() above (create carried
+		 * the flag / bind read the stream config); UNSUPPORTED
+		 * already WARNed at the latch site. */
+		if (kv_ttl_below_marker) {
+			switch (nats_pool_kv_ttl_below_marker_state()) {
+			case 1:
+				LM_INFO("cachedb_nats: bucket '%s' honors per-key "
+					"TTLs below the marker TTL "
+					"(allow_msg_ttl_below_marker)\n", kv_bucket);
+				break;
+			case 0:
+				LM_INFO("cachedb_nats: kv_ttl_below_marker requested "
+					"but not available (see WARN above); expiry "
+					"stays reaper-only\n");
+				break;
+			default:
+				LM_INFO("cachedb_nats: kv_ttl_below_marker support "
+					"not probed yet\n");
+				break;
+			}
+		}
 	}
 
 	/* The JSON search index is now SHM-backed and was allocated in

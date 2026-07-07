@@ -90,6 +90,7 @@ NATS_DL_FN(kvWatcher_Next)
 NATS_DL_FN(kvWatcher_Stop)
 
 /* Core nats_* lifecycle */
+NATS_DL_FN(nats_GetLastError)
 NATS_DL_FN(nats_GetLastErrorStack)
 NATS_DL_FN(nats_Open)
 NATS_DL_FN(nats_Sleep)

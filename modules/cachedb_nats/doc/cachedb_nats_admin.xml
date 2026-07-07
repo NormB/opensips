@@ -357,6 +357,50 @@ modparam("cachedb_nats", "kv_ttl", 3600)
 	</example>
 	</section>
 
+	<section id="param_kv_ttl_below_marker" xreflabel="kv_ttl_below_marker">
+	<title><varname>kv_ttl_below_marker</varname> (integer)</title>
+	<para>
+		When set to 1, bucket creation requests the
+		<emphasis>allow_msg_ttl_below_marker</emphasis> stream option, so
+		per-key TTLs shorter than the bucket's delete-marker TTL are
+		honoured on buckets with <varname>kv_history</varname> greater
+		than 1.  Without it, such a server raises short per-key TTLs to
+		the marker TTL at ingest, and an expiring key on a
+		history-keeping bucket rolls back to an older revision instead of
+		disappearing.
+	</para>
+	<para>
+		The option requires a NATS server built with the
+		<emphasis>allow_msg_ttl_below_marker</emphasis> stream config
+		option and a libnats that can express it.  A stock server rejects
+		the unknown field at bucket creation: the module probes exactly
+		that — the create is retried without the option, a warning is
+		logged, and expiry stays reaper-only, the same behaviour as with
+		this parameter off.  The probe outcome is reported at startup.
+	</para>
+	<para>
+		This parameter only takes effect when the bucket is first
+		created; when binding to a pre-existing bucket, the bucket's
+		backing-stream configuration decides (a warning is logged if it
+		lacks the option).  The bucket is created with a 30-second
+		delete-marker TTL (the option requires one), which shapes how
+		long delete markers stay visible to watchers.
+	</para>
+	<para>
+		<emphasis>
+			Default value is <quote>0</quote> (off).
+		</emphasis>
+	</para>
+	<example>
+	<title>Set <varname>kv_ttl_below_marker</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "kv_ttl_below_marker", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
 	<section id="param_fts_json_prefix" xreflabel="fts_json_prefix">
 	<title><varname>fts_json_prefix</varname> (string)</title>
 	<para>

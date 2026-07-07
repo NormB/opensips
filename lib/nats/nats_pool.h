@@ -241,6 +241,28 @@ int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns);
 int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps);
 
 /*
+ * [TTL-BELOW-MARKER] kv_ttl_below_marker support request + probe result.
+ *
+ * nats_pool_kv_request_ttl_below_marker(): called at module init (from the
+ * kv_ttl_below_marker modparam) BEFORE the first nats_pool_get_kv().  The
+ * next bucket create then carries allow_msg_ttl_below_marker (fork
+ * nats-server option: per-key TTLs below the marker TTL are honored on
+ * History>1 buckets) plus a delete-marker TTL of @marker_ttl_secs (the
+ * flag requires one server-side; <= 0 selects the 30 s default).  A stock
+ * broker rejects the unknown field; the pool retries the create without
+ * flag and marker TTL and latches UNSUPPORTED -- the module keeps running
+ * with reaper-only expiry semantics.  Without libnats support compiled in
+ * (LIBNATS_HAS_TTL_BELOW_MARKER), the request itself latches UNSUPPORTED
+ * with a WARN.
+ *
+ * nats_pool_kv_ttl_below_marker_state(): -1 = not probed yet (or never
+ * requested), 0 = unsupported (broker/bucket/libnats), 1 = supported (the
+ * bound bucket carries the option).
+ */
+void nats_pool_kv_request_ttl_below_marker(int marker_ttl_secs);
+int nats_pool_kv_ttl_below_marker_state(void);
+
+/*
  * Returns non-zero once any module has registered the pool
  * (nats_pool_register).  Lets a module choose to contribute a default URL
  * only when nothing else has registered, instead of injecting a spurious
