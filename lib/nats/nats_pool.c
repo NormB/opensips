@@ -1230,6 +1230,15 @@ int nats_pool_kv_ttl_below_marker_state(void)
 	return _kv_tbm_state;
 }
 
+/* Behavioral downgrade: config truth said SUPPORTED but broker truth
+ * disagreed (the module's TTL canary survived past its deadline).  Latch
+ * UNSUPPORTED so TTL-carrying writes stop; expiry falls back to the
+ * reaper.  Per-process, like the rest of the latch. */
+void nats_pool_kv_ttl_below_marker_mark_broken(void)
+{
+	_kv_tbm_state = 0;
+}
+
 kvStore *nats_pool_get_kv(const char *bucket, int replicas,
                           int history, int64_t ttl_secs)
 {

@@ -123,15 +123,33 @@ typedef struct __kvStore kvStore;
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
-	int got_entry, uint64_t entry_rev, uint64_t *out_rev);
+	int got_entry, uint64_t entry_rev, int64_t ttl_ms, uint64_t *out_rev);
+
+/* [TTL-BELOW-MARKER] pure TTL-derivation helpers (resurrected from the
+ * pre-P1.5a native-TTL path; TTL-SOLUTION-SPEC §2.3/§5).  A row is
+ * TTL-eligible only when non-empty, non-permanent, and single-contact or
+ * uniform-expiry (mixed rows stay reaper-owned); the ms value floors at
+ * the server's 1 s minimum so an already-expired-at-write row still
+ * self-expires (RC-6). */
+int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry);
+int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace);
+int64_t _ttl_msgttl_ms(int64_t ttl_seconds);
 
 /* The §2.0 write entry point every row writer uses.  rev==0 is the "no
  * prior message" sentinel [HREV-2] (JetStream sequences are 1-based): the
  * write becomes a CREATE; rev>0 CAS-updates at that revision.
+ * @row_exp/@n_contacts/@all_same are the row's finalized metadata and
+ * @grace the physical-reclamation slack (nats_reap_grace +
+ * nats_expired_linger): when kv_ttl_below_marker is on AND the broker
+ * probe latched SUPPORTED, the write re-asserts a native per-key TTL
+ * derived from them (§2.0 invariant); otherwise they are ignored and the
+ * write is TTL-less exactly as before.
  * 0 = done, 1 = CAS conflict (re-read + retry), -1 = fail.  *out_rev set
  * on success. */
 int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
-	const char *json, int json_len, uint64_t rev, uint64_t *out_rev);
+	const char *json, int json_len, uint64_t rev,
+	int64_t row_exp, int n_contacts, int all_same, int grace,
+	uint64_t *out_rev);
 
 /*
  * cachedb_nats_reaper.h — the reaper: the AUTHORITATIVE per-contact expiry

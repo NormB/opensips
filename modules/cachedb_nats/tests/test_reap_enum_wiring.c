@@ -67,8 +67,23 @@ int main(void)
 		"reaper tick enumerates via nats_reap_enum_bucket()");
 	ASSERT(count(src, "nats_dl.kvStore_Keys(") == 0,
 		"no kvStore_Keys() enumeration left");
-	ASSERT(count(src, "nats_dl.kvStore_Get(") == 0,
-		"no per-key kvStore_Get() left (zero GET storm)");
+	/* The reap SWEEP must issue zero per-key Gets (the watch pass carries
+	 * values).  The only allowed kvStore_Get in this TU is the TTL
+	 * canary's single one-shot verdict read (_ttl_canary_check) -- one
+	 * key, once per process lifetime, not O(bucket). */
+	{
+		int gets = count(src, "nats_dl.kvStore_Get(");
+		const char *canary = strstr(src, "_ttl_canary_check");
+		ASSERT(gets <= 1, "at most one kvStore_Get in the TU");
+		if (gets == 1) {
+			ASSERT(canary != NULL
+			       && strstr(canary, "nats_dl.kvStore_Get(") != NULL,
+				"the single kvStore_Get is the canary verdict read");
+		} else {
+			ASSERT(gets == 0,
+				"no per-key kvStore_Get() left (zero GET storm)");
+		}
+	}
 	ASSERT(count(src, "kvKeysList") == 0,
 		"kvKeysList plumbing removed");
 

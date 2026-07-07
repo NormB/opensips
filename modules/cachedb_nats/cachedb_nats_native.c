@@ -536,11 +536,15 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 		jsCtx *js = nats_pool_get_js();
 		/* [P3.6] the value rides (ptr,len) into the CAS write
 		 * uncopied -- nats_kv_put_row is length-aware end to end. */
+		/* ttl_ms=0: the generic script-level CAS update carries no
+		 * per-key TTL (usrloc rows derive theirs in
+		 * nats_kv_write_row_cas; this path has no row metadata). */
 		enum ttl_outcome o = nats_kv_put_row(js, kv,
 			bucket_buf[0] ? bucket_buf : kv_bucket, key_buf,
 			(value->s && value->len > 0) ? value->s : NULL,
 			value->len > 0 ? value->len : 0,
-			/*got_entry=*/1, (uint64_t)*expected_rev, &new_rev);
+			/*got_entry=*/1, (uint64_t)*expected_rev, /*ttl_ms=*/0,
+			&new_rev);
 
 		if (o == TTL_RETRY) {
 			LM_DBG("CAS mismatch for '%s' (expected rev %d)\n",

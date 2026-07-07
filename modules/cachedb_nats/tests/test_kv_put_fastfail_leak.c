@@ -135,10 +135,10 @@ static int         put_row_last_len;
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
-	int got_entry, uint64_t entry_rev, uint64_t *out_rev)
+	int got_entry, uint64_t entry_rev, int64_t ttl_ms, uint64_t *out_rev)
 {
 	(void)js; (void)kv; (void)bucket; (void)key;
-	(void)got_entry; (void)entry_rev;
+	(void)got_entry; (void)entry_rev; (void)ttl_ms;
 	put_row_calls++;
 	put_row_last_json = json;
 	put_row_last_len  = json_len;

@@ -163,10 +163,51 @@ static enum ttl_pub_status _pub_status(natsStatus s)
  * Returns an enum ttl_outcome (TTL_DONE/RETRY/FAIL_SAVE); the caller maps
  * RETRY to its re-read loop.
  */
+/* [TTL-BELOW-MARKER] pure TTL-derivation helpers, resurrected verbatim
+ * from the pre-P1.5a native-TTL path (TTL-SOLUTION-SPEC §2.3/§5).  The
+ * P1.5a deletion rationale is resolved: TTL-loss-on-update is prevented
+ * by the §2.0 re-assert below, the history-bucket rollback by the fork
+ * server (allow_msg_ttl_below_marker / marker replacement), and the old
+ * capability-latch layer by the kv_ttl_below_marker pool probe. */
+
+/* [REV-6/F6] (§5) per-message TTL eligibility. */
+int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
+{
+	if (n_contacts < 1)
+		return 0;             /* empty row => no TTL */
+	if (row_exp == 0)
+		return 0;             /* a permanent contact => never auto-expire */
+	return (n_contacts == 1) || all_same_expiry;
+}
+
+/* (§2.3) ttl_seconds = row_exp - now + grace. */
+int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace)
+{
+	return row_exp - now + (int64_t)grace;
+}
+
+/* (§2.3 [TREV-12] / [HREV-3]) MsgTTL in ms; <=0 floors to the 1 s server
+ * minimum so an already-expired-at-write row still self-expires instead of
+ * being written TTL-less (RC-6). */
+int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
+{
+	int64_t ms;
+
+	if (ttl_seconds <= 0)
+		return 1000;                           /* HREV-3: floor to 1 s min */
+	/* overflow-safe: cap before *1000 (real epochs never reach this). */
+	if (ttl_seconds > 9223372036854775LL)
+		ttl_seconds = 9223372036854775LL;
+	ms = ttl_seconds * 1000;
+	if (ms < 1000)
+		ms = 1000;                             /* clamp to the 1 s minimum */
+	return ms;
+}
+
 enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	const char *bucket, const char *key,
 	const char *json, int json_len,
-	int got_entry, uint64_t entry_rev, uint64_t *out_rev)
+	int got_entry, uint64_t entry_rev, int64_t ttl_ms, uint64_t *out_rev)
 {
 	char subj[512];
 	uint64_t cas_seq = 0, rev = 0;
@@ -194,8 +235,12 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 
 	if (pred == TTL_CAS_NO_MESSAGE) {
 		/* [P3.6] length-aware create: json_len is already in hand;
-		 * the *String form re-measured the full document. */
-		s = nats_dl.kvStore_Create(&rev, kv, key, json, json_len);
+		 * the *String form re-measured the full document.
+		 * [TTL-BELOW-MARKER] ttl_ms <= 0 makes CreateWithTTL identical
+		 * to kvStore_Create (no TTL); > 0 carries the row's TTL on the
+		 * create itself, so first inserts self-expire too. */
+		s = nats_dl.kvStore_CreateWithTTL(&rev, kv, key, json, json_len,
+			ttl_ms);
 		if (s == NATS_OK) {
 			if (out_rev)
 				*out_rev = rev;
@@ -223,6 +268,8 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 		return TTL_FAIL_SAVE;
 	nats_dl.jsPubOptions_Init(&o);
 	o.ExpectLastSubjectSeq = cas_seq;
+	if (ttl_ms > 0)
+		o.MsgTTL = ttl_ms;   /* re-assert Nats-TTL on update [TREV-3] */
 
 	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
 	if (s == NATS_OK && pa && out_rev)
@@ -272,10 +319,27 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
  * Returns 0 = committed, 1 = CAS conflict (caller re-reads + retries),
  * -1 = fatal/fail-the-save.  *out_rev set on success. */
 int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
-	const char *json, int json_len, uint64_t rev, uint64_t *out_rev)
+	const char *json, int json_len, uint64_t rev,
+	int64_t row_exp, int n_contacts, int all_same, int grace,
+	uint64_t *out_rev)
 {
-	enum ttl_outcome o = nats_kv_put_row(nats_pool_get_js(), kv, bucket,
-		key, json, json_len, rev != 0, rev, out_rev);
+	int64_t ttl_ms = 0;
+	enum ttl_outcome o;
+
+	/* [TTL-BELOW-MARKER] native per-key TTL, re-asserted on EVERY row
+	 * write (§2.0): only when the operator opted in AND the broker probe
+	 * latched SUPPORTED (fork server; verified further by the canary).
+	 * Everything else -- knob off, stock broker, old libnats, mixed or
+	 * permanent rows -- writes TTL-less exactly as before and relies on
+	 * the reaper. */
+	if (kv_ttl_below_marker &&
+	    nats_pool_kv_ttl_below_marker_state() == 1 &&
+	    _ttl_eligible(row_exp, n_contacts, all_same))
+		ttl_ms = _ttl_msgttl_ms(
+			_ttl_seconds(row_exp, (int64_t)time(NULL), grace));
+
+	o = nats_kv_put_row(nats_pool_get_js(), kv, bucket,
+		key, json, json_len, rev != 0, rev, ttl_ms, out_rev);
 	if (o == TTL_DONE)
 		return 0;
 	if (o == TTL_RETRY)
@@ -642,6 +706,7 @@ static int _reap_pass_entry(kvEntry *e, void *arg)
 		 * convergence to the watcher (no index code). */
 		uint64_t newrev = 0;
 		if (nats_kv_write_row_cas(c->kv, kv_bucket, key, proj, plen, rev,
+				p_row_exp, n_surv, p_all_same, c->slack,
 				&newrev) == 0) {
 			NATS_CDB_STATS_INC(rows_reaped);
 			/* [OBS] bindings physically removed by this survivor-write */
@@ -733,6 +798,86 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			c.reaped);
 }
 
+/* ── [TTL-BELOW-MARKER] ttl_canary: broker truth beats config truth ──
+ *
+ * The kv_ttl_below_marker probe proves the broker ACCEPTED the option;
+ * the canary proves it HONORS it: when the probe latched SUPPORTED, the
+ * reaper process writes one short-TTL canary key and, a few seconds
+ * later, checks that it actually died.  A surviving canary means the
+ * config lied (e.g. a build/runtime libnats skew silently dropped the
+ * flag) -- downgrade the pool latch so THIS process stops TTL-carrying
+ * writes, and WARN loudly.
+ *
+ * The latch is per-process (like the whole pool); SIP workers keep
+ * their own verdicts.  That is safe either way: a TTL that the broker
+ * ignores merely does nothing, and the reaper remains the authoritative
+ * backstop that reclaims every due row regardless of write mode. */
+
+#define NATS_TTL_CANARY_KEY     "__cdbn_ttl_canary"
+#define NATS_TTL_CANARY_TTL_MS  1000
+#define NATS_TTL_CANARY_WAIT_S  5
+
+static time_t _ttl_canary_deadline = 0;   /* 0 = idle / verdict delivered */
+
+static void _ttl_canary_arm(void)
+{
+	kvStore *kv;
+	uint64_t rev = 0;
+	natsStatus s;
+
+	if (!kv_ttl_below_marker)
+		return;
+	/* Bind the bucket FIRST: the probe latch is per-process, and in this
+	 * (reaper) process it is set by our own first get_kv -- checking the
+	 * state before binding would always read "unprobed". */
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv)
+		return;                       /* broker down: nothing to verify */
+	if (nats_pool_kv_ttl_below_marker_state() != 1)
+		return;                       /* probe says unsupported: no canary */
+	/* A non-usrloc doc: the reap projector classifies it "not a usrloc
+	 * row" and skips it; with a working TTL it self-expires anyway. */
+	s = nats_dl.kvStore_CreateWithTTL(&rev, kv, NATS_TTL_CANARY_KEY,
+		"{}", 2, NATS_TTL_CANARY_TTL_MS);
+	if (s != NATS_OK)
+		LM_DBG("ttl_canary: create returned %s (a survivor from a "
+			"previous run is checked on the same schedule)\n",
+			nats_dl.natsStatus_GetText(s));
+	_ttl_canary_deadline = time(NULL) + NATS_TTL_CANARY_WAIT_S;
+	LM_INFO("cachedb_nats: TTL canary armed (key '%s', %d ms TTL, "
+		"verdict in %d s)\n", NATS_TTL_CANARY_KEY,
+		NATS_TTL_CANARY_TTL_MS, NATS_TTL_CANARY_WAIT_S);
+}
+
+static void _ttl_canary_check(time_t now)
+{
+	kvStore *kv;
+	kvEntry *e = NULL;
+
+	if (_ttl_canary_deadline == 0 || now < _ttl_canary_deadline)
+		return;
+	_ttl_canary_deadline = 0;
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv)
+		return;      /* broker down: never downgrade on connectivity */
+	if (nats_dl.kvStore_Get(&e, kv, NATS_TTL_CANARY_KEY) == NATS_OK && e) {
+		nats_dl.kvEntry_Destroy(e);
+		nats_dl.kvStore_Delete(kv, NATS_TTL_CANARY_KEY);
+		nats_pool_kv_ttl_below_marker_mark_broken();
+		LM_WARN("cachedb_nats: TTL canary SURVIVED its %d ms TTL -- the "
+			"broker accepted allow_msg_ttl_below_marker but does not "
+			"honor per-key TTLs (libnats build/runtime skew?); native "
+			"TTL writes disabled in this process, the reaper stays "
+			"authoritative\n", NATS_TTL_CANARY_TTL_MS);
+	} else {
+		LM_INFO("cachedb_nats: TTL canary verified -- broker honors "
+			"per-key TTLs below the marker TTL (native expiry active, "
+			"reaper as backstop)\n");
+	}
+}
+
 /* ── [P3.3] dedicated reaper process ─────────────────────────────── */
 
 /* Owned by cachedb_nats.c (modparams / mod_init state). */
@@ -785,8 +930,12 @@ void nats_cdb_reaper_proc_main(int rank)
 	sc.last_reap += nats_cdb_reap_first_jitter(nats_reap_interval,
 		(unsigned int)getpid());
 
+	/* [TTL-BELOW-MARKER] arm the broker-truth canary once. */
+	_ttl_canary_arm();
+
 	for (;;) {
 		sleep(1);
+		_ttl_canary_check(time(NULL));
 		nats_cdb_proc_sched_due(&sc, time(NULL), nats_reap_interval,
 			resync_iv, &run_reap, &run_resync);
 		if (run_reap)

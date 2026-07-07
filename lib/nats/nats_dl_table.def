@@ -68,6 +68,7 @@ NATS_DL_FN(kvStore_Create)
  * and embedded-NUL values are carried instead of silently truncated.
  * Keys/subjects stay NUL-terminated C strings (nats_str_to_buf). */
 NATS_DL_FN(kvStore_CreateString)
+NATS_DL_FN(kvStore_CreateWithTTL)
 /* [PR #1000] create-if-absent carrying a per-key TTL; re-creates over a
  * DEL/PURGE/MaxAge marker first-attempt AND keeps the TTL (Phase B). */
 NATS_DL_FN(kvStore_Delete)

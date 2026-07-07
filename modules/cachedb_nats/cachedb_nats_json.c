@@ -1100,7 +1100,9 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * Index maintenance stays HERE (R8): the reaper defers to the watcher, but
 	 * the registration worker keeps the index authoritative inline. */
 	rc = nats_kv_write_row_cas(ncon->kv, kv_bucket, target_key,
-		new_json, new_len, rev, &new_rev);
+		new_json, new_len, rev,
+		f_row_exp, f_n_contacts, f_all_same,
+		nats_reap_grace + nats_expired_linger, &new_rev);
 	if (rc == 0) {
 		if (rev == 0)                 /* [HREV-2] first-insert create landed */
 			NATS_CDB_STATS_INC(create_doc);

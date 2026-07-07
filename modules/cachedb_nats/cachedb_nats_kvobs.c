@@ -394,6 +394,13 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 			KVLINE_I("allow_msg_ttl", si->Config->AllowMsgTTL ? 1 : 0);
 			KVLINE_I("subject_delete_marker_ttl_s",
 				si->Config->SubjectDeleteMarkerTTL / 1000000000LL);
+#ifdef LIBNATS_HAS_TTL_BELOW_MARKER
+			KVLINE_I("allow_msg_ttl_below_marker",
+				si->Config->AllowMsgTTLBelowMarker ? 1 : 0);
+#endif
+			/* -1 unprobed/never requested, 0 unsupported, 1 supported */
+			KVLINE_I("ttl_below_marker_state",
+				nats_pool_kv_ttl_below_marker_state());
 			KVLINE_I("messages", si->State.Msgs);
 			KVLINE_I("bytes", si->State.Bytes);
 			KVLINE_I("first_seq", si->State.FirstSeq);

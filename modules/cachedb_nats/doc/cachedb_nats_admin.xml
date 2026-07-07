@@ -370,6 +370,16 @@ modparam("cachedb_nats", "kv_ttl", 3600)
 		disappearing.
 	</para>
 	<para>
+		Once the support probe confirms the option (and a short-TTL canary
+		key verifies the broker actually honours it), every usrloc row
+		write carries a native per-key TTL derived from the row's contact
+		expiry (plus the reclamation slack), so expired registrations
+		disappear on their own; the periodic cleanup scan (the reaper)
+		remains active as a backstop and stays authoritative for rows
+		that are not TTL-eligible (mixed-expiry multi-contact rows and
+		rows containing permanent contacts).
+	</para>
+	<para>
 		The option requires a NATS server built with the
 		<emphasis>allow_msg_ttl_below_marker</emphasis> stream config
 		option and a libnats that can express it.  A stock server rejects

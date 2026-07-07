@@ -57,6 +57,11 @@ extern char *kv_bucket;
  * Default: 3 (matches the 3-node cluster).  Minimum: 1. */
 extern int   kv_replicas;
 
+/* [TTL-BELOW-MARKER] request the allow_msg_ttl_below_marker bucket option
+ * and, when the probe latches SUPPORTED, write usrloc rows with native
+ * per-key TTLs (the reaper demotes to backstop).  Default 0. */
+extern int   kv_ttl_below_marker;
+
 /* Number of historical revisions to retain per key.
  * Default: 1 (current value only) [HREV-1] -- required for native per-key
  * TTL expiry (history>1 makes an expired key roll back to an older

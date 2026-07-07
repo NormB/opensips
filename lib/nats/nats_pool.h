@@ -263,6 +263,15 @@ void nats_pool_kv_request_ttl_below_marker(int marker_ttl_secs);
 int nats_pool_kv_ttl_below_marker_state(void);
 
 /*
+ * [TTL-BELOW-MARKER] behavioral downgrade: broker truth beats config
+ * truth.  Called by the module when its short-TTL canary key survived
+ * past its deadline on a bucket the probe had latched SUPPORTED --
+ * latches UNSUPPORTED so TTL-carrying writes stop and expiry falls back
+ * to the reaper.
+ */
+void nats_pool_kv_ttl_below_marker_mark_broken(void);
+
+/*
  * Returns non-zero once any module has registered the pool
  * (nats_pool_register).  Lets a module choose to contribute a default URL
  * only when nothing else has registered, instead of injecting a spurious
