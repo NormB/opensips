@@ -37,6 +37,12 @@
 # Defaults: 3 trials, scales "10000 30000", modes "idx off",
 #           RPS 1000, 16 workers, 1 s timeout.
 #
+# Reaper: bench_ul_register.sh defaults REAP_INTERVAL to run-length
+# + 60 s, so the reaper's O(bucket) pass stays OUT of every measured
+# cell (the 2026-07-07 investigation traced the 30k-scale p99/max tail
+# blowups to that collision).  `REAP_INTERVAL=30 ./bench_matrix.sh ...`
+# restores the collision when the sweep phase is what you are measuring.
+#
 # Each mode is mapped to a knob preset:
 #   idx -> ENABLE_INDEX=1 (watcher in its dedicated process, the only mode)
 #   off -> ENABLE_INDEX=0 (no index, no watcher)

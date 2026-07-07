@@ -38,6 +38,16 @@ RPS="${RPS:-200}"
 AOR_SPACE="${AOR_SPACE:-200}"
 INSTANCES="${INSTANCES:-1}"
 
+# Reaper cadence for the rendered cfg.  Default: keep the reaper's
+# O(bucket) pass OUT of the measured window -- the 2026-07-07 tail-spike
+# investigation traced the 30k-scale p99/max blowups (27-88 ms vs ~1 ms
+# baseline) to the first reap pass (default 30 s = exactly the old run
+# length) colliding with live traffic.  Export REAP_INTERVAL explicitly
+# to force the collision when the sweep phase itself is the thing being
+# measured.
+RUN_S=$(( (N + RPS - 1) / RPS ))
+REAP_INTERVAL="${REAP_INTERVAL:-$(( RUN_S + 60 ))}"
+
 # Scale-tuning knobs.  ENABLE_INDEX=0 disables the
 # in-memory JSON-FTS index entirely; reads/writes use the PK fast
 # path.  This is the recommended setting for usrloc-as-store
@@ -99,14 +109,21 @@ sed -e "s|@@MODULES@@|${OPENSIPS_MODULES}|g" \
         -e "s|@@KV_BUCKET@@|${KV_BUCKET}|g" -e "s|@@INSTANCE@@|${inst}|g" \
         -e "s|@@FTS_LOAD@@|${BENCH_FTS_LOAD}|g" \
         -e "s|@@EXPIRED_LINGER@@|${EXPIRED_LINGER:-0}|g" \
-        -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL:-30}|g" \
+        -e "s|@@REAP_INTERVAL@@|${REAP_INTERVAL}|g" \
         "${HERE}/opensips.cfg.in" > "$out"
 }
 
 start_instance() {
     local inst=$1 sip=$2 mi=$3 cport=$4 nid=$5
     local cfg="$WORKDIR/o_${inst}.cfg"
-    local log="$OUT/opensips_${inst}.log"
+    # Log into the tmpfs WORKDIR during the run, not $OUT: the cfg xlogs
+    # one INFO line per REGISTER (~4 MB per 30k run), and when $OUT sits
+    # on a disk-backed fs the kernel's dirty-page expiry
+    # (vm.dirty_expire_centisecs, default 30 s) flushes the log pages
+    # mid-run -- measured 2026-07-07 fattening the 30k tail from
+    # p99 3.0 ms / max 18 ms to p99 10.4 ms / max 45 ms.  The log is
+    # copied to $OUT after the measured window (bottom of the script).
+    local log="$WORKDIR/opensips_${inst}.log"
     render_cfg "$cfg" "$inst" "$sip" "$mi" "$cport" "$nid"
     LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
         "$OPENSIPS_BIN" -F -f "$cfg" -s HP_MALLOC -m 256 -M 8 > "$log" 2>&1 &
@@ -146,6 +163,7 @@ echo "  N:          $N"
 echo "  target RPS: $RPS"
 echo "  AoR space:  $AOR_SPACE"
 echo "  bucket:     $KV_BUCKET"
+echo "  reap every: ${REAP_INTERVAL}s (run ~${RUN_S}s; sweep excluded unless REAP_INTERVAL exported)"
 echo "  out:        $OUT"
 echo "=========================================="
 
@@ -293,3 +311,9 @@ echo "  opensips A RSS (KB):   ${A_RSS_KB}"
 echo "  ENABLE_INDEX:          ${ENABLE_INDEX}"
 echo "  index_buckets:         ${INDEX_BUCKETS}"
 echo "=========================================="
+
+# Preserve the opensips logs now that the measured window is over (they
+# live in the tmpfs WORKDIR during the run -- see start_instance).
+if [ "$OUT" != "$WORKDIR" ]; then
+    cp "$WORKDIR"/opensips_*.log "$OUT/" 2>/dev/null || true
+fi
