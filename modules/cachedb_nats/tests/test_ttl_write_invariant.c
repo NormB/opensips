@@ -53,16 +53,16 @@ int main(void)
 	ASSERT(grep_in_function("../cachedb_nats_json.c",
 		"_update_apply_and_cas", "nats_dl.kvStore_UpdateString") == 0,
 		"registration write (_update_apply_and_cas) has no direct kvStore_UpdateString");
-	ASSERT(grep_in_function("../cachedb_nats_expiry.c",   /* [P2.7] body moved */
-		"nats_cdb_reaper_tick", "nats_dl.kvStore_UpdateString") == 0,
+	ASSERT(grep_in_function("../cachedb_nats_expiry.c",   /* watch-pass cb */
+		"_reap_pass_entry", "nats_dl.kvStore_UpdateString") == 0,
 		"reaper survivor-write has no direct kvStore_UpdateString");
 
 	/* both writers route through the helper */
 	ASSERT(grep_in_function("../cachedb_nats_json.c",
 		"_update_apply_and_cas", "nats_kv_write_row_cas") >= 1,
 		"registration write routes through nats_kv_write_row_cas");
-	ASSERT(grep_in_function("../cachedb_nats_expiry.c",   /* [P2.7] body moved */
-		"nats_cdb_reaper_tick", "nats_kv_write_row_cas") >= 1,
+	ASSERT(grep_in_function("../cachedb_nats_expiry.c",   /* watch-pass cb */
+		"_reap_pass_entry", "nats_kv_write_row_cas") >= 1,
 		"reaper survivor-write routes through nats_kv_write_row_cas");
 
 	/* the helper delegates to the single CAS publish (nats_kv_put_row);

@@ -176,8 +176,8 @@ int _reap_interval_guard(int interval);
 
 /* [P2.7] The reaper pass body (P9 host); the SINGLE expiry mechanism.
  * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main),
- * NOT the shared core timer process -- a full-bucket pass (kvStore_Keys +
- * per-key Get + CAS) at scale would stall usrloc/tm/dialog timers
+ * NOT the shared core timer process -- a full-bucket pass (one
+ * value-carrying watch pass + CAS) at scale would stall usrloc/tm/dialog timers
  * system-wide.  The (ticks, param) signature is kept from its
  * register_timer era so the body needs no churn. */
 void nats_cdb_reaper_tick(unsigned int ticks, void *param);
@@ -201,6 +201,27 @@ typedef struct nats_cdb_proc_sched {
 	time_t last_reap;
 	time_t last_resync;
 } nats_cdb_proc_sched_t;
+
+/*
+ * First-fire stagger for the reaper.  Multi-instance deployments boot
+ * every proxy with the same nats_reap_interval; without a per-instance
+ * offset all reapers start their first O(bucket) pass at the same
+ * uptime and hit the broker together.  Returns a deterministic offset
+ * in [0, interval/4] derived from @seed (callers pass the pid);
+ * degenerate intervals (< 4 s) return 0.
+ */
+static inline int nats_cdb_reap_first_jitter(int interval_s,
+	unsigned int seed)
+{
+	unsigned int span;
+
+	if (interval_s < 4)
+		return 0;                     /* a quarter of nothing is nothing */
+	span = (unsigned int)(interval_s / 4);
+	/* Knuth multiplicative hash: cheap, deterministic, spreads
+	 * consecutive pids (fork order!) across the whole span. */
+	return (int)(((seed * 2654435761u) >> 16) % (span + 1));
+}
 
 static inline void nats_cdb_proc_sched_due(nats_cdb_proc_sched_t *sc,
 	time_t now, int reap_iv, int resync_iv,

@@ -62,6 +62,15 @@ CORE_DEFS := -fPIC -DPIC \
 test_json_foreach: EXTRA := $(CORE_DEFS)
 test_json_foreach: ../cachedb_nats_json_walk.c ../cachedb_nats_json_internal.h
 
+# Reaper watch-pass enumeration: #includes the production TU and drives
+# it against a scripted fake nats_dl (zero per-key Get is the contract).
+test_reap_watch_enum: EXTRA := $(CORE_DEFS)
+test_reap_watch_enum: ../cachedb_nats_reap_enum.c ../cachedb_nats_reap_enum.h
+
+# Reaper first-fire jitter: the helper is a static inline in the header
+# (and the wiring assert slurps the expiry TU) -- depend on both.
+test_reap_first_jitter: ../cachedb_nats_expiry.h ../cachedb_nats_expiry.c
+
 # [P3.5] _sink_emit_int divide-loop: links the REAL ser TU and
 # characterizes every edge value (incl. INT64_MIN) against printf.
 test_sink_emit_int: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_ser.c -D_GNU_SOURCE

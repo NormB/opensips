@@ -55,6 +55,7 @@
 #include "cachedb_nats_reg.h"      /* _reg_row_scan (reaper due-check) */
 #include "cachedb_nats_stats.h"    /* NATS_CDB_STATS_* (reaper counters) */
 #include "cachedb_nats_expiry.h"
+#include "cachedb_nats_reap_enum.h"   /* value-carrying watch pass */
 #include "cachedb_nats_json_internal.h"   /* walkers, json_sink_t, _contact_*, _row_finalize_metadata */
 #include "cachedb_nats_json.h"            /* _reap_project_survivors / _reap_row_due_json decls */
 
@@ -563,33 +564,120 @@ static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
 	return -1;
 }
 
+/* Per-pass context threaded through nats_reap_enum_bucket(). */
+struct reap_pass_ctx {
+	kvStore *kv;
+	jsCtx *js;
+	time_t now;
+	int slack;
+	int prefix_len;
+	int reaped;
+	/* [OBS/D-OBS-2] pass gauges */
+	long g_keys, g_aors, g_contacts, g_active, g_perm, g_due;
+};
+
+/* One bucket entry of the watch pass: the DUE usrloc rows are either
+ * CAS-rewritten to their survivors or CAS-deleted when nothing
+ * survives.  The entry (key/val) is owned by the enumerator and valid
+ * for the duration of this call only; proj is independent of val.
+ * Always returns 0: per-row problems skip the row, never the pass. */
+static int _reap_pass_entry(kvEntry *e, void *arg)
+{
+	struct reap_pass_ctx *c = arg;
+	const char *key = nats_dl.kvEntry_Key(e);
+	const char *val;
+	int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
+	int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
+	uint64_t rev;
+	char *proj;
+
+	if (!key)
+		return 0;                     /* malformed / header-only entry */
+	/* only our usrloc rows; never touch another consumer's keys. */
+	if (c->prefix_len && strncmp(key, fts_json_prefix, c->prefix_len) != 0)
+		return 0;
+	c->g_keys++;
+	val = nats_dl.kvEntry_ValueString(e);
+	vlen = nats_dl.kvEntry_ValueLen(e);
+	rev = nats_dl.kvEntry_Revision(e);
+
+	/* [OBS] pass gauges (visibility semantics: grace only); n_before
+	 * feeds the contacts_pruned tally in the survivors branch. */
+	n_before = 0;
+	{
+		struct reg_row_info g_ri;
+		if (val && vlen > 0 &&
+		    _reg_row_scan(val, vlen, c->now, nats_reap_grace,
+				NULL, 0, NULL, 0, &g_ri) == 0) {
+			c->g_aors++;
+			c->g_contacts += g_ri.n_contacts;
+			c->g_active   += g_ri.n_active;
+			c->g_perm     += g_ri.n_perm;
+			n_before = g_ri.n_contacts;
+		}
+	}
+
+	/* cheap due-gate: skip permanent / not-yet-due rows without a
+	 * full reprojection (row_exp == min contact expiry). */
+	if (_reap_row_due_json(val, vlen, c->now, c->slack) == 0)
+		return 0;
+	c->g_due++;
+	proj = _reap_project_survivors(val, vlen, c->now, c->slack,
+		&n_surv, &plen, &p_row_exp, &p_all_same);
+	if (!proj)
+		return 0;                     /* malformed/poison: read path alarms it */
+	if (n_surv < 0) {                     /* not a usrloc row */
+		pkg_free(proj);
+		return 0;
+	}
+	if (n_surv == 0) {
+		if (_reap_cas_delete(c->js, kv_bucket, key, rev) == 0) {
+			NATS_CDB_STATS_INC(rows_reaped);
+			c->reaped++;
+		}
+	} else {
+		/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
+		 * the pruned row goes through the one row-write helper (CAS
+		 * publish, conflict-classified).  The reaper defers index
+		 * convergence to the watcher (no index code). */
+		uint64_t newrev = 0;
+		if (nats_kv_write_row_cas(c->kv, kv_bucket, key, proj, plen, rev,
+				&newrev) == 0) {
+			NATS_CDB_STATS_INC(rows_reaped);
+			/* [OBS] bindings physically removed by this survivor-write */
+			if (n_before > n_surv)
+				NATS_CDB_STATS_ADD(contacts_pruned,
+					n_before - n_surv);
+			c->reaped++;
+		}
+		/* CAS conflict / error: a concurrent writer won; retry next tick */
+	}
+	pkg_free(proj);
+	return 0;
+}
+
 /* The reaper pass: scan the bucket once, and for each DUE usrloc row either
  * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.
  * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main
  * below).  It still does not gate on nats_pool_is_connected(): a NULL KV/JS
  * handle means the broker is down and we skip just this pass.
  *
- * Independent of the search index [REV-17]: enumeration is a direct
- * kvStore_Keys() over the bucket, so the reaper works with enable_search_index=0.
- * Malformed/poison rows are LEFT in place (the read path alarms them); permanent
- * and not-yet-due rows are skipped by the cheap row_exp due-gate. */
+ * Independent of the search index [REV-17]: enumeration is ONE
+ * value-carrying watch pass (nats_reap_enum_bucket), so the reaper works
+ * with enable_search_index=0.  The watch pass replaced the previous
+ * kvStore_Keys() + per-key kvStore_Get() sweep: that pattern issued
+ * O(bucket) synchronous round trips per tick, and the 30k-AoR bench
+ * (2026-07-07) measured it dragging REGISTER p99/max from ~1 ms to
+ * 27-88 ms for the 7-17 s the sweep overlapped live traffic.
+ * Malformed/poison rows are LEFT in place (the read path alarms them);
+ * permanent and not-yet-due rows are skipped by the cheap row_exp
+ * due-gate. */
 void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 {
 	kvStore *kv;
 	jsCtx *js;
-	kvKeysList keys;
-	natsStatus s;
-	time_t now;
-	int i, prefix_len, reaped = 0;
-	/* [HREV-3] physical-reclamation slack: the skew margin plus the
-	 * operator's retention window -- without the linger term the reaper
-	 * would reclaim rows the TTL path was told to keep. */
-	const int slack = nats_reap_grace + nats_expired_linger;
-	/* [OBS/D-OBS-2] pass gauges: the scan below Gets every prefixed key
-	 * anyway, so bucket-wide registration totals are free here.  "active"
-	 * uses grace only (visibility semantics), independent of the slack. */
-	long g_keys = 0, g_aors = 0, g_contacts = 0, g_active = 0,
-	     g_perm = 0, g_due = 0;
+	struct reap_pass_ctx c;
+	int rc;
 	struct timespec g_t0, g_t1;
 
 	(void)ticks; (void)param;
@@ -606,98 +694,26 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		return;
 	}
 
-	now = time(NULL);
-	prefix_len = (fts_json_prefix && *fts_json_prefix)
+	memset(&c, 0, sizeof(c));
+	c.kv = kv;
+	c.js = js;
+	c.now = time(NULL);
+	/* [HREV-3] physical-reclamation slack: the skew margin plus the
+	 * operator's retention window -- without the linger term the reaper
+	 * would reclaim rows the TTL path was told to keep. */
+	c.slack = nats_reap_grace + nats_expired_linger;
+	c.prefix_len = (fts_json_prefix && *fts_json_prefix)
 		? fts_json_prefix_len : 0;
 
-	memset(&keys, 0, sizeof(keys));
-	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
-	if (s == NATS_NOT_FOUND)
-		return;                           /* empty bucket */
-	if (s != NATS_OK) {
-		LM_DBG("reaper: kvStore_Keys failed: %s\n",
-			nats_dl.natsStatus_GetText(s));
-		return;
-	}
-
-	for (i = 0; i < keys.Count; i++) {
-		const char *key = keys.Keys[i];
-		kvEntry *e = NULL;
-		const char *val;
-		int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
-		int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
-		uint64_t rev;
-		char *proj;
-
-		if (!key)
-			continue;
-		/* only our usrloc rows; never touch another consumer's keys. */
-		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
-			continue;
-		g_keys++;
-		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
-			continue;                     /* mid-delete / vanished -> skip */
-		val = nats_dl.kvEntry_ValueString(e);
-		vlen = nats_dl.kvEntry_ValueLen(e);
-		rev = nats_dl.kvEntry_Revision(e);
-
-		/* [OBS] pass gauges (visibility semantics: grace only); n_before
-		 * feeds the contacts_pruned tally in the survivors branch. */
-		n_before = 0;
-		{
-			struct reg_row_info g_ri;
-			if (val && vlen > 0 &&
-			    _reg_row_scan(val, vlen, now, nats_reap_grace,
-					NULL, 0, NULL, 0, &g_ri) == 0) {
-				g_aors++;
-				g_contacts += g_ri.n_contacts;
-				g_active   += g_ri.n_active;
-				g_perm     += g_ri.n_perm;
-				n_before = g_ri.n_contacts;
-			}
-		}
-
-		/* cheap due-gate: skip permanent / not-yet-due rows without a
-		 * full reprojection (row_exp == min contact expiry). */
-		if (_reap_row_due_json(val, vlen, now, slack) == 0) {
-			nats_dl.kvEntry_Destroy(e);
-			continue;
-		}
-		g_due++;
-		proj = _reap_project_survivors(val, vlen, now, slack,
-			&n_surv, &plen, &p_row_exp, &p_all_same);
-		nats_dl.kvEntry_Destroy(e);           /* proj is independent of val */
-		if (!proj)
-			continue;                     /* malformed/poison: read path alarms it */
-		if (n_surv < 0) {                     /* not a usrloc row */
-			pkg_free(proj);
-			continue;
-		}
-		if (n_surv == 0) {
-			if (_reap_cas_delete(js, kv_bucket, key, rev) == 0) {
-				NATS_CDB_STATS_INC(rows_reaped);
-				reaped++;
-			}
-		} else {
-			/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
-			 * the pruned row goes through the one row-write helper (CAS
-			 * publish, conflict-classified).  The reaper defers index
-			 * convergence to the watcher (no index code). */
-			uint64_t newrev = 0;
-			if (nats_kv_write_row_cas(kv, kv_bucket, key, proj, plen, rev,
-					&newrev) == 0) {
-				NATS_CDB_STATS_INC(rows_reaped);
-				/* [OBS] bindings physically removed by this survivor-write */
-				if (n_before > n_surv)
-					NATS_CDB_STATS_ADD(contacts_pruned,
-						n_before - n_surv);
-				reaped++;
-			}
-			/* CAS conflict / error: a concurrent writer won; retry next tick */
-		}
-		pkg_free(proj);
-	}
-	nats_dl.kvKeysList_Destroy(&keys);
+	rc = nats_reap_enum_bucket(kv, NATS_REAP_ENUM_NEXT_TIMEOUT_MS,
+		_reap_pass_entry, &c);
+	if (rc < 0)
+		/* watch create failed or the pass ended early (broker stall):
+		 * whatever was visited is already handled; the reaper is
+		 * idempotent, the next tick simply rescans.  Gauges below
+		 * reflect the partial pass. */
+		LM_DBG("reaper: enumeration ended early (%d); next tick rescans\n",
+			rc);
 
 	/* [OBS/D-OBS-2] publish the pass gauges (single writer: this process) */
 	clock_gettime(CLOCK_MONOTONIC, &g_t1);
@@ -705,15 +721,16 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	NATS_CDB_STATS_SET(reap_last_ms,
 		(g_t1.tv_sec - g_t0.tv_sec) * 1000
 		+ (g_t1.tv_nsec - g_t0.tv_nsec) / 1000000);
-	NATS_CDB_STATS_SET(reap_last_keys, g_keys);
-	NATS_CDB_STATS_SET(reap_last_aors, g_aors);
-	NATS_CDB_STATS_SET(reap_last_contacts, g_contacts);
-	NATS_CDB_STATS_SET(reap_last_active, g_active);
-	NATS_CDB_STATS_SET(reap_last_permanent, g_perm);
-	NATS_CDB_STATS_SET(reap_last_due, g_due);
+	NATS_CDB_STATS_SET(reap_last_keys, c.g_keys);
+	NATS_CDB_STATS_SET(reap_last_aors, c.g_aors);
+	NATS_CDB_STATS_SET(reap_last_contacts, c.g_contacts);
+	NATS_CDB_STATS_SET(reap_last_active, c.g_active);
+	NATS_CDB_STATS_SET(reap_last_permanent, c.g_perm);
+	NATS_CDB_STATS_SET(reap_last_due, c.g_due);
 
-	if (reaped)
-		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n", reaped);
+	if (c.reaped)
+		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n",
+			c.reaped);
 }
 
 /* ── [P3.3] dedicated reaper process ─────────────────────────────── */
@@ -724,8 +741,8 @@ extern int index_resync_interval_secs;
 
 /*
  * nats_cdb_reaper_proc_main() -- dedicated-process host for the
- * module's periodic O(bucket) jobs: the reaper pass (kvStore_Keys +
- * per-key Get + CAS prune) and, when the FTS module is bound and
+ * module's periodic O(bucket) jobs: the reaper pass (one value-carrying
+ * watch pass + CAS prune) and, when the FTS module is bound and
  * index_resync_interval_secs > 0, the periodic index resync.
  *
  * [P3.3] Both used to run as register_timer callbacks in the SHARED
@@ -759,8 +776,14 @@ void nats_cdb_reaper_proc_main(int rank)
 		return;
 
 	/* register_timer semantics preserved: first fire one full interval
-	 * after startup, not immediately. */
+	 * after startup, not immediately.  The reap stamp additionally
+	 * carries a per-instance jitter (<= interval/4, pid-derived) so
+	 * the reapers of a multi-proxy deployment do not all start their
+	 * first O(bucket) pass at the same uptime; steady-state cadence
+	 * is untouched (the stamp resets to "now" on every fire). */
 	sc.last_reap = sc.last_resync = time(NULL);
+	sc.last_reap += nats_cdb_reap_first_jitter(nats_reap_interval,
+		(unsigned int)getpid());
 
 	for (;;) {
 		sleep(1);
