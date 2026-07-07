@@ -91,7 +91,14 @@ cmake .. \
     -DCMAKE_INSTALL_PREFIX="${LIBNATS_PREFIX}" \
     -DNATS_BUILD_STREAMING=OFF \
     -DNATS_BUILD_EXAMPLES=OFF \
-    -DNATS_BUILD_USE_SODIUM=OFF
+    -DNATS_BUILD_USE_SODIUM=OFF \
+    -DNATS_BUILD_WITH_TLS=OFF
+# TLS off on purpose: nats.c main's cmake does find_package(OpenSSL 1.1.1
+# REQUIRED) only under NATS_BUILD_WITH_TLS, and the OpenSIPS NATS modules link
+# libnats at runtime via dlopen, so they only need it to build/link here. This
+# avoids the missing-OPENSSL_CRYPTO_LIBRARY configure failure on slim/cross
+# container images (e.g. debian_12-slim arm64). NATS-over-TLS is covered
+# separately by the nats-tls-backends.yml workflow, which builds its own libnats.
 make -j"$(nproc 2>/dev/null || echo 2)"
 ${SUDO} make install
 
