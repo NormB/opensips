@@ -2126,6 +2126,8 @@ modparam("cachedb_nats", "kv_watch",    ">")
 	</example>
 	</section>
 
+	</section><!-- /exported_mi -->
+
 	&playbook;
 
 </chapter>

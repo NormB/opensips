@@ -1,0 +1,10 @@
+<!-- Placeholder: the OpenSIPS release tooling regenerates this file
+     from git history (see any upstream module's auto-generated
+     contributors.xml).  Kept minimal until the module merges. -->
+<chapter id="contributors" xreflabel="contributors">
+    <title>&contributors;</title>
+    <para>
+        Generated from git history by the &osipsname; release tooling
+        at release time.
+    </para>
+</chapter>

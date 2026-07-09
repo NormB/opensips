@@ -1,0 +1,1818 @@
+cachedb_nats Module
+     __________________________________________________________
+
+   Table of Contents
+
+   1. Admin Guide
+
+        1.1. Overview
+        1.2. Dependencies
+
+              1.2.1. OpenSIPS Modules
+              1.2.2. External Libraries or Applications
+
+        1.3. Exported Parameters
+
+              1.3.1. cachedb_url (string)
+              1.3.2. nats_url (string)
+              1.3.3. kv_bucket (string)
+              1.3.4. kv_replicas (integer)
+              1.3.5. kv_history (integer)
+              1.3.6. kv_ttl (integer)
+              1.3.7. kv_ttl_below_marker (integer)
+              1.3.8. require_secure_url (integer)
+              1.3.9. require_usrloc_safe_bucket (integer)
+              1.3.10. fts_json_prefix (string)
+              1.3.11. kv_watch (string)
+              1.3.12. TLS configuration
+              1.3.13. cas_retries (integer)
+              1.3.14. index_resync_on_reconnect (integer)
+              1.3.15. index_resync_interval_secs (integer)
+              1.3.16. drain_timeout_ms (integer)
+              1.3.17. reconnect_wait_ms (integer)
+              1.3.18. max_reconnect (integer)
+              1.3.19. reap_interval (integer)
+              1.3.20. reap_grace (integer)
+              1.3.21. expired_linger (integer)
+              1.3.22. max_value_size (integer)
+              1.3.23. kv_op_timeout_ms (integer)
+
+        1.4. Exported Functions
+
+              1.4.1. nats_kv_history(key, result_pvar)
+              1.4.2. nats_kv_get(bucket, key, value_pvar,
+                      [revision_pvar])
+
+              1.4.3. nats_kv_put(bucket, key, value)
+              1.4.4. nats_kv_update(bucket, key, value,
+                      expected_rev)
+
+              1.4.5. nats_kv_delete(bucket, key)
+              1.4.6. nats_kv_revision(bucket, key, revision_pvar)
+
+        1.5. CacheDB Operations
+
+              1.5.1. KV Key Validation
+              1.5.2. cache_store — KV put
+              1.5.3. cache_fetch — KV get
+              1.5.4. cache_remove — KV delete
+              1.5.5. cache_add — atomic counter increment
+              1.5.6. cache_sub — atomic counter decrement
+              1.5.7. cache_counter_fetch — read counter value
+
+        1.6. JSON Full-Text Search Index
+        1.7. KV Watcher
+        1.8. Raw Query Commands
+
+              1.8.1. KV KEYS
+              1.8.2. KV PURGE <key>
+              1.8.3. KV BUCKET INFO
+
+        1.9. Map Operations
+        1.10. Exported MI Functions
+
+              1.10.1. nats_kv_status
+              1.10.2. nats_cdb_stats
+              1.10.3. nats_reg_summary
+              1.10.4. nats_reg_list
+              1.10.5. nats_reg_show
+              1.10.6. nats_stream_list
+              1.10.7. nats_stream_info
+              1.10.8. nats_kv_keys
+              1.10.9. Exported Events
+              1.10.10. Cluster Configuration
+
+        1.11. Operator playbook: NATS as backend store for usrloc
+
+              1.11.1. Topology by DC count
+              1.11.2. Bucket sizing
+              1.11.3. Snapshot and restore
+              1.11.4. Scale tuning: PK fast path and the optional
+                      index
+
+              1.11.5. SHM allocator selection
+              1.11.6. MI counters and alert thresholds
+              1.11.7. Migration from full-sharing-cachedb-cluster
+              1.11.8. Optional knobs introduced in this work
+
+   2. Contributors
+
+   List of Examples
+
+   1.1. Set cachedb_url parameter
+   1.2. Use the nats cache group in a routing script
+   1.3. Set nats_url parameter
+   1.4. Set kv_bucket parameter
+   1.5. Set kv_replicas parameter
+   1.6. Set kv_history parameter
+   1.7. Set kv_ttl parameter
+   1.8. Set kv_ttl_below_marker parameter
+   1.9. Set require_secure_url parameter
+   1.10. Set require_usrloc_safe_bucket parameter
+   1.11. Set fts_json_prefix parameter
+   1.12. Set kv_watch parameter
+   1.13. tls_mgm-driven NATS TLS
+   1.14. Set reconnect_wait_ms parameter
+   1.15. Set max_reconnect parameter
+   1.16. nats_kv_history usage
+   1.17. nats_kv_get usage with CAS read
+   1.18. Idempotent state transition with CAS
+   1.19. cache_store with nats
+   1.20. cache_fetch with nats
+   1.21. cache_remove with nats
+   1.22. cache_add with nats
+   1.23. cache_sub with nats
+   1.24. cache_counter_fetch with nats
+   1.25. cache_query — JSON equality search
+   1.26. KV KEYS raw query
+   1.27. KV PURGE raw query
+   1.28. KV BUCKET INFO raw query
+   1.29. nats_kv_status MI call
+   1.30. nats_cdb_stats MI call
+   1.31. nats_reg_summary MI call
+   1.32. nats_reg_summary as CSV
+   1.33. nats_reg_list MI call
+   1.34. nats_reg_list as CSV (find every Yealink)
+   1.35. nats_reg_show MI call
+   1.36. nats_reg_show as CSV
+   1.37. nats_stream_list MI call
+   1.38. nats_stream_info MI call
+   1.39. nats_stream_info as plain text (cut/awk-ready)
+   1.40. nats_kv_keys MI call
+   1.41. Subscribing to E_NATS_KV_CHANGE in opensips.cfg
+   1.42. Three-node cluster configuration
+   1.43. Single-node development configuration
+
+Chapter 1. Admin Guide
+
+1.1. Overview
+
+   The cachedb_nats module implements the OpenSIPS CacheDB engine
+   interface on top of NATS JetStream Key-Value stores. It
+   provides persistent, replicated, cluster-aware key-value
+   storage accessible from OpenSIPS routing scripts via the
+   standard cache_store/cache_fetch/cache_remove operations,
+   together with several NATS-native extensions.
+
+   The module connects to a NATS JetStream-enabled server or
+   cluster, creates a named KV bucket on first use, and maps all
+   CacheDB operations onto NATS KV primitives. Reconnection and
+   bucket handle refresh are fully automatic: an epoch-based
+   staleness check at the top of every operation transparently
+   re-opens the KV handle after any NATS disconnect/reconnect
+   cycle.
+
+   Beyond the standard CacheDB API the module provides:
+
+     * Atomic CAS counters — cache_add and cache_sub use
+       compare-and-swap with a configurable retry budget
+       (cas_retries default 10), giving safe concurrent counter
+       increments from multiple OpenSIPS worker processes.
+     * JSON full-text search index — keys whose names begin with
+       fts_json_prefix are automatically parsed and indexed in a
+       SHM-backed hash table (sharded under NATS_IDX_SHARDS = 16
+       gen_lock_set locks). cache_query performs O(1) equality
+       lookups against this index without scanning the KV bucket.
+       The bucket count is tunable via the index_buckets modparam.
+       The index can be disabled entirely via not loading
+       cachedb_nats_fts for PK-only deployments (notably
+       usrloc-as-store), in which case cache_query uses a PK fast
+       path that goes straight to kvStore_Get with no index
+       lookup.
+     * Live KV watcher — a self-healing pthread watches the KV
+       bucket in real time, updating the search index on every
+       put/delete/purge and raising the E_NATS_KV_CHANGE EVI event
+       for script reaction. Skipped entirely when the
+       cachedb_nats_fts module is not loaded.
+     * nats_kv_history() — retrieves the full version history of a
+       KV key as a JSON array.
+     * Raw query commands — KV KEYS, KV PURGE, and KV BUCKET INFO
+       via cache_raw_query.
+     * Map operations — composite key:subkey addressing for get,
+       set, and remove of individual fields within JSON documents.
+
+1.2. Dependencies
+
+1.2.1. OpenSIPS Modules
+
+   The following modules must be loaded before this module:
+     * None. The module is self-contained and carries its own copy
+       of the shared NATS connection pool (statically linked from
+       lib/nats/libnats_pool.so). It does not depend on the
+       nats_connection module or any other OpenSIPS module.
+
+1.2.2. External Libraries or Applications
+
+   The following libraries must be installed before running
+   OpenSIPS with this module loaded:
+     * nats.c with the per-key KV TTL API (libnats.so):
+       The official C client library for NATS, available at
+       https://github.com/nats-io/nats.c. Build with CMake and
+       install to a standard library path (e.g.
+       /usr/local/lib/libnats.so, then run ldconfig). This module
+       requires a nats.c that provides the per-key KV TTL API
+       (kvStore_CreateStringWithTTL, nats.c PR #1000) — not merely
+       JetStream KV support. The exact release matters less than
+       the capability: an older libnats that predates that API
+       will be detected at build time and the NATS modules will be
+       skipped with a clear message ("libnats too old: missing the
+       per-key KV TTL API ... install a newer nats.c e.g. to
+       /usr/local + ldconfig, or set LOCALBASE") rather than
+       failing with an obscure compile error. pkg-config
+       (libnats.pc) or LOCALBASE is used to locate the headers.
+       For TLS connections, nats.c must be built against OpenSSL
+       (CMake -DNATS_BUILD_WITH_TLS=ON). The same OpenSSL
+       installation used by OpenSIPS must be present at runtime to
+       avoid library version conflicts.
+     * NATS Server with JetStream enabled:
+       NATS Server 2.9 or later with JetStream enabled (jetstream:
+       {} in the server configuration). For production deployments
+       a three-node JetStream cluster is recommended to survive
+       single-node failures with kv_replicas set to 3.
+
+1.3. Exported Parameters
+
+1.3.1. cachedb_url (string)
+
+   The CacheDB URL that associates this module with a named cache
+   group in the OpenSIPS script. The URL format follows the
+   standard OpenSIPS CacheDB convention:
+
+   nats[:group]://host:port/
+
+   The optional group label (e.g. nats:mycluster://) distinguishes
+   multiple cache namespaces in the same script. When nats_url is
+   also set it takes precedence over the host:port portion of this
+   URL for the actual NATS connection; the URL is then used solely
+   for group registration.
+
+   This parameter may be set more than once to register multiple
+   cache group names backed by the same NATS connection.
+
+   Example 1.1. Set cachedb_url parameter
+...
+modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:4222/")
+modparam("cachedb_nats", "cachedb_url", "nats:calls://127.0.0.1:4222/")
+...
+
+   Example 1.2. Use the nats cache group in a routing script
+...
+cache_store("nats", "call:$ci", "$fu");
+cache_fetch("nats:calls", "call:$ci", $var(caller));
+...
+
+1.3.2. nats_url (string)
+
+   Comma-separated list of NATS server URLs used as the bootstrap
+   seed list for the connection pool. After the initial connection
+   is established, nats.c discovers all cluster peers via the INFO
+   protocol gossip mechanism and maintains the full topology
+   automatically. This parameter only needs to contain enough
+   servers to bootstrap the initial connection.
+
+   Use DNS hostnames rather than IP addresses so that getaddrinfo
+   re-resolves on each reconnect attempt, automatically following
+   topology changes in the cluster.
+
+   When this parameter is set it takes precedence over the
+   host:port embedded in cachedb_url.
+
+   Default value is “nats://127.0.0.1:4222”.
+
+   Example 1.3. Set nats_url parameter
+...
+modparam("cachedb_nats", "nats_url",
+    "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")
+...
+
+1.3.3. kv_bucket (string)
+
+   The name of the NATS JetStream KV bucket that this module will
+   use for all key-value operations. If the bucket does not yet
+   exist it will be created during child_init with the
+   replication, history, and TTL settings defined by the
+   kv_replicas, kv_history, and kv_ttl parameters.
+
+   If the bucket already exists the creation parameters are
+   ignored and the existing bucket configuration is used as-is. To
+   change replication on an existing bucket use the NATS CLI: nats
+   kv update <bucket> --replicas=N.
+
+   Bucket names must be valid NATS subject tokens (alphanumeric,
+   hyphens, and underscores; no spaces or dots).
+
+   Default value is “opensips”.
+
+   Example 1.4. Set kv_bucket parameter
+...
+modparam("cachedb_nats", "kv_bucket", "opensips-prod")
+...
+
+1.3.4. kv_replicas (integer)
+
+   The JetStream replication factor for the KV bucket. A value of
+   3 means every key-value entry is replicated to three NATS
+   nodes, tolerating single-node failure without data loss. This
+   parameter only takes effect when the bucket is first created;
+   it is ignored if the bucket already exists.
+
+   For development or single-node deployments use a value of 1.
+
+   Default value is “3”.
+
+   Example 1.5. Set kv_replicas parameter
+...
+modparam("cachedb_nats", "kv_replicas", 1)
+...
+
+1.3.5. kv_history (integer)
+
+   The number of value revisions to retain per key. This parameter
+   only takes effect when the bucket is first created.
+
+   Keep this at 1 for registration buckets unless you use
+   nats_kv_history(). Expiry is performed by the periodic cleanup
+   scan (the reaper) — see reap_interval.
+
+   Raise this only if your script uses nats_kv_history to inspect
+   old versions of keys and you accept scan-only expiry.
+
+   Default value is “1” (current version only).
+
+   Example 1.6. Set kv_history parameter
+...
+modparam("cachedb_nats", "kv_history", 10)
+...
+
+1.3.6. kv_ttl (integer)
+
+   Bucket-level TTL in seconds. When greater than zero, all keys
+   in the bucket automatically expire after this many seconds
+   since their last modification. A value of zero disables expiry.
+
+   Note: this kv_ttl is bucket-wide and only takes effect when the
+   bucket is first created. The expires argument to cache_store
+   and cache_add is accepted for API compatibility but does not
+   set a per-key TTL on these generic paths. Per-key expiry is
+   honoured on the usrloc row-write path, reclaimed by the reaper
+   pass — see the usrloc playbook.
+
+   Default value is “0” (no expiry).
+
+   Example 1.7. Set kv_ttl parameter
+...
+modparam("cachedb_nats", "kv_ttl", 3600)
+...
+
+1.3.7. kv_ttl_below_marker (integer)
+
+   When set to 1, bucket creation requests the
+   allow_msg_ttl_below_marker stream option, so per-key TTLs
+   shorter than the bucket's delete-marker TTL are honoured on
+   buckets with kv_history greater than 1. Without it, such a
+   server raises short per-key TTLs to the marker TTL at ingest,
+   and an expiring key on a history-keeping bucket rolls back to
+   an older revision instead of disappearing.
+
+   Once the support probe confirms the option (and a short-TTL
+   canary key verifies the broker actually honours it), every
+   usrloc row write carries a native per-key TTL derived from the
+   row's contact expiry (plus the reclamation slack), so expired
+   registrations disappear on their own; the periodic cleanup scan
+   (the reaper) remains active as a backstop and stays
+   authoritative for rows that are not TTL-eligible (mixed-expiry
+   multi-contact rows and rows containing permanent contacts).
+
+   The option requires a NATS server built with the
+   allow_msg_ttl_below_marker stream config option and a libnats
+   that can express it. A stock server rejects the unknown field
+   at bucket creation: the module probes exactly that — the create
+   is retried without the option, a warning is logged, and expiry
+   stays reaper-only, the same behaviour as with this parameter
+   off. The probe outcome is reported at startup.
+
+   This parameter only takes effect when the bucket is first
+   created; when binding to a pre-existing bucket, the bucket's
+   backing-stream configuration decides (a warning is logged if it
+   lacks the option). The bucket is created with a 30-second
+   delete-marker TTL (the option requires one), which shapes how
+   long delete markers stay visible to watchers.
+
+   Default value is “0” (off).
+
+   Example 1.8. Set kv_ttl_below_marker parameter
+...
+modparam("cachedb_nats", "kv_ttl_below_marker", 1)
+...
+
+1.3.8. require_secure_url (integer)
+
+   Strict security mode for the connection URL. The registration
+   bucket is a PII / lawful-intercept-relevant store (subscriber
+   IP, user-agent, call-id, path) and NATS KV has no per-key ACL,
+   so a plaintext nats:// URL or one without credentials always
+   draws a loud startup warning. With this set to 1 the module
+   refuses to start instead: use tls:// with an authenticated
+   account and one bucket per trust domain.
+
+   Recommended usrloc production profile: require_secure_url=1
+   together with require_usrloc_safe_bucket=1. The default stays 0
+   for lab / development brokers and for generic (non-PII) cachedb
+   use.
+
+   Default value: 0 (warn only).
+
+   Example 1.9. Set require_secure_url parameter
+...
+modparam("cachedb_nats", "require_secure_url", 1)
+...
+
+1.3.9. require_usrloc_safe_bucket (integer)
+
+   Strict bucket-shape mode. Binding to a pre-existing bucket
+   whose backing stream carries a non-zero MaxAge would silently
+   expire all keys, including permanent contacts (expires==0); by
+   default this is detected once at startup and warned about
+   loudly. With this set to 1 the module refuses to start instead
+   -- recreate the bucket with MaxAge=0 (kv_ttl=0) and migrate,
+   per the migration guide [REV-25].
+
+   Default value: 0 (warn only).
+
+   Example 1.10. Set require_usrloc_safe_bucket parameter
+...
+modparam("cachedb_nats", "require_usrloc_safe_bucket", 1)
+...
+
+1.3.10. fts_json_prefix (string)
+
+   Key name prefix that marks documents for inclusion in the
+   in-process JSON full-text search index. Any key stored via
+   cache_store whose name begins with this prefix is parsed as a
+   JSON object and indexed for equality queries via cache_query.
+
+   The index maps every top-level string and integer field of the
+   JSON document to the document key, enabling O(1) hash lookups.
+   Documents stored without this prefix are still accessible via
+   the standard KV operations but are not indexed.
+
+   Default value is “json_”.
+
+   Example 1.11. Set fts_json_prefix parameter
+...
+modparam("cachedb_nats", "fts_json_prefix", "usrloc.")
+...
+
+1.3.11. kv_watch (string)
+
+   A NATS subject pattern that restricts the KV watcher to a
+   subset of keys. NATS wildcard tokens are supported: > matches
+   any remaining subject tokens (e.g. usrloc.> watches all keys
+   under usrloc.), and * matches exactly one token. When this
+   parameter is not set, the watcher subscribes to all keys in the
+   bucket.
+
+   This parameter may be set more than once to watch multiple
+   disjoint key patterns simultaneously. Each call adds one
+   pattern to the watch list; all patterns are passed to
+   kvStore_WatchMulti as a combined subscription. If no kv_watch
+   parameters are set, the watcher is not started.
+
+   Default value is “NULL” (watcher disabled unless at least one
+   kv_watch pattern is configured).
+
+   Example 1.12. Set kv_watch parameter
+...
+modparam("cachedb_nats", "kv_watch", "usrloc.>")
+modparam("cachedb_nats", "kv_watch", "json_>")
+...
+
+1.3.12. TLS configuration
+
+   NATS-side TLS for cachedb_nats is configured via OpenSIPS's
+   central tls_mgm module — the same way proto_tls,
+   event_rabbitmq, rest_client, and other TLS-using modules do it.
+   cachedb_nats does not carry its own tls_* modparams.
+
+   To use TLS, define a tls_mgm client domain named "nats" and use
+   a tls:// URL in cachedb_url (or set nats_url directly to a
+   tls:// URL):
+
+   Example 1.13. tls_mgm-driven NATS TLS
+loadmodule "tls_mgm.so"
+modparam("tls_mgm", "client_domain", "nats")
+modparam("tls_mgm", "certificate", "[nats]/etc/opensips/nats-cert.pem")
+modparam("tls_mgm", "private_key", "[nats]/etc/opensips/nats-key.pem")
+modparam("tls_mgm", "ca_list",     "[nats]/etc/opensips/nats-ca.pem")
+modparam("tls_mgm", "verify_cert", "[nats]1")
+
+loadmodule "tls_wolfssl.so"     # or tls_openssl.so
+
+loadmodule "cachedb_nats.so"
+modparam("cachedb_nats", "cachedb_url", "nats:loc://tls://nats.example.o
+rg:4222/")
+
+   Plaintext-only deployments (nats:// URLs) don't need tls_mgm
+   loaded — cachedb_nats declares it DEP_SILENT and only attempts
+   the lookup when a tls:// URL is actually used. Operators who
+   configure tls:// without a tls_mgm "nats" domain see a clear
+   error at connect time pointing at the missing config.
+
+   tls_mgm's ca_directory field (a directory of PEM files) is
+   supported: cachedb_nats reads every .pem in the directory in
+   lexicographic order, concatenates the contents in memory, and
+   hands the result to libnats via the PEM-string API. This
+   mirrors OpenSSL's SSL_CTX_load_verify_locations(NULL, dir)
+   semantics.
+
+1.3.13. cas_retries (integer)
+
+   The former name “nats_cas_retries” is kept as a working alias;
+   new configurations should use “cas_retries”.
+
+   Number of compare-and-swap retries used by atomic counter
+   increments (cache_add()) and JSON field updates
+   (cache_update()). Each retry costs one round-trip to the NATS
+   server. When the retry budget is exhausted the operation is
+   dropped and an LM_WARN is emitted naming the affected key.
+
+   Raised from a hardcoded value of 3 (which silently dropped
+   increments under as few as 3 concurrent writers) to a default
+   of 10; operators on hot-contested keys can raise further.
+
+   Default value is “10”. Minimum bound is 1.
+
+1.3.14. index_resync_on_reconnect (integer)
+
+   Whether the KV watcher rebuilds the in-memory search index in
+   full after each reconnect to NATS. The watcher subscribes with
+   UpdatesOnly, so writes made by sibling instances while this
+   process was disconnected are never delivered live. The
+   stale-entry self-heal in nats_cache_query only evicts index
+   entries the KV store reports as gone; it cannot discover a key
+   that was never indexed locally. The default is therefore on, so
+   the index always converges after an outage.
+
+   Set to 0 only in large-index or hot-reconnect deployments that
+   cannot afford the O(N) bulk rebuild on every reconnect; bound
+   the staleness window with index_resync_interval_secs (the
+   periodic resync) instead, since per-query self-heal does not
+   recover missed inserts.
+
+   Ignored when the cachedb_nats_fts module is not loaded.
+
+   Default value is “1”.
+
+1.3.15. index_resync_interval_secs (integer)
+
+   Periodic full rebuild of the in-memory search index.
+   Belt-and-braces upper bound on per-process index staleness
+   regardless of reconnect cadence or self-heal pace. Skipped
+   silently while NATS is disconnected. Runs in the dedicated
+   “NATS Reaper” module process, not the shared core timer
+   process.
+
+   Set to a value <= the longest tolerable staleness window in
+   deployments where the lazy self-heal pace is insufficient. Each
+   tick costs one kvStore_WatchAll snapshot drain.
+
+   Ignored when the cachedb_nats_fts module is not loaded.
+
+   Default value is “0” (disabled).
+
+1.3.16. drain_timeout_ms (integer)
+
+   The former name “cdb_drain_timeout_ms” is kept as a working
+   alias; new configurations should use “drain_timeout_ms”.
+
+   Shutdown drain timeout in milliseconds for the shared lib/nats
+   connection pool. Controls how long nats_pool_finalize waits for
+   in-flight publishes / requests to complete before forcibly
+   closing connections. Cross-DC deployments with high RTT may
+   need to extend the budget; the underlying setting is shared
+   with event_nats (last writer wins).
+
+   Default value is “5000” ms.
+
+1.3.17. reconnect_wait_ms (integer)
+
+   The former name “reconnect_wait” is kept as a working alias;
+   new configurations should use “reconnect_wait_ms”.
+
+   The time in milliseconds to wait between reconnection attempts
+   when the NATS connection is lost. Applies to the shared
+   connection pool managed by lib/nats.
+
+   Default value is “2000” ms.
+
+   Example 1.14. Set reconnect_wait_ms parameter
+...
+modparam("cachedb_nats", "reconnect_wait_ms", 1000)
+...
+
+1.3.18. max_reconnect (integer)
+
+   Maximum number of reconnection attempts during child_init. Once
+   the initial connection is established, the nats.c library
+   handles runtime reconnection autonomously with no limit. This
+   parameter affects only the startup retry loop, not runtime
+   resilience.
+
+   Default value is “60” attempts.
+
+   Example 1.15. Set max_reconnect parameter
+...
+modparam("cachedb_nats", "max_reconnect", 30)
+...
+
+1.3.19. reap_interval (integer)
+
+   The former name “nats_reap_interval” is kept as a working
+   alias; new configurations should use “reap_interval”.
+
+   Period, in seconds, of the reaper pass that CAS-prunes expired
+   bindings from the bucket. The reaper is the module's single
+   expiry mechanism, so this periodic prune is what guarantees an
+   expired binding is physically reclaimed. The value must be > 0;
+   a non-positive value is refused at startup (it would leave
+   expired bindings unreclaimed).
+
+   The pass runs in a dedicated “NATS Reaper” module process, so a
+   full-bucket scan at scale never stalls the shared core timer
+   process that other modules' timers depend on.
+
+   Default value is “30” (seconds).
+
+1.3.20. reap_grace (integer)
+
+   The former name “nats_reap_grace” is kept as a working alias;
+   new configurations should use “reap_grace”.
+
+   Clock-skew slack, in seconds, applied to every expiry decision
+   (the write-side expiry hygiene, the read-side filter and the
+   reaper). A binding is treated as expired only once it is more
+   than reap_grace seconds past its TTL, so a node whose clock
+   leads its peers never deletes or hides another node's
+   still-live registration. Set this to at least the real maximum
+   clock skew between the nodes sharing the bucket.
+
+   Default value is “5” (seconds).
+
+1.3.21. expired_linger (integer)
+
+   The former name “nats_expired_linger” is kept as a working
+   alias; new configurations should use “expired_linger”.
+
+   How long, in seconds, an expired registration record stays
+   physically present in the bucket after it stops being served.
+   This is a retention-policy knob with zero effect on call
+   routing: once a contact's time is up (plus the reap_grace
+   clock-skew margin) it is never used again, whatever this is set
+   to.
+
+   0 (the default) deletes expired records as promptly as possible
+   — on the next cleanup-scan pass. A value such as 30 keeps each
+   expired record around for ~30 more seconds, which is useful
+   when troubleshooting registration problems (the record stays
+   visible to nats kv get and nats_kv_history) and damps
+   delete/re-create churn from endpoints that flap around their
+   expiry time.
+
+   Cost of raising it: bucket size — roughly
+   expired-records-per-second × linger extra records resident at
+   any time. A re-registration during the linger window simply
+   overwrites the lingering record; phones are never locked out by
+   it. Range 0–86400; out-of-range values refuse startup.
+
+   Default value is “0” (reclaim as soon as possible).
+
+1.3.22. max_value_size (integer)
+
+   The former name “nats_max_value_size” is kept as a working
+   alias; new configurations should use “max_value_size”.
+
+   Maximum stored value size, in bytes, for a usrloc row. An
+   oversize row is detected before the CAS write and the offending
+   contact's save fails cleanly — never a silent truncation or
+   corruption. Set this to the deployment's real per-message cap
+   (and no larger than the stream's max_msg_size). A value <= 0
+   disables the guard.
+
+   Default value is “1048576” (1 MiB, the NATS max_payload
+   default).
+
+1.3.23. kv_op_timeout_ms (integer)
+
+   Per-operation timeout, in milliseconds, for KV get/put/update
+   calls issued from a SIP worker (e.g. the usrloc read/write
+   path), so a slow-but-connected broker cannot block a worker for
+   the full library default (5 s). The usrloc update path performs
+   two synchronous round-trips per REGISTER, so the per-REGISTER
+   worst case is roughly twice this value. A value <= 0 removes
+   the cap (cnats library default applies).
+
+   Default value is “1000” (ms; bounds the per-REGISTER worst case
+   at ~2 s).
+
+1.4. Exported Functions
+
+1.4.1.  nats_kv_history(key, result_pvar)
+
+   Retrieves the revision history for a KV key and stores it as a
+   JSON array string in result_pvar. Each array element is an
+   object with the fields rev (revision number, integer), value
+   (the stored string at that revision), and ts (Unix timestamp of
+   the revision in nanoseconds).
+
+   The depth of history available depends on the kv_history bucket
+   setting. With the default of 5, up to five past values are
+   returned per key in reverse chronological order (most recent
+   first).
+
+   This function can be used from any route.
+
+   Parameters:
+     * key (string) — KV key to retrieve history for. May contain
+       pseudo-variables.
+     * result_pvar (writable pvar) — Pseudo-variable to receive
+       the JSON history array.
+
+   Return values:
+     * 1 — history retrieved successfully.
+     * -1 — error (NATS failure or allocation error).
+     * -2 — key not found or no history available.
+
+   Example 1.16. nats_kv_history usage
+...
+nats_kv_history("usrloc.alice", $var(hist));
+if ($retcode == 1) {
+    # $var(hist) = [{"rev":3,"value":"sip:alice@192.0.2.1","ts":17000000
+03},
+    #               {"rev":2,"value":"sip:alice@192.0.2.2","ts":17000000
+02},
+    #               {"rev":1,"value":"sip:alice@192.0.2.3","ts":17000000
+01}]
+    xlog("history for alice: $var(hist)\n");
+}
+...
+
+1.4.2.  nats_kv_get(bucket, key, value_pvar, [revision_pvar])
+
+   Reads a key from the JetStream KV bucket and stores its value
+   in value_pvar. The optional revision_pvar receives the current
+   revision number; pass it to a subsequent nats_kv_update call to
+   perform a Compare-And-Swap update.
+
+   The bucket must already exist. At mod_init time the module
+   creates the bucket named by the kv_bucket modparam; if you call
+   nats_kv_get with a different bucket name that bucket must have
+   been pre-created out of band (e.g. via the nats CLI or another
+   opensips instance).
+
+   CAS contract for revision_pvar: the wrapper populates the
+   script var with both string and integer views so it can drive a
+   subsequent nats_kv_update CAS. NATS revisions are 64-bit; the
+   OpenSIPS script integer type is 32-bit. In the (unrealistic)
+   case that a key passes INT_MAX revisions the wrapper logs a
+   WARN and the truncated value will fail any subsequent CAS.
+
+   Return values: 1 success; -1 error (no NATS connection, bucket
+   missing, etc); -2 key not found.
+
+   Example 1.17. nats_kv_get usage with CAS read
+$var(rev) = 0;
+if (nats_kv_get("calls", "$ci", $var(state), $var(rev))) {
+    xlog("call $ci is in state $var(state) at rev $var(rev)\n");
+}
+
+1.4.3.  nats_kv_put(bucket, key, value)
+
+   Unconditionally writes value at key in bucket. Any concurrent
+   writer's revision is overwritten. Use nats_kv_update instead
+   when you need to preserve optimistic-concurrency semantics.
+
+   Return values: 1 success; -1 error.
+
+1.4.4.  nats_kv_update(bucket, key, value, expected_rev)
+
+   Compare-And-Swap update: writes value at key only if the
+   bucket's current revision for that key equals expected_rev.
+   Read the rev with nats_kv_get; pass it back here.
+
+   expected_rev accepts both a literal integer and a script
+   variable (e.g. $var(rev)). When passing a variable the var must
+   have been written by nats_kv_get / nats_kv_revision -- those
+   wrappers mark the var with the int type flag the OpenSIPS fixup
+   engine requires.
+
+   Return values: 1 CAS succeeded; -1 error (connection,
+   permissions, malformed publish, etc — not retryable); -2 CAS
+   mismatch — the key's current revision is not expected_rev; a
+   concurrent writer beat us, so re-read the revision and retry.
+   The two are now cleanly separated: -2 is returned only for a
+   genuine revision conflict (the broker's wrong last sequence /
+   jsErrCode 10071), while any other failure is -1, so a CAS retry
+   loop cannot spin on a non-retryable error. In script, retcode
+   is FALSE for both -1 and -2; if you need to distinguish them
+   inspect $retcode directly.
+
+   Example 1.18. Idempotent state transition with CAS
+$var(rev) = 0;
+if (!nats_kv_get("calls", "$ci", $var(s), $var(rev)))
+    return;
+
+if (!nats_kv_update("calls", "$ci", "ringing", $var(rev))) {
+    xlog("CAS failed: someone else updated $ci, rc=$retcode\n");
+    # caller can retry, surface 503, etc.
+}
+
+1.4.5.  nats_kv_delete(bucket, key)
+
+   Removes key from bucket. Subsequent nats_kv_get on the same key
+   returns -2 (not found). Past revisions remain visible to
+   nats_kv_history until the bucket's history window rolls them
+   off.
+
+   Return values: 1 success; -1 error.
+
+1.4.6.  nats_kv_revision(bucket, key, revision_pvar)
+
+   Convenience wrapper around nats_kv_get that fetches only the
+   current revision number, without copying the value out. Same
+   int-type contract on the returned var as nats_kv_get -- safe to
+   drive nats_kv_update.
+
+   Return values: 1 success; -1 error; -2 key not found.
+
+1.5. CacheDB Operations
+
+   All standard OpenSIPS CacheDB script functions are supported.
+   The engine identifier in every call must match the group name
+   used in cachedb_url (default: nats).
+
+1.5.1. KV Key Validation
+
+   Every KV operation (cache_store, cache_fetch, cache_remove,
+   cache_add, cache_sub) passes its key through validate_kv_key()
+   before reaching the NATS server. Invalid keys are rejected with
+   -1 at the module layer (surfacing to scripts as the standard
+   cachedb failure code) rather than being delegated to NATS,
+   which would otherwise fail silently or return opaque protocol
+   errors.
+
+   A key is considered invalid if it is empty, or contains any of
+   the following:
+     * control characters (< 0x20 or 0x7f DEL)
+     * whitespace (space or tab)
+     * NATS subject wildcards (*, >)
+     * the : character (reserved by the $KV.<bucket>.<key> subject
+       mapping)
+
+   Dots, hyphens, underscores, slashes, equals signs, and
+   backslashes are allowed — dots separate subject tokens in the
+   underlying NATS representation. Use dots or dashes when
+   composing structured keys (e.g. call.abc123, user-alice).
+
+1.5.2. cache_store — KV put
+
+   Stores a string value under the given key in the NATS KV
+   bucket. The key must consist of valid NATS subject tokens
+   (alphanumeric, hyphens, underscores, and dots as separators; no
+   spaces or colons). If the key already exists it is overwritten.
+
+   When the key begins with fts_json_prefix and the value is a
+   valid JSON object, the document is parsed and added to the
+   in-process search index so that it becomes immediately
+   queryable via cache_query.
+
+   Example 1.19. cache_store with nats
+...
+# Plain key-value
+cache_store("nats", "call.$ci", "$fu|$tu");
+
+# JSON document (auto-indexed because key starts with "json_")
+cache_store("nats", "json.user.alice",
+    "{\"name\":\"alice\",\"domain\":\"example.com\",\"status\":\"active\
+"}");
+...
+
+1.5.3. cache_fetch — KV get
+
+   Retrieves the current value of a key from the NATS KV bucket
+   and stores it in the given pseudo-variable. Returns 1 on
+   success, -2 if the key does not exist, and -1 on error.
+
+   Example 1.20. cache_fetch with nats
+...
+cache_fetch("nats", "call.$ci", $var(call_info));
+if ($retcode == -2) {
+    xlog("no active call record for $ci\n");
+}
+...
+
+1.5.4. cache_remove — KV delete
+
+   Removes a key from the NATS KV bucket. The operation is a soft
+   delete that creates a deletion tombstone while preserving
+   revision history. Use the KV PURGE raw query command to
+   permanently remove a key and its full history.
+
+   Example 1.21. cache_remove with nats
+...
+cache_remove("nats", "call.$ci");
+...
+
+1.5.5. cache_add — atomic counter increment
+
+   Atomically increments an integer counter stored in the KV
+   bucket. The operation uses compare-and-swap (CAS) with up to
+   cas_retries retry attempts, safely handling concurrent
+   increments from multiple OpenSIPS worker processes. If the key
+   does not yet exist it is created with an initial value equal to
+   increment.
+
+   The counter is stored as a plain decimal integer string in the
+   KV bucket. The expires argument is accepted for API
+   compatibility but does not set a per-key TTL (NATS KV TTL is
+   bucket-wide; see kv_ttl).
+
+   Example 1.22. cache_add with nats
+...
+cache_add("nats", "counter.calls.$fU", 1, 0);
+cache_counter_fetch("nats", "counter.calls.$fU", $var(call_count));
+xlog("$fU has $var(call_count) active calls\n");
+...
+
+1.5.6. cache_sub — atomic counter decrement
+
+   Atomically decrements an integer counter. Equivalent to
+   cache_add with a negated increment value. Uses the same
+   cas_retries budget as cache_add (default 10).
+
+   Example 1.23. cache_sub with nats
+...
+cache_sub("nats", "counter.calls.$fU", 1, 0);
+...
+
+1.5.7. cache_counter_fetch — read counter value
+
+   Reads the current integer value of a counter key. Returns 1 on
+   success (counter value in pvar), -2 if the key does not exist,
+   and -1 on error.
+
+   Example 1.24. cache_counter_fetch with nats
+...
+cache_counter_fetch("nats", "counter.calls.$fU", $var(n));
+if ($var(n) > 5) {
+    sl_send_reply(503, "Too Many Calls");
+    exit;
+}
+...
+
+1.6. JSON Full-Text Search Index
+
+   The cachedb_nats module maintains a process-local hash-based
+   search index over JSON documents stored in the KV bucket.
+   Documents are included in the index when their key begins with
+   the string defined by fts_json_prefix (default: json_). All
+   top-level string and integer fields of each document are
+   indexed as field:value entries mapping to the document key.
+
+   The index supports equality queries via the standard CacheDB
+   cache_query call:
+
+   Example 1.25. cache_query — JSON equality search
+...
+# Find all documents where the "domain" field equals "example.com"
+cache_query("nats", "domain", "example.com", $var(results));
+if ($retcode == 1) {
+    xlog("matched documents: $var(results)\n");
+}
+...
+
+   Index lifecycle:
+     * Startup: the index is built by scanning the entire KV
+       bucket during child_init. Every key matching
+       fts_json_prefix is fetched and parsed.
+     * Live updates: the KV watcher thread calls
+       nats_json_index_add or nats_json_index_remove for every
+       put, delete, or purge event received from the NATS server.
+     * Reconnection: when the watcher detects that a reconnect
+       epoch change has occurred, it performs a full
+       nats_json_index_rebuild — clearing all existing entries and
+       repopulating from the current KV state. This guarantees the
+       index never drifts after a disconnect.
+
+   Thread safety: all index operations acquire a dedicated
+   pthread_mutex_t. The KV watcher thread (writer) and OpenSIPS
+   SIP worker processes (readers via cache_query) contend on this
+   mutex. Index memory is managed with raw malloc and free rather
+   than OpenSIPS pkg_malloc, because the watcher pthread and SIP
+   worker thread share the same process address space and
+   pkg_malloc is not thread-safe across pthreads. Statistics
+   counters use __atomic_fetch_add for lock-free cross-thread
+   accumulation.
+
+   The maximum number of results returned per query is controlled
+   by fts_max_results.
+
+1.7. KV Watcher
+
+   The KV watcher is a self-healing pthread that runs inside the
+   first OpenSIPS SIP worker process (rank 1) and monitors the
+   NATS KV bucket for real-time mutations. It is started by
+   nats_watch_start during child_init when at least one kv_watch
+   pattern is configured.
+
+   Only a single watcher per OpenSIPS instance is started (on rank
+   1) to minimise JetStream ordered consumer count. Each watcher
+   creates one JetStream ordered push consumer in the NATS server;
+   during cluster topology changes nats.c rebalances these
+   consumers internally, and fewer consumers reduce the window for
+   race conditions during failover.
+
+   The watcher runs a four-step loop:
+     * Wait for connectivity: polls nats_pool_is_connected until
+       the NATS connection is established. Sleeps briefly between
+       polls to avoid busy-waiting.
+     * Create watcher: acquires a fresh KV handle from the pool
+       and calls kvStore_WatchMulti with the configured key
+       patterns (and UpdatesOnly) to create a kvWatcher handle.
+       The subscription is created before the snapshot rebuild
+       below so that any put/delete landing during the
+       (potentially slow, O(N)) rebuild is captured in the
+       watcher's pending queue and applied afterwards — closing
+       the (snapshot, subscribe) window that would otherwise drop
+       those mutations from the index until the next reconnect.
+     * Rebuild index: calls nats_json_index_rebuild to repopulate
+       the search index from the current bucket contents. This is
+       the crash-recovery path that keeps the index consistent
+       after a disconnect. It is gated by
+       index_resync_on_reconnect (default on); when that parameter
+       is 0 the post-reconnect rebuild is skipped in favour of the
+       query-path lazy self-heal.
+     * Process updates: calls kvWatcher_Next in a loop. For each
+       received kvEntry the watcher:
+          + Updates the JSON search index (nats_json_index_add for
+            put, nats_json_index_remove for delete or purge).
+          + Raises an E_NATS_KV_CHANGE EVI event carrying the key,
+            operation type, value (on puts), and NATS revision
+            number.
+       If a reconnect epoch change is detected the loop exits back
+       to the connectivity-wait step.
+
+   The _watcher_running flag is an atomic_int accessed via
+   atomic_load and atomic_store. The nats_watch_stop function
+   signals the thread to exit, stops the kvWatcher to unblock
+   kvWatcher_Next, then joins the thread. It is safe to call
+   during OpenSIPS shutdown regardless of whether the watcher was
+   ever started.
+
+1.8. Raw Query Commands
+
+   The module exposes NATS KV administrative operations via the
+   standard CacheDB cache_raw_query interface. The following
+   commands are supported:
+
+1.8.1. KV KEYS
+
+   Lists all keys currently present in the KV bucket. The result
+   is stored in the provided pseudo-variable as a comma-separated
+   string of key names.
+
+   Example 1.26. KV KEYS raw query
+...
+cache_raw_query("nats", "KV KEYS", $var(keys));
+xlog("all KV keys: $var(keys)\n");
+...
+
+1.8.2. KV PURGE <key>
+
+   Permanently removes a key and its entire revision history from
+   the KV bucket. Unlike a soft delete (which leaves a deletion
+   tombstone), a purge is irreversible and frees the storage used
+   by all historical revisions.
+
+   Example 1.27. KV PURGE raw query
+...
+cache_raw_query("nats", "KV PURGE json.user.alice");
+...
+
+1.8.3. KV BUCKET INFO
+
+   Returns a JSON object describing the KV bucket configuration:
+   bucket name, replication factor, history depth, TTL, and the
+   backing JetStream stream name.
+
+   Example 1.28. KV BUCKET INFO raw query
+...
+cache_raw_query("nats", "KV BUCKET INFO", $var(info));
+xlog("bucket info: $var(info)\n");
+...
+
+1.9. Map Operations
+
+   The module supports composite key:subkey addressing for reading
+   and writing individual fields of JSON documents stored in the
+   KV bucket. These operations are accessible via the
+   column-oriented CacheDB API functions (map_get, map_set,
+   map_remove) which are used internally by OpenSIPS modules such
+   as usrloc when configured with a CacheDB backend.
+
+   map_get — retrieves the JSON document at key and returns its
+   top-level fields as separate columns in a cdb_res_t result set.
+
+   map_set — reads the existing JSON document at key (or starts
+   from an empty object), merges the provided field-value pairs,
+   and writes the result back using CAS for consistency.
+
+   map_remove — reads the existing JSON document, removes the
+   named field (subkey), and writes the result back. If no fields
+   remain after removal the entire key is deleted from the bucket.
+
+1.10. Exported MI Functions
+
+   The observability commands (nats_reg_*, nats_stream_*,
+   nats_kv_keys) default to structured JSON output and can render
+   their result table as CSV (RFC 4180: CRLF records, header
+   first, quote-and-double escaping) or plain text (TAB-separated
+   lines, “# ”-prefixed header) instead: pass format=csv /
+   format=txt as a filter key on the list commands, or as an
+   optional trailing parameter on nats_reg_summary / nats_reg_show
+   / nats_stream_info (e.g. nats_reg_show alice@example.com csv;
+   the parameter also accepts csv;eol=lf;header=0). The formatted
+   table is returned as a single data string inside the usual
+   JSON-RPC envelope — line endings survive JSON escaping exactly,
+   so | jq -r '.result.data' yields clean CSV/text while counts
+   such as matched stay directly accessible as JSON. Options:
+   eol=lf (default is CRLF), header=0. An unrecognized format
+   value refuses the command rather than silently falling back to
+   JSON.
+
+   The examples below show a small sample deployment (two
+   subscribers of example.com: alice with a Yealink and a Zoiper
+   contact, bob with a Grandstream) against the default opensips
+   bucket. Every example invocation is executed verbatim against a
+   live broker by the sip_e2e suite (case 096_docbook_examples,
+   which registers exactly this population and asserts the stable
+   parts of these outputs) — timestamp, sequence and size fields
+   naturally vary.
+
+1.10.1. nats_kv_status
+
+   Returns a JSON object with the current KV bucket configuration
+   and NATS connection state. Useful for monitoring and
+   diagnostics.
+
+   Response fields:
+     * bucket (string) — name of the configured KV bucket.
+     * replicas (integer) — configured replication factor.
+     * history (integer) — configured history depth per key.
+     * ttl (integer) — configured bucket TTL in seconds (0 = no
+       expiry).
+     * connected (string) — yes if the NATS connection pool is
+       currently connected, no otherwise.
+
+   Example 1.29. nats_kv_status MI call
+## opensips-cli -x mi nats_kv_status
+{
+    "bucket": "opensips",
+    "replicas": 3,
+    "history": 5,
+    "ttl": 0,
+    "connected": "yes"
+}
+
+1.10.2. nats_cdb_stats
+
+   Returns a snapshot of the cachedb_nats counter set, summed
+   across the per-process slots maintained in shared memory. Used
+   for alerting and capacity planning; see the usrloc playbook
+   (usrloc storage playbook) for recommended thresholds.
+
+   Counters in the response:
+     * cas_retry — total CAS retries across all cache_add /
+       cache_sub / cdbf.update calls. Bumped once per failed
+       kvStore_Update.
+     * cas_exhausted — total cdbf calls that ran out of
+       cas_retries attempts and dropped the write. Should be 0 in
+       steady state; any non-zero value means writes were lost.
+     * create_doc — total times nats_cache_update synthesised a
+       seed document and called kvStore_CreateString (the insert
+       path).
+     * index_miss_kv — query/update found a key in the in-memory
+       search index but the KV store said NOT_FOUND. Flags index
+       staleness, typically from a sibling-instance delete.
+       Sustained non-zero values indicate cross-instance churn
+       worth investigating.
+
+   [OBS] It also carries the contacts_pruned counter (individual
+   expired bindings removed by the reaper's survivor-writes;
+   rows_reaped counts whole rows) and the reap_last_* gauges —
+   bucket-wide registration totals recorded by the reaper's
+   periodic pass at zero extra broker cost: reap_last_run (epoch)
+   / _ms / _keys / _aors / _contacts / _active / _permanent /
+   _due. These refresh every reap_interval seconds and are the
+   recommended monitoring feed for registration counts (poll this,
+   not nats_reg_summary, on large buckets).
+
+   Example 1.30. nats_cdb_stats MI call
+## opensips-cli -x mi nats_cdb_stats
+{
+    "cas_retry": 0,
+    "cas_exhausted": 0,
+    "create_doc": 2,
+    "index_miss_kv": 0,
+    "fastfail_rejected": 0,
+    "op_failed": 0,
+    "watcher_restarts": 0,
+    "watcher_handle_leaks": 0,
+    "nul_fields_rejected": 0,
+    "poison_values_rejected": 0,
+    "value_oversize_rejected": 0,
+    "rows_reaped": 0,
+    "contacts_pruned": 0,
+    "reap_last_run": 1783008230,
+    "reap_last_ms": 9,
+    "reap_last_keys": 2,
+    "reap_last_aors": 2,
+    "reap_last_contacts": 3,
+    "reap_last_active": 3,
+    "reap_last_permanent": 0,
+    "reap_last_due": 0,
+    "tbm_requested": 1,
+    "tbm_probe_state": 2,
+    "tbm_canary_verdict": 1,
+    "tbm_canary_last": 1783008228,
+    "tbm_canary_failures": 0
+}
+
+1.10.3. nats_reg_summary
+
+   High-level registration totals, computed by scanning the KV
+   bucket (the source of truth — in full-sharing-cachedb mode
+   usrloc's own ul_dump is empty by design, because records are
+   freed from memory after every flush). Reports AoR and contact
+   counts split by state: active (would be served: unexpired, or
+   within the reap_grace margin), expired (still stored —
+   lingering per expired_linger, or awaiting cleanup) and
+   permanent, plus the soonest upcoming expiry and scan cost. With
+   the optional domains=1 parameter it adds a per-domain breakdown
+   (the part after the last “@” of each AoR, compared
+   case-insensitively).
+
+   The scan costs one round-trip per stored AoR; on very large
+   buckets prefer the free reap_last_* gauges in nats_cdb_stats
+   for monitoring, and reserve this command for interactive use.
+
+   Example 1.31. nats_reg_summary MI call
+## opensips-cli -x mi nats_reg_summary domains=1
+{
+    "bucket": "opensips",
+    "aors": 2,
+    "contacts": 3,
+    "active_contacts": 3,
+    "expired_contacts": 0,
+    "permanent_contacts": 0,
+    "soonest_expiry": 1783008325,
+    "soonest_expiry_in": 118,
+    "scanned_keys": 2,
+    "other_docs": 0,
+    "scan_ms": 14,
+    "domains": [{
+        "domain": "example.com",
+        "aors": 2, "contacts": 3, "active_contacts": 3
+    }]
+}
+
+   Example 1.32. nats_reg_summary as CSV
+## opensips-cli -x mi nats_reg_summary domains=1 format=csv
+{
+    "bucket": "opensips", ...,
+    "format": "csv",
+    "data": "scope,domain,aors,contacts,active,expired,permanent\r\ntota
+l,,2,3,3,0,0\r\ndomain,example.com,2,3,3,,\r\n"
+}
+
+1.10.4. nats_reg_list
+
+   Per-AoR registration listing with filtering, sorting and
+   pagination. Takes one optional filter string of “;”-separated
+   key=value pairs:
+     * aor=<glob> — shell-style wildcard over the AoR (e.g.
+       aor=*@example.com)
+     * domain=<host> — case-insensitive exact match on the AoR's
+       domain part
+     * ua=<substring> / contact=<substring> — substring match over
+       a contact's user-agent / contact URI
+     * state=active|expired|permanent|all — rows having at least
+       one contact in that state; default active
+     * expiring_within=<secs> — rows whose next expiry is at most
+       this far away
+     * min_contacts=<n> — rows holding at least n stored contacts
+     * sort=aor|expiry|contacts|last_mod (+ desc=1) — expiry puts
+       whatever dies next first; ties always break by AoR
+       ascending, so pagination is deterministic
+     * limit=<n> (default 50, hard cap 200 — MI datagram size) and
+       offset=<n>
+
+   An unknown key or malformed value refuses the whole command (a
+   mistyped filter must never silently list the wrong subset).
+
+   Example 1.33. nats_reg_list MI call
+## opensips-cli -x mi nats_reg_list 'domain=example.com;sort=expiry;limi
+t=2'
+{
+    "matched": 2, "returned": 2, "offset": 0,
+    "scanned_aors": 2, "scan_ms": 12,
+    "aors": [{
+        "aor": "alice@example.com",
+        "contacts": 2, "active": 2, "expired": 0, "permanent": 0,
+        "expires_next": 1783008325, "expires_in": 118,
+        "last_mod": 1783008207
+    }, {
+        "aor": "bob@example.com",
+        "contacts": 1, "active": 1, "expired": 0, "permanent": 0,
+        "expires_next": 1783011805, "expires_in": 3598,
+        "last_mod": 1783008207
+    }]
+}
+
+   Example 1.34. nats_reg_list as CSV (find every Yealink)
+## opensips-cli -x mi nats_reg_list 'ua=Yealink;format=csv'
+{
+    "matched": 1, "returned": 1, "offset": 0, ...,
+    "format": "csv",
+    "data": "aor,contacts,active,expired,permanent,expires_next,expires_
+in,last_mod\r\nalice@example.com,2,2,0,0,1783008325,118,1783008207\r\n"
+}
+
+1.10.5. nats_reg_show
+
+   Full detail of one AoR: every stored contact with all its
+   attributes (contact URI, expires, q, callid, cseq, user-agent,
+   socket, received, path, flags, last_mod, ...), each annotated
+   with its computed state and expires_in, plus the row's KV
+   metadata (revision, created timestamp, row_exp, schema_version)
+   — the support view for “what exactly does the cluster believe
+   about this subscriber?”.
+
+   Example 1.35. nats_reg_show MI call
+## opensips-cli -x mi nats_reg_show alice@example.com
+{
+    "aor": "alice@example.com",
+    "key": "json_alice=40example.com",
+    "revision": 2, "created": 1783008207,
+    "row_exp": 1783008325, "schema_version": 1,
+    "contacts": [{
+        "id": "c2lwOmFsaWNlQDEwLjAuMC4xOjUwNjA=",
+        "contact": "sip:alice@10.0.0.1:5060",
+        "expires": 1783011805, "ua": "Yealink T54W",
+        "state": "active", "expires_in": 3598, ...
+    }, {
+        "id": "c2lwOmFsaWNlQDEwLjAuMC4yOjUwNjA=",
+        "contact": "sip:alice@10.0.0.2:5060",
+        "expires": 1783008325, "ua": "Zoiper 5",
+        "state": "active", "expires_in": 118, ...
+    }]
+}
+
+   Example 1.36. nats_reg_show as CSV
+## opensips-cli -x mi nats_reg_show alice@example.com csv
+{
+    "aor": "alice@example.com", ..., "revision": 2,
+    "format": "csv",
+    "data": "aor,id,contact,state,expires,expires_in,q,cseq,callid,ua,so
+ck,received,path,flags,cflags,last_mod\r\nalice@example.com,...,sip:alic
+e@10.0.0.1:5060,active,...\r\n..."
+}
+
+1.10.6. nats_stream_list
+
+   Lists the JetStream streams on the connected server: name,
+   message and byte counts, subject and consumer counts, storage
+   type. A KV bucket's backing stream (KV_<bucket>) also reports
+   the derived kv_bucket name, so operators can think in bucket
+   terms. Optional filter string (“;”-separated key=value):
+   name=<glob>, kv=1 (KV backing streams only), limit (default 50,
+   cap 200) and offset. Results sort by name, so pagination is
+   deterministic.
+
+   Example 1.37. nats_stream_list MI call
+## opensips-cli -x mi nats_stream_list 'kv=1'
+{
+    "matched": 1, "returned": 1, "offset": 0,
+    "streams": [{
+        "name": "KV_opensips", "kv_bucket": "opensips",
+        "messages": 2, "bytes": 1044,
+        "subjects": 2, "consumers": 1, "storage": "file"
+    }]
+}
+
+1.10.7. nats_stream_info
+
+   Full configuration and state of one stream — the direct
+   operator check of a registration bucket's backing-stream expiry
+   preconditions: max_age_s must be 0 (a non-zero stream MaxAge
+   silently expires permanent contacts), with max_msgs_per_subject
+   showing the KV history depth. State reports messages, bytes,
+   first/last sequence, subject count, deleted count and
+   consumers.
+
+   Example 1.38. nats_stream_info MI call
+## opensips-cli -x mi nats_stream_info KV_opensips
+{
+    "name": "KV_opensips", "kv_bucket": "opensips",
+    "config": {
+        "subjects": ["$KV.opensips.>"],
+        "storage": "file", "retention": "limits", "replicas": 1,
+        "max_msgs_per_subject": 1, "max_age_s": 0,
+        "allow_msg_ttl": true, "subject_delete_marker_ttl_s": 30
+    },
+    "state": {
+        "messages": 2, "bytes": 1044,
+        "first_seq": 1, "last_seq": 3,
+        "subjects": 2, "deleted": 1, "consumers": 1
+    }
+}
+
+   Example 1.39. nats_stream_info as plain text (cut/awk-ready)
+## opensips-cli -x mi nats_stream_info KV_opensips txt
+{
+    "name": "KV_opensips", "kv_bucket": "opensips",
+    "format": "txt",
+    "data": "# field\tvalue\r\nname\tKV_opensips\r\nkv_bucket\topensips\
+r\nstorage\tfile\r\n...\r\nallow_msg_ttl\t1\r\nsubject_delete_marker_ttl
+_s\t30\r\n..."
+}
+
+1.10.8. nats_kv_keys
+
+   Lists the LIVE keys of a KV bucket — server-side delete markers
+   are never listed, so what this returns is what a reader can
+   actually Get. Optional filter string: bucket=<name> (default:
+   the module's kv_bucket), key=<glob>, detail=1 (adds revision /
+   created / value size for each RETURNED key — one extra
+   round-trip per key, bounded by the limit cap), limit (default
+   50, cap 200) and offset. Keys sort by name.
+
+   Read-only by construction: the bucket is bound, never created,
+   so a mistyped bucket name returns “no such bucket” instead of
+   materializing an empty stream on the server.
+
+   Example 1.40. nats_kv_keys MI call
+## opensips-cli -x mi nats_kv_keys 'key=json_alice*;detail=1'
+{
+    "bucket": "opensips", "live_keys": 2,
+    "matched": 1, "returned": 1, "offset": 0,
+    "keys": [{
+        "key": "json_alice=40example.com",
+        "revision": 2, "created": 1783008207, "size": 731
+    }]
+}
+
+1.10.9. Exported Events
+
+1.10.9.1. E_NATS_KV_CHANGE
+
+   Raised by the KV watcher thread for every mutation received
+   from the NATS KV bucket. This event allows OpenSIPS routing
+   scripts to react to changes made by any client in the cluster —
+   not just changes made through OpenSIPS itself.
+
+   The event is raised with the following parameters:
+     * key (string) — the KV key that was modified.
+     * operation (string) — the type of mutation: put (value
+       created or updated), delete (soft delete tombstone), or
+       purge (hard delete with history removal).
+     * value (string) — the new value of the key. Only present for
+       put operations; absent for delete and purge.
+     * revision (integer) — the NATS JetStream sequence number
+       (revision) of this mutation. Revisions are monotonically
+       increasing and globally ordered within the KV bucket.
+
+   Example 1.41. Subscribing to E_NATS_KV_CHANGE in opensips.cfg
+...
+startup_route {
+    subscribe_event("E_NATS_KV_CHANGE", "nats:opensips-events");
+}
+
+event_route[E_NATS_KV_CHANGE] {
+    xlog("KV change: key=$param(key) op=$param(operation) rev=$param(rev
+ision)\n");
+    if ($param(operation) == "put") {
+        xlog("  new value: $param(value)\n");
+    }
+}
+...
+
+1.10.10. Cluster Configuration
+
+   For production deployments a three-node NATS JetStream cluster
+   is recommended. The nats_url parameter is a seed list used only
+   for the initial bootstrap connection. After the first
+   connection is established, nats.c discovers all cluster peers
+   via the INFO protocol gossip mechanism (connect_urls) and
+   maintains the full topology automatically. Adding or removing
+   nodes from the cluster is transparent to the OpenSIPS module.
+
+   Use DNS hostnames rather than IP addresses in nats_url. The
+   nats.c library calls getaddrinfo on each reconnection attempt,
+   so DNS-based hostnames automatically pick up topology changes
+   such as node replacement or IP address reassignment.
+
+   The kv_replicas parameter controls the JetStream replication
+   factor and only takes effect when the KV bucket is first
+   created. A value of 3 on a three-node cluster tolerates
+   one-node failure without data loss or availability impact. To
+   change the replication factor on an existing bucket use the
+   NATS CLI:
+nats kv update opensips --replicas=3
+
+   The internal reconnection loop is unlimited at runtime: nats.c
+   will never permanently remove a server from its routing pool.
+   The max_reconnect parameter only limits the number of retries
+   during the initial connection phase in child_init.
+
+   Example 1.42. Three-node cluster configuration
+...
+loadmodule "cachedb_nats.so"
+
+modparam("cachedb_nats", "cachedb_url", "nats://nats-1:4222/")
+modparam("cachedb_nats", "nats_url",
+    "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222")
+modparam("cachedb_nats", "kv_bucket",   "opensips")
+modparam("cachedb_nats", "kv_replicas", 3)
+modparam("cachedb_nats", "kv_history",  5)
+modparam("cachedb_nats", "kv_ttl",      0)
+modparam("cachedb_nats", "kv_watch",    "usrloc.>")
+modparam("cachedb_nats", "kv_watch",    "json.>")
+...
+
+   Example 1.43. Single-node development configuration
+...
+loadmodule "cachedb_nats.so"
+
+modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:4222/")
+modparam("cachedb_nats", "kv_replicas", 1)
+modparam("cachedb_nats", "kv_watch",    ">")
+...
+
+1.11. Operator playbook: NATS as backend store for usrloc
+
+   This section is for operators deploying usrloc in cluster_mode
+   = full-sharing-cachedb with cachedb_nats as the cachedb engine.
+   In this configuration JetStream KV is the authoritative store
+   for AoR / contact records:
+     * SIP REGISTER → save("location") → usrloc → cdbf.update →
+       kvStore_UpdateString / kvStore_CreateString on
+       KV_<bucket>.json_<encoded-aor>.
+     * SIP lookup → usrloc → cdb_load_urecord → nats_cache_query
+       using the per-process JSON-FTS index over JetStream KV.
+     * Process restart → usrloc state in shared memory is lost;
+       cachedb_nats's nats_json_index_build rehydrates the index
+       from the bucket.
+
+   Multiple OpenSIPS instances pointing at the same bucket
+   converge on a consistent view of usrloc state without any
+   clusterer-driven binary replication; the only synchronization
+   between writers is JetStream's per-key CAS.
+
+1.11.1. Topology by DC count
+
+   Single DC, single broker
+          kv_replicas = 1, kv_history = 1, File storage. Use this
+          for development and small single-DC deployments. Restart
+          hydration is fast (one round-trip per key).
+
+   Single DC, clustered NATS (3 servers)
+          kv_replicas = 3. Survives a single broker failure with
+          no AoR loss. Recommended production baseline.
+          Inter-broker replication is NATS-internal and adds ~1-2
+          ms to write latency.
+
+   Multiple DCs, one global bucket
+          Recommended only when the inter-DC RTT is < 50 ms and
+          concurrent same-AoR writes are rare. Every
+          kvStore_UpdateString CAS pays full inter-DC RTT. The
+          jittered backoff bounds the worst-case at ~50 ms across
+          the default nats_cas_retries = 10 budget; raise the
+          budget if cross-DC contention drives cas_exhausted above
+          zero.
+
+   Multiple DCs, bucket per DC + leafnodes
+          Lower per-write latency at the cost of cross-DC
+          visibility being asynchronous. Each DC reads its local
+          bucket; cross-DC AoR resolution happens out of band
+          (e.g. GSLB or local-fail- through-to-remote logic).
+          Conflict resolution becomes operator-defined; the
+          simplest policy is "the first DC to see a REGISTER owns
+          the AoR."
+
+1.11.2. Bucket sizing
+
+     * Storage: File (default). Memory storage loses AoRs on
+       broker restart, defeating the purpose of using NATS as the
+       backend store.
+     * Replicas: match broker cluster size up to 3. Replicas > 3
+       add latency without meaningful availability gains for
+       usrloc workloads.
+     * History: kv_history = 1 — required for on-time native
+       expiry. A bucket that keeps old revisions makes an expired
+       key roll back to a previous version instead of
+       disappearing, so the module disables server-side
+       auto-expiry on it and falls back to the periodic cleanup
+       scan (correct, but up to nats_reap_interval seconds late).
+       Use a history-keeping bucket only when routing logic
+       genuinely needs nats_kv_history, and keep it OFF the
+       registration bucket if possible.
+     * TTL: kv_ttl = 0 (no bucket-wide max age — it would delete
+       permanent contacts; the module refuses to start otherwise).
+       Per-AoR expiry is native: each registration write carries
+       its own server-side TTL, with the cleanup scan
+       (nats_reap_interval) as the safety net. To keep expired
+       records readable for a while (forensics), see
+       nats_expired_linger.
+     * Max bytes / max age: NATS defaults are typically
+       appropriate. For bounded environments, size the stream for
+       at least (active_aors × avg_doc_size × kv_history) bytes.
+       An average AoR JSON document with a single contact is
+       roughly 400-600 bytes.
+
+1.11.3. Snapshot and restore
+
+   JetStream KV buckets are JetStream streams named KV_<bucket>
+   under the hood, so they snapshot and restore through the
+   standard stream tooling:
+nats stream snapshot KV_USRLOC ./usrloc-2026-05-08.tar.gz
+nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
+
+   Snapshot during a low-traffic window for a point-in-time copy.
+   After restore, every connected OpenSIPS instance must rebuild
+   its in-memory index; either bounce the instances (cleanest),
+   set index_resync_on_reconnect = 1 and cycle the broker, or set
+   index_resync_interval_secs to a value ≤ the longest tolerable
+   staleness window so the periodic timer pulls the new state. The
+   lazy self-heal in nats_cache_query only evicts stale entries it
+   already holds; it does not add keys introduced by the restore,
+   so an explicit rebuild (or the periodic timer) is required, not
+   merely faster.
+
+1.11.4. Scale tuning: PK fast path and the optional index
+
+   usrloc's read and write path is exclusively primary-key: both
+   cdb_load_urecord (read) and cdb_flush_urecord (write) build
+   cdb_filter_t with is_pk = 1. The in-memory JSON-FTS search
+   index that cachedb_nats maintains is therefore optional weight
+   for any deployment that uses the module purely as a usrloc
+   backend. Two operator knobs control the index behaviour:
+
+   cachedb_nats_fts module (load / don't load)
+          The former enable_search_index modparam is gone: loading
+          the optional cachedb_nats_fts module IS the enable
+          switch for the JSON-FTS index. Pure usrloc workloads
+          simply do not load it — PK-only operation, no index SHM,
+          no watcher-feed CPU.
+
+   index_buckets (int, default 4096)
+          Hash bucket count for the JSON-FTS index. Init code
+          rounds the value up to the next power of two with a
+          floor of 16 (NATS_IDX_SHARDS) so the hash can use a
+          bitmask AND. Each doubling halves average chain length
+          for ~32 KB more SHM. Only relevant when the
+          cachedb_nats_fts module loaded; ignored otherwise.
+          Recommended values: 4096 at ≤ 20k AoRs, 16384 at 100k,
+          65536 at 1MM.
+
+   PK fast path (nats_cache_query)
+          Always on; no modparam. When the filter is a single
+          is_pk=1 condition with val.is_str = 1 and op =
+          CDB_OP_EQ, the function encodes the value via
+          _kv_encode_key, builds the prefixed target_key, calls
+          kvStore_Get, parses the returned JSON, and returns one
+          row. No mutex acquired, no chain walk. Falls through to
+          the index path for any non-PK or multi-condition filter.
+
+   Scaling guidance is documented in detail in the scaling notes
+   in the opensips-usrloc-nats design repository; the short
+   version:
+     * Pure usrloc workloads at any scale: do not load
+       cachedb_nats_fts. No index, no watcher, no per-write index
+       update.
+     * Mixed workloads (script-driven non-PK queries on the same
+       bucket): leave the index on and tune index_buckets. The KV
+       watcher always runs in its own dedicated child process, so
+       it never competes with SIP request handling in the workers.
+     * 1MM endpoints: the index off is essentially mandatory (~250
+       MB SHM saved per instance); the watcher would otherwise
+       saturate one core at the steady-state event rate. If the
+       index is still kept on for mixed-workload reasons, budget
+       one core for the dedicated watcher process.
+     * 10MM endpoints: the index off is mandatory. Sharding
+       remains required for SIP-side reasons.
+
+1.11.5. SHM allocator selection
+
+   OpenSIPS defaults the shared-memory allocator to Q_MALLOC,
+   which is single-mutex and serialises every shm_malloc /
+   shm_free across all worker processes. At populated index sizes
+   (10k+ AoRs) and sustained REGISTER churn this becomes the
+   dominant tail-latency contributor: the per-CAS path triggers
+   3-5 SHM allocations to add a doc to the in-memory JSON-FTS
+   index, and Q_MALLOC's lock pinches every worker on every alloc.
+
+   Recommendation: launch opensips with -s HP_MALLOC to select
+   HP_MALLOC ("optimized for shared memory multiprocessing").
+   Bench results from the session that introduced this playbook:
+     * 10k AoRs, single instance: p99 84 ms → 54 ms (−36%); p50 35
+       ms → 21 ms (−40%).
+     * 20k AoRs, single instance: p99 185 ms → 142 ms (−23%); p50
+       41 ms → 25 ms (−39%).
+
+   Combined with the targeted-index-remove change
+   (nats_json_index_remove_fields), the cumulative p99 improvement
+   at 20k AoRs is −63% versus the start of the perf series.
+   Effective RPS climbs accordingly.
+
+   Pkg memory (-k) is per-process and not contended, so the
+   default Q_MALLOC there is fine. Only the SHM allocator (-s)
+   needs the switch.
+
+1.11.6. MI counters and alert thresholds
+
+   nats_cdb_stats returns a snapshot of four atomic per-process
+   counters tracking the cachedb path:
+     * cas_retry — bumped per failed UpdateString / CreateString
+       race. Steady non-zero values are normal under contention; a
+       sustained high rate suggests nats_cas_retries is too low or
+       the CAS hot key is genuinely contended.
+     * cas_exhausted — bumped when a CAS gave up after exhausting
+       the budget. Should always be 0 in a healthy deployment;
+       non-zero indicates lost writes. Page on
+       delta(cas_exhausted) > 0 over any reasonable interval.
+     * create_doc — bumped per first-insert path
+       (kvStore_CreateString of a seed doc). Roughly equal to the
+       rate of genuinely new AoRs. A spike usually maps to a burst
+       of new registrations.
+     * index_miss_kv — bumped when nats_cache_query hit an index
+       entry whose KV key was already deleted. Self-heal evicts
+       the entry; a non-zero rate is expected in multi-instance
+       deployments. A large sustained rate suggests cross-instance
+       churn higher than the self-heal pace; consider enabling
+       index_resync_interval_secs.
+
+1.11.7. Migration from full-sharing-cachedb-cluster
+
+   The legacy mode full-sharing-cachedb-cluster additionally
+   relies on clusterer to broadcast cachedb invalidation events.
+   With cachedb_nats, the KV watcher thread + stale-entry
+   self-heal subsume that role. To migrate:
+    1. Take a snapshot of the current bucket (above).
+    2. On each instance, change cluster_mode to
+       full-sharing-cachedb; keep the existing location_cluster
+       (clusterer is still required for shtag / pinging
+       coordination).
+    3. Roll instances one at a time. Each rolled instance rebuilds
+       its index from KV on child_init and is immediately
+       consistent with peers still on the old mode.
+    4. After all instances are migrated, the clusterer-driven
+       cachedb broadcast capabilities become idle and can be
+       removed at the next maintenance window.
+
+1.11.8. Optional knobs introduced in this work
+
+   See usrloc storage: scale tuning for loading cachedb_nats_fts
+   and index_buckets, the two scale-tuning knobs. The remaining
+   knobs are listed below.
+
+   index_resync_on_reconnect (int, default 1)
+          Whether the KV watcher rebuilds the in-memory index in
+          full after each reconnect. The watcher uses UpdatesOnly,
+          so writes made by sibling instances during an outage are
+          never delivered live; the query-path self-heal only
+          evicts stale entries it already holds and cannot recover
+          a missed insert, so the default is on for correctness.
+          Set to 0 only for large indexes that cannot afford the
+          O(N) rebuild per reconnect, paired with
+          index_resync_interval_secs.
+
+   index_resync_interval_secs (int, default 0 = off)
+          Periodic full rebuild on a timer. Belt-and- braces upper
+          bound on per-process index staleness. Skipped silently
+          while NATS is disconnected.
+
+   nats_cas_retries (int, default 10)
+          CAS budget per nats_cache_update / nats_cache_counter_op
+          call. Combined with the jittered backoff (50 us base,
+          5 ms cap), the worst-case per-call latency is ~50 ms.
+          Raise only if cas_exhausted shows non-zero rates;
+          lowering risks lost writes under contention.
+
+Chapter 2. Contributors
+
+   Generated from git history by the Open SIP Server release
+   tooling at release time.
+
+   Documentation Copyrights:
+
+   Copyright © 2026 www.opensips-solutions.com
