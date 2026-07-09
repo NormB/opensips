@@ -45,9 +45,6 @@ on:
       - 'modules/tls_openssl/**'
       - '.github/workflows/nats-tls-backends.yml'
 
-env:
-  NATS_C_VERSION: main
-
 jobs:
   tls_mgm_smoke:
     name: tls_mgm NATS TLS smoke
@@ -69,16 +66,10 @@ jobs:
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
             nats-server
-          git clone --depth 1 --branch "$NATS_C_VERSION" \
-              https://github.com/nats-io/nats.c /tmp/nats.c
-          cd /tmp/nats.c && mkdir build && cd build
-          cmake -DNATS_BUILD_WITH_TLS=ON \
-                -DNATS_BUILD_EXAMPLES=OFF \
-                -DBUILD_TESTING=OFF \
-                -DCMAKE_INSTALL_PREFIX=/usr/local ..
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          # One pinned nats.c SHA across every CI leg (P5.1); the pin
+          # lives in install_libnats.sh.  TLS=ON: this leg exercises
+          # NATS-over-TLS.
+          SUDO=sudo LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
       - name: Build OpenSIPS core + tls_mgm + NATS modules
         run: |
           set -e

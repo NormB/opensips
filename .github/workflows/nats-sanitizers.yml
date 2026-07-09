@@ -86,36 +86,29 @@ jobs:
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
 
     steps:
-      - name: Install build deps + libnats
-        run: |
-          # apt's libnats-dev on ubuntu 22.04/24.04 ships libnats 3.7,
-          # which predates kvStore_WatchMulti / kvStore_WatchAll-with-opts
-          # and several other symbols referenced by lib/nats/nats_dl_table.def.
-          # Build from source pinned to a known-good upstream tag so the
-          # X-macro that materialises the function-pointer struct
-          # (NATS_DL_FN(sym) -> __typeof__(sym) *sym;) finds every
-          # referenced symbol declared in nats/nats.h.
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libuv1-dev cmake \
-            git ca-certificates
-          git clone --depth 1 --branch main \
-              https://github.com/nats-io/nats.c /tmp/nats.c
-          cd /tmp/nats.c && mkdir build && cd build
-          cmake -DNATS_BUILD_WITH_TLS=ON \
-                -DNATS_BUILD_EXAMPLES=OFF \
-                -DBUILD_TESTING=OFF \
-                -DCMAKE_INSTALL_PREFIX=/usr/local ..
-          make -j"$(nproc)"
-          make install
-          ldconfig
-
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      - name: Install build deps + libnats (pinned)
+        run: |
+          # apt's libnats-dev on ubuntu 22.04/24.04 ships libnats 3.7,
+          # which predates kvStore_WatchMulti / kvStore_WatchAll-with-opts
+          # and several other symbols referenced by lib/nats/nats_dl_table.def.
+          # install_libnats.sh builds the ONE pinned nats.c SHA every CI
+          # leg shares (P5.1); LIBNATS_TLS=ON for dev-env parity.  The
+          # container runs as root, so SUDO stays empty.
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libuv1-dev cmake \
+            git ca-certificates wget
+          LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
+
       - name: Lint — no unredacted URLs in log calls
         run: ./lib/nats/tests/lint_url_redaction.sh
+
+      - name: Lint — no raw KV row keys (AoRs) in log calls
+        run: ./lib/nats/tests/lint_key_redaction.sh
 
       - name: Build NATS module .o files (needed by lib/nats unit tests)
         run: |

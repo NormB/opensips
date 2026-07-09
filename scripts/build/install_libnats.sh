@@ -19,11 +19,19 @@
 
 set -e
 
-# nats-io/nats.c ref to build. Uses main (nats.c's default branch): per-key KV
-# TTL (PR #1000 -- kvConfig.LimitMarkerTTL + kvStore_*WithTTL) is merged on main
-# but not yet in a tagged release, and cachedb_nats's per-key-TTL path requires it.
-LIBNATS_VERSION="${LIBNATS_VERSION:-main}"
+# nats-io/nats.c ref to build -- PINNED to the PR #1001 merge (contains the
+# per-key KV TTL surface cachedb_nats requires: PR #1000 kvConfig.LimitMarkerTTL
+# + kvStore_*WithTTL, PR #1001 sub-second TTL rejection), which is merged on
+# main but not yet in a tagged release.  A pin (not 'main') keeps every CI leg
+# and every cache generation building the SAME libnats; the main.yml cache key
+# hashes this script, so bumping the pin rolls the cache automatically.
+LIBNATS_VERSION="${LIBNATS_VERSION:-47da162082bf54e2665064fe8fe8c38b8ddc32ae}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
+# TLS in the libnats build (-DNATS_BUILD_WITH_TLS).  Default OFF: the OpenSIPS
+# NATS modules link libnats at runtime via dlopen and only need it to
+# build/link, and slim/cross images lack a locatable OpenSSL.  The sanitizer
+# and TLS-backend workflows set LIBNATS_TLS=ON for dev-env parity.
+LIBNATS_TLS="${LIBNATS_TLS:-OFF}"
 
 # Skip on cross-compile builds.  The multiarch CI uses *-cross
 # compilers (gcc-mips64-cross, clang-arm32-qemu-cross, etc.) running
@@ -79,10 +87,12 @@ ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get -y \
 tmp=$(mktemp -d)
 cd "$tmp"
 
-wget -q "https://github.com/nats-io/nats.c/archive/refs/heads/${LIBNATS_VERSION}.tar.gz" \
-    -O "nats.c-${LIBNATS_VERSION}.tar.gz"
-tar xzf "nats.c-${LIBNATS_VERSION}.tar.gz"
-cd "nats.c-${LIBNATS_VERSION}"
+# archive/<ref> resolves branches, tags, and commit SHAs alike (the
+# refs/heads/ form only accepts branches, which would break the pin).
+wget -q "https://github.com/nats-io/nats.c/archive/${LIBNATS_VERSION}.tar.gz" \
+    -O "nats.c-src.tar.gz"
+tar xzf "nats.c-src.tar.gz"
+cd nats.c-*/
 
 mkdir build
 cd build
@@ -92,13 +102,13 @@ cmake .. \
     -DNATS_BUILD_STREAMING=OFF \
     -DNATS_BUILD_EXAMPLES=OFF \
     -DNATS_BUILD_USE_SODIUM=OFF \
-    -DNATS_BUILD_WITH_TLS=OFF
-# TLS off on purpose: nats.c main's cmake does find_package(OpenSSL 1.1.1
-# REQUIRED) only under NATS_BUILD_WITH_TLS, and the OpenSIPS NATS modules link
-# libnats at runtime via dlopen, so they only need it to build/link here. This
-# avoids the missing-OPENSSL_CRYPTO_LIBRARY configure failure on slim/cross
-# container images (e.g. debian_12-slim arm64). NATS-over-TLS is covered
-# separately by the nats-tls-backends.yml workflow, which builds its own libnats.
+    -DNATS_BUILD_WITH_TLS="${LIBNATS_TLS}"
+# TLS defaults OFF on purpose: nats.c main's cmake does find_package(OpenSSL
+# 1.1.1 REQUIRED) only under NATS_BUILD_WITH_TLS, and the OpenSIPS NATS modules
+# link libnats at runtime via dlopen, so they only need it to build/link here.
+# This avoids the missing-OPENSSL_CRYPTO_LIBRARY configure failure on slim/cross
+# container images (e.g. debian_12-slim arm64). The sanitizer and TLS-backend
+# workflows pass LIBNATS_TLS=ON.
 make -j"$(nproc 2>/dev/null || echo 2)"
 ${SUDO} make install
 
