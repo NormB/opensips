@@ -75,7 +75,7 @@ if ! nats --server "$NATS_URL" server check connection \
     DOCKER_NATS="sip-nats-e2e-natstest"
     docker rm -f "$DOCKER_NATS" >/dev/null 2>&1 || true
     docker run -d --rm --name "$DOCKER_NATS" \
-        -p "${NATS_PORT}:4222" nats:2.10-alpine -js >/dev/null
+        -p "${NATS_PORT}:4222" nats:2.11.10-alpine -js >/dev/null
     for i in $(seq 1 10); do
         nats --server "$NATS_URL" server check connection \
             >/dev/null 2>&1 && break

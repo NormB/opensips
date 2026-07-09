@@ -1,0 +1,68 @@
+# Nightly NATS integration tier (MAINTAINABILITY-PERF-SPEC P5.2).
+#
+# Gate placement: the cachedb_nats sip_e2e suite and bench_matrix need
+# the internal >=2.11 JetStream cluster (LAN-only) and run there with
+# STRICT=1 as the release gate; GitHub-hosted runners cannot reach it.
+# This job covers the leg that CAN self-provision: the three-module
+# (event_nats + cachedb_nats + nats_consumer) sip_e2e against a pinned
+# nats:2.11.10 docker broker.  On the nightly gate a skip (exit 77,
+# missing prerequisite) is a FAILURE -- a green nightly means the tier
+# actually ran.
+#
+# libnats comes from scripts/build/install_libnats.sh (single pinned
+# SHA across all CI legs, P5.1).
+
+name: NATS Nightly e2e
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  three_module_e2e:
+    name: three-module docker e2e (pinned nats 2.11)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps + pinned libnats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config bison flex m4 \
+            libssl-dev libpcre3-dev libxml2-dev cmake wget ca-certificates \
+            sip-tester netcat-openbsd
+          SUDO=sudo sh scripts/build/install_libnats.sh
+
+      - name: Install nats CLI (pinned)
+        run: |
+          wget -q https://github.com/nats-io/natscli/releases/download/v0.1.5/nats-0.1.5-amd64.deb
+          sudo dpkg -i nats-0.1.5-amd64.deb
+          nats --version
+
+      - name: Build opensips + the e2e module set
+        run: |
+          set -e
+          make -j"$(nproc)" opensips
+          make -j"$(nproc)" modules \
+            modules="modules/event_nats modules/cachedb_nats modules/cachedb_nats_fts modules/nats_consumer modules/mi_datagram modules/proto_udp modules/signaling modules/sipmsgops modules/sl"
+          mkdir -p _modules
+          find modules -maxdepth 2 -name '*.so' \
+            -exec ln -sf "$(pwd)/{}" _modules/ \;
+
+      - name: Strict-gate selftest (skip-vs-fail contract)
+        run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+
+      - name: event_nats sip_e2e (docker broker; skip = FAILURE)
+        run: |
+          ./modules/event_nats/tests/sip_e2e/run.sh; rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "e2e rc=$rc (77 = missing prerequisite: a FAILURE on the nightly gate)"
+            exit 1
+          fi
