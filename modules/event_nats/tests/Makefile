@@ -8,20 +8,19 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_partial_alloc test_seq_cast_guard test_mi_seq_u64 \
-        test_atomic_stats test_subscription_rebuild \
-        test_child_init_degrade test_mi_command_collision test_mi_single_owner \
-        test_inbound_backpressure test_inbound_drop_stats
+# Auto-discovered [P5.3]: every test_*.c is a test with its own main().
+TESTS := $(sort $(patsubst %.c,%,$(wildcard test_*.c)))
 
 # Tests safe to run under ThreadSanitizer.
 # test_atomic_stats deliberately demonstrates that `volatile` is not
 # atomic by racing two writers on a non-atomic counter, so TSan
 # (correctly) flags it as a data race -- that is the whole point of
 # the test, not a regression.
-TESTS_TSAN_SAFE = test_partial_alloc test_seq_cast_guard \
-                  test_subscription_rebuild test_child_init_degrade \
-                  test_mi_command_collision test_mi_single_owner test_inbound_backpressure \
-                  test_inbound_drop_stats
+# ASan-pinned canaries kept out of the TSan/plain subset:
+# test_atomic_stats demonstrates a volatile race under ASan;
+# test_mi_seq_u64 is a pre-existing exclusion carried over.
+TESTS_TSAN_UNSAFE := test_atomic_stats test_mi_seq_u64
+TESTS_TSAN_SAFE := $(filter-out $(TESTS_TSAN_UNSAFE),$(TESTS))
 
 all: $(TESTS)
 
@@ -78,3 +77,4 @@ check-tsan: $(TESTS_TSAN_SAFE)
 
 clean:
 	rm -f $(TESTS)
+

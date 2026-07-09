@@ -7,23 +7,21 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_redact_url test_key_redaction test_validate_publish_subject test_validate_modes test_pool_merge \
-        test_validate_subject_cache test_nats_dl test_nats_ca_dir \
-        test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
-        test_js_pending_cap test_pool_refcount \
-        test_kv_op_timeout test_reconnect_jitter \
-        test_ping_liveness test_async_first_connect test_kv_ttl_probe_matrix \
-        test_kv_tbm_probe \
-        test_epoch_wrapper test_blocking_budget \
-        test_nats_rank test_rl test_doc_truth test_drain_merge
+# Auto-discovered [P5.3]: every test_*.c is a test with its own main().
+TESTS := $(sort $(patsubst %.c,%,$(wildcard test_*.c)))
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
 TESTS_TSAN_SAFE = $(TESTS)
 
 all: $(TESTS)
 
-# nats_redact_url() lives in nats_redact.c — link the .o (built by
-# the parent Makefile) to avoid duplicating its source here.
+# Lib TUs some tests link against, built HERE with the same
+# CFLAGS/ASAN as the tests -- sanitizer and -Werror legs get matching
+# instrumentation, and the suite works from a clean tree.  [P5.3]
+../%.o: ../%.c
+	$(CC) $(CFLAGS) $(ASAN) -fPIC -I../../.. -c $< -o $@
+
+# nats_redact_url() lives in nats_redact.c — link the .o.
 test_redact_url: test_redact_url.c ../nats_redact.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_redact_url.c ../nats_redact.o
 
@@ -130,26 +128,14 @@ test_ping_liveness: test_ping_liveness.c
 NATS_TEST_ENV = LD_LIBRARY_PATH=/usr/local/lib:$$LD_LIBRARY_PATH
 
 check: all
-	./test_redact_url
-	./test_validate_publish_subject
-	./test_validate_modes
-	./test_pool_merge
-	./test_validate_subject_cache
-	$(NATS_TEST_ENV) ./test_nats_dl
-	./test_nats_ca_dir
-	./test_nats_pool_fixes
-	./test_unsafe_log_clamp
-	./test_server_info_redact
-	./test_js_pending_cap
-	./test_pool_refcount
-	./test_kv_op_timeout
-	./test_reconnect_jitter
-	./test_ping_liveness
-	./test_async_first_connect
-	./test_kv_ttl_probe_matrix
-	./test_rl
-	./test_doc_truth
-	./test_drain_merge
+	@for t in $(TESTS); do \
+		echo "  ./$$t"; \
+		if [ "$$t" = "test_nats_dl" ]; then \
+			$(NATS_TEST_ENV) ./$$t || exit 1; \
+		else \
+			./$$t || exit 1; \
+		fi; \
+	done
 
 # tls_mgm end-to-end smoke: spins up a TLS-enabled nats-server,
 # generates self-signed certs, boots opensips with tls_mgm + the
@@ -175,4 +161,4 @@ test_kv_ttl_probe_matrix: test_kv_ttl_probe_matrix.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
 clean:
-	rm -f $(TESTS)
+	rm -f $(TESTS) ../nats_redact.o ../nats_validate.o ../nats_rank.o

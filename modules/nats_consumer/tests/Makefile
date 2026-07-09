@@ -29,42 +29,23 @@ RINGORDER_SRCS := test_registry_ring_alloc_order.c $(SHIM) ../nats_handle_regist
 # pins -fsanitize=address in its own rule (it is
 # specifically asserting an ASan trip on a bad slurp), so it cannot
 # be linked under ThreadSanitizer.  The rest of the suite is race-safe.
-TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
-                  test_request_route_restriction \
-                  test_consumer_heartbeat \
-                  test_async_request_skeleton \
-                  test_header_propagation \
-                  test_rpc_subject test_fetch_async_timerfd \
-                  test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait \
-                  test_ring_bounded_spin test_registry_ring_ref_safety \
-                  test_ring_xproc_wakeup test_rpc_ipc_generation test_rpc_reply_pin \
-                  test_parser_adversarial test_rpc_slot_lifecycle \
-                  test_rpc_inbox_auth test_registry_lookup_ref \
-                  test_consumer_proc_boot_retry test_rpc_subject_validation \
-                  test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin test_ring_force_unwedge \
-                  test_pool_self_register \
-                  test_retired_no_sub_reap test_sub_identity_match \
-                  test_fetch_budget test_ring_wake_one \
-                  test_bind_bounds test_rpc_tunables \
-                  test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget \
-                  test_rpc_wake_ipc test_p36_alloc_policy test_rebuild_bias_stale
+# Auto-discovered [P5.3]: every test_*.c here is a test with its own
+# main(); test_shim.c is the shared seam TU, not a test.  Adding a test
+# = drop in test_foo.c (a custom rule/vars only when the link line
+# differs from the generic fallback at the bottom).  The old hand lists
+# drifted within hours of a new test landing.
+TESTS := $(filter-out test_shim,$(sort $(patsubst %.c,%,$(wildcard test_*.c))))
 
-all: test_registry test_parser test_ring test_ack_token \
-     test_request_route_restriction \
-     test_consumer_heartbeat \
-     test_async_request_skeleton \
-     test_header_propagation \
-     test_rpc_subject test_fetch_async_timerfd \
-     test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
-     test_registry_ring_ref_safety test_ring_xproc_wakeup \
-     test_rpc_ipc_generation test_rpc_ipc_pack test_rpc_reply_pin test_parser_adversarial test_rpc_slot_lifecycle test_rpc_slot_reaper test_rpc_inbox_auth test_registry_lookup_ref \
-     test_consumer_proc_boot_retry test_rpc_subject_validation \
-     test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin test_ring_force_unwedge \
-     test_pool_self_register test_msg_ref_orphan_reap \
-     test_retired_no_sub_reap test_sub_identity_match \
-     test_fetch_budget test_ring_wake_one \
-     test_bind_bounds test_rpc_tunables \
-     test_slot_prefix_copy test_replay_bias test_backpressure_stats test_consumer_stats_mi test_poison_term test_dead_inbox_retry test_ensure_backoff test_proc_tu_split test_request_fastfail test_blocking_budget test_orphan_msg_ref_purge test_ack_ipc_actions test_rpc_reply_pin test_rpc_wake_ipc test_registry_foreach_unlocked test_p36_alloc_policy test_rebuild_bias_stale
+# Kept OUT of the TSan/plain subset: the first five pin
+# -fsanitize=address in their rules (they prove their bug class through
+# ASan and need its runtime); test_rpc_slot_reaper is a pre-existing
+# TSan exclusion carried over from the hand-maintained list.
+TESTS_TSAN_UNSAFE := test_ack_ipc_actions test_msg_ref_orphan_reap \
+                     test_orphan_msg_ref_purge test_registry_foreach_unlocked \
+                     test_rpc_ipc_pack test_rpc_slot_reaper
+TESTS_TSAN_SAFE := $(filter-out $(TESTS_TSAN_UNSAFE),$(TESTS))
+
+all: $(TESTS)
 
 test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(REG_SRCS) $(LDFLAGS)
@@ -362,82 +343,14 @@ test_registry_ring_ref_safety: test_registry_ring_ref_safety.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
 check: all
-	./test_registry
-	./test_parser
-	./test_ring
-	./test_ack_token
-	./test_request_route_restriction
-	./test_consumer_heartbeat
-	./test_async_request_skeleton
-	./test_header_propagation
-	./test_rpc_subject
-	./test_fetch_async_timerfd
-	./test_msg_ref_teardown
-	./test_msg_ref_gen_epoch
-	./test_orphan_ttl_ackwait
-	./test_ring_bounded_spin
-	./test_registry_ring_ref_safety
-	./test_ring_xproc_wakeup
-	./test_rpc_ipc_generation
-	./test_rpc_ipc_pack
-	./test_rpc_wake_ipc
-	./test_registry_foreach_unlocked
-	./test_p36_alloc_policy
-	./test_rebuild_bias_stale
-	./test_rpc_reply_pin
-	./test_parser_adversarial
-	./test_rpc_slot_lifecycle
-	./test_rpc_slot_reaper
-	./test_rpc_inbox_auth
-	./test_registry_lookup_ref
-	./test_consumer_proc_boot_retry
-	./test_rpc_subject_validation
-	./test_registry_index_recycle
-	./test_registry_ring_alloc_order
-	./test_orphan_msg_ref_purge
-	./test_ack_ipc_actions
-	./test_ring_push_bounded_spin
-	./test_ring_force_unwedge
-	./test_pool_self_register
-	./test_msg_ref_orphan_reap
-	./test_retired_no_sub_reap
-	./test_sub_identity_match test_fetch_budget \
-	      test_ring_wake_one test_bind_bounds \
-	      test_rpc_tunables test_slot_prefix_copy
-	./test_fetch_budget
-	./test_ring_wake_one
-	./test_bind_bounds
-	./test_rpc_tunables
-	./test_slot_prefix_copy
-	./test_replay_bias
-	./test_backpressure_stats
-	./test_consumer_stats_mi
-	./test_poison_term
-	./test_dead_inbox_retry
-	./test_ensure_backoff
-	./test_proc_tu_split
-	./test_request_fastfail
-	./test_blocking_budget
+	@for t in $(TESTS); do echo "  ./$$t"; ./$$t || exit 1; done
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)
 	@for t in $(TESTS_TSAN_SAFE); do echo "  ./$$t"; ./$$t || exit 1; done
 
 clean:
-	rm -f test_registry test_parser test_ring test_ack_token \
-	      test_request_route_restriction \
-	      test_consumer_heartbeat \
-	      test_async_request_skeleton \
-	      test_header_propagation \
-	      test_rpc_subject test_fetch_async_timerfd \
-	      test_msg_ref_teardown test_msg_ref_gen_epoch test_orphan_ttl_ackwait test_ring_bounded_spin \
-	      test_registry_ring_ref_safety test_ring_xproc_wakeup \
-	      test_rpc_ipc_generation test_rpc_inbox_auth \
-	      test_registry_lookup_ref test_consumer_proc_boot_retry \
-	      test_rpc_subject_validation test_registry_index_recycle \
-	      test_ring_push_bounded_spin test_pool_self_register \
-	      test_msg_ref_orphan_reap test_retired_no_sub_reap \
-	      test_sub_identity_match
+	rm -f $(TESTS)
 
 # Heartbeat test (self-contained)
 test_consumer_heartbeat: test_consumer_heartbeat.c
@@ -464,3 +377,9 @@ smoke-multi-instance: ./test_multi_instance_durable.sh
 
 test_orphan_ttl_ackwait: test_orphan_ttl_ackwait.c
 	$(CC) -g -O0 -Wall -o $@ $<
+
+
+# Generic fallback [P5.3]: a self-contained test needs no explicit
+# rule (explicit rules above always win for the tests that have one).
+test_%: test_%.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
