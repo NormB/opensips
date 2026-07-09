@@ -39,4 +39,30 @@ EOF
 	exit 1
 fi
 
+# [P5.6] Reject staged ELF binaries.  Compiled test binaries carry no
+# extension (test_foo), so name filters cannot catch them -- this is
+# the class of the committed-binary accident cleaned up in the P1 repo
+# hygiene pass.  Check the STAGED blob's magic bytes (not the worktree
+# file: they can differ).
+elves=""
+for f in $staged; do
+	magic=$(git cat-file blob ":$f" 2>/dev/null | head -c4)
+	if [ "$magic" = "$(printf '\177ELF')" ]; then
+		elves="$elves$f
+"
+	fi
+done
+
+if [ -n "$elves" ]; then
+	cat >&2 <<EOF
+pre-commit: refusing to commit ELF binaries:
+
+$elves
+Build artifacts do not belong in the tree (make clean, or add the
+binary name to the relevant tests/.gitignore).  Bypass (almost never
+the right call):    git commit --no-verify
+EOF
+	exit 1
+fi
+
 exit 0
