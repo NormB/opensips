@@ -1250,16 +1250,17 @@ timer_route[drain, 1] {
                 </para>
                 <para>
                     <emphasis>Latency note.</emphasis>  The resume
-                    function discovers the lost-connection state
-                    when the async-core timer next wakes it; the
-                    worst-case time to surface
-                    <varname>-2</varname> is therefore bounded by
-                    the script's
-                    <varname>timeout_ms</varname>.  Proactive
-                    sub-second reaping requires either a
-                    periodic-poll route or a
-                    <filename>lib/nats</filename> disconnect-
-                    callback chain; both remain TODO.
+                    function checks the connection epoch on every
+                    guard tick, so a mid-flight disconnect surfaces
+                    <varname>-2</varname> on the next guard tick --
+                    worst case one <varname>async_rpc_poll_ms</varname>
+                    interval (100 ms default) after the pool notices
+                    the loss, independent of the script's
+                    <varname>timeout_ms</varname>.  A reply that is
+                    already being delivered when the disconnect is
+                    detected still wins: the cancel uses the same
+                    atomic claim as the timeout path and backs off
+                    if the consumer got there first.
                 </para></listitem>
                 <listitem><para>
                     <varname>-3</varname> — NATS unavailable at
@@ -1635,6 +1636,102 @@ $ opensips-cli -x mi nats_consumer_health
     "consumer_pid": 4711,
     "last_tick_ms_ago": 821,
     "stale": "false"
+}
+                </programlisting>
+            </example>
+        </section>
+
+        <section id="mi_nats_consumer_stats">
+            <title><function>nats_consumer_stats</function></title>
+            <para>
+                One flat JSON object aggregating the observability
+                counters an operator needs to spot back-pressure and
+                IPC saturation.  Safe to call from the attendant/MI
+                process: the counters live in SHM allocated pre-fork.
+            </para>
+            <itemizedlist>
+                <listitem><para>
+                    <emphasis role="bold">handles</emphasis>,
+                    <emphasis role="bold">ring_depth</emphasis> /
+                    <emphasis role="bold">ring_capacity</emphasis> —
+                    bound handle count and ring occupancy summed across
+                    handles.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">msgs_delivered</emphasis>,
+                    <emphasis role="bold">pulls_requested</emphasis>,
+                    <emphasis role="bold">acks</emphasis>,
+                    <emphasis role="bold">naks</emphasis>,
+                    <emphasis role="bold">terms</emphasis>,
+                    <emphasis role="bold">redeliveries</emphasis>,
+                    <emphasis role="bold">poisoned</emphasis> —
+                    lifetime delivery/ack totals (poisoned counts
+                    messages terminated by the
+                    <varname>poison_max_deliver</varname> backstop).
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">fetch_skips_full</emphasis> —
+                    Fetches skipped because a ring was full (flow
+                    control, no data loss);
+                    <emphasis role="bold">backpressure_drops</emphasis> —
+                    messages fetched but deferred (the broker
+                    redelivers);
+                    <emphasis role="bold">fetch_errors</emphasis> —
+                    Fetch calls returning a hard error.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">ack_ipc_depth /
+                    ack_ipc_enqueued / ack_ipc_drained /
+                    ack_ipc_dropped</emphasis> — the worker-to-consumer
+                    ack queue: current depth plus lifetime totals.  A
+                    climbing depth or any drops mean the consumer
+                    process is not draining acks fast enough.
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">rpc_ipc_depth /
+                    rpc_ipc_enqueued / rpc_ipc_drained /
+                    rpc_ipc_dropped</emphasis> — same fields for the
+                    async-RPC request queue, plus
+                    <emphasis role="bold">rpc_slot_orphans_reaped</emphasis>
+                    (slots reclaimed after their worker died).
+                </para></listitem>
+                <listitem><para>
+                    <emphasis role="bold">rpc_slots_inflight /
+                    rpc_slots_total</emphasis> — async-RPC slot-pool
+                    occupancy; inflight pinned at total means new
+                    <function>nats_request</function> calls return
+                    <varname>-5</varname> (pool full).
+                </para></listitem>
+            </itemizedlist>
+            <example>
+                <title>Poll aggregate consumer stats</title>
+                <programlisting format="linespecific">
+$ opensips-cli -x mi nats_consumer_stats
+{
+    "handles": 2,
+    "ring_depth": 0,
+    "ring_capacity": 2048,
+    "msgs_delivered": 15024,
+    "pulls_requested": 15060,
+    "acks": 15024,
+    "naks": 0,
+    "terms": 0,
+    "redeliveries": 3,
+    "poisoned": 0,
+    "fetch_skips_full": 0,
+    "backpressure_drops": 0,
+    "fetch_errors": 0,
+    "ack_ipc_depth": 0,
+    "ack_ipc_enqueued": 15024,
+    "ack_ipc_drained": 15024,
+    "ack_ipc_dropped": 0,
+    "rpc_ipc_depth": 0,
+    "rpc_ipc_enqueued": 240,
+    "rpc_ipc_drained": 240,
+    "rpc_ipc_dropped": 0,
+    "rpc_slot_orphans_reaped": 0,
+    "rpc_slots_inflight": 1,
+    "rpc_slots_total": 64
 }
                 </programlisting>
             </example>

@@ -443,7 +443,27 @@ static int resume_nats_request_slot(int fd, struct sip_msg *msg,
 		return 0;
 	}
 
-	/* state == INFLIGHT.  Check the per-call deadline so we
+	/* state == INFLIGHT.  A lost connection epoch orphans the request
+	 * even if the pool has already reconnected -- the reply inbox and
+	 * the consumer's subscription died with the old connection -- so
+	 * waiting out timeout_ms only delays the script's failover
+	 * decision.  Cancel on THIS tick (the cancellation budget is one
+	 * async_rpc_poll_ms guard tick, 100 ms default), with the same
+	 * CAS guard as the timeout path below: if the consumer wins the
+	 * race a reply is landing -- keep polling, never drop it. */
+	if (nats_epoch_lost(&s->epoch_at_start)) {
+		if (nats_rpc_slot_abandon(s) != NATS_RPC_SLOT_ABANDONED) {
+			async_status = ASYNC_CONTINUE;
+			return 0;
+		}
+		async_status = ASYNC_DONE_CLOSE_FD;
+		nats_rpc_wake_unregister(s->slot_idx);
+		nats_rpc_slot_free(s, w->gen);
+		pkg_free(w);
+		return -2;
+	}
+
+	/* Check the per-call deadline so we
 	 * surface -1 even though the async core has no built-in
 	 * timeout for raw FDs.  Otherwise re-arm and keep polling. */
 	if (now_us_monotonic() >= w->deadline_us) {
