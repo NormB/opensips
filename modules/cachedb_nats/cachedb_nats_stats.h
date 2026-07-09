@@ -47,13 +47,14 @@
  *   watcher_restarts — times the search-index watcher tore down and rebuilt
  *                      its KV handle + index after a reconnect/disconnect.
  *                      A climbing value flags a flapping broker connection.
- *   watcher_handle_leaks — kvWatcher handles intentionally NOT destroyed on
- *                      the disconnected teardown path (destroying while
- *                      nats.c's I/O thread tears down the same internal
- *                      state double-frees). Bounded reclaim needs live-broker
- *                      teardown-timing validation and stays deferred; this
- *                      counter makes the per-flap leak observable so it can
- *                      be alerted on.
+ *   watcher_handle_leaks — kvWatcher handles NOT destroyed at teardown.
+ *                      Expected 0: the disconnected-teardown double-free
+ *                      suspicion that used to leak one handle per broker
+ *                      flap was refuted live (watcher_destroy_spike.c,
+ *                      ASan-clean Stop+Destroy on a disconnected conn) and
+ *                      the destroy is now unconditional. The counter stays
+ *                      exported so existing dashboards/alerts keep working
+ *                      and any regression shows up as a non-zero value.
  */
 
 #ifndef _CACHEDB_NATS_STATS_H_

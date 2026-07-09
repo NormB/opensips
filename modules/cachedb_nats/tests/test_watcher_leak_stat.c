@@ -3,22 +3,21 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Regression test for TODO #36 (survivability): the KV watcher deliberately
- * skips kvWatcher_Destroy() on the disconnected teardown path, because
- * destroying the handle while nats.c's I/O thread is concurrently tearing
- * down the same internal subscription state double-frees.  The handle is
- * therefore leaked once per disconnect-while-disconnected cycle -- unbounded
- * under a flapping broker.
+ * Regression test for the KV watcher teardown stat (originally TODO #36
+ * survivability): the watcher used to deliberately skip kvWatcher_Destroy()
+ * on the disconnected teardown path (suspected double-free against nats.c's
+ * I/O thread) and count each skip in watcher_handle_leaks -- one leaked
+ * handle per broker flap, unbounded under a flapping broker.
  *
- * Reclaiming the handle safely needs live-broker validation of the teardown
- * timing (the destroy is only known-safe while connected), so it stays
- * deferred.  What this commit does is make the leak OBSERVABLE: a
- * watcher_handle_leaks counter incremented on every skipped destroy and
- * surfaced in nats_cdb_stats, so operators can alert on a climbing leak rate
- * instead of discovering it as unexplained memory growth.
+ * The suspicion was refuted live (design repo watcher_destroy_spike.c:
+ * 10 SIGKILL broker-flap cycles, Stop+Destroy on a disconnected connection
+ * with the reconnect thread running, ASan-clean on the pinned libnats), so
+ * the destroy is now UNCONDITIONAL and no teardown path leaks.  The counter
+ * stays declared and MI-exported -- expected 0 -- so existing dashboards
+ * and alert rules keep working and any regression is visible.
  *
- * This test carries the count-decision model (leak counted iff the destroy
- * was skipped because disconnected) and asserts the production wiring.
+ * This test carries the fixed teardown model (destroy in every connection
+ * state, nothing counted as leaked) and asserts the production wiring.
  *
  * Build (self-contained):
  *   gcc -g -O0 -Wall -o test_watcher_leak_stat test_watcher_leak_stat.c
@@ -71,12 +70,15 @@ static int grep_in_function(const char *path, const char *fn, const char *needle
 
 /* ---- carried model: when is a watcher handle leak counted? --------- */
 
-/* Mirrors the teardown decision: destroy (no leak) while connected; skip
- * destroy (leak, counted) while disconnected. */
+/* Mirrors the teardown decision since the disconnected-destroy fix:
+ * the claimed handle is destroyed in EVERY connection state (the old
+ * skip-while-disconnected arm leaked one handle per broker flap; its
+ * double-free suspicion was refuted by watcher_destroy_spike.c). */
 static void teardown(int connected, int *destroyed, int *leaks)
 {
-	if (connected) (*destroyed)++;
-	else           (*leaks)++;
+	(void)connected;
+	(*destroyed)++;
+	(void)leaks;
 }
 
 int main(void)
@@ -85,11 +87,11 @@ int main(void)
 	{
 		int destroyed = 0, leaks = 0;
 		teardown(1, &destroyed, &leaks);   /* connected: destroyed */
-		teardown(0, &destroyed, &leaks);   /* disconnected: leaked+counted */
-		teardown(0, &destroyed, &leaks);   /* flap again: another leak */
+		teardown(0, &destroyed, &leaks);   /* disconnected: ALSO destroyed */
+		teardown(0, &destroyed, &leaks);   /* flap again: destroyed */
 		teardown(1, &destroyed, &leaks);   /* connected: destroyed */
-		ASSERT(destroyed == 2, "connected teardown destroys (no leak)");
-		ASSERT(leaks == 2, "each disconnected skip is counted as a leak");
+		ASSERT(destroyed == 4, "teardown destroys in EVERY connection state");
+		ASSERT(leaks == 0, "no teardown path leaks the handle");
 	}
 
 	/* ---- stats counter declared + emitted ----------------------- */
@@ -100,12 +102,15 @@ int main(void)
 			"nats_cdb_stats MI emits watcher_handle_leaks");
 	}
 
-	/* ---- counted exactly on the skipped-destroy (disconnected) path - */
+	/* ---- the skip arm is GONE: destroy is unconditional -------------
+	 * (the disconnected-destroy double-free suspicion was refuted live:
+	 * watcher_destroy_spike.c, 10 SIGKILL flap cycles, ASan-clean; the
+	 * counter stays exported, expected 0, so dashboards keep working) */
 	{
 		const char *w = "../cachedb_nats_watch.c";
 		ASSERT(grep_in_function(w, "_watcher_loop",
-				"NATS_CDB_STATS_INC(watcher_handle_leaks)") >= 1,
-			"watcher counts the leak when it skips destroy while disconnected");
+				"NATS_CDB_STATS_INC(watcher_handle_leaks)") == 0,
+			"watcher no longer counts intentional leaks (destroy unconditional)");
 	}
 
 	if (g_fails == 0) fprintf(stderr, "\n=== ALL PASS (fails=0) ===\n");

@@ -568,21 +568,19 @@ static void _watcher_loop(void)
 			kvWatcher *w_claim = atomic_exchange(&_watcher, NULL);
 			if (w_claim) {
 				nats_dl.kvWatcher_Stop(w_claim);
-				/* Only destroy if still connected.  During
-				 * disconnect, nats.c's I/O thread may be cleaning
-				 * up the same internal structures -- destroying
-				 * here causes double-free.  We therefore skip the
-				 * destroy and leak this (tiny) handle; under a
-				 * flapping broker the leak accumulates one handle
-				 * per cycle.  Safe reclaim needs live-broker
-				 * validation of the teardown timing and stays
-				 * deferred -- but count the skip so the leak rate
-				 * is visible in nats_cdb_stats and can be alerted
-				 * on. */
-				if (nats_pool_is_connected())
-					nats_dl.kvWatcher_Destroy(w_claim);
-				else
-					NATS_CDB_STATS_INC(watcher_handle_leaks);
+				/* Destroy unconditionally.  The old code skipped
+				 * this when the broker was down (suspected
+				 * double-free against nats.c's I/O thread) and
+				 * leaked one handle per flap cycle into
+				 * watcher_handle_leaks.  The suspicion was
+				 * refuted live: 10 SIGKILL broker-flap cycles,
+				 * Stop+Destroy on a disconnected connection with
+				 * the reconnect thread running, ASan-clean on the
+				 * pinned libnats (watcher_destroy_spike.c in the
+				 * design repo).  nats.c refcounts the underlying
+				 * subscription, so user-thread Destroy is safe in
+				 * any connection state. */
+				nats_dl.kvWatcher_Destroy(w_claim);
 			}
 		}
 
