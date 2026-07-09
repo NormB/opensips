@@ -86,6 +86,16 @@ jobs:
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
 
     steps:
+      # Bare ubuntu:24.04 container: actions/checkout needs git in PATH
+      # or it falls back to the REST download, which hard-errors on the
+      # submodules input.  Bootstrap git BEFORE checkout; the rest of
+      # the deps (and install_libnats.sh, which lives in the repo) come
+      # after it.
+      - name: Bootstrap git for checkout
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -98,10 +108,8 @@ jobs:
           # install_libnats.sh builds the ONE pinned nats.c SHA every CI
           # leg shares (P5.1); LIBNATS_TLS=ON for dev-env parity.  The
           # container runs as root, so SUDO stays empty.
-          apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libuv1-dev cmake \
-            git ca-certificates wget
+            build-essential pkg-config libssl-dev libuv1-dev cmake wget
           LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
 
       - name: Lint — no unredacted URLs in log calls
@@ -109,6 +117,9 @@ jobs:
 
       - name: Lint — no raw KV row keys (AoRs) in log calls
         run: ./lib/nats/tests/lint_key_redaction.sh
+
+      - name: Strict-gate selftest (skip-vs-fail contract)
+        run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
 
       - name: Build NATS module .o files (needed by lib/nats unit tests)
         run: |
