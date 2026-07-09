@@ -69,6 +69,11 @@ int main(void)
 			"poison cap global defined");
 		ASSERT(file_contains(c, "\"poison_max_deliver\""),
 			"poison_max_deliver modparam registered");
+		/* the backstop must be ON by default: a poison message on a
+		 * handle left at the unlimited JetStream default would
+		 * otherwise wedge that handle forever (spec: default 20). */
+		ASSERT(file_contains(c, "int nats_consumer_poison_max_deliver = 20"),
+			"poison cap defaults to a non-zero backstop (20)");
 	}
 
 	/* ---- per-handle counter declared ---------------------------- */

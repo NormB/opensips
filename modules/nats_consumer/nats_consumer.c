@@ -293,8 +293,8 @@ int nats_consumer_fetch_timeout_ms = 1000;
  * forever, with no dead-letter -- one poison message can wedge a handle.
  * When this is > 0 the consumer Terms any message whose NumDelivered
  * exceeds it (a dead-letter backstop) and bumps the per-handle `poisoned`
- * counter.  Default 0 = off (unchanged unlimited-redelivery behaviour). */
-int nats_consumer_poison_max_deliver = 0;
+ * counter.  0 disables the backstop (unlimited redelivery). */
+int nats_consumer_poison_max_deliver = 20;
 
 /* Outbound header name used to carry the per-call UUIDv7
  * correlation id auto-minted by both the sync and async

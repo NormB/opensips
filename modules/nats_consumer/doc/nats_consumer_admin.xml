@@ -422,8 +422,9 @@ nats_consumer_bind("id=rpc;stream=API;durable=rpc;
             </para>
             <para>
                 <emphasis>Default value:</emphasis>
-                <varname>0</varname> (disabled -- unlimited
-                broker-paced redelivery, unchanged from prior releases)
+                <varname>20</varname>.  Set to <varname>0</varname> to
+                disable the backstop (unlimited broker-paced
+                redelivery).
             </para>
             <example>
                 <title>Dead-letter a message after 20 failed deliveries</title>
