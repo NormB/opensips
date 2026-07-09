@@ -115,6 +115,19 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long reap_last_active;     /* would-be-served contacts */
 	_Atomic unsigned long reap_last_permanent;  /* permanent contacts       */
 	_Atomic unsigned long reap_last_due;        /* rows past their slack    */
+	/* [TTL-BELOW-MARKER, Tier-2] canary observability (single writer:
+	 * the reaper process' slot, like the reap_last_* gauges, so the
+	 * cross-slot SUM yields the plain value):
+	 *   tbm_probe_state     pool probe -1/0/1 stored +1 (0 = unprobed,
+	 *                       1 = unsupported, 2 = supported)
+	 *   tbm_canary_verdict  0 = none yet, 1 = honored, 2 = broken
+	 *   tbm_canary_last     epoch of the last verdict
+	 *   tbm_canary_failures counter of SURVIVED (broken) verdicts --
+	 *                       history survives a later recovery. */
+	_Atomic unsigned long tbm_probe_state;
+	_Atomic unsigned long tbm_canary_verdict;
+	_Atomic unsigned long tbm_canary_last;
+	_Atomic unsigned long tbm_canary_failures;
 } __attribute__((aligned(64))) nats_cdb_stats_t;
 
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */

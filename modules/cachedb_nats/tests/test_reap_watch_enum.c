@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * nats_reap_enum_bucket(): the reaper's value-carrying watch pass.
+ * nats_kv_enum_live_values(): the reaper's value-carrying watch pass.
  * Bench-measured motivation (2026-07-07, 30k AoRs): the previous
  * kvStore_Keys() + per-key kvStore_Get() enumeration issues O(bucket)
  * synchronous round trips per tick and drags REGISTER p99/max from
@@ -173,7 +173,7 @@ int main(void)
 	S.next_rc[1] = NATS_OK; S.next_entry[1] = FAKE_ENTRY(1);
 	S.next_rc[2] = NATS_OK; S.next_entry[2] = FAKE_ENTRY(2);
 	S.next_rc[3] = NATS_OK; S.next_entry[3] = NULL;   /* sentinel */
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
 	CHECK(rc == 3, "returns visit count 3");
 	CHECK(V.calls == 3, "callback ran exactly 3 times");
 	CHECK(V.seen[0] == FAKE_ENTRY(0) && V.seen[1] == FAKE_ENTRY(1)
@@ -189,7 +189,7 @@ int main(void)
 	printf("== empty bucket: sentinel first ==\n");
 	reset_all();
 	S.next_rc[0] = NATS_OK; S.next_entry[0] = NULL;
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
 	CHECK(rc == 0, "empty bucket returns 0");
 	CHECK(V.calls == 0, "callback never ran");
 	CHECK(S.stop_calls == 1 && S.destroy_calls == 1,
@@ -198,16 +198,16 @@ int main(void)
 	printf("== WatchAll failure ==\n");
 	reset_all();
 	S.watchall_rc = NATS_ERR;
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EWATCH, "EWATCH on WatchAll failure");
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EWATCH, "EWATCH on WatchAll failure");
 	CHECK(V.calls == 0 && S.next_calls == 0, "nothing consumed");
 	CHECK(S.destroy_calls == 0, "no watcher to destroy");
 
 	printf("== WatchAll NATS_OK but NULL watcher ==\n");
 	reset_all();
 	S.watchall_out = NULL;
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EWATCH, "EWATCH on NULL watcher");
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EWATCH, "EWATCH on NULL watcher");
 	CHECK(S.next_calls == 0, "Next never called on NULL watcher");
 
 	printf("== Next timeout mid-pass ==\n");
@@ -215,8 +215,8 @@ int main(void)
 	S.next_rc[0] = NATS_OK; S.next_entry[0] = FAKE_ENTRY(0);
 	S.next_rc[1] = NATS_OK; S.next_entry[1] = FAKE_ENTRY(1);
 	S.next_rc[2] = NATS_TIMEOUT; S.next_entry[2] = NULL;
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_ENEXT, "ENEXT on mid-pass timeout");
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_ENEXT, "ENEXT on mid-pass timeout");
 	CHECK(V.calls == 2, "entries before the failure were visited");
 	CHECK(S.entry_destroys == 2, "and destroyed");
 	CHECK(S.stop_calls == 1 && S.destroy_calls == 1,
@@ -228,8 +228,8 @@ int main(void)
 	S.next_rc[0] = NATS_OK; S.next_entry[0] = FAKE_ENTRY(0);
 	S.next_rc[1] = NATS_OK; S.next_entry[1] = FAKE_ENTRY(1);
 	S.next_rc[2] = NATS_OK; S.next_entry[2] = FAKE_ENTRY(2);
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EABORT, "EABORT when callback aborts");
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EABORT, "EABORT when callback aborts");
 	CHECK(V.calls == 2, "no visits past the abort");
 	CHECK(S.entry_destroys == 2,
 	      "the aborting call's entry is still destroyed");
@@ -238,14 +238,14 @@ int main(void)
 
 	printf("== argument guards ==\n");
 	reset_all();
-	rc = nats_reap_enum_bucket(NULL, 5000, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EARG, "NULL kv -> EARG");
-	rc = nats_reap_enum_bucket(FAKE_KV, 5000, NULL, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EARG, "NULL cb -> EARG");
-	rc = nats_reap_enum_bucket(FAKE_KV, 0, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EARG, "timeout 0 -> EARG");
-	rc = nats_reap_enum_bucket(FAKE_KV, -5, spy_cb, NULL);
-	CHECK(rc == NATS_REAP_ENUM_EARG, "negative timeout -> EARG");
+	rc = nats_kv_enum_live_values(NULL, 5000, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EARG, "NULL kv -> EARG");
+	rc = nats_kv_enum_live_values(FAKE_KV, 5000, NULL, NULL);
+	CHECK(rc == NATS_KV_ENUM_EARG, "NULL cb -> EARG");
+	rc = nats_kv_enum_live_values(FAKE_KV, 0, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EARG, "timeout 0 -> EARG");
+	rc = nats_kv_enum_live_values(FAKE_KV, -5, spy_cb, NULL);
+	CHECK(rc == NATS_KV_ENUM_EARG, "negative timeout -> EARG");
 	CHECK(S.watchall_calls == 0 && S.next_calls == 0,
 	      "guards fire before any libnats call");
 

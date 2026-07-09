@@ -44,6 +44,7 @@
 #include "cachedb_nats_fmt.h"
 #include "cachedb_nats_emit.h"
 #include "cachedb_nats_reg.h"
+#include "cachedb_nats_reap_enum.h"
 
 extern char *fts_json_prefix;            /* cachedb_nats.c                   */
 extern int   fts_json_prefix_len;        /* [P3.6] cached at mod_init        */
@@ -420,89 +421,94 @@ struct reg_scan_totals {
 /* cb returns 0 to continue, -1 to abort (OOM etc.) */
 typedef int (*reg_row_cb)(const struct reg_row_info *ri, void *arg);
 
+/* per-pass context threaded through nats_kv_enum_live_values() */
+struct _reg_enum_pass {
+	reg_row_cb cb;
+	void *arg;
+	struct reg_scan_totals *tot;
+	time_t now;
+	const char *ua_nee, *ct_nee;
+	int ua_len, ct_len;
+	int prefix_len;
+};
+
+/* Per-entry visitor: the same decision ladder the old Keys+Get loop
+ * had, minus the per-key round trip.  The entry is owned by the
+ * enumerator (destroyed after return). */
+static int _reg_enum_entry(kvEntry *e, void *arg)
+{
+	struct _reg_enum_pass *p = arg;
+	const char *key = nats_dl.kvEntry_Key(e);
+	const char *val;
+	int vlen;
+	struct reg_row_info ri;
+
+	if (!key)
+		return 0;
+	if (p->prefix_len &&
+	    strncmp(key, fts_json_prefix, p->prefix_len) != 0)
+		return 0;
+	p->tot->keys++;
+	val = nats_dl.kvEntry_ValueString(e);
+	vlen = nats_dl.kvEntry_ValueLen(e);
+	if (!val || vlen <= 0)
+		return 0;   /* defensive: IgnoreDeletes filters markers */
+	if (_reg_row_scan(val, vlen, p->now, nats_reap_grace,
+			p->ua_nee, p->ua_len, p->ct_nee, p->ct_len, &ri) != 0) {
+		p->tot->other++;
+		return 0;
+	}
+	p->tot->rows++;
+	p->tot->contacts  += ri.n_contacts;
+	p->tot->active    += ri.n_active;
+	p->tot->expired   += ri.n_expired;
+	p->tot->permanent += ri.n_perm;
+	if (ri.soonest_exp < p->tot->soonest)
+		p->tot->soonest = ri.soonest_exp;
+	if (p->cb && p->cb(&ri, p->arg) < 0)
+		return -1;
+	return 0;
+}
+
 static int _reg_scan_bucket(const struct reg_filter *f, reg_row_cb cb,
 	void *arg, struct reg_scan_totals *tot)
 {
 	kvStore *kv;
-	kvKeysList keys;
-	natsStatus s;
-	time_t now = time(NULL);
+	struct _reg_enum_pass p;
 	struct timespec t0, t1;
-	int i, prefix_len;
-	const char *ua_nee = NULL, *ct_nee = NULL;
-	int ua_len = 0, ct_len = 0;
+	int rc;
 
 	memset(tot, 0, sizeof(*tot));
 	tot->soonest = REG_NO_EXPIRY;
 
-	if (f && f->ua[0])      { ua_nee = f->ua; ua_len = (int)strlen(f->ua); }
-	if (f && f->contact[0]) { ct_nee = f->contact; ct_len = (int)strlen(f->contact); }
+	memset(&p, 0, sizeof(p));
+	p.cb = cb;
+	p.arg = arg;
+	p.tot = tot;
+	p.now = time(NULL);
+	if (f && f->ua[0])      { p.ua_nee = f->ua; p.ua_len = (int)strlen(f->ua); }
+	if (f && f->contact[0]) { p.ct_nee = f->contact; p.ct_len = (int)strlen(f->contact); }
 
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history, (int64_t)kv_ttl);
 	if (!kv)
 		return -1;
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	prefix_len = (fts_json_prefix && *fts_json_prefix)
+	p.prefix_len = (fts_json_prefix && *fts_json_prefix)
 		? fts_json_prefix_len : 0;
 
-	memset(&keys, 0, sizeof(keys));
-	s = nats_dl.kvStore_Keys(&keys, kv, NULL);
-	if (s == NATS_NOT_FOUND) {
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-		tot->ms = (t1.tv_sec - t0.tv_sec) * 1000
-			+ (t1.tv_nsec - t0.tv_nsec) / 1000000;
-		return 0;                       /* empty bucket */
-	}
-	if (s != NATS_OK)
-		return -1;
-
-	for (i = 0; i < keys.Count; i++) {
-		const char *key = keys.Keys[i];
-		kvEntry *e = NULL;
-		const char *val;
-		int vlen;
-		struct reg_row_info ri;
-
-		if (!key)
-			continue;
-		if (prefix_len && strncmp(key, fts_json_prefix, prefix_len) != 0)
-			continue;
-		tot->keys++;
-		if (nats_dl.kvStore_Get(&e, kv, key) != NATS_OK)
-			continue;                   /* vanished mid-scan */
-		val = nats_dl.kvEntry_ValueString(e);
-		vlen = nats_dl.kvEntry_ValueLen(e);
-		if (!val || vlen <= 0) {
-			nats_dl.kvEntry_Destroy(e);
-			continue;                   /* delete marker */
-		}
-		if (_reg_row_scan(val, vlen, now, nats_reap_grace,
-				ua_nee, ua_len, ct_nee, ct_len, &ri) != 0) {
-			tot->other++;
-			nats_dl.kvEntry_Destroy(e);
-			continue;
-		}
-		tot->rows++;
-		tot->contacts  += ri.n_contacts;
-		tot->active    += ri.n_active;
-		tot->expired   += ri.n_expired;
-		tot->permanent += ri.n_perm;
-		if (ri.soonest_exp < tot->soonest)
-			tot->soonest = ri.soonest_exp;
-		if (cb && cb(&ri, arg) < 0) {
-			nats_dl.kvEntry_Destroy(e);
-			nats_dl.kvKeysList_Destroy(&keys);
-			return -1;
-		}
-		nats_dl.kvEntry_Destroy(e);
-	}
-	nats_dl.kvKeysList_Destroy(&keys);
+	/* One value-carrying watch pass over the live keys -- the same
+	 * enumeration the reaper uses.  The old kvStore_Keys() + per-key
+	 * kvStore_Get() issued O(bucket) synchronous round trips, which
+	 * is exactly what an operator must not pay for running
+	 * nats_reg_summary mid-incident on a large deployment. */
+	rc = nats_kv_enum_live_values(kv, NATS_KV_ENUM_NEXT_TIMEOUT_MS,
+			_reg_enum_entry, &p);
 
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	tot->ms = (t1.tv_sec - t0.tv_sec) * 1000
 		+ (t1.tv_nsec - t0.tv_nsec) / 1000000;
-	return 0;
+	return rc < 0 ? -1 : 0;
 }
 
 /* ---- nats_reg_summary --------------------------------------------- */

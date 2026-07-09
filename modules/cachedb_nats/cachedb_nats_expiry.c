@@ -635,7 +635,7 @@ static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
 	return -1;
 }
 
-/* Per-pass context threaded through nats_reap_enum_bucket(). */
+/* Per-pass context threaded through nats_kv_enum_live_values(). */
 struct reap_pass_ctx {
 	kvStore *kv;
 	jsCtx *js;
@@ -735,7 +735,7 @@ static int _reap_pass_entry(kvEntry *e, void *arg)
  * handle means the broker is down and we skip just this pass.
  *
  * Independent of the search index [REV-17]: enumeration is ONE
- * value-carrying watch pass (nats_reap_enum_bucket), so the reaper works
+ * value-carrying watch pass (nats_kv_enum_live_values), so the reaper works
  * with enable_search_index=0.  The watch pass replaced the previous
  * kvStore_Keys() + per-key kvStore_Get() sweep: that pattern issued
  * O(bucket) synchronous round trips per tick, and the 30k-AoR bench
@@ -777,7 +777,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	c.prefix_len = (fts_json_prefix && *fts_json_prefix)
 		? fts_json_prefix_len : 0;
 
-	rc = nats_reap_enum_bucket(kv, NATS_REAP_ENUM_NEXT_TIMEOUT_MS,
+	rc = nats_kv_enum_live_values(kv, NATS_KV_ENUM_NEXT_TIMEOUT_MS,
 		_reap_pass_entry, &c);
 	if (rc < 0)
 		/* watch create failed or the pass ended early (broker stall):
@@ -841,6 +841,10 @@ static void _ttl_canary_arm(void)
 		(int64_t)kv_ttl);
 	if (!kv)
 		return;                       /* broker down: nothing to verify */
+	/* surface the probe outcome (gauge encoding: pool -1/0/1 -> +1) even
+	 * when it means no canary will be armed */
+	NATS_CDB_STATS_SET(tbm_probe_state,
+		(unsigned long)(nats_pool_kv_ttl_below_marker_state() + 1));
 	if (nats_pool_kv_ttl_below_marker_state() != 1)
 		return;                       /* probe says unsupported: no canary */
 	/* A non-usrloc doc: the reap projector classifies it "not a usrloc
@@ -873,12 +877,20 @@ static void _ttl_canary_check(time_t now)
 		nats_dl.kvEntry_Destroy(e);
 		nats_dl.kvStore_Delete(kv, NATS_TTL_CANARY_KEY);
 		nats_pool_kv_ttl_below_marker_mark_broken();
+		NATS_CDB_STATS_SET(tbm_canary_verdict, 2);
+		NATS_CDB_STATS_SET(tbm_canary_last, (unsigned long)now);
+		NATS_CDB_STATS_INC(tbm_canary_failures);
+		/* the latch is broken now: refresh the probe gauge too */
+		NATS_CDB_STATS_SET(tbm_probe_state,
+			(unsigned long)(nats_pool_kv_ttl_below_marker_state() + 1));
 		LM_WARN("cachedb_nats: TTL canary SURVIVED its %d ms TTL -- the "
 			"broker accepted allow_msg_ttl_below_marker but does not "
 			"honor per-key TTLs (libnats build/runtime skew?); native "
 			"TTL writes disabled in this process, the reaper stays "
 			"authoritative\n", NATS_TTL_CANARY_TTL_MS);
 	} else {
+		NATS_CDB_STATS_SET(tbm_canary_verdict, 1);
+		NATS_CDB_STATS_SET(tbm_canary_last, (unsigned long)now);
 		LM_INFO("cachedb_nats: TTL canary verified -- broker honors "
 			"per-key TTLs below the marker TTL (native expiry active, "
 			"reaper as backstop)\n");

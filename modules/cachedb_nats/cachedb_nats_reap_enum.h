@@ -17,8 +17,8 @@
  * ordered-consumer drain: no per-key round trips at all.
  */
 
-#ifndef CACHEDB_NATS_REAP_ENUM_H
-#define CACHEDB_NATS_REAP_ENUM_H
+#ifndef CACHEDB_NATS_KV_ENUM_H
+#define CACHEDB_NATS_KV_ENUM_H
 
 #include <stdint.h>
 #include <nats/nats.h>
@@ -26,13 +26,13 @@
 /* Per-entry wait budget the reaper hands to kvWatcher_Next().  Big
  * enough to ride out a flow-control pause, small enough that a dead
  * broker ends the pass promptly (the next tick rescans). */
-#define NATS_REAP_ENUM_NEXT_TIMEOUT_MS  5000
+#define NATS_KV_ENUM_NEXT_TIMEOUT_MS  5000
 
 /* Return codes (all < 0; success returns the visit count >= 0). */
-#define NATS_REAP_ENUM_EARG    (-1)  /* bad arguments */
-#define NATS_REAP_ENUM_EWATCH  (-2)  /* WatchAll create failed */
-#define NATS_REAP_ENUM_ENEXT   (-3)  /* Next failed/timed out mid-pass */
-#define NATS_REAP_ENUM_EABORT  (-4)  /* callback asked to abort */
+#define NATS_KV_ENUM_EARG    (-1)  /* bad arguments */
+#define NATS_KV_ENUM_EWATCH  (-2)  /* WatchAll create failed */
+#define NATS_KV_ENUM_ENEXT   (-3)  /* Next failed/timed out mid-pass */
+#define NATS_KV_ENUM_EABORT  (-4)  /* callback asked to abort */
 
 /*
  * Per-entry callback.  Runs once for every live key's LATEST revision
@@ -41,24 +41,31 @@
  * destroy it, do not keep pointers into it past the return.
  * Return >= 0 to continue the pass, < 0 to abort it.
  */
-typedef int (*nats_reap_enum_cb_f)(kvEntry *entry, void *arg);
+typedef int (*nats_kv_enum_cb_f)(kvEntry *entry, void *arg);
 
 /*
- * nats_reap_enum_bucket() -- drain one full initial watch pass.
+ * nats_kv_enum_live_values() -- drain one full initial watch pass.
+ *
+ * Shared live-value enumeration: one kvStore_WatchAll pass with
+ * IgnoreDeletes and values riding along, replacing the O(bucket)
+ * kvStore_Keys() + per-key kvStore_Get() round-trip pattern.  Users:
+ * the reaper tick (cachedb_nats_expiry.c) and the registration MI
+ * scan (cachedb_nats_reg.c).  (Named nats_reap_enum_bucket until the
+ * MI scan was converted; the file keeps its original name.)
  *
  * @kv               bucket handle (from nats_pool_get_kv()).
  * @next_timeout_ms  per-entry wait budget handed to kvWatcher_Next();
  *                   must be > 0.  A broker stall longer than this ends
- *                   the pass with NATS_REAP_ENUM_ENEXT (the next tick
+ *                   the pass with NATS_KV_ENUM_ENEXT (the next tick
  *                   simply rescans -- the reaper is idempotent).
  * @cb / @arg        per-entry visitor.
  *
  * Returns the number of entries visited (>= 0), or one of the
- * NATS_REAP_ENUM_E* codes above.  The end of the initial data set is
+ * NATS_KV_ENUM_E* codes above.  The end of the initial data set is
  * signalled by libnats delivering a NULL entry from kvWatcher_Next();
  * the enumerator stops there -- live updates are never consumed.
  */
-int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
-		nats_reap_enum_cb_f cb, void *arg);
+int nats_kv_enum_live_values(kvStore *kv, int64_t next_timeout_ms,
+		nats_kv_enum_cb_f cb, void *arg);
 
-#endif /* CACHEDB_NATS_REAP_ENUM_H */
+#endif /* CACHEDB_NATS_KV_ENUM_H */

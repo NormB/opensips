@@ -118,6 +118,13 @@ int kv_replicas = 3;
  * consumers, accepting reaper-only (scan-based) expiry. */
 int kv_history = 1;
 int kv_ttl = 0;
+/* [SPEC §11 / REV-24] strict security mode: FAIL init instead of
+ * warning.  Both default 0 -- the warn-only default is dev/lab
+ * ergonomics (the usual lab broker is plaintext, no auth) and generic
+ * non-PII cachedb use, not compatibility; a usrloc production profile
+ * sets both to 1 (see the admin docs). */
+int require_secure_url = 0;
+int require_usrloc_safe_bucket = 0;
 /* [TTL-BELOW-MARKER] request the fork nats-server's
  * allow_msg_ttl_below_marker option on bucket creation, so per-key TTLs
  * shorter than the marker TTL are honored on History>1 buckets (the
@@ -299,6 +306,8 @@ static const param_export_t params[] = {
 	{"kv_history",     INT_PARAM,                 &kv_history},
 	{"kv_ttl",         INT_PARAM,                 &kv_ttl},
 	{"kv_ttl_below_marker", INT_PARAM,            &kv_ttl_below_marker},
+	{"require_secure_url",  INT_PARAM,            &require_secure_url},
+	{"require_usrloc_safe_bucket", INT_PARAM,     &require_usrloc_safe_bucket},
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
 	/* Shared lib/nats shutdown drain timeout, ms (ONE pool value; see
@@ -653,6 +662,14 @@ static int init_pool(void)
 			char _redacted_url[512];
 			nats_redact_url(url_to_use, _redacted_url,
 				sizeof(_redacted_url));
+			if (require_secure_url) {
+				LM_ERR("cachedb_nats: connection URL '%s' is INSECURE "
+					"for a PII/lawful-intercept store and "
+					"require_secure_url=1 -- refusing to start. Use "
+					"tls:// with an authenticated account (SPEC \xc2\xa7""11 "
+					"[REV-24])\n", _redacted_url);
+				return -1;
+			}
 			LM_WARN("cachedb_nats: connection URL '%s' is INSECURE for a "
 				"PII/lawful-intercept store (subscriber IP, user-agent, "
 				"call-id, path) — use tls:// with an authenticated account "
@@ -860,12 +877,23 @@ static int child_init(int rank)
 	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
 	 * (expires==0).  Detect it once (rank 1) and WARN loudly with the
 	 * remediation -- the documented migration policy, never a silent expiry.
-	 * WARN (not refuse) so a generic cachedb_nats TTL-cache user is not broken;
+	 * WARN (not refuse) by default so a generic cachedb_nats TTL-cache user
+	 * is not broken; require_usrloc_safe_bucket=1 makes it fail closed --
 	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
 	if (rank == 1) {
 		int64_t maxage_ns = 0, mmps = 0;
 		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
 				_kv_legacy_bucket_maxage_warn(maxage_ns)) {
+			if (require_usrloc_safe_bucket) {
+				LM_ERR("cachedb_nats: bound bucket '%s' has a non-zero "
+					"backing-stream MaxAge (%lld ns) and "
+					"require_usrloc_safe_bucket=1 -- refusing to start "
+					"(it would SILENTLY EXPIRE permanent contacts). "
+					"Recreate the bucket with MaxAge=0 (kv_ttl=0) and "
+					"migrate [REV-25].\n",
+					kv_bucket, (long long)maxage_ns);
+				return -1;
+			}
 			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
 				"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
 				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "

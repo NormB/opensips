@@ -14,8 +14,8 @@
 #include "../../lib/nats/nats_dl.h"
 #include "cachedb_nats_reap_enum.h"
 
-int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
-		nats_reap_enum_cb_f cb, void *arg)
+int nats_kv_enum_live_values(kvStore *kv, int64_t next_timeout_ms,
+		nats_kv_enum_cb_f cb, void *arg)
 {
 	kvWatchOptions opts;
 	kvWatcher *w = NULL;
@@ -24,7 +24,7 @@ int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
 	int visited = 0, rc;
 
 	if (!kv || !cb || next_timeout_ms <= 0)
-		return NATS_REAP_ENUM_EARG;
+		return NATS_KV_ENUM_EARG;
 
 	nats_dl.kvWatchOptions_Init(&opts);
 	/* parity with the kvStore_Keys() enumeration this replaces: live
@@ -36,7 +36,7 @@ int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
 	if (s != NATS_OK || !w) {
 		LM_DBG("reap enum: kvStore_WatchAll failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
-		return NATS_REAP_ENUM_EWATCH;
+		return NATS_KV_ENUM_EWATCH;
 	}
 
 	for (;;) {
@@ -48,7 +48,7 @@ int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
 				nats_dl.natsStatus_GetText(s));
 			nats_dl.kvWatcher_Stop(w);
 			nats_dl.kvWatcher_Destroy(w);
-			return NATS_REAP_ENUM_ENEXT;
+			return NATS_KV_ENUM_ENEXT;
 		}
 		if (!e)
 			break;   /* initial-data sentinel: bucket enumerated */
@@ -58,7 +58,7 @@ int nats_reap_enum_bucket(kvStore *kv, int64_t next_timeout_ms,
 		if (rc < 0) {
 			nats_dl.kvWatcher_Stop(w);
 			nats_dl.kvWatcher_Destroy(w);
-			return NATS_REAP_ENUM_EABORT;
+			return NATS_KV_ENUM_EABORT;
 		}
 	}
 

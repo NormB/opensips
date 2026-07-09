@@ -411,6 +411,66 @@ modparam("cachedb_nats", "kv_ttl_below_marker", 1)
 	</example>
 	</section>
 
+	<section id="param_require_secure_url" xreflabel="require_secure_url">
+	<title><varname>require_secure_url</varname> (integer)</title>
+	<para>
+		Strict security mode for the connection URL.  The registration
+		bucket is a PII / lawful-intercept-relevant store (subscriber
+		IP, user-agent, call-id, path) and NATS KV has no per-key ACL,
+		so a plaintext <varname>nats://</varname> URL or one without
+		credentials always draws a loud startup warning.  With this set
+		to <varname>1</varname> the module <emphasis>refuses to
+		start</emphasis> instead: use <varname>tls://</varname> with an
+		authenticated account and one bucket per trust domain.
+	</para>
+	<para>
+		Recommended <emphasis>usrloc production profile</emphasis>:
+		<varname>require_secure_url=1</varname> together with
+		<varname>require_usrloc_safe_bucket=1</varname>.  The default
+		stays <varname>0</varname> for lab / development brokers and
+		for generic (non-PII) cachedb use.
+	</para>
+	<para>
+		<emphasis>Default value:</emphasis> <varname>0</varname>
+		(warn only).
+	</para>
+	<example>
+	<title>Set <varname>require_secure_url</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "require_secure_url", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
+	<section id="param_require_usrloc_safe_bucket" xreflabel="require_usrloc_safe_bucket">
+	<title><varname>require_usrloc_safe_bucket</varname> (integer)</title>
+	<para>
+		Strict bucket-shape mode.  Binding to a pre-existing bucket
+		whose backing stream carries a non-zero <varname>MaxAge</varname>
+		would silently expire <emphasis>all</emphasis> keys, including
+		permanent contacts (<varname>expires==0</varname>); by default
+		this is detected once at startup and warned about loudly.  With
+		this set to <varname>1</varname> the module <emphasis>refuses to
+		start</emphasis> instead -- recreate the bucket with
+		<varname>MaxAge=0</varname> (<varname>kv_ttl=0</varname>) and
+		migrate, per the migration guide [REV-25].
+	</para>
+	<para>
+		<emphasis>Default value:</emphasis> <varname>0</varname>
+		(warn only).
+	</para>
+	<example>
+	<title>Set <varname>require_usrloc_safe_bucket</varname> parameter</title>
+	<programlisting format="linespecific">
+...
+modparam("cachedb_nats", "require_usrloc_safe_bucket", 1)
+...
+	</programlisting>
+	</example>
+	</section>
+
 	<section id="param_fts_json_prefix" xreflabel="fts_json_prefix">
 	<title><varname>fts_json_prefix</varname> (string)</title>
 	<para>
@@ -1642,7 +1702,12 @@ xlog("bucket info: $var(info)\n");
     "reap_last_contacts": 3,
     "reap_last_active": 3,
     "reap_last_permanent": 0,
-    "reap_last_due": 0
+    "reap_last_due": 0,
+    "tbm_requested": 1,
+    "tbm_probe_state": 2,
+    "tbm_canary_verdict": 1,
+    "tbm_canary_last": 1783008228,
+    "tbm_canary_failures": 0
 }
 	</programlisting>
 	</example>

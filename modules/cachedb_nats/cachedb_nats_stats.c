@@ -34,6 +34,7 @@
 #include "../../mi/mi.h"
 
 #include "cachedb_nats_stats.h"
+#include "cachedb_nats_dbase.h"   /* kv_ttl_below_marker */
 
 nats_cdb_stats_t *nats_cdb_stats = NULL;
 
@@ -158,6 +159,24 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 		goto error;
 	if (add_mi_number(resp_obj, MI_SSTR("reap_last_due"),
 		NATS_CDB_STATS_SUM(reap_last_due)) < 0)
+		goto error;
+	/* [TTL-BELOW-MARKER] canary observability: requested comes straight
+	 * from the modparam; the rest are reaper-slot gauges/counter (see
+	 * cachedb_nats_stats.h for the value encodings). */
+	if (add_mi_number(resp_obj, MI_SSTR("tbm_requested"),
+		kv_ttl_below_marker) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("tbm_probe_state"),
+		NATS_CDB_STATS_SUM(tbm_probe_state)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("tbm_canary_verdict"),
+		NATS_CDB_STATS_SUM(tbm_canary_verdict)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("tbm_canary_last"),
+		NATS_CDB_STATS_SUM(tbm_canary_last)) < 0)
+		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("tbm_canary_failures"),
+		NATS_CDB_STATS_SUM(tbm_canary_failures)) < 0)
 		goto error;
 
 	return resp;

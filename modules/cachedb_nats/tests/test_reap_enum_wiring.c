@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * Structural test: the reaper tick in cachedb_nats_expiry.c must
- * enumerate the bucket through nats_reap_enum_bucket() (one
+ * enumerate the bucket through nats_kv_enum_live_values() (one
  * value-carrying watch pass) and must NOT use the old
  * kvStore_Keys() + per-key kvStore_Get() pattern -- the O(bucket)
  * synchronous GET storm measured at 27-88 ms REGISTER p99/max
@@ -63,8 +63,8 @@ int main(void)
 
 	ASSERT(strstr(src, "#include \"cachedb_nats_reap_enum.h\"") != NULL,
 		"expiry.c includes cachedb_nats_reap_enum.h");
-	ASSERT(count(src, "nats_reap_enum_bucket(") >= 1,
-		"reaper tick enumerates via nats_reap_enum_bucket()");
+	ASSERT(count(src, "nats_kv_enum_live_values(") >= 1,
+		"reaper tick enumerates via nats_kv_enum_live_values()");
 	ASSERT(count(src, "nats_dl.kvStore_Keys(") == 0,
 		"no kvStore_Keys() enumeration left");
 	/* The reap SWEEP must issue zero per-key Gets (the watch pass carries
