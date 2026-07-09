@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P2.7 / SPEC.md §4.1-step-4 [REV-21 + REV-1]: skew-safe write-side hygiene.
  *
@@ -45,9 +59,9 @@ static int _contact_is_expired(int64_t expires, long now, int grace)
 }
 
 /* ─── carried copy: JSON walkers + minimal sink ─────────────────── */
-static const char *_skip_ws(const char *p, const char *end)
+static const char *cdbn_skip_ws(const char *p, const char *end)
 { while (p < end && (*p==' '||*p=='\t'||*p=='\n'||*p=='\r')) p++; return p; }
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -57,10 +71,10 @@ static const char *_parse_json_string(const char *p, const char *end,
 	if (p >= end) return NULL;
 	*out = start; *out_len = (int)(p - start); return p + 1;
 }
-static const char *_skip_json_value(const char *p, const char *end)
+static const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end) return NULL;
 	switch (*p) {
 	case '"':
@@ -82,47 +96,47 @@ static const char *_skip_json_value(const char *p, const char *end)
 	}
 }
 typedef struct { char *buf; int len; int cap; int oom; } json_sink_t;
-static int _sink_init(json_sink_t *s, int n){ s->buf=malloc(n>0?n:16); if(!s->buf)return -1; s->len=0; s->cap=n>0?n:16; s->oom=0; return 0; }
+static int cdbn_sink_init(json_sink_t *s, int n){ s->buf=malloc(n>0?n:16); if(!s->buf)return -1; s->len=0; s->cap=n>0?n:16; s->oom=0; return 0; }
 static int _sink_grow(json_sink_t *s,int need){ int c=s->cap; char *b; while(c-s->len<need)c*=2; b=realloc(s->buf,c); if(!b){s->oom=1;return -1;} s->buf=b; s->cap=c; return 0; }
-static int _sink_write(json_sink_t *s,const char *p,int n){ if(s->oom)return -1; if(s->cap-s->len<n&&_sink_grow(s,n)<0)return -1; memcpy(s->buf+s->len,p,n); s->len+=n; return 0; }
-static int _sink_putc(json_sink_t *s,char c){ return _sink_write(s,&c,1); }
-static int _sink_emit_raw_string(json_sink_t *s,const char *p,int n){ if(_sink_putc(s,'"')<0)return -1; if(_sink_write(s,p,n)<0)return -1; return _sink_putc(s,'"'); }
-static char *_sink_take(json_sink_t *s,int *out_len){ if(s->oom){free(s->buf);return NULL;} if(_sink_putc(s,'\0')<0)return NULL; if(out_len)*out_len=s->len-1; return s->buf; }
+static int cdbn_sink_write(json_sink_t *s,const char *p,int n){ if(s->oom)return -1; if(s->cap-s->len<n&&_sink_grow(s,n)<0)return -1; memcpy(s->buf+s->len,p,n); s->len+=n; return 0; }
+static int cdbn_sink_putc(json_sink_t *s,char c){ return cdbn_sink_write(s,&c,1); }
+static int cdbn_sink_emit_raw_string(json_sink_t *s,const char *p,int n){ if(cdbn_sink_putc(s,'"')<0)return -1; if(cdbn_sink_write(s,p,n)<0)return -1; return cdbn_sink_putc(s,'"'); }
+static char *cdbn_sink_take(json_sink_t *s,int *out_len){ if(s->oom){free(s->buf);return NULL;} if(cdbn_sink_putc(s,'\0')<0)return NULL; if(out_len)*out_len=s->len-1; return s->buf; }
 
 /* ─── carried copy: contacts-subkey removal (rowmeta TU) ─────────── */
 static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	const char **ids, const int *id_lens, int n_ids)
 {
-	const char *p = _skip_ws(cvs, cve), *end = cve;
+	const char *p = cdbn_skip_ws(cvs, cve), *end = cve;
 	int first = 1;
 	if (p >= end || *p != '{') return -1;
-	if (_sink_putc(s, '{') < 0) return -1;
+	if (cdbn_sink_putc(s, '{') < 0) return -1;
 	p++;
 	while (p < end) {
 		const char *name, *vs; int nlen, i, drop = 0;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) return -1;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) return -1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) return -1;
 		for (i = 0; i < n_ids; i++)
 			if (nlen == id_lens[i] && memcmp(name, ids[i], nlen) == 0) { drop = 1; break; }
 		if (drop) continue;
-		if (!first && _sink_putc(s, ',') < 0) return -1;
+		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
-		if (_sink_emit_raw_string(s, name, nlen) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
-		if (_sink_write(s, vs, (int)(p - vs)) < 0) return -1;
+		if (cdbn_sink_emit_raw_string(s, name, nlen) < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_write(s, vs, (int)(p - vs)) < 0) return -1;
 	}
-	if (_sink_putc(s, '}') < 0) return -1;
+	if (cdbn_sink_putc(s, '}') < 0) return -1;
 	return 0;
 }
 static char *_contacts_drop_subkeys(const char *json, int len,
@@ -133,38 +147,38 @@ static char *_contacts_drop_subkeys(const char *json, int len,
 	int first = 1;
 	if (!json || len <= 0) return NULL;
 	end = json + len;
-	p = _skip_ws(json, end);
+	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{') return NULL;
-	if (_sink_init(&s, len + 16) < 0) return NULL;
-	if (_sink_putc(&s, '{') < 0) goto fail;
+	if (cdbn_sink_init(&s, len + 16) < 0) return NULL;
+	if (cdbn_sink_putc(&s, '{') < 0) goto fail;
 	p++;
 	while (p < end) {
 		const char *name, *vs; int nlen;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) goto fail;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) goto fail;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') goto fail;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) goto fail;
-		if (!first && _sink_putc(&s, ',') < 0) goto fail;
+		if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
 		first = 0;
-		if (_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
-		if (_sink_putc(&s, ':') < 0) goto fail;
+		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
+		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
 			if (_emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
 		} else {
-			if (_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
+			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}
 	}
-	if (_sink_putc(&s, '}') < 0) goto fail;
-	return _sink_take(&s, out_len);
+	if (cdbn_sink_putc(&s, '}') < 0) goto fail;
+	return cdbn_sink_take(&s, out_len);
 fail:
 	free(s.buf); return NULL;
 }

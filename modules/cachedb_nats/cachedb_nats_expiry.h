@@ -55,7 +55,7 @@ enum ttl_cas_pred {
 /* @got_entry: kvStore_Get returned an entry (any @value_len, incl. 0 marker).
  * @entry_rev: that entry's kvEntry_Revision.  @head_seq: the subject's resolved
  * head sequence when !got_entry (0 if provably empty).  Sets *out_seq. */
-enum ttl_cas_pred _ttl_cas_predicate(int got_entry, int value_len,
+enum ttl_cas_pred cdbn_ttl_cas_predicate(int got_entry, int value_len,
 	uint64_t entry_rev, uint64_t head_seq, uint64_t *out_seq);
 
 /* ---- js_PublishMsg outcome classification (§2.2.1 [TREV-13]) ------ */
@@ -73,7 +73,7 @@ enum ttl_outcome {
 	TTL_RETRY      = 1,   /* CAS conflict (10071) — re-read + retry */
 	TTL_FAIL_SAVE  = 4,   /* broker down / unknown — non-2xx, client retries */
 };
-enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr);
+enum ttl_outcome cdbn_ttl_classify(enum ttl_pub_status st, int jerr);
 
 /* ---- delete / purge as a publish (§2.5) -------------------------- */
 #define NATS_KV_OP_HDR   "KV-Operation"
@@ -81,24 +81,24 @@ enum ttl_outcome _ttl_classify(enum ttl_pub_status st, int jerr);
 #define NATS_KV_OP_PURGE "PURGE"
 /* The KV-Operation value for a publish-delete: PURGE (drop history) when
  * @purge, else DEL (tombstone, keep history). */
-const char *_ttl_delete_op(int purge);
+const char *cdbn_ttl_delete_op(int purge);
 
 /* ---- startup guard + capability latch (§5.3 [REV-7], §6 [TREV-8]) -- */
 
 /* [REV-7] kv_ttl (bucket MaxAge) MUST be 0: a non-zero bucket TTL becomes
  * stream MaxAge, which caps per-key TTL and silently expires permanent
  * (expires==0) contacts.  Returns 0 if ok, -1 if the value must be refused. */
-int _kv_ttl_guard(int kv_ttl);
+int cdbn_kv_ttl_guard(int kv_ttl);
 
 /* P11b [REV-25]: policy for a PRE-EXISTING bucket already carrying a non-zero
- * backing-stream MaxAge (the _kv_ttl_guard modparam check only stops THIS module
+ * backing-stream MaxAge (the cdbn_kv_ttl_guard modparam check only stops THIS module
  * from creating one).  A non-zero MaxAge silently expires permanent (expires==0)
  * contacts.  @maxage_ns = bound stream MaxAge (ns).  Returns 1 if a startup WARN
  * is warranted (non-zero), 0 if clean (MaxAge==0). */
-int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns);
+int cdbn_kv_legacy_bucket_maxage_warn(int64_t maxage_ns);
 
 /* [D6/HREV-6] mod_init guard: 0 ok, -1 refuse. */
-int _linger_guard(int linger);          /* nats_expired_linger: 0..86400 */
+int cdbn_linger_guard(int linger);          /* nats_expired_linger: 0..86400 */
 
 /* ---- key -> JetStream subject (§2.1 [TREV-5]) -------------------- */
 
@@ -131,9 +131,9 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
  * uniform-expiry (mixed rows stay reaper-owned); the ms value floors at
  * the server's 1 s minimum so an already-expired-at-write row still
  * self-expires (RC-6). */
-int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry);
-int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace);
-int64_t _ttl_msgttl_ms(int64_t ttl_seconds);
+int cdbn_ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry);
+int64_t cdbn_ttl_seconds(int64_t row_exp, int64_t now, int grace);
+int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds);
 
 /* The §2.0 write entry point every row writer uses.  rev==0 is the "no
  * prior message" sentinel [HREV-2] (JetStream sequences are 1-based): the
@@ -175,7 +175,7 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
  * passes is nats_reap_grace + nats_expired_linger [HREV-3]: the skew margin
  * keeps the reaper from purging within S of an expiry, the linger keeps it
  * from defeating the operator's physical-retention window. */
-int _reap_row_due(int64_t row_exp, time_t now, int grace);
+int cdbn_reap_row_due(int64_t row_exp, time_t now, int grace);
 
 /* (§4.3A [REV-16/31]) What the reaper does with a due row after pruning its
  * expired contacts. */
@@ -183,14 +183,14 @@ enum reap_action {
 	REAP_WRITE_SURVIVORS = 0,   /* CAS survivor-write via nats_kv_put_row     */
 	REAP_DELETE_EMPTY    = 1,   /* CAS-guarded publish-delete (never blind)   */
 };
-enum reap_action _reap_row_action(int n_live_survivors);
+enum reap_action cdbn_reap_row_action(int n_live_survivors);
 
 /* (F2 [PREV-26/REV-2], extended [D6/HREV-6]) nats_reap_interval guard.
  * Returns 0 to start, -1 to refuse: interval <= 0 (reaper-off, TTL-only) is
  * unsupported unless the operator explicitly sets nats_unsafe_ttl_only (which
  * LM_WARNs #6959/#1994) -- and never supported with nats_native_ttl=0, which
  * would leave no expiry mechanism at all. */
-int _reap_interval_guard(int interval);
+int cdbn_reap_interval_guard(int interval);
 
 /* [P2.7] The reaper pass body (P9 host); the SINGLE expiry mechanism.
  * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main),

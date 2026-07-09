@@ -1,9 +1,23 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
  *
- * Registration-observability MI [OBS]: _reg_row_scan() -- one pass over a
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ *
+ * Registration-observability MI [OBS]: cdbn_reg_row_scan() -- one pass over a
  * stored usrloc row producing the per-AoR summary the MI commands (and the
  * reaper's piggybacked gauges) are built from:
  *
@@ -34,14 +48,14 @@
 
 /* ─── carried copies of the shared JSON walkers (json_index/rowmeta) ── */
 
-static const char *_skip_ws(const char *p, const char *end)
+static const char *cdbn_skip_ws(const char *p, const char *end)
 {
 	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 		p++;
 	return p;
 }
 
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -64,10 +78,10 @@ static const char *_parse_json_string(const char *p, const char *end,
 	return p + 1;
 }
 
-static const char *_skip_json_value(const char *p, const char *end)
+static const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end)
 		return NULL;
 	switch (*p) {
@@ -124,7 +138,7 @@ static const char *_json_parse_int64(const char *p, const char *end,
 	return p;
 }
 
-static int _reg_substr(const char *hay, int hlen, const char *nee, int nlen)
+static int cdbn_reg_substr(const char *hay, int hlen, const char *nee, int nlen)
 {
 	int i;
 	if (nlen <= 0 || nlen > hlen)
@@ -151,7 +165,7 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
 {
-	const char *p = _skip_ws(cs, ce);
+	const char *p = cdbn_skip_ws(cs, ce);
 	int64_t expires = -1, lm = 0;
 	int have_exp = 0;
 
@@ -170,16 +184,16 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 	while (p < ce) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		if (p >= ce || *p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, ce, &name, &nlen);
+		p = cdbn_parse_json_string(p, ce, &name, &nlen);
 		if (!p) { o->n_expired++; return; }     /* malformed: fail closed */
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		if (p >= ce || *p != ':') { o->n_expired++; return; }
 		p++;
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
@@ -192,16 +206,16 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 		} else if ((nlen == 2 && memcmp(name, "ua", 2) == 0) ||
 		           (nlen == 7 && memcmp(name, "contact", 7) == 0)) {
 			const char *sv; int svl;
-			if (*vs == '"' && _parse_json_string(vs, ce, &sv, &svl)) {
+			if (*vs == '"' && cdbn_parse_json_string(vs, ce, &sv, &svl)) {
 				if (nlen == 2 && ua_len &&
-				    _reg_substr(sv, svl, ua_nee, ua_len))
+				    cdbn_reg_substr(sv, svl, ua_nee, ua_len))
 					o->ua_hit = 1;
 				if (nlen == 7 && ct_len &&
-				    _reg_substr(sv, svl, ct_nee, ct_len))
+				    cdbn_reg_substr(sv, svl, ct_nee, ct_len))
 					o->ct_hit = 1;
 			}
 		}
-		p = _skip_json_value(p, ce);
+		p = cdbn_skip_json_value(p, ce);
 		if (!p) { o->n_expired++; return; }
 	}
 	if (!have_exp) {
@@ -224,7 +238,7 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 #endif
 }
 
-static int _reg_row_scan(const char *json, int len, time_t now, int grace,
+static int cdbn_reg_row_scan(const char *json, int len, time_t now, int grace,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
 {
@@ -234,33 +248,33 @@ static int _reg_row_scan(const char *json, int len, time_t now, int grace,
 	memset(o, 0, sizeof(*o));
 	o->soonest_exp = REG_NO_EXPIRY;
 
-	p = _skip_ws(json, end);
+	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{')
 		return -1;
 	p++;
 	while (p < end) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end)
 			return -1;
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p)
 			return -1;
 		if (nlen == 3 && memcmp(name, "aor", 3) == 0 && *vs == '"') {
-			_parse_json_string(vs, end, &o->aor, &o->aor_len);
+			cdbn_parse_json_string(vs, end, &o->aor, &o->aor_len);
 		} else if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
 			if (*vs != '{')
 				return -1;                     /* poison contacts: not a row */
@@ -271,25 +285,25 @@ static int _reg_row_scan(const char *json, int len, time_t now, int grace,
 		return -1;                             /* not a usrloc row */
 
 	/* walk the contacts object's members */
-	p = _skip_ws(c_vs, c_ve);
+	p = cdbn_skip_ws(c_vs, c_ve);
 	p++;                                       /* '{' */
 	while (p < c_ve) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve || *p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, c_ve, &name, &nlen);
+		p = cdbn_parse_json_string(p, c_ve, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		vs = p;
-		p = _skip_json_value(p, c_ve);
+		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
 		_reg_scan_contact(vs, p, now, grace,
@@ -327,7 +341,7 @@ int main(void)
 			"\"k3\":{\"contact\":\"sip:a@10.0.0.3:5060\",\"expires\":0,"
 			"\"last_mod\":999999}"
 			"},\"row_exp\":1000100,\"schema_version\":1}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == 0, "usrloc row recognized");
 		CHECK(o.aor_len == 17 && memcmp(o.aor, "alice@example.com", 17) == 0,
 			"aor slice extracted");
@@ -346,16 +360,16 @@ int main(void)
 			"{\"aor\":\"b@x\",\"contacts\":{"
 			"\"k1\":{\"expires\":1000100,\"ua\":\"evil\\\"quote agent\","
 			"\"contact\":\"sip:b@host;transport=tcp\"}}}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			"quote", 5, NULL, 0, &o) == 0 && o.ua_hit == 1,
 			"ua needle matches across an escaped quote (raw text match)");
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			"Yealink", 7, NULL, 0, &o) == 0 && o.ua_hit == 0,
 			"non-matching ua needle: no hit");
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, "transport=tcp", 13, &o) == 0 && o.ct_hit == 1,
 			"contact needle matches inside the URI ('=' in value)");
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, "callid", 6, &o) == 0 && o.ct_hit == 0,
 			"needles never match OTHER fields (no cross-field bleed)");
 	}
@@ -368,7 +382,7 @@ int main(void)
 			"\"k2\":{\"expires\":\"1000100\"},"
 			"\"k3\":7,"
 			"\"k4\":{\"expires\":1000100}}}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == 0, "row with poison members still scans");
 		CHECK(o.n_contacts == 4, "all 4 stored members counted");
 		CHECK(o.n_expired == 3,
@@ -384,7 +398,7 @@ int main(void)
 			"\"k1\":{\"expires\":999995},"
 			"\"k2\":{\"expires\":5000000000}}}";
 		/* k1: expires+grace == now exactly => expired (mirrors read filter) */
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == 0 &&
 			o.n_expired == 1 && o.n_active == 1,
 			"expires+grace==now boundary => expired");
@@ -394,26 +408,26 @@ int main(void)
 	printf("[OBS] empty / degenerate rows:\n");
 	{
 		const char *doc = "{\"aor\":\"e@x\",\"contacts\":{}}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == 0 &&
 			o.n_contacts == 0 && o.soonest_exp == REG_NO_EXPIRY,
 			"empty contacts: zero counts, no-expiry sentinel");
 	}
 	{
 		const char *doc = "{\"x\":1}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == -1,
 			"doc without contacts => NOT a usrloc row (-1, counted as other)");
 	}
 	{
 		const char *doc = "{\"aor\":\"f@x\",\"contacts\":[1,2]}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == -1,
 			"contacts not an object => refused, never guessed");
 	}
 	{
 		const char *doc = "not json at all";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			NULL, 0, NULL, 0, &o) == -1, "non-JSON => -1");
 	}
 
@@ -422,7 +436,7 @@ int main(void)
 		const char *doc =
 			"{\"aor\":\"g\\\\@x\",\"contacts\":{"
 			"\"k\\\\1\":{\"expires\":1000100,\"ua\":\"back\\\\slash\"}}}";
-		CHECK(_reg_row_scan(doc, (int)strlen(doc), NOW, G,
+		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
 			"back\\\\slash", 11, NULL, 0, &o) == 0 &&
 			o.n_active == 1 && o.ua_hit == 1,
 			"escaped backslashes in key/value do not derail the walk");

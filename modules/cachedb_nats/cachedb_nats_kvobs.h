@@ -47,8 +47,8 @@ struct kvobs_filter {
 };
 
 /* pure helpers, unit-locked in tests/test_kvobs_filter.c */
-int _kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f);
-int _kvobs_bucket_of_stream(const char *stream, int len,
+int cdbn_kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f);
+int cdbn_kvobs_bucket_of_stream(const char *stream, int len,
 	const char **bucket, int *blen);
 
 /* MI handlers (registered in cachedb_nats.c) */

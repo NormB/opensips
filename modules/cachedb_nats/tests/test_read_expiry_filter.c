@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P4 / SPEC.md §4.2 [REV-3 / REV-1 / REV-26]: read-side expiry filter.
  *
@@ -68,7 +82,7 @@ static struct tcontact *mk(const char *id, int has, int64_t exp)
 	c->id = id; c->has_expires = has; c->expires = exp;
 	return c;
 }
-/* carried copy of the filter surgery (mirrors _row_filter_expired_contacts). */
+/* carried copy of the filter surgery (mirrors cdbn_row_filter_expired_contacts). */
 static void filter(struct list_head *contacts, long now, int grace)
 {
 	struct list_head *pos, *tmp;

@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P2.2 / SPEC.md §4.1-step-2 [REV-8]: same-subkey merge ordering.
  *
@@ -14,10 +28,10 @@
  *
  * The decision engages ONLY when BOTH values carry a `cseq` (usrloc contacts).
  * For any other subkey (a non-usrloc cachedb_nats consumer, or a value that is
- * not a JSON object), _cseq_new_wins returns 1 → last-writer-wins, exactly the
+ * not a JSON object), cdbn_cseq_new_wins returns 1 → last-writer-wins, exactly the
  * generic merge's current behavior (so the existing merge tests are unaffected).
  *
- *   gcc -DCSEQ_CURRENT ... -> today: blind last-writer-wins (_cseq_new_wins
+ *   gcc -DCSEQ_CURRENT ... -> today: blind last-writer-wins (cdbn_cseq_new_wins
  *                             always 1) => RED (a stale write is NOT discarded).
  *   gcc ...               -> the FIXED ordering => GREEN.
  *
@@ -32,9 +46,9 @@
 #include <string.h>
 
 /* ─── carried copy: JSON walkers + int64 parse + field extractor ──── */
-static const char *_skip_ws(const char *p, const char *end)
+static const char *cdbn_skip_ws(const char *p, const char *end)
 { while (p < end && (*p==' '||*p=='\t'||*p=='\n'||*p=='\r')) p++; return p; }
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -44,10 +58,10 @@ static const char *_parse_json_string(const char *p, const char *end,
 	if (p >= end) return NULL;
 	*out = start; *out_len = (int)(p - start); return p + 1;
 }
-static const char *_skip_json_value(const char *p, const char *end)
+static const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end) return NULL;
 	switch (*p) {
 	case '"':
@@ -82,54 +96,54 @@ static const char *_json_parse_int64(const char *p, const char *end, int64_t *ou
 	}
 	*out = neg ? -(int64_t)mag : (int64_t)mag; return p;
 }
-static int _contact_field_int64(const char *vstart, const char *vend,
+static int cdbn_contact_field_int64(const char *vstart, const char *vend,
 	const char *fname, int flen, int64_t *out)
 {
-	const char *p = _skip_ws(vstart, vend);
+	const char *p = cdbn_skip_ws(vstart, vend);
 	if (p >= vend || *p != '{') return -1;
 	p++;
 	while (p < vend) {
 		const char *name, *vs; int nlen;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend) return -1;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, vend, &name, &nlen);
+		p = cdbn_parse_json_string(p, vend, &name, &nlen);
 		if (!p) return -1;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend || *p != ':') return -1;
 		p++;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v; if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
-		p = _skip_json_value(p, vend);
+		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;
 	}
 	return -1;
 }
 
 /* ─── carried copy: the ordering decision (rowmeta TU) ──────────── */
-static int _cseq_new_wins(const char *new_json, int new_len,
+static int cdbn_cseq_new_wins(const char *new_json, int new_len,
 	const char *old_json, int old_len)
 {
 #ifdef CSEQ_CURRENT
 	(void)new_json; (void)new_len; (void)old_json; (void)old_len;
-	(void)_contact_field_int64;
+	(void)cdbn_contact_field_int64;
 	return 1;   /* today: blind last-writer-wins */
 #else
 	int64_t nc, oc, nlm = 0, olm = 0;
 	/* engage only when BOTH carry a cseq; else last-writer-wins. */
-	if (_contact_field_int64(new_json, new_json + new_len, "cseq", 4, &nc) != 0)
+	if (cdbn_contact_field_int64(new_json, new_json + new_len, "cseq", 4, &nc) != 0)
 		return 1;
-	if (_contact_field_int64(old_json, old_json + old_len, "cseq", 4, &oc) != 0)
+	if (cdbn_contact_field_int64(old_json, old_json + old_len, "cseq", 4, &oc) != 0)
 		return 1;
 	if (nc != oc)
 		return nc > oc;
 	/* tie on cseq → higher last_mod wins (absent treated as 0). */
-	_contact_field_int64(new_json, new_json + new_len, "last_mod", 8, &nlm);
-	_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
+	cdbn_contact_field_int64(new_json, new_json + new_len, "last_mod", 8, &nlm);
+	cdbn_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
 	return nlm > olm;
 #endif
 }
@@ -140,7 +154,7 @@ static int fails = 0;
 	else printf("  ok:   %s\n", msg); } while (0)
 /* wins(new, old): does the new value supersede the old? */
 static int wins(const char *n, const char *o)
-{ return _cseq_new_wins(n, (int)strlen(n), o, (int)strlen(o)); }
+{ return cdbn_cseq_new_wins(n, (int)strlen(n), o, (int)strlen(o)); }
 
 int main(void)
 {

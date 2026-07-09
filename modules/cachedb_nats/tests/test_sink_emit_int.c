@@ -1,9 +1,23 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
  *
- * [P3.5] _sink_emit_int(): the per-field snprintf("%lld") parsed a
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ *
+ * [P3.5] cdbn_sink_emit_int(): the per-field snprintf("%lld") parsed a
  * format string for every integer emitted into a row document (expires,
  * cseq, last_mod, q, methods, row_exp ... a dozen per REGISTER); it is
  * now a plain divide-loop.  This is a characterization test against the
@@ -11,7 +25,7 @@
  * exactly what printf produces -- including INT64_MIN, whose naive
  * negation is UB.
  *
- * Also locks the pattern: no snprintf left inside _sink_emit_int.
+ * Also locks the pattern: no snprintf left inside cdbn_sink_emit_int.
  */
 
 #include <stdio.h>
@@ -64,9 +78,9 @@ static int emits_exactly(int64_t v)
 	int want_len, got_len, ok;
 
 	want_len = snprintf(want, sizeof(want), "%" PRId64, v);
-	if (_sink_init(&s, 8) < 0) return 0;
-	if (_sink_emit_int(&s, v) < 0) return 0;
-	got = _sink_take(&s, &got_len);
+	if (cdbn_sink_init(&s, 8) < 0) return 0;
+	if (cdbn_sink_emit_int(&s, v) < 0) return 0;
+	got = cdbn_sink_take(&s, &got_len);
 	if (!got) return 0;
 	ok = (got_len == want_len && memcmp(got, want, want_len) == 0);
 	if (!ok)
@@ -122,8 +136,8 @@ int main(void)
 	CHECK(all, "every edge value serializes byte-identically to printf");
 
 	CHECK(!file_function_contains("../cachedb_nats_json_ser.c",
-			"int _sink_emit_int(", "snprintf"),
-		"_sink_emit_int no longer parses a printf format per field");
+			"int cdbn_sink_emit_int(", "snprintf"),
+		"cdbn_sink_emit_int no longer parses a printf format per field");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

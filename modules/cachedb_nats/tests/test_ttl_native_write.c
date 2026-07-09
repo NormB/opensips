@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Native per-key TTL row writes, gated on the kv_ttl_below_marker probe.
  *
@@ -15,10 +29,10 @@
  * This test locks the resurrection:
  *
  *   - the pure helpers (carried copies below, matrix-tested):
- *     _ttl_eligible(row_exp, n_contacts, all_same): TTL only for a
+ *     cdbn_ttl_eligible(row_exp, n_contacts, all_same): TTL only for a
  *       non-empty, non-permanent row whose contacts all share one expiry;
- *     _ttl_seconds(row_exp, now, grace): remaining life + physical slack;
- *     _ttl_msgttl_ms(secs): ms with the server's 1 s minimum floored so an
+ *     cdbn_ttl_seconds(row_exp, now, grace): remaining life + physical slack;
+ *     cdbn_ttl_msgttl_ms(secs): ms with the server's 1 s minimum floored so an
  *       already-expired row still self-expires (RC-6);
  *   - structural: the helpers live in cachedb_nats_expiry.c; the row-write
  *     helper gates on kv_ttl_below_marker + probe state SUPPORTED and
@@ -62,7 +76,7 @@ static char *slurp(const char *path)
 }
 
 /* ─── carried copies of the pure helpers (cachedb_nats_expiry.c) ──── */
-static int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
+static int cdbn_ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
 {
 	if (n_contacts < 1)
 		return 0;             /* empty row => no TTL */
@@ -71,12 +85,12 @@ static int _ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
 	return (n_contacts == 1) || all_same_expiry;
 }
 
-static int64_t _ttl_seconds(int64_t row_exp, int64_t now, int grace)
+static int64_t cdbn_ttl_seconds(int64_t row_exp, int64_t now, int grace)
 {
 	return row_exp - now + (int64_t)grace;
 }
 
-static int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
+static int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds)
 {
 	int64_t ms;
 	if (ttl_seconds <= 0)
@@ -92,28 +106,28 @@ static int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 int main(void)
 {
 	printf("== carried-copy helper matrix ==\n");
-	CHECK(_ttl_eligible(0, 1, 1) == 0, "permanent row (row_exp 0): no TTL");
-	CHECK(_ttl_eligible(100, 0, 1) == 0, "empty row: no TTL");
-	CHECK(_ttl_eligible(100, 1, 0) == 1, "single contact: eligible");
-	CHECK(_ttl_eligible(100, 3, 1) == 1, "uniform multi-contact: eligible");
-	CHECK(_ttl_eligible(100, 3, 0) == 0,
+	CHECK(cdbn_ttl_eligible(0, 1, 1) == 0, "permanent row (row_exp 0): no TTL");
+	CHECK(cdbn_ttl_eligible(100, 0, 1) == 0, "empty row: no TTL");
+	CHECK(cdbn_ttl_eligible(100, 1, 0) == 1, "single contact: eligible");
+	CHECK(cdbn_ttl_eligible(100, 3, 1) == 1, "uniform multi-contact: eligible");
+	CHECK(cdbn_ttl_eligible(100, 3, 0) == 0,
 		"mixed-expiry multi-contact: NO TTL (reaper handles it)");
-	CHECK(_ttl_seconds(1000, 900, 5) == 105, "remaining life + slack");
-	CHECK(_ttl_msgttl_ms(30) == 30000, "30 s => 30000 ms");
-	CHECK(_ttl_msgttl_ms(1) == 1000, "1 s => 1000 ms");
-	CHECK(_ttl_msgttl_ms(0) == 1000,
+	CHECK(cdbn_ttl_seconds(1000, 900, 5) == 105, "remaining life + slack");
+	CHECK(cdbn_ttl_msgttl_ms(30) == 30000, "30 s => 30000 ms");
+	CHECK(cdbn_ttl_msgttl_ms(1) == 1000, "1 s => 1000 ms");
+	CHECK(cdbn_ttl_msgttl_ms(0) == 1000,
 		"already expired at write: floored to 1 s, still self-expires");
-	CHECK(_ttl_msgttl_ms(-50) == 1000, "long past expiry: floored to 1 s");
+	CHECK(cdbn_ttl_msgttl_ms(-50) == 1000, "long past expiry: floored to 1 s");
 
 	printf("== structural: helpers + gate + TTL-carrying put ==\n");
 	{
 		char *src = slurp("../cachedb_nats_expiry.c");
 		CHECK(src != NULL, "can read ../cachedb_nats_expiry.c");
 		if (src) {
-			CHECK(strstr(src, "int _ttl_eligible(") != NULL,
-				"_ttl_eligible defined");
-			CHECK(strstr(src, "int64_t _ttl_msgttl_ms(") != NULL,
-				"_ttl_msgttl_ms defined");
+			CHECK(strstr(src, "int cdbn_ttl_eligible(") != NULL,
+				"cdbn_ttl_eligible defined");
+			CHECK(strstr(src, "int64_t cdbn_ttl_msgttl_ms(") != NULL,
+				"cdbn_ttl_msgttl_ms defined");
 			CHECK(strstr(src, "nats_pool_kv_ttl_below_marker_state() == 1")
 					!= NULL,
 				"row write gated on the probe latch");

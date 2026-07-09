@@ -125,7 +125,7 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 /* ------------------------------------------------------------------ */
 
 
-int _sink_init(json_sink_t *s, int initial)
+int cdbn_sink_init(json_sink_t *s, int initial)
 {
 	s->cap = initial > 16 ? initial : 16;
 	s->len = 0;
@@ -154,7 +154,7 @@ static int _sink_grow(json_sink_t *s, int need)
 	return 0;
 }
 
-int _sink_write(json_sink_t *s, const char *p, int n)
+int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom || n <= 0) return s->oom ? -1 : 0;
 	if (_sink_grow(s, n + 1) < 0) return -1;
@@ -164,9 +164,9 @@ int _sink_write(json_sink_t *s, const char *p, int n)
 	return 0;
 }
 
-int _sink_putc(json_sink_t *s, char c)
+int cdbn_sink_putc(json_sink_t *s, char c)
 {
-	return _sink_write(s, &c, 1);
+	return cdbn_sink_write(s, &c, 1);
 }
 
 /* Compute exactly how many bytes _json_escape will emit for `n` input
@@ -205,7 +205,7 @@ static int _json_escape_len(const char *in, int in_len)
 	return (int)out;
 }
 
-int _sink_emit_string(json_sink_t *s, const char *p, int n)
+int cdbn_sink_emit_string(json_sink_t *s, const char *p, int n)
 {
 	int esc_len;
 	int needed;
@@ -237,21 +237,21 @@ int _sink_emit_string(json_sink_t *s, const char *p, int n)
 }
 
 /* Emit a JSON string whose bytes are ALREADY escaped — i.e. a name or
- * value slice that came straight out of _parse_json_string() and still
+ * value slice that came straight out of cdbn_parse_json_string() and still
  * points into the source document.  Those bytes carry their original
  * RFC 8259 escaping (\", \\, \uXXXX, …) verbatim, so they must be copied
  * through raw with surrounding quotes.  Re-running them through
- * _sink_emit_string() would escape the backslashes a second time
+ * cdbn_sink_emit_string() would escape the backslashes a second time
  * (\" -> \\\", \\ -> \\\\) and corrupt the name on every update. */
-int _sink_emit_raw_string(json_sink_t *s, const char *p, int n)
+int cdbn_sink_emit_raw_string(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom) return -1;
-	if (_sink_putc(s, '"') < 0) return -1;
-	if (_sink_write(s, p, n) < 0) return -1;
-	return _sink_putc(s, '"');
+	if (cdbn_sink_putc(s, '"') < 0) return -1;
+	if (cdbn_sink_write(s, p, n) < 0) return -1;
+	return cdbn_sink_putc(s, '"');
 }
 
-int _sink_emit_int(json_sink_t *s, int64_t v)
+int cdbn_sink_emit_int(json_sink_t *s, int64_t v)
 {
 	/* [P3.5] plain divide-loop: the old per-field "%lld" formatter
 	 * parsed a format string for every integer of every row (expires,
@@ -268,12 +268,12 @@ int _sink_emit_int(json_sink_t *s, int64_t v)
 	} while (u);
 	if (v < 0)
 		*--p = '-';
-	return _sink_write(s, p, (int)(tmp + sizeof(tmp) - p));
+	return cdbn_sink_write(s, p, (int)(tmp + sizeof(tmp) - p));
 }
 
 /* Transfer ownership of the buffer to the caller; sink resets to empty.
  * Caller frees the returned pointer with pkg_free(). */
-char *_sink_take(json_sink_t *s, int *out_len)
+char *cdbn_sink_take(json_sink_t *s, int *out_len)
 {
 	char *r;
 	if (s->oom) {
@@ -302,7 +302,7 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 	cdb_pair_t *pair;
 	int first = 1;
 
-	if (_sink_putc(s, '{') < 0) return -1;
+	if (cdbn_sink_putc(s, '{') < 0) return -1;
 
 	list_for_each(pos, dict) {
 		pair = list_entry(pos, cdb_pair_t, list);
@@ -312,35 +312,35 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 		if (pair->unset)
 			continue;
 
-		if (!first && _sink_putc(s, ',') < 0) return -1;
+		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
 
-		if (_sink_emit_string(s, pair->key.name.s,
+		if (cdbn_sink_emit_string(s, pair->key.name.s,
 				pair->key.name.len) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
 
 		/* If a subkey is present, the field's JSON value is itself
 		 * an object whose only entry is the subkey -> value pair. */
 		if (pair->subkey.len > 0 && pair->subkey.s) {
-			if (_sink_putc(s, '{') < 0) return -1;
-			if (_sink_emit_string(s, pair->subkey.s,
+			if (cdbn_sink_putc(s, '{') < 0) return -1;
+			if (cdbn_sink_emit_string(s, pair->subkey.s,
 					pair->subkey.len) < 0) return -1;
-			if (_sink_putc(s, ':') < 0) return -1;
+			if (cdbn_sink_putc(s, ':') < 0) return -1;
 		}
 
 		switch (pair->val.type) {
 		case CDB_STR:
-			if (_sink_emit_string(s, pair->val.val.st.s,
+			if (cdbn_sink_emit_string(s, pair->val.val.st.s,
 					pair->val.val.st.len) < 0) return -1;
 			break;
 		case CDB_INT32:
-			if (_sink_emit_int(s, pair->val.val.i32) < 0) return -1;
+			if (cdbn_sink_emit_int(s, pair->val.val.i32) < 0) return -1;
 			break;
 		case CDB_INT64:
-			if (_sink_emit_int(s, pair->val.val.i64) < 0) return -1;
+			if (cdbn_sink_emit_int(s, pair->val.val.i64) < 0) return -1;
 			break;
 		case CDB_NULL:
-			if (_sink_write(s, "null", 4) < 0) return -1;
+			if (cdbn_sink_write(s, "null", 4) < 0) return -1;
 			break;
 		case CDB_DICT:
 			if (_sink_emit_cdb_dict(s, &pair->val.val.dict) < 0)
@@ -355,26 +355,26 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 		}
 
 		if (pair->subkey.len > 0 && pair->subkey.s) {
-			if (_sink_putc(s, '}') < 0) return -1;
+			if (cdbn_sink_putc(s, '}') < 0) return -1;
 		}
 	}
 
-	if (_sink_putc(s, '}') < 0) return -1;
+	if (cdbn_sink_putc(s, '}') < 0) return -1;
 	return 0;
 }
 
 /* Backwards-compatible wrapper: serialize dict into a malloc'd JSON
  * object string.  Replaces the old per-pair-_json_apply_pair pattern
  * with a single growable buffer; caller still frees with pkg_free(). */
-char *_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
+char *cdbn_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 {
 	json_sink_t s;
-	if (_sink_init(&s, 256) < 0) return NULL;
+	if (cdbn_sink_init(&s, 256) < 0) return NULL;
 	if (_sink_emit_cdb_dict(&s, dict) < 0) {
 		pkg_free(s.buf);
 		return NULL;
 	}
-	return _sink_take(&s, out_len);
+	return cdbn_sink_take(&s, out_len);
 }
 
 
@@ -389,7 +389,7 @@ static int _kv_char_safe(unsigned char c)
 	 * to satisfy the project's backslash-adversarial rule and to keep the
 	 * encoded key unambiguous. '.' and '/' stay literal (valid NATS subject
 	 * token chars; keeps `nats kv` greppability); keys that would yield an
-	 * EMPTY subject token are rejected by _kv_key_validate() on the PK path. */
+	 * EMPTY subject token are rejected by cdbn_kv_key_validate() on the PK path. */
 	case '-': case '_': case '/': case '.':
 		return 1;
 	}
@@ -403,7 +403,7 @@ static int _kv_char_safe(unsigned char c)
  * (and the empty key) up-front so the save fails loudly instead. The only '.'
  * left after encoding are literal dots passed through from the input.
  * Returns 0 if the key is a valid subject, -1 to reject. */
-int _kv_key_validate(const char *enc, int enc_len)
+int cdbn_kv_key_validate(const char *enc, int enc_len)
 {
 	int i;
 	if (!enc || enc_len <= 0)
@@ -422,7 +422,7 @@ int _kv_key_validate(const char *enc, int enc_len)
  * '@' which would otherwise produce kvStore "Invalid Argument"
  * errors and silently drop every REGISTER. The encoding is
  * round-trippable: literal '=' becomes '=3D'. */
-char *_kv_encode_key(const char *in, int in_len, int *out_len)
+char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 {
 	static const char hex[] = "0123456789ABCDEF";
 	int i, w = 0;
@@ -452,7 +452,7 @@ char *_kv_encode_key(const char *in, int in_len, int *out_len)
  * sets *heap to 1 when heap-allocated (pkg), or NULL on OOM.  Free with:
  *   if (heap) pkg_free(ptr);
  */
-char *_pk_target_key(const char *val, int val_len,
+char *cdbn_pk_target_key(const char *val, int val_len,
 	char *stackbuf, int stackcap, int *heap)
 {
 	static const char hex[] = "0123456789ABCDEF";
@@ -493,7 +493,7 @@ char *_pk_target_key(const char *val, int val_len,
  * first-insert path. Both field name and value are RFC 8259 escaped.
  * If field is NULL/empty, returns "{}" so the doc is still a valid JSON
  * object. Returns NULL on error. Caller must pkg_free(). */
-char *_build_seed_doc(const char *field, int flen,
+char *cdbn_build_seed_doc(const char *field, int flen,
 	const char *val, int vlen, int *out_len)
 {
 	char *buf, *esc_field, *esc_val;

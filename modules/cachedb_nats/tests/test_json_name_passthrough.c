@@ -1,26 +1,40 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: cachedb_nats_json.c::_apply_pairs_one_pass /
  * _sink_merge_subkeys re-escaped EXISTING JSON field/subkey NAMES when
  * copying them through on a KV-doc update.
  *
- * Those names come straight out of _parse_json_string(), which returns
+ * Those names come straight out of cdbn_parse_json_string(), which returns
  * the bytes STILL ESCAPED (it does not decode \" / \\ / \uXXXX).  The
- * buggy code fed them back through _sink_emit_string(), which escapes
+ * buggy code fed them back through cdbn_sink_emit_string(), which escapes
  * again:  the source name  foo\"bar  (logical:  foo"bar )  became
  * foo\\\"bar  on every update -> the backslash count doubles on each
  * write -> data corruption.
  *
  * The fix copies already-escaped names through raw via a new helper
- * _sink_emit_raw_string() (open-quote + raw bytes + close-quote), so a
+ * cdbn_sink_emit_raw_string() (open-quote + raw bytes + close-quote), so a
  * name round-trips byte-for-byte.  cdb_pair-supplied NAMES (which are
- * UN-escaped) still go through _sink_emit_string().
+ * UN-escaped) still go through cdbn_sink_emit_string().
  *
  * This test carries byte-for-byte copies of the production helpers
- * (_json_escape, _json_escape_len, _sink_*, _parse_json_string) so it
+ * (_json_escape, _json_escape_len, _sink_*, cdbn_parse_json_string) so it
  * runs standalone, then drives a copy-through of a parsed name with
  * both the buggy emitter and the fixed emitter and asserts:
  *   - fixed emitter: name survives unchanged (idempotent round-trip)
@@ -45,7 +59,7 @@ typedef struct {
 	int   oom;
 } json_sink_t;
 
-static int _sink_init(json_sink_t *s, int cap)
+static int cdbn_sink_init(json_sink_t *s, int cap)
 {
 	if (cap < 16) cap = 16;
 	s->buf = malloc(cap);
@@ -67,7 +81,7 @@ static int _sink_grow(json_sink_t *s, int extra)
 	return 0;
 }
 
-static int _sink_write(json_sink_t *s, const char *p, int n)
+static int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom || n <= 0) return s->oom ? -1 : 0;
 	if (_sink_grow(s, n + 1) < 0) return -1;
@@ -77,9 +91,9 @@ static int _sink_write(json_sink_t *s, const char *p, int n)
 	return 0;
 }
 
-static int _sink_putc(json_sink_t *s, char c)
+static int cdbn_sink_putc(json_sink_t *s, char c)
 {
-	return _sink_write(s, &c, 1);
+	return cdbn_sink_write(s, &c, 1);
 }
 
 static int _json_escape(const char *in, int in_len, char *out, int out_sz)
@@ -144,7 +158,7 @@ static int _json_escape_len(const char *in, int in_len)
  * generous buffer here (the production sink off-by-one is a separate
  * issue, irrelevant to the NAME double-escape we are demonstrating) so
  * that the escaping itself succeeds and the double-escape is visible. */
-static int _sink_emit_string(json_sink_t *s, const char *p, int n)
+static int cdbn_sink_emit_string(json_sink_t *s, const char *p, int n)
 {
 	char tmp[512];
 	int written;
@@ -152,23 +166,23 @@ static int _sink_emit_string(json_sink_t *s, const char *p, int n)
 	(void)_json_escape_len;
 	written = _json_escape(p, n, tmp, (int)sizeof(tmp));
 	if (written < 0) { s->oom = 1; return -1; }
-	if (_sink_putc(s, '"') < 0) return -1;
-	if (_sink_write(s, tmp, written) < 0) return -1;
-	return _sink_putc(s, '"');
+	if (cdbn_sink_putc(s, '"') < 0) return -1;
+	if (cdbn_sink_write(s, tmp, written) < 0) return -1;
+	return cdbn_sink_putc(s, '"');
 }
 
 /* The raw emitter -- correct for ALREADY-escaped existing names. */
-static int _sink_emit_raw_string(json_sink_t *s, const char *p, int n)
+static int cdbn_sink_emit_raw_string(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom) return -1;
-	if (_sink_putc(s, '"') < 0) return -1;
-	if (_sink_write(s, p, n) < 0) return -1;
-	return _sink_putc(s, '"');
+	if (cdbn_sink_putc(s, '"') < 0) return -1;
+	if (cdbn_sink_write(s, p, n) < 0) return -1;
+	return cdbn_sink_putc(s, '"');
 }
 
-/* _parse_json_string: returns slice pointing into source, escapes NOT
+/* cdbn_parse_json_string: returns slice pointing into source, escapes NOT
  * decoded -- exact copy of the production parser's contract. */
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -202,15 +216,15 @@ static int passthrough_name(const char *doc, int emit_raw,
 
 	if (*p != '{') return -1;
 	p++;
-	p = _parse_json_string(p, end, &fname, &flen);
+	p = cdbn_parse_json_string(p, end, &fname, &flen);
 	if (!p) return -1;
 
-	if (_sink_init(&s, 64) < 0) return -1;
+	if (cdbn_sink_init(&s, 64) < 0) return -1;
 	if (emit_raw) {
-		if (_sink_emit_raw_string(&s, fname, flen) < 0)
+		if (cdbn_sink_emit_raw_string(&s, fname, flen) < 0)
 			{ free(s.buf); return -1; }
 	} else {
-		if (_sink_emit_string(&s, fname, flen) < 0)
+		if (cdbn_sink_emit_string(&s, fname, flen) < 0)
 			{ free(s.buf); return -1; }
 	}
 	if ((size_t)s.len + 1 > out_sz) { free(s.buf); return -1; }
@@ -294,7 +308,7 @@ int main(void)
 		CHECK(fs != NULL, "open cachedb_nats_json_ser.c for source check");
 		if (fs) {
 			while (fgets(line, sizeof(line), fs)) {
-				if (strstr(line, "_sink_emit_raw_string(json_sink_t"))
+				if (strstr(line, "cdbn_sink_emit_raw_string(json_sink_t"))
 					have_raw_helper = 1;
 			}
 			fclose(fs);
@@ -303,14 +317,14 @@ int main(void)
 			while (fgets(line, sizeof(line), f)) {
 				/* count the copy-through call sites that emit a
 				 * parsed (already-escaped) name via the raw helper */
-				if (strstr(line, "_sink_emit_raw_string(") &&
+				if (strstr(line, "cdbn_sink_emit_raw_string(") &&
 				    !strstr(line, "json_sink_t"))
 					raw_uses++;
 			}
 			fclose(f);
 		}
 		CHECK(have_raw_helper,
-			"_sink_emit_raw_string helper defined in source");
+			"cdbn_sink_emit_raw_string helper defined in source");
 		/* fname x3 (top set / subkey-merge / copy-through) +
 		 * kfield x2 (subkey op / subkey copy-through) = 5 sites */
 		CHECK(raw_uses >= 5,

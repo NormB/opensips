@@ -20,7 +20,7 @@
 
 /*
  * cachedb_nats_json_walk.c — the shared, dependency-free JSON walkers
- * (_skip_ws, _parse_json_string, _skip_json_value, _safe_json_to_dict)
+ * (cdbn_skip_ws, cdbn_parse_json_string, cdbn_skip_json_value, cdbn_safe_json_to_dict)
  * used by this module's JSON layer AND by the optional cachedb_nats_fts
  * module (declared in cachedb_nats_json_internal.h).  Split into their
  * own TU so unit tests can link them without dragging either module's
@@ -50,14 +50,14 @@
 #define NATS_JSON_MAX_BYTES  (1 * 1024 * 1024)
 
 /**
- * _skip_ws() — Advance past JSON whitespace characters.
+ * cdbn_skip_ws() — Advance past JSON whitespace characters.
  *
  * Skips spaces, tabs, newlines, and carriage returns.  All JSON parser
  * entry points call this before inspecting the next token.  Returns a
  * pointer to the first non-whitespace character, or @end if the buffer
  * is exhausted.
  */
-const char *_skip_ws(const char *p, const char *end)
+const char *cdbn_skip_ws(const char *p, const char *end)
 {
 	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 		p++;
@@ -65,7 +65,7 @@ const char *_skip_ws(const char *p, const char *end)
 }
 
 /**
- * _parse_json_string() — Parse a JSON quoted string with escape handling.
+ * cdbn_parse_json_string() — Parse a JSON quoted string with escape handling.
  *
  * Expects @p to point at the opening double-quote.  Scans forward,
  * honouring backslash-escaped characters (\\, \", \n, etc.) so that
@@ -76,7 +76,7 @@ const char *_skip_ws(const char *p, const char *end)
  *
  * Returns a pointer past the closing quote, or NULL on malformed input.
  */
-const char *_parse_json_string(const char *p, const char *end,
+const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -104,7 +104,7 @@ const char *_parse_json_string(const char *p, const char *end,
 }
 
 /**
- * _skip_json_value() — Skip over any JSON value without extracting it.
+ * cdbn_skip_json_value() — Skip over any JSON value without extracting it.
  *
  * Handles all six JSON value types via a simple state machine:
  *   - Strings:  scan to closing quote, respecting backslash escapes.
@@ -115,11 +115,11 @@ const char *_parse_json_string(const char *p, const char *end,
  *
  * Returns a pointer past the value, or NULL on malformed input.
  */
-const char *_skip_json_value(const char *p, const char *end)
+const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
 
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end)
 		return NULL;
 
@@ -217,7 +217,7 @@ static int _json_parse_guard(const char *data, int data_len,
 }
 
 /**
- * _safe_json_to_dict() — guard + parse a broker-supplied JSON document.
+ * cdbn_safe_json_to_dict() — guard + parse a broker-supplied JSON document.
  *
  * Runs _json_parse_guard() to reject hostile input (deep nesting, raw
  * NUL, oversize), then hands cdb_json_to_dict() a guaranteed
@@ -227,7 +227,7 @@ static int _json_parse_guard(const char *data, int data_len,
  * large ones touch the allocator.  Returns 0 on success, -1 on rejection
  * or parse failure.
  */
-int _safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
+int cdbn_safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
 {
 	char stackbuf[1024];
 	char *buf;
@@ -271,7 +271,7 @@ int _safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
  * Returns 0 after a complete walk, -1 on malformed JSON, a cb abort,
  * or bad arguments.  Pure: no allocation, no logging.
  */
-int _json_foreach_top_field(const char *json, int len,
+int cdbn_json_foreach_top_field(const char *json, int len,
 	json_field_cb cb, void *ud)
 {
 	const char *p, *end;
@@ -280,7 +280,7 @@ int _json_foreach_top_field(const char *json, int len,
 		return -1;
 	p = json;
 	end = json + len;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end || *p != '{')
 		return -1;
 	p++;
@@ -288,23 +288,23 @@ int _json_foreach_top_field(const char *json, int len,
 		const char *fname, *vstart, *vend;
 		int flen;
 
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end)
 			return -1;              /* unterminated object */
 		if (*p == '}')
 			return 0;               /* complete walk */
 		if (*p == ',') { p++; continue; }
 
-		p = _parse_json_string(p, end, &fname, &flen);
+		p = cdbn_parse_json_string(p, end, &fname, &flen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vstart = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p || p == vstart)
 			return -1;
 		vend = p;

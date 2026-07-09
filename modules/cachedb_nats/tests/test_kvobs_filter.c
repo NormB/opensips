@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Generic KV/stream introspection MI [KVOBS]: the filter language shared by
  * nats_stream_list and nats_kv_keys.  Same shape as the nats_reg_list
@@ -97,7 +111,7 @@ static int _kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
 #undef CPY
 }
 
-static int _kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
+static int cdbn_kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
 {
 	memset(f, 0, sizeof(*f));
 	f->limit = KVOBS_LIMIT_DEFAULT;
@@ -133,7 +147,7 @@ static int _kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
 
 /* KV backing streams are named KV_<bucket>; the operator thinks in bucket
  * names, so stream listings expose both. */
-static int _kvobs_bucket_of_stream(const char *stream, int len,
+static int cdbn_kvobs_bucket_of_stream(const char *stream, int len,
 	const char **bucket, int *blen)
 {
 #ifdef KVOBS_CURRENT
@@ -164,12 +178,12 @@ int main(void)
 #endif
 
 	printf("[KVOBS] defaults and happy path:\n");
-	CHECK(_kvobs_filter_parse("", 0, &f) == 0 && f.limit == KVOBS_LIMIT_DEFAULT &&
+	CHECK(cdbn_kvobs_filter_parse("", 0, &f) == 0 && f.limit == KVOBS_LIMIT_DEFAULT &&
 	      f.offset == 0 && !f.kv_only && !f.detail && !f.bucket[0],
 	      "empty filter => defaults");
 	{
 		const char *q = "bucket=other_bucket; key=json_*;detail=1;limit=25;offset=50";
-		CHECK(_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
+		CHECK(cdbn_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
 		      strcmp(f.bucket, "other_bucket") == 0 &&
 		      strcmp(f.key_glob, "json_*") == 0 &&
 		      f.detail == 1 && f.limit == 25 && f.offset == 50,
@@ -177,49 +191,49 @@ int main(void)
 	}
 	{
 		const char *q = "name=KV_*;kv=1";
-		CHECK(_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
+		CHECK(cdbn_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
 		      strcmp(f.name_glob, "KV_*") == 0 && f.kv_only == 1,
 		      "stream_list filter round-trips");
 	}
 
 	printf("[KVOBS] fail loudly on bad input:\n");
-	CHECK(_kvobs_filter_parse("wat=1", 5, &f) == -1, "unknown key => refused");
-	CHECK(_kvobs_filter_parse("kv=2", 4, &f) == -1, "kv flag not 0/1 => refused");
-	CHECK(_kvobs_filter_parse("detail=yes", 10, &f) == -1, "non-numeric flag => refused");
-	CHECK(_kvobs_filter_parse("limit=0", 7, &f) == -1, "limit 0 => refused");
-	CHECK(_kvobs_filter_parse("bucket=", 7, &f) == -1, "empty value => refused");
-	CHECK(_kvobs_filter_parse("limit=999999", 12, &f) == 0 && f.limit == KVOBS_LIMIT_CAP,
+	CHECK(cdbn_kvobs_filter_parse("wat=1", 5, &f) == -1, "unknown key => refused");
+	CHECK(cdbn_kvobs_filter_parse("kv=2", 4, &f) == -1, "kv flag not 0/1 => refused");
+	CHECK(cdbn_kvobs_filter_parse("detail=yes", 10, &f) == -1, "non-numeric flag => refused");
+	CHECK(cdbn_kvobs_filter_parse("limit=0", 7, &f) == -1, "limit 0 => refused");
+	CHECK(cdbn_kvobs_filter_parse("bucket=", 7, &f) == -1, "empty value => refused");
+	CHECK(cdbn_kvobs_filter_parse("limit=999999", 12, &f) == 0 && f.limit == KVOBS_LIMIT_CAP,
 	      "limit clamps to the 200 cap (not an error)");
 	{
 		char big[300];
 		memset(big, 'b', sizeof(big));
 		memcpy(big, "bucket=", 7);
-		CHECK(_kvobs_filter_parse(big, (int)sizeof(big), &f) == -1,
+		CHECK(cdbn_kvobs_filter_parse(big, (int)sizeof(big), &f) == -1,
 		      "oversize bucket name refused, never truncated");
 	}
 
 	printf("[FMT] output-format keys:\n");
 	{
 		const char *q = "key=json_*;format=csv;eol=lf;header=0";
-		CHECK(_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
+		CHECK(cdbn_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
 		      f.format == 1 && f.eol_lf == 1 && f.header == 0 &&
 		      strcmp(f.key_glob, "json_*") == 0,
 		      "format/eol/header compose with kv keys");
 	}
-	CHECK(_kvobs_filter_parse("format=tsv", 10, &f) == -1,
+	CHECK(cdbn_kvobs_filter_parse("format=tsv", 10, &f) == -1,
 	      "unknown format value refused");
-	CHECK(_kvobs_filter_parse("", 0, &f) == 0 && f.format == 0 && f.header == 1,
+	CHECK(cdbn_kvobs_filter_parse("", 0, &f) == 0 && f.format == 0 && f.header == 1,
 	      "defaults: json + header on");
 
 	printf("[KVOBS] KV bucket name derived from the backing-stream name:\n");
 	{
 		const char *b; int bl;
-		CHECK(_kvobs_bucket_of_stream("KV_opensips", 11, &b, &bl) == 0 &&
+		CHECK(cdbn_kvobs_bucket_of_stream("KV_opensips", 11, &b, &bl) == 0 &&
 		      bl == 8 && memcmp(b, "opensips", 8) == 0,
 		      "KV_opensips => bucket 'opensips'");
-		CHECK(_kvobs_bucket_of_stream("EVENTS", 6, &b, &bl) == -1,
+		CHECK(cdbn_kvobs_bucket_of_stream("EVENTS", 6, &b, &bl) == -1,
 		      "non-KV stream => no bucket");
-		CHECK(_kvobs_bucket_of_stream("KV_", 3, &b, &bl) == -1,
+		CHECK(cdbn_kvobs_bucket_of_stream("KV_", 3, &b, &bl) == -1,
 		      "bare 'KV_' => no bucket (empty name)");
 	}
 

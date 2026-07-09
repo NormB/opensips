@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P7 / SPEC.md §5.3 [REV-7] + TTL-SOLUTION-SPEC.md §6 [TREV-8]: the kv_ttl==0
  * startup guard and the per-message-TTL capability latch.
@@ -33,7 +47,7 @@
 
 /* 0 = ok (kv_ttl is 0); -1 = reject (non-zero bucket TTL would expire
  * permanent contacts).  Negative kv_ttl is also rejected (invalid). */
-static int _kv_ttl_guard(int kv_ttl)
+static int cdbn_kv_ttl_guard(int kv_ttl)
 {
 #ifdef GUARD_CURRENT
 	(void)kv_ttl; return 0;   /* today: no guard */
@@ -75,10 +89,10 @@ int main(void)
 #endif
 
 	printf("[REV-7] kv_ttl==0 guard (protects permanent contacts):\n");
-	CHECK(_kv_ttl_guard(0) == 0, "kv_ttl==0 => accepted");
-	CHECK(_kv_ttl_guard(30) == -1, "kv_ttl==30 => REJECTED (bucket MaxAge expires permanent contacts)");
-	CHECK(_kv_ttl_guard(1) == -1, "kv_ttl==1 => rejected");
-	CHECK(_kv_ttl_guard(-5) == -1, "negative kv_ttl => rejected (invalid)");
+	CHECK(cdbn_kv_ttl_guard(0) == 0, "kv_ttl==0 => accepted");
+	CHECK(cdbn_kv_ttl_guard(30) == -1, "kv_ttl==30 => REJECTED (bucket MaxAge expires permanent contacts)");
+	CHECK(cdbn_kv_ttl_guard(1) == -1, "kv_ttl==1 => rejected");
+	CHECK(cdbn_kv_ttl_guard(-5) == -1, "negative kv_ttl => rejected (invalid)");
 
 	printf("[TREV-8] capability latch transitions:\n");
 	CHECK(_ttl_cap_next(TTL_CAP_UNPROBED, TTL_EV_SETUP_OK) == TTL_CAP_SUPPORTED,

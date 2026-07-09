@@ -50,7 +50,7 @@
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"
 #include "cachedb_nats_dbase.h"          /* kv_bucket default                */
-#include "cachedb_nats_reg.h"            /* _reg_page (shared pagination)    */
+#include "cachedb_nats_reg.h"            /* cdbn_reg_page (shared pagination)    */
 #include "cachedb_nats_fmt.h"            /* [FMT] csv/txt table rendering    */
 #include "cachedb_nats_emit.h"           /* [P2.4] one-walk row emitter      */
 #include "cachedb_nats_kvobs.h"
@@ -78,7 +78,7 @@ static int _kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
 	if (KEQ("key"))    { CPY(f->key_glob);  return 0; }
 	if (KEQ("name"))   { CPY(f->name_glob); return 0; }
 	if (KEQ("format")) {
-		int fk = _fmt_kind_parse(v, vlen);
+		int fk = cdbn_fmt_kind_parse(v, vlen);
 		if (fk < 0)
 			return -1;
 		f->format = fk;
@@ -110,7 +110,7 @@ static int _kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
 #undef CPY
 }
 
-int _kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
+int cdbn_kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
 {
 	const char *p = s, *end = s + len;
 
@@ -140,7 +140,7 @@ int _kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
 	return 0;
 }
 
-int _kvobs_bucket_of_stream(const char *stream, int len,
+int cdbn_kvobs_bucket_of_stream(const char *stream, int len,
 	const char **bucket, int *blen)
 {
 	if (len > 3 && memcmp(stream, "KV_", 3) == 0) {
@@ -197,7 +197,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 	(void)async_hdl;
 	if (try_get_mi_string_param(params, "filter", &fstr.s, &fstr.len) < 0)
 		fstr.s = NULL;
-	if (_kvobs_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
+	if (cdbn_kvobs_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
 			&f) < 0)
 		return init_mi_error(400, MI_SSTR("bad filter (keys: name kv "
 			"limit offset; ';'-separated key=value)"));
@@ -223,14 +223,14 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 			continue;
 		name = si->Config->Name;
 		if (f.kv_only &&
-		    _kvobs_bucket_of_stream(name, (int)strlen(name), &bk, &bl) != 0)
+		    cdbn_kvobs_bucket_of_stream(name, (int)strlen(name), &bk, &bl) != 0)
 			continue;
 		if (f.name_glob[0] && fnmatch(f.name_glob, name, 0) != 0)
 			continue;
 		match[n++] = si;
 	}
 	qsort(match, n, sizeof(*match), _stream_name_cmp);
-	_reg_page(n, f.limit, f.offset, &start, &count);
+	cdbn_reg_page(n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)
@@ -259,7 +259,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 			rc |= nats_emit_rec(&em);
 			rc |= nats_emit_str(&em, MI_SSTR("name"),
 				name, (int)strlen(name));
-			if (_kvobs_bucket_of_stream(name, (int)strlen(name),
+			if (cdbn_kvobs_bucket_of_stream(name, (int)strlen(name),
 					&bk, &bl) == 0)
 				rc |= nats_emit_str(&em, MI_SSTR("kv_bucket"),
 					bk, bl);
@@ -336,7 +336,7 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 		goto oom;
 	{
 		const char *bk; int bl;
-		if (_kvobs_bucket_of_stream(sname, name.len, &bk, &bl) == 0 &&
+		if (cdbn_kvobs_bucket_of_stream(sname, name.len, &bk, &bl) == 0 &&
 		    add_mi_string(obj, MI_SSTR("kv_bucket"), (char *)bk, bl) < 0)
 			goto oom;
 	}
@@ -351,7 +351,7 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 		const char *stn = _storage_name(si->Config->Storage);
 		const char *rtn = _retention_name(si->Config->Retention);
 
-		_kvobs_bucket_of_stream(sname, name.len, &bk, &bl);
+		cdbn_kvobs_bucket_of_stream(sname, name.len, &bk, &bl);
 		if (fk == FMT_CSV) {
 			static const char *COLS[] = {"name", "kv_bucket", "storage",
 				"retention", "replicas", "max_msgs_per_subject",
@@ -567,7 +567,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 	(void)async_hdl;
 	if (try_get_mi_string_param(params, "filter", &fstr.s, &fstr.len) < 0)
 		fstr.s = NULL;
-	if (_kvobs_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
+	if (cdbn_kvobs_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
 			&f) < 0)
 		return init_mi_error(400, MI_SSTR("bad filter (keys: bucket key "
 			"detail limit offset; ';'-separated key=value)"));
@@ -593,7 +593,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 		nats_dl.kvStore_Destroy(kv);
 		return init_mi_error(500, MI_SSTR("out of memory"));
 	}
-	_reg_page(n, f.limit, f.offset, &start, &count);
+	cdbn_reg_page(n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)

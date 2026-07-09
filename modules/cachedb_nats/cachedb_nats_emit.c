@@ -219,7 +219,7 @@ int nats_mi_fmt_param(const mi_params_t *params,
 	*kind = FMT_JSON; *eol_lf = 0; *header = 1;
 	if (try_get_mi_string_param(params, "format", &fmtp.s, &fmtp.len) == 0 &&
 	    fmtp.s &&
-	    _fmt_opts_parse(fmtp.s, fmtp.len, kind, eol_lf, header) < 0)
+	    cdbn_fmt_opts_parse(fmtp.s, fmtp.len, kind, eol_lf, header) < 0)
 		return -1;
 	return 0;
 }

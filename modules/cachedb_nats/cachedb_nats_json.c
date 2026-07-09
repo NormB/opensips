@@ -82,7 +82,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 
 	/* Build the target key on the stack (heap only for rare long
 	 * keys) -- saves two allocs per usrloc read on the PK fast path. */
-	target_key = _pk_target_key(filter->val.s.s, filter->val.s.len,
+	target_key = cdbn_pk_target_key(filter->val.s.s, filter->val.s.len,
 		key_stack, sizeof(key_stack), &key_heap);
 	if (!target_key) {
 		LM_ERR("PK query: target-key build failed (filter '%.*s', "
@@ -99,7 +99,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		int plen = (fts_json_prefix && *fts_json_prefix)
 			? fts_json_prefix_len : 0;
 		const char *enc = target_key + plen;
-		if (_kv_key_validate(enc, (int)strlen(enc)) < 0) {
+		if (cdbn_kv_key_validate(enc, (int)strlen(enc)) < 0) {
 			LM_DBG("PK query: AoR encodes to invalid subject "
 				"(encoded len %d) -> empty result\n",
 				(int)strlen(enc));
@@ -124,7 +124,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	/* P2.5 [REV-26] (SPEC §4.2): an EMPTY value is a delete marker (absent);
 	 * a non-empty non-object is POISON — a hard integrity error, never masked
 	 * as an empty AoR (which usrloc would read as a silent deregistration). */
-	vclass = _value_classify(data, data_len);
+	vclass = cdbn_value_classify(data, data_len);
 	if (vclass == NATS_VAL_POISON) {
 		NATS_CDB_STATS_INC(poison_values_rejected);
 		LM_ERR("PK read: poison value for key '%s' (len %d, not a JSON "
@@ -142,7 +142,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 			if (key_heap) pkg_free(target_key);
 			return -1;
 		}
-		if (_safe_json_to_dict(data, data_len, &row->dict) != 0) {
+		if (cdbn_safe_json_to_dict(data, data_len, &row->dict) != 0) {
 			LM_ERR("PK fast path: failed to parse JSON for "
 				"'%s'\n", target_key);
 			pkg_free(row);
@@ -152,13 +152,13 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 		}
 		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
 		 * (the shared converter clamped it to int32). */
-		_row_patch_last_mod_int64(data, data_len, &row->dict);
+		cdbn_row_patch_last_mod_int64(data, data_len, &row->dict);
 		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
 		 * strip the cachedb_nats-private row_exp/schema_version peers. */
-		_row_strip_private_keys(&row->dict);
+		cdbn_row_strip_private_keys(&row->dict);
 		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
 		 * sees them; fail-closed on an unparseable expires. */
-		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
+		cdbn_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
 	}
@@ -212,7 +212,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		 * poison — alarm + count rather than silently dropping the row
 		 * (which would mask corruption as an empty AoR).  An EMPTY value
 		 * is a delete marker: skip it quietly. */
-		vclass = _value_classify(data, data_len);
+		vclass = cdbn_value_classify(data, data_len);
 		if (vclass == NATS_VAL_POISON) {
 			NATS_CDB_STATS_INC(poison_values_rejected);
 			LM_ERR("read: poison value for key '%s' (len %d, not a "
@@ -238,7 +238,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			return -1;
 		}
 
-		if (_safe_json_to_dict(data, data_len, &row->dict) != 0) {
+		if (cdbn_safe_json_to_dict(data, data_len, &row->dict) != 0) {
 			LM_ERR("failed to parse JSON for key '%s'\n", match_keys[i]);
 			pkg_free(row);
 			nats_dl.kvEntry_Destroy(entry);
@@ -247,13 +247,13 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		}
 		/* P2.4 [REV-15/REV-30]: widen each contact's last_mod back to int64
 		 * (the shared converter clamped it to int32). */
-		_row_patch_last_mod_int64(data, data_len, &row->dict);
+		cdbn_row_patch_last_mod_int64(data, data_len, &row->dict);
 		/* P2.6 [REV-18/REV-35]: hand usrloc exactly {contacts, aorhash} —
 		 * strip the cachedb_nats-private row_exp/schema_version peers. */
-		_row_strip_private_keys(&row->dict);
+		cdbn_row_strip_private_keys(&row->dict);
 		/* P4 [REV-3/1/26]: omit expired contacts (read-only) before usrloc
 		 * sees them; fail-closed on an unparseable expires. */
-		_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
+		cdbn_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
 
 		res->count++;
 		list_add_tail(&row->list, &res->rows);
@@ -273,7 +273,7 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
  * with the running result using _intersect_keys(), implementing AND
  * semantics.  After all filters are applied, the matched documents are
  * fetched from the NATS KV store, parsed into cdb_row_t structs via
- * _safe_json_to_dict() (which guards then calls cdb_json_to_dict()), and
+ * cdbn_safe_json_to_dict() (which guards then calls cdb_json_to_dict()), and
  * appended to @res.
  *
  * Only CDB_OP_EQ with string values is supported.  Results may be capped
@@ -399,7 +399,7 @@ static void _free_apply_ops(apply_op_t *ops, int n)
 
 /* Translate cdb_pair_t types into the inline apply_op_t representation.
  * Materializes any CDB_DICT subtree once via the new sink-based
- * _serialize_cdb_dict (Tier-1 #1).  Returns NULL on alloc / unknown
+ * cdbn_serialize_cdb_dict (Tier-1 #1).  Returns NULL on alloc / unknown
  * type. */
 static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 {
@@ -446,7 +446,7 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 			break;
 		case CDB_DICT: {
 			int slen = 0;
-			ops[i].owned = _serialize_cdb_dict(&pair->val.val.dict,
+			ops[i].owned = cdbn_serialize_cdb_dict(&pair->val.val.dict,
 				&slen);
 			if (!ops[i].owned) {
 				_free_apply_ops(ops, n);
@@ -476,14 +476,14 @@ static int _sink_emit_op_value(json_sink_t *s, const apply_op_t *op)
 {
 	switch (op->val_type) {
 	case 'S':
-		return _sink_emit_string(s, op->val_str, op->val_len);
+		return cdbn_sink_emit_string(s, op->val_str, op->val_len);
 	case 'I':
 	case 'L':
-		return _sink_emit_int(s, op->val_int);
+		return cdbn_sink_emit_int(s, op->val_int);
 	case 'N':
-		return _sink_write(s, "null", 4);
+		return cdbn_sink_write(s, "null", 4);
 	case 'O':
-		return _sink_write(s, op->val_str, op->val_len);
+		return cdbn_sink_write(s, op->val_str, op->val_len);
 	}
 	return -1;
 }
@@ -549,13 +549,13 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 		c->ops[op_idx].consumed = 1;
 		if (c->ops[op_idx].pair->unset)
 			return 0; /* drop this subkey */
-		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
 		c->first = 0;
 		/* kfield is an already-escaped existing name —
 		 * copy it through raw, do not re-escape. */
-		if (_sink_emit_raw_string(s, kfield, kflen) < 0)
+		if (cdbn_sink_emit_raw_string(s, kfield, kflen) < 0)
 			return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
 		/* P2.2 [REV-8]: same-subkey collision — keep the
 		 * higher cseq (tie-break last_mod).  When the NEW
 		 * write is stale versus the existing value, discard
@@ -563,7 +563,7 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 		 * carrying a cseq engages this; everything else falls
 		 * through to last-writer-wins (overwrite), unchanged. */
 		if (c->ops[op_idx].val_type == 'O' &&
-		    !_cseq_new_wins(c->ops[op_idx].val_str,
+		    !cdbn_cseq_new_wins(c->ops[op_idx].val_str,
 				c->ops[op_idx].val_len,
 				kvstart, (int)(kvend - kvstart))) {
 			/* [REV-8] stale cseq: keep the existing
@@ -571,7 +571,7 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 			 * (no rollback). */
 			LM_DBG("[REV-8] discarded stale-cseq write; "
 				"kept the existing higher-cseq contact\n");
-			if (_sink_write(s, kvstart,
+			if (cdbn_sink_write(s, kvstart,
 					(int)(kvend - kvstart)) < 0)
 				return -1;
 		} else if (_sink_emit_op_value(s, &c->ops[op_idx]) < 0) {
@@ -579,14 +579,14 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 		}
 	} else {
 		/* Copy through the existing entry. */
-		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
 		c->first = 0;
 		/* kfield is an already-escaped existing name —
 		 * copy it through raw, do not re-escape. */
-		if (_sink_emit_raw_string(s, kfield, kflen) < 0)
+		if (cdbn_sink_emit_raw_string(s, kfield, kflen) < 0)
 			return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
-		if (_sink_write(s, kvstart,
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_write(s, kvstart,
 				(int)(kvend - kvstart)) < 0)
 			return -1;
 	}
@@ -601,14 +601,14 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 	int first;
 	int i;
 
-	if (_sink_putc(s, '{') < 0) return -1;
+	if (cdbn_sink_putc(s, '{') < 0) return -1;
 	ctx.s = s;
 	ctx.ops = ops;
 	ctx.n = n;
 	ctx.fname = fname;
 	ctx.flen = flen;
 	ctx.first = 1;
-	if (_json_foreach_top_field(vstart, (int)(vend - vstart),
+	if (cdbn_json_foreach_top_field(vstart, (int)(vend - vstart),
 			_merge_subkey_cb, &ctx) < 0)
 		return -1;
 	first = ctx.first;
@@ -623,15 +623,15 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 		if (q->subkey.len <= 0) continue;
 		ops[i].consumed = 1;
 		if (q->unset) continue;
-		if (!first && _sink_putc(s, ',') < 0) return -1;
+		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
-		if (_sink_emit_string(s, q->subkey.s, q->subkey.len) < 0)
+		if (cdbn_sink_emit_string(s, q->subkey.s, q->subkey.len) < 0)
 			return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
 		if (_sink_emit_op_value(s, &ops[i]) < 0) return -1;
 	}
 
-	if (_sink_putc(s, '}') < 0) return -1;
+	if (cdbn_sink_putc(s, '}') < 0) return -1;
 	return 0;
 }
 
@@ -661,11 +661,11 @@ static int _apply_field_cb(const char *fname, int flen,
 		c->ops[top_idx].consumed = 1;
 		if (c->ops[top_idx].pair->unset)
 			return 0; /* drop the field entirely */
-		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
 		c->first = 0;
 		/* fname is an already-escaped existing name — raw copy. */
-		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
 		if (_sink_emit_op_value(s, &c->ops[top_idx]) < 0) return -1;
 		/* Mark any subkey ops on the same field as consumed —
 		 * the top-level set replaces the whole value. */
@@ -678,20 +678,20 @@ static int _apply_field_cb(const char *fname, int flen,
 				c->ops[i].consumed = 1;
 		}
 	} else if (sk_count > 0) {
-		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
 		c->first = 0;
 		/* fname is an already-escaped existing name — raw copy. */
-		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
 		if (_sink_merge_subkeys(s, vstart, vend,
 				c->ops, c->n_ops, fname, flen) < 0) return -1;
 	} else {
-		if (!c->first && _sink_putc(s, ',') < 0) return -1;
+		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
 		c->first = 0;
 		/* fname is an already-escaped existing name — raw copy. */
-		if (_sink_emit_raw_string(s, fname, flen) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
-		if (_sink_write(s, vstart, (int)(vend - vstart)) < 0)
+		if (cdbn_sink_emit_raw_string(s, fname, flen) < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_write(s, vstart, (int)(vend - vstart)) < 0)
 			return -1;
 	}
 	return 0;
@@ -713,14 +713,14 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 	ops = _classify_pairs(pairs, &n_ops);
 	if (!ops) return NULL;
 
-	if (_sink_init(&s, json_len + 256) < 0) goto out;
-	if (_sink_putc(&s, '{') < 0) goto out;
+	if (cdbn_sink_init(&s, json_len + 256) < 0) goto out;
+	if (cdbn_sink_putc(&s, '{') < 0) goto out;
 
 	ctx.s = &s;
 	ctx.ops = ops;
 	ctx.n_ops = n_ops;
 	ctx.first = 1;
-	if (_json_foreach_top_field(json, json_len,
+	if (cdbn_json_foreach_top_field(json, json_len,
 			_apply_field_cb, &ctx) < 0)
 		goto out;
 	first = ctx.first;
@@ -731,18 +731,18 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 		if (ops[i].consumed) continue;
 		ops[i].consumed = 1;
 		if (q->unset) continue;
-		if (!first && _sink_putc(&s, ',') < 0) goto out;
+		if (!first && cdbn_sink_putc(&s, ',') < 0) goto out;
 		first = 0;
-		if (_sink_emit_string(&s, q->key.name.s, q->key.name.len) < 0)
+		if (cdbn_sink_emit_string(&s, q->key.name.s, q->key.name.len) < 0)
 			goto out;
-		if (_sink_putc(&s, ':') < 0) goto out;
+		if (cdbn_sink_putc(&s, ':') < 0) goto out;
 		if (q->subkey.len > 0) {
-			if (_sink_putc(&s, '{') < 0) goto out;
-			if (_sink_emit_string(&s, q->subkey.s, q->subkey.len) < 0)
+			if (cdbn_sink_putc(&s, '{') < 0) goto out;
+			if (cdbn_sink_emit_string(&s, q->subkey.s, q->subkey.len) < 0)
 				goto out;
-			if (_sink_putc(&s, ':') < 0) goto out;
+			if (cdbn_sink_putc(&s, ':') < 0) goto out;
 			if (_sink_emit_op_value(&s, &ops[i]) < 0) goto out;
-			if (_sink_putc(&s, '}') < 0) goto out;
+			if (cdbn_sink_putc(&s, '}') < 0) goto out;
 			/* Mark any other subkey-bearing ops on the same field
 			 * as consumed too — they would all have been gathered
 			 * above. We reuse this slot's emission only. */
@@ -774,7 +774,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 		}
 	}
 
-	if (_sink_putc(&s, '}') < 0) goto out;
+	if (cdbn_sink_putc(&s, '}') < 0) goto out;
 	rc = 0;
 
 out:
@@ -785,7 +785,7 @@ out:
 	}
 	/* [P3.5] surface the sink's length -- the caller threads it
 	 * through instead of re-measuring the document. */
-	return _sink_take(&s, out_len);
+	return cdbn_sink_take(&s, out_len);
 }
 
 /* Resolve the document key for an update: non-PK filters try the
@@ -818,7 +818,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 	/* PK path or non-PK index miss: build encoded prefix+filter-value. */
 	if (!target_key) {
 		int enc_len = 0;
-		char *enc = _kv_encode_key(row_filter->val.s.s,
+		char *enc = cdbn_kv_encode_key(row_filter->val.s.s,
 			row_filter->val.s.len, &enc_len);
 		if (!enc) {
 			LM_ERR("update: malloc for KV-key encode buffer "
@@ -832,7 +832,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 		 * token: leading/trailing/double '.') BEFORE any kvStore_* -- else
 		 * JetStream rejects the publish and the REGISTER is silently lost.
 		 * Fail the save loudly; log is redacted (length only, not the AoR). */
-		if (_kv_key_validate(enc, enc_len) < 0) {
+		if (cdbn_kv_key_validate(enc, enc_len) < 0) {
 			LM_ERR("update: AoR encodes to an invalid NATS subject "
 				"(empty/edge-dot token; encoded len %d) -- rejecting "
 				"the save\n", enc_len);
@@ -915,7 +915,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 			return -1;
 		}
 
-		seed = _build_seed_doc(row_filter->key.name.s,
+		seed = cdbn_build_seed_doc(row_filter->key.name.s,
 			row_filter->key.name.len,
 			row_filter->val.s.s, row_filter->val.s.len, &seed_len);
 		if (!seed) {
@@ -956,7 +956,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 			nats_dl.kvEntry_Destroy(entry);
 			return -1;
 		}
-		seed = _build_seed_doc(row_filter->key.name.s,
+		seed = cdbn_build_seed_doc(row_filter->key.name.s,
 			row_filter->key.name.len,
 			row_filter->val.s.s, row_filter->val.s.len, &seed_len);
 		nats_dl.kvEntry_Destroy(entry);
@@ -1049,7 +1049,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * grace + linger [HREV-3]: a lingering contact must survive a
 	 * concurrent sibling's row rewrite. */
 	{
-		char *hygiened = _row_drop_expired_own(new_json,
+		char *hygiened = cdbn_row_drop_expired_own(new_json,
 			new_len, pairs, time(NULL),
 			nats_reap_grace + nats_expired_linger, &new_len);
 		if (!hygiened) {
@@ -1067,7 +1067,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * non-usrloc cachedb_nats consumer) is returned byte-for-byte
 	 * unchanged. */
 	{
-		char *finalized = _row_finalize_metadata(new_json,
+		char *finalized = cdbn_row_finalize_metadata(new_json,
 			new_len, &new_len,
 			&f_row_exp, &f_n_contacts, &f_all_same);
 		if (!finalized) {
@@ -1085,7 +1085,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * its bindings) untouched, rather than hit the NATS payload cap mid-write
 	 * (a broker error) or silently truncate.  Fatal (no CAS retry): the value
 	 * would be identical on every retry. */
-	if (!_value_size_ok(new_len, nats_max_value_size)) {
+	if (!cdbn_value_size_ok(new_len, nats_max_value_size)) {
 		NATS_CDB_STATS_INC(value_oversize_rejected);
 		LM_ERR("update rejected: merged value for key '%s' is %d "
 			"bytes, over nats_max_value_size=%d; save failed "
@@ -1183,7 +1183,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	/* Resolve target_key for both PK and non-PK paths.
 	 *
 	 * Filter values are encoded into NATS-KV-safe form via
-	 * _kv_encode_key so that AoR-shaped inputs (containing '@', etc.)
+	 * cdbn_kv_encode_key so that AoR-shaped inputs (containing '@', etc.)
 	 * do not blow up kvStore_Get with "Invalid Argument". The encoded
 	 * form is also used when falling through to first-insert via the
 	 * CAS loop's NATS_NOT_FOUND branch. */
@@ -1214,7 +1214,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	 * round-trip (the reader's strlen truncates it — silent corruption), so
 	 * fail the save cleanly with no partial row and bump the integrity
 	 * counter.  The value is NOT logged (redacted); only the filter field. */
-	if (_dict_has_nul_field(pairs)) {
+	if (cdbn_dict_has_nul_field(pairs)) {
 		NATS_CDB_STATS_INC(nul_fields_rejected);
 		LM_ERR("update rejected: a contact field for filter '%.*s' "
 			"contains an embedded NUL (value redacted)\n",

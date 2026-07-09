@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P11b / IMPLEMENTATION-PLAN P11b [REV-25], SPEC §4.1/§4.2: migration /
  * mixed-version read tolerance for the cachedb_nats-private `schema_version`
@@ -14,7 +28,7 @@
  * crash on the version value — or every real upgrade breaks.
  *
  * The production read path achieves this STRUCTURALLY: `_is_private_top_key`
- * matches "schema_version" (and "row_exp") by NAME and `_row_strip_private_keys`
+ * matches "schema_version" (and "row_exp") by NAME and `cdbn_row_strip_private_keys`
  * removes the peer before usrloc sees it; the version VALUE is never parsed or
  * branched on.  So absent / 1 / any-higher all read identically.
  *

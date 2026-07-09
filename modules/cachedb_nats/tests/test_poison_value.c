@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P2.5 / SPEC.md §4.2 [REV-26]: fail-closed on a poison stored value.
  *
@@ -15,7 +29,7 @@
  * An EMPTY value (zero-length / all-whitespace) is a *legitimate* server-side
  * delete marker (TTL-SOLUTION §2.2/§4) and stays "absent", not poison.
  *
- * _value_classify(data,len) is the pure leaf:
+ * cdbn_value_classify(data,len) is the pure leaf:
  *   EMPTY  -> absent (delete marker)        -> res.count stays 0, no error
  *   OBJECT -> parse it
  *   POISON -> hard error: alarm + counter   -> never masked as empty
@@ -38,7 +52,7 @@
 enum { VAL_EMPTY = 0, VAL_OBJECT = 1, VAL_POISON = 2 };
 
 /* ─── carried copy of the production classifier (rowmeta TU) ─────── */
-static int _value_classify(const char *data, int len)
+static int cdbn_value_classify(const char *data, int len)
 {
 #ifdef POISON_CURRENT
 	/* today: data[0]=='{' is the only "object"; everything else (incl. a
@@ -66,7 +80,7 @@ static const char *_name(int c)
 
 /* expectations are CONSTANT (FIXED semantics) so the CURRENT arm fails them. */
 #define EXPECT(data, len, want, msg) do { \
-	int _g = _value_classify((data), (len)); \
+	int _g = cdbn_value_classify((data), (len)); \
 	if (_g != (want)) { printf("  FAIL: %s (got %s want %s)\n", msg, \
 		_name(_g), _name(want)); fails++; } \
 	else printf("  ok:   %s\n", msg); } while (0)

@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * [P3.5] Hot-path allocator policy: the JSON compose/serialize/rowmeta
  * TUs ran on raw libc malloc/free.  Every context that touches them is
@@ -18,7 +32,7 @@
  *     malloc/realloc/calloc/free tokens (pkg_* / shm_* only),
  *   - the cross-TU consumers of their buffers follow the contract:
  *     expiry.c's reaper projection (proj/tmp/sink) and reg.c's
- *     _pk_target_key heap arm free with pkg_free.
+ *     cdbn_pk_target_key heap arm free with pkg_free.
  *
  * Out of scope (cold MI paths, self-contained libc pairs): kvobs.c
  * match arrays, reg.c's MI snapshot ctx/rows.
@@ -134,7 +148,7 @@ int main(void)
 		ASSERT(code != NULL, "reg TU readable");
 		if (code) {
 			ASSERT(strstr(code, "pkg_free(key)") != NULL,
-				"reg TU: _pk_target_key heap arm freed via pkg");
+				"reg TU: cdbn_pk_target_key heap arm freed via pkg");
 			free(code);
 		}
 	}

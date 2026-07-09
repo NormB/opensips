@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * MI-OUTPUT-FORMAT-SPEC.md [FMT-4..7]: the pure table formatter behind
  * format=csv / format=txt on the [OBS]/[KVOBS] commands, plus the format
@@ -140,7 +154,7 @@ static char *fmt_take(struct fmt_table *t, int *out_len)
 	return b;
 }
 
-static int _fmt_opts_parse(const char *s, int len,
+static int cdbn_fmt_opts_parse(const char *s, int len,
 	int *kind, int *eol_lf, int *header)
 {
 	*kind = FMT_JSON; *eol_lf = 0; *header = 1;
@@ -221,28 +235,28 @@ int main(void)
 	printf("[FMT-4/5] option parsing:\n");
 	{
 		int k, e, h;
-		CHECK(_fmt_opts_parse("csv", 3, &k, &e, &h) == 0 &&
+		CHECK(cdbn_fmt_opts_parse("csv", 3, &k, &e, &h) == 0 &&
 		      k == FMT_CSV && e == 0 && h == 1,
 		      "bare 'csv' => csv, CRLF, header (the defaults)");
-		CHECK(_fmt_opts_parse("txt;eol=lf;header=0", 19, &k, &e, &h) == 0 &&
+		CHECK(cdbn_fmt_opts_parse("txt;eol=lf;header=0", 19, &k, &e, &h) == 0 &&
 		      k == FMT_TXT && e == 1 && h == 0,
 		      "'txt;eol=lf;header=0' fully parsed");
-		CHECK(_fmt_opts_parse("format=csv;header=0", 19, &k, &e, &h) == 0 &&
+		CHECK(cdbn_fmt_opts_parse("format=csv;header=0", 19, &k, &e, &h) == 0 &&
 		      k == FMT_CSV && h == 0,
 		      "'format=csv;header=0' long form accepted");
-		CHECK(_fmt_opts_parse("json", 4, &k, &e, &h) == 0 && k == FMT_JSON,
+		CHECK(cdbn_fmt_opts_parse("json", 4, &k, &e, &h) == 0 && k == FMT_JSON,
 		      "explicit 'json' accepted");
-		CHECK(_fmt_opts_parse("", 0, &k, &e, &h) == 0 && k == FMT_JSON,
+		CHECK(cdbn_fmt_opts_parse("", 0, &k, &e, &h) == 0 && k == FMT_JSON,
 		      "empty => json default");
-		CHECK(_fmt_opts_parse("cvs", 3, &k, &e, &h) == -1,
+		CHECK(cdbn_fmt_opts_parse("cvs", 3, &k, &e, &h) == -1,
 		      "typo'd 'cvs' REFUSED (never silently json)");
-		CHECK(_fmt_opts_parse("csv;eol=bogus", 13, &k, &e, &h) == -1,
+		CHECK(cdbn_fmt_opts_parse("csv;eol=bogus", 13, &k, &e, &h) == -1,
 		      "bad eol value refused");
-		CHECK(_fmt_opts_parse("csv;header=2", 12, &k, &e, &h) == -1,
+		CHECK(cdbn_fmt_opts_parse("csv;header=2", 12, &k, &e, &h) == -1,
 		      "bad header value refused");
-		CHECK(_fmt_opts_parse("eol=lf;csv", 10, &k, &e, &h) == -1,
+		CHECK(cdbn_fmt_opts_parse("eol=lf;csv", 10, &k, &e, &h) == -1,
 		      "bare kind only allowed as the FIRST token");
-		CHECK(_fmt_opts_parse("csv;wat=1", 9, &k, &e, &h) == -1,
+		CHECK(cdbn_fmt_opts_parse("csv;wat=1", 9, &k, &e, &h) == -1,
 		      "unknown option key refused");
 	}
 

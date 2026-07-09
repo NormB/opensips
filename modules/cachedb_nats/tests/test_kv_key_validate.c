@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P1 / SPEC.md [REV-9 + REV-23 + REV-33]: the usrloc row-key encoder must be
  * injective, round-trippable, produce only NATS-KV-safe *and token-valid*
@@ -13,7 +27,7 @@
  *      the project's mandatory backslash-adversarial rule).
  *   2. [REV-23] '.' and '/' stay literal (valid multi-token subjects; keeps
  *      `nats kv` greppability) BUT a key with an EMPTY subject token
- *      (leading '.', trailing '.', or '..') is REJECTED by _kv_key_validate()
+ *      (leading '.', trailing '.', or '..') is REJECTED by cdbn_kv_key_validate()
  *      before any kvStore_* call -- else JetStream rejects it and the REGISTER
  *      is silently lost (remote DoS / per-user poisoning).
  *   3. injectivity over an adversarial corpus; decode(encode(x)) == x for all
@@ -55,7 +69,7 @@ static int _kv_char_safe(unsigned char c)
 	return 0;
 }
 
-char *_kv_encode_key(const char *in, int in_len, int *out_len)
+char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 {
 	static const char hex[] = "0123456789ABCDEF";
 	int i, w = 0;
@@ -79,7 +93,7 @@ char *_kv_encode_key(const char *in, int in_len, int *out_len)
 
 /* [REV-23] Reject an encoded AoR key whose subject would have an empty token
  * (NATS rejects leading/trailing/double '.') or that is empty. 0=ok, -1=reject. */
-static int _kv_key_validate(const char *enc, int len)
+static int cdbn_kv_key_validate(const char *enc, int len)
 {
 #ifdef KEYENC_CURRENT
 	(void)enc; (void)len; return 0;   /* TODAY: PK path does no validation */
@@ -125,20 +139,20 @@ static int fails = 0;
 
 static int enc_has(const char *in, const char *needle)
 {
-	int el; char *e = _kv_encode_key(in, (int)strlen(in), &el);
+	int el; char *e = cdbn_kv_encode_key(in, (int)strlen(in), &el);
 	int r = e && strstr(e, needle) != NULL; free(e); return r;
 }
 static int roundtrips(const char *in, int len)
 {
-	int el, dl; char *e = _kv_encode_key(in, len, &el);
+	int el, dl; char *e = cdbn_kv_encode_key(in, len, &el);
 	char *d = e ? _kv_decode_key(e, el, &dl) : NULL;
 	int ok = e && d && dl == len && memcmp(d, in, len) == 0;
 	free(e); free(d); return ok;
 }
 static int validate_aor(const char *aor)
 {
-	int el; char *e = _kv_encode_key(aor, (int)strlen(aor), &el);
-	int r = e ? _kv_key_validate(e, el) : -2; free(e); return r;
+	int el; char *e = cdbn_kv_encode_key(aor, (int)strlen(aor), &el);
+	int r = e ? cdbn_kv_key_validate(e, el) : -2; free(e); return r;
 }
 
 int main(void)
@@ -175,8 +189,8 @@ int main(void)
 		CHECK(roundtrips(corpus[k], (int)strlen(corpus[k])), corpus[k][0]?corpus[k]:"<empty>");
 	{ const char nulstr[] = {'a','\0','b'}; CHECK(roundtrips(nulstr, 3), "embedded NUL round-trips"); }
 	for (k = 0; k < n; k++) for (j = k+1; j < n; j++) {
-		int al,bl; char *a=_kv_encode_key(corpus[k],(int)strlen(corpus[k]),&al);
-		char *b=_kv_encode_key(corpus[j],(int)strlen(corpus[j]),&bl);
+		int al,bl; char *a=cdbn_kv_encode_key(corpus[k],(int)strlen(corpus[k]),&al);
+		char *b=cdbn_kv_encode_key(corpus[j],(int)strlen(corpus[j]),&bl);
 		if (a && b && al==bl && memcmp(a,b,al)==0) { printf("  FAIL: collision %s==%s\n",corpus[k],corpus[j]); fails++; }
 		free(a); free(b);
 	}

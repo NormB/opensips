@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P3 / SPEC.md §3.2 §4.1 [REV-5]: value-size / payload bound.
  *
@@ -13,12 +27,12 @@
  * the row, and leave the existing bindings intact.  (max_contacts is a separate
  * usrloc responsibility, [REV-35]; this is the independent value-size guard.)
  *
- * _value_size_ok(len, max): max <= 0 means "unbounded" (knob disabled); else the
+ * cdbn_value_size_ok(len, max): max <= 0 means "unbounded" (knob disabled); else the
  * serialized value must be <= max bytes.  The check runs on the FINAL merged doc
  * just before kvStore_Update, so an over-limit write fails fatally (not a CAS
  * retry) with the previous revision untouched.
  *
- *   gcc -DSIZE_CURRENT ... -> today: no size check (_value_size_ok always 1)
+ *   gcc -DSIZE_CURRENT ... -> today: no size check (cdbn_value_size_ok always 1)
  *                            => RED (an oversize value is not rejected).
  *   gcc ...               -> the FIXED bound => GREEN.
  *
@@ -32,7 +46,7 @@
 #include <string.h>
 
 /* ─── carried copy of the production guard (rowmeta TU) ─────────── */
-static int _value_size_ok(int len, int max)
+static int cdbn_value_size_ok(int len, int max)
 {
 #ifdef SIZE_CURRENT
 	(void)len; (void)max; return 1;   /* today: no value-size guard */
@@ -57,20 +71,20 @@ int main(void)
 #endif
 
 	printf("[REV-5] within bound writes, over bound is rejected:\n");
-	CHECK(_value_size_ok(100, 1048576) == 1, "100 B <= 1 MiB => ok");
-	CHECK(_value_size_ok(1048576, 1048576) == 1, "exactly at limit => ok (<=)");
-	CHECK(_value_size_ok(1048577, 1048576) == 0, "one over the limit => rejected");
-	CHECK(_value_size_ok(5000000, 1048576) == 0, "5 MB value => rejected (would hit max_payload)");
+	CHECK(cdbn_value_size_ok(100, 1048576) == 1, "100 B <= 1 MiB => ok");
+	CHECK(cdbn_value_size_ok(1048576, 1048576) == 1, "exactly at limit => ok (<=)");
+	CHECK(cdbn_value_size_ok(1048577, 1048576) == 0, "one over the limit => rejected");
+	CHECK(cdbn_value_size_ok(5000000, 1048576) == 0, "5 MB value => rejected (would hit max_payload)");
 
 	printf("[REV-5] the knob disabled (max<=0) means unbounded:\n");
-	CHECK(_value_size_ok(5000000, 0) == 1, "max==0 => unbounded (no guard)");
-	CHECK(_value_size_ok(5000000, -1) == 1, "max<0 => unbounded");
+	CHECK(cdbn_value_size_ok(5000000, 0) == 1, "max==0 => unbounded (no guard)");
+	CHECK(cdbn_value_size_ok(5000000, -1) == 1, "max<0 => unbounded");
 
 	printf("[REV-5] small / boundary / defensive:\n");
-	CHECK(_value_size_ok(0, 1048576) == 1, "empty value => ok");
-	CHECK(_value_size_ok(1, 1) == 1, "len==max==1 => ok");
-	CHECK(_value_size_ok(2, 1) == 0, "2 > 1 => rejected");
-	CHECK(_value_size_ok(0, 0) == 1, "0 len, unbounded => ok");
+	CHECK(cdbn_value_size_ok(0, 1048576) == 1, "empty value => ok");
+	CHECK(cdbn_value_size_ok(1, 1) == 1, "len==max==1 => ok");
+	CHECK(cdbn_value_size_ok(2, 1) == 0, "2 > 1 => rejected");
+	CHECK(cdbn_value_size_ok(0, 0) == 1, "0 len, unbounded => ok");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
 	return fails ? 1 : 0;

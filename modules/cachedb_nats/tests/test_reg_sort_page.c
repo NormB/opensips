@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Registration-observability MI [OBS]: nats_reg_list ordering + pagination.
  *
@@ -14,7 +28,7 @@
  *   desc=1         reverses; ties then break by AoR both ways (stable,
  *                  deterministic pagination across repeated calls)
  *
- *   _reg_page(total, limit, offset): window clamps -- offset past the end
+ *   cdbn_reg_page(total, limit, offset): window clamps -- offset past the end
  *   yields an empty page, never an error; count never exceeds the remainder.
  *
  *   gcc -DREGS_CURRENT ... -> comparator ignores the sort key (insertion
@@ -50,7 +64,7 @@ static int _aor_cmp(const struct reg_row_sum *a, const struct reg_row_sum *b)
 	return a->aor_len - b->aor_len;
 }
 
-static int _reg_row_cmp(const struct reg_row_sum *a,
+static int cdbn_reg_row_cmp(const struct reg_row_sum *a,
 	const struct reg_row_sum *b, int sort, int desc)
 {
 #ifdef REGS_CURRENT
@@ -79,7 +93,7 @@ static int _reg_row_cmp(const struct reg_row_sum *a,
 #endif
 }
 
-static void _reg_page(long total, long limit, long offset,
+static void cdbn_reg_page(long total, long limit, long offset,
 	long *start, long *count)
 {
 #ifdef REGS_CURRENT
@@ -103,7 +117,7 @@ static int fails = 0;
 static int g_sort, g_desc;
 static int qcmp(const void *a, const void *b)
 {
-	return _reg_row_cmp((const struct reg_row_sum *)a,
+	return cdbn_reg_row_cmp((const struct reg_row_sum *)a,
 	                    (const struct reg_row_sum *)b, g_sort, g_desc);
 }
 static const char *order(struct reg_row_sum *r, int n, int sort, int desc,
@@ -164,17 +178,17 @@ int main(void)
 	printf("[OBS] pagination window clamps:\n");
 	{
 		long s, c;
-		_reg_page(10, 4, 0, &s, &c);
+		cdbn_reg_page(10, 4, 0, &s, &c);
 		CHECK(s == 0 && c == 4, "first page: [0,4)");
-		_reg_page(10, 4, 8, &s, &c);
+		cdbn_reg_page(10, 4, 8, &s, &c);
 		CHECK(s == 8 && c == 2, "last partial page: count clamps to remainder");
-		_reg_page(10, 4, 10, &s, &c);
+		cdbn_reg_page(10, 4, 10, &s, &c);
 		CHECK(c == 0, "offset == total: empty page, not an error");
-		_reg_page(10, 4, 9999, &s, &c);
+		cdbn_reg_page(10, 4, 9999, &s, &c);
 		CHECK(c == 0, "offset far past the end: empty page");
-		_reg_page(0, 50, 0, &s, &c);
+		cdbn_reg_page(0, 50, 0, &s, &c);
 		CHECK(c == 0, "empty result set: empty page");
-		_reg_page(3, 200, 0, &s, &c);
+		cdbn_reg_page(3, 200, 0, &s, &c);
 		CHECK(s == 0 && c == 3, "limit larger than total: whole set");
 	}
 

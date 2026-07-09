@@ -165,7 +165,7 @@ void fmt_free(struct fmt_table *t)
 	t->len = t->cap = 0;
 }
 
-int _fmt_kind_parse(const char *v, int n)
+int cdbn_fmt_kind_parse(const char *v, int n)
 {
 	if (n == 4 && memcmp(v, "json", 4) == 0) return FMT_JSON;
 	if (n == 3 && memcmp(v, "csv", 3) == 0)  return FMT_CSV;
@@ -179,7 +179,7 @@ static int _fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
 	int *kind, int *eol_lf, int *header)
 {
 	if (klen == 6 && memcmp(k, "format", 6) == 0) {
-		int fk = _fmt_kind_parse(v, vlen);
+		int fk = cdbn_fmt_kind_parse(v, vlen);
 		if (fk < 0)
 			return -1;
 		*kind = fk;
@@ -199,7 +199,7 @@ static int _fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
 	return -1;              /* unknown option: reject */
 }
 
-int _fmt_opts_parse(const char *s, int len,
+int cdbn_fmt_opts_parse(const char *s, int len,
 	int *kind, int *eol_lf, int *header)
 {
 	const char *p = s, *end = s + len;
@@ -224,7 +224,7 @@ int _fmt_opts_parse(const char *s, int len,
 			int k;
 			if (!first)
 				return -1;                 /* bare kind only leads */
-			k = _fmt_kind_parse(tok, (int)(te - tok));
+			k = cdbn_fmt_kind_parse(tok, (int)(te - tok));
 			if (k < 0)
 				return -1;
 			*kind = k;

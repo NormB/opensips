@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P5 / TTL-SOLUTION-SPEC.md §2.2 [TREV-2 / TREV-2a / REV-27]: marker-aware CAS
  * predicate for the raw publish.
@@ -31,7 +45,7 @@
 enum ttl_cas_pred { TTL_CAS_NO_MESSAGE = 0, TTL_CAS_LAST_SEQ = 1 };
 
 /* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
-static enum ttl_cas_pred _ttl_cas_predicate(int got_entry, int value_len,
+static enum ttl_cas_pred cdbn_ttl_cas_predicate(int got_entry, int value_len,
 	uint64_t entry_rev, uint64_t head_seq, uint64_t *out_seq)
 {
 #ifdef CASPRED_CURRENT
@@ -60,25 +74,25 @@ int main(void)
 #endif
 
 	printf("[TREV-2] a non-empty entry => ExpectLastSubjectSeq=rev:\n");
-	CHECK(_ttl_cas_predicate(1, 50, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
+	CHECK(cdbn_ttl_cas_predicate(1, 50, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
 	      "non-empty entry => LAST_SEQ at rev 7");
 
 	printf("[TREV-2a] an EMPTY-value entry (marker) => LAST_SEQ, not NoMessage:\n");
-	CHECK(_ttl_cas_predicate(1, 0, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
+	CHECK(cdbn_ttl_cas_predicate(1, 0, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
 	      "empty-value entry => LAST_SEQ at rev 7 (NOT ExpectNoMessage)");
 
 	printf("[REV-27] NOT_FOUND with a head marker => LAST_SEQ at head:\n");
-	CHECK(_ttl_cas_predicate(0, 0, 0, 9, &seq) == TTL_CAS_LAST_SEQ && seq == 9,
+	CHECK(cdbn_ttl_cas_predicate(0, 0, 0, 9, &seq) == TTL_CAS_LAST_SEQ && seq == 9,
 	      "NOT_FOUND + head seq 9 => LAST_SEQ at 9 (not ExpectNoMessage)");
 
 	printf("[TREV-2a] genuinely empty subject => ExpectNoMessage:\n");
-	CHECK(_ttl_cas_predicate(0, 0, 0, 0, &seq) == TTL_CAS_NO_MESSAGE && seq == 0,
+	CHECK(cdbn_ttl_cas_predicate(0, 0, 0, 0, &seq) == TTL_CAS_NO_MESSAGE && seq == 0,
 	      "NOT_FOUND + no head => ExpectNoMessage, seq 0");
 
 	printf("adversarial: rev/head at boundary values:\n");
-	CHECK(_ttl_cas_predicate(1, 0, UINT64_MAX, 0, &seq) == TTL_CAS_LAST_SEQ && seq == UINT64_MAX,
+	CHECK(cdbn_ttl_cas_predicate(1, 0, UINT64_MAX, 0, &seq) == TTL_CAS_LAST_SEQ && seq == UINT64_MAX,
 	      "entry rev UINT64_MAX preserved");
-	CHECK(_ttl_cas_predicate(1, 0, 1, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 1,
+	CHECK(cdbn_ttl_cas_predicate(1, 0, 1, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 1,
 	      "entry rev 1 (lowest real) => LAST_SEQ");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");

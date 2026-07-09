@@ -39,10 +39,32 @@
  *   nats_msg_delete        — delete a message by sequence number
  */
 
-#ifndef _NATS_JETSTREAM_H_
-#define _NATS_JETSTREAM_H_
+#ifndef NATS_JETSTREAM_H
+#define NATS_JETSTREAM_H
 
 #include "../../mi/mi.h"
+
+/*
+ * Shared contract (every handler below):
+ *
+ * @param params     MI arguments (stream/consumer names, sequence
+ *                   numbers); owned by the MI core, read-only here.
+ *                   Names are validated before any broker call.
+ * @param async_hdl  asynchronous-MI handle; unused (all commands
+ *                   answer synchronously) and may be NULL.
+ * @return           a pkg-allocated mi_response_t; ownership transfers
+ *                   to the MI core, which serializes and frees it
+ *                   (free_mi_response).  NULL = allocation failure.
+ *
+ * Process/locking context: callable from whichever process runs the MI
+ * core.  Unlike the registry MI, every handler here performs
+ * SYNCHRONOUS broker I/O on the calling process' pool connection
+ * (jsOpts.Wait-bounded) -- the MI call blocks for up to that timeout,
+ * and broker-side errors come back as MI errors with the libnats
+ * status text.  The mutating commands (create/delete/purge) are
+ * cluster-administration surfaces: deletes and purges are permanent
+ * and take effect broker-side immediately.
+ */
 
 /* Account info */
 mi_response_t *mi_nats_account_info(const mi_params_t *params,
@@ -79,4 +101,4 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
     struct mi_handler *async_hdl);
 
-#endif /* _NATS_JETSTREAM_H_ */
+#endif /* NATS_JETSTREAM_H */

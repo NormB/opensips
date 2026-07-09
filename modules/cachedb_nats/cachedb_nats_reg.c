@@ -40,7 +40,7 @@
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"
 #include "cachedb_nats_dbase.h"          /* kv_bucket / kv_replicas / ...    */
-#include "cachedb_nats_json_internal.h"  /* walkers + _pk_target_key + dict  */
+#include "cachedb_nats_json_internal.h"  /* walkers + cdbn_pk_target_key + dict  */
 #include "cachedb_nats_fmt.h"
 #include "cachedb_nats_emit.h"
 #include "cachedb_nats_reg.h"
@@ -55,7 +55,7 @@ extern int   nats_reap_grace;
 /* pure helpers — byte-identical to the carried copies in tests/        */
 /* ==================================================================== */
 
-int _reg_contact_state(int64_t expires, time_t now, int grace)
+int cdbn_reg_contact_state(int64_t expires, time_t now, int grace)
 {
 	if (expires == 0)
 		return REG_C_PERMANENT;
@@ -63,7 +63,7 @@ int _reg_contact_state(int64_t expires, time_t now, int grace)
 		? REG_C_ACTIVE : REG_C_EXPIRED;
 }
 
-int _reg_domain_of(const char *aor, int len, const char **dom, int *dlen)
+int cdbn_reg_domain_of(const char *aor, int len, const char **dom, int *dlen)
 {
 	int i;
 	for (i = len - 1; i >= 0; i--) {
@@ -77,7 +77,7 @@ int _reg_domain_of(const char *aor, int len, const char **dom, int *dlen)
 	return -1;
 }
 
-int _reg_ci_eq(const char *a, int alen, const char *b, int blen)
+int cdbn_reg_ci_eq(const char *a, int alen, const char *b, int blen)
 {
 	int i;
 	if (alen != blen)
@@ -92,7 +92,7 @@ int _reg_ci_eq(const char *a, int alen, const char *b, int blen)
 	return 1;
 }
 
-int _reg_substr(const char *hay, int hlen, const char *nee, int nlen)
+int cdbn_reg_substr(const char *hay, int hlen, const char *nee, int nlen)
 {
 	int i;
 	if (nlen <= 0 || nlen > hlen)
@@ -165,7 +165,7 @@ static int _reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	if (klen == 6 && memcmp(k, "format", 6) == 0) {
-		int fk = _fmt_kind_parse(v, vlen);
+		int fk = cdbn_fmt_kind_parse(v, vlen);
 		if (fk < 0)
 			return -1;
 		f->format = fk;
@@ -180,7 +180,7 @@ static int _reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	return 1;                                  /* not a format key */
 }
 
-int _reg_filter_parse(const char *s, int len, struct reg_filter *f)
+int cdbn_reg_filter_parse(const char *s, int len, struct reg_filter *f)
 {
 	const char *p = s, *end = s + len;
 
@@ -219,7 +219,7 @@ int _reg_filter_parse(const char *s, int len, struct reg_filter *f)
 	return 0;
 }
 
-void _reg_page(long total, long limit, long offset, long *start, long *count)
+void cdbn_reg_page(long total, long limit, long offset, long *start, long *count)
 {
 	if (offset >= total) {
 		*start = total; *count = 0;
@@ -238,7 +238,7 @@ static int _aor_cmp(const struct reg_row_info *a, const struct reg_row_info *b)
 	return a->aor_len - b->aor_len;
 }
 
-int _reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b,
+int cdbn_reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b,
 	int sort, int desc)
 {
 	int c = 0;
@@ -268,7 +268,7 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
 {
-	const char *p = _skip_ws(cs, ce);
+	const char *p = cdbn_skip_ws(cs, ce);
 	int64_t expires = -1;
 	int have_exp = 0;
 
@@ -281,40 +281,40 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 	while (p < ce) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		if (p >= ce || *p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, ce, &name, &nlen);
+		p = cdbn_parse_json_string(p, ce, &name, &nlen);
 		if (!p) { o->n_expired++; return; }
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		if (p >= ce || *p != ':') { o->n_expired++; return; }
 		p++;
-		p = _skip_ws(p, ce);
+		p = cdbn_skip_ws(p, ce);
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
-			if (_contact_field_int64(cs, ce, "expires", 7, &v) == 0) {
+			if (cdbn_contact_field_int64(cs, ce, "expires", 7, &v) == 0) {
 				expires = v; have_exp = 1;
 			}
 		} else if (nlen == 8 && memcmp(name, "last_mod", 8) == 0) {
 			int64_t v;
-			if (_contact_field_int64(cs, ce, "last_mod", 8, &v) == 0 &&
+			if (cdbn_contact_field_int64(cs, ce, "last_mod", 8, &v) == 0 &&
 			    v > o->last_mod)
 				o->last_mod = v;
 		} else if ((nlen == 2 && memcmp(name, "ua", 2) == 0) ||
 		           (nlen == 7 && memcmp(name, "contact", 7) == 0)) {
 			const char *sv; int svl;
-			if (*vs == '"' && _parse_json_string(vs, ce, &sv, &svl)) {
+			if (*vs == '"' && cdbn_parse_json_string(vs, ce, &sv, &svl)) {
 				if (nlen == 2 && ua_len &&
-				    _reg_substr(sv, svl, ua_nee, ua_len))
+				    cdbn_reg_substr(sv, svl, ua_nee, ua_len))
 					o->ua_hit = 1;
 				if (nlen == 7 && ct_len &&
-				    _reg_substr(sv, svl, ct_nee, ct_len))
+				    cdbn_reg_substr(sv, svl, ct_nee, ct_len))
 					o->ct_hit = 1;
 			}
 		}
-		p = _skip_json_value(p, ce);
+		p = cdbn_skip_json_value(p, ce);
 		if (!p) { o->n_expired++; return; }
 	}
 	if (!have_exp) {
@@ -334,7 +334,7 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 	}
 }
 
-int _reg_row_scan(const char *json, int len, time_t now, int grace,
+int cdbn_reg_row_scan(const char *json, int len, time_t now, int grace,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
 {
@@ -344,33 +344,33 @@ int _reg_row_scan(const char *json, int len, time_t now, int grace,
 	memset(o, 0, sizeof(*o));
 	o->soonest_exp = REG_NO_EXPIRY;
 
-	p = _skip_ws(json, end);
+	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{')
 		return -1;
 	p++;
 	while (p < end) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end)
 			return -1;
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p)
 			return -1;
 		if (nlen == 3 && memcmp(name, "aor", 3) == 0 && *vs == '"') {
-			_parse_json_string(vs, end, &o->aor, &o->aor_len);
+			cdbn_parse_json_string(vs, end, &o->aor, &o->aor_len);
 		} else if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
 			if (*vs != '{')
 				return -1;              /* poison contacts: not a row */
@@ -380,25 +380,25 @@ int _reg_row_scan(const char *json, int len, time_t now, int grace,
 	if (!c_vs)
 		return -1;                      /* not a usrloc row */
 
-	p = _skip_ws(c_vs, c_ve);
+	p = cdbn_skip_ws(c_vs, c_ve);
 	p++;                                /* '{' */
 	while (p < c_ve) {
 		const char *name, *vs;
 		int nlen;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve || *p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, c_ve, &name, &nlen);
+		p = cdbn_parse_json_string(p, c_ve, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		vs = p;
-		p = _skip_json_value(p, c_ve);
+		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
 		_reg_scan_contact(vs, p, now, grace,
@@ -453,7 +453,7 @@ static int _reg_enum_entry(kvEntry *e, void *arg)
 	vlen = nats_dl.kvEntry_ValueLen(e);
 	if (!val || vlen <= 0)
 		return 0;   /* defensive: IgnoreDeletes filters markers */
-	if (_reg_row_scan(val, vlen, p->now, nats_reap_grace,
+	if (cdbn_reg_row_scan(val, vlen, p->now, nats_reap_grace,
 			p->ua_nee, p->ua_len, p->ct_nee, p->ct_len, &ri) != 0) {
 		p->tot->other++;
 		return 0;
@@ -537,11 +537,11 @@ static int _reg_summary_cb(const struct reg_row_info *ri, void *arg)
 	if (!c->want_domains)
 		return 0;
 	if (ri->aor_len <= 0 ||
-	    _reg_domain_of(ri->aor, ri->aor_len, &d, &dlen) != 0) {
+	    cdbn_reg_domain_of(ri->aor, ri->aor_len, &d, &dlen) != 0) {
 		d = "(none)"; dlen = 6;
 	}
 	for (i = 0; i < c->n_dom; i++)
-		if (_reg_ci_eq(c->dom[i].d, c->dom[i].dlen, d, dlen))
+		if (cdbn_reg_ci_eq(c->dom[i].d, c->dom[i].dlen, d, dlen))
 			break;
 	if (i == c->n_dom) {
 		if (c->n_dom >= REG_MAX_DOMAINS || dlen >= (int)sizeof(c->dom[0].d)) {
@@ -711,9 +711,9 @@ static int _reg_row_match(const struct reg_row_info *ri,
 	if (f->domain[0]) {
 		const char *d; int dlen;
 		if (ri->aor_len <= 0 ||
-		    _reg_domain_of(ri->aor, ri->aor_len, &d, &dlen) != 0)
+		    cdbn_reg_domain_of(ri->aor, ri->aor_len, &d, &dlen) != 0)
 			return 0;
-		if (!_reg_ci_eq(d, dlen, f->domain, (int)strlen(f->domain)))
+		if (!cdbn_reg_ci_eq(d, dlen, f->domain, (int)strlen(f->domain)))
 			return 0;
 	}
 	if (f->ua[0] && !ri->ua_hit)
@@ -766,7 +766,7 @@ static int _reg_list_cb(const struct reg_row_info *ri, void *arg)
 static int g_reg_sort, g_reg_desc;
 static int _reg_qcmp(const void *a, const void *b)
 {
-	return _reg_row_cmp((const struct reg_row_info *)a,
+	return cdbn_reg_row_cmp((const struct reg_row_info *)a,
 	                    (const struct reg_row_info *)b,
 	                    g_reg_sort, g_reg_desc);
 }
@@ -811,7 +811,7 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	if (try_get_mi_string_param(params, "filter", &fstr.s, &fstr.len) < 0)
 		fstr.s = NULL;
 
-	if (_reg_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
+	if (cdbn_reg_filter_parse(fstr.s ? fstr.s : "", fstr.s ? fstr.len : 0,
 			&f) < 0)
 		return init_mi_error(400, MI_SSTR("bad filter (keys: aor domain ua "
 			"contact state expiring_within min_contacts sort desc limit "
@@ -834,7 +834,7 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	if (ctx.n > 1)
 		qsort(ctx.rows, ctx.n, sizeof(*ctx.rows), _reg_qcmp);
 
-	_reg_page(ctx.n, f.limit, f.offset, &start, &count);
+	cdbn_reg_page(ctx.n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)
@@ -939,7 +939,7 @@ static int _contact_dict_exp(const cdb_dict_t *ct, int64_t *exp)
 
 static const char *_reg_state_str(int64_t exp, time_t now, int grace)
 {
-	int st = _reg_contact_state(exp, now, grace);
+	int st = cdbn_reg_contact_state(exp, now, grace);
 	return st == REG_C_PERMANENT ? "permanent" :
 	       st == REG_C_ACTIVE ? "active" : "expired";
 }
@@ -1094,7 +1094,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 		return init_mi_error(400, MI_SSTR("bad format (json|csv|txt"
 			"[;eol=lf|crlf][;header=0|1])"));
 
-	key = _pk_target_key(aor.s, aor.len, keybuf, sizeof(keybuf), &key_heap);
+	key = cdbn_pk_target_key(aor.s, aor.len, keybuf, sizeof(keybuf), &key_heap);
 	if (!key)
 		return init_mi_error(400, MI_SSTR("unencodable aor"));
 
@@ -1117,14 +1117,14 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	}
 
 	INIT_LIST_HEAD(&dict);
-	if (_safe_json_to_dict(val, vlen, &dict) != 0) {
+	if (cdbn_safe_json_to_dict(val, vlen, &dict) != 0) {
 		nats_dl.kvEntry_Destroy(e);
 		if (key_heap) pkg_free(key);
 		return init_mi_error(500, MI_SSTR("stored value is not valid JSON"));
 	}
-	_row_patch_last_mod_int64(val, vlen, &dict);
-	_contact_field_int64(val, val + vlen, "row_exp", 7, &row_exp);
-	_contact_field_int64(val, val + vlen, "schema_version", 14, &schema);
+	cdbn_row_patch_last_mod_int64(val, vlen, &dict);
+	cdbn_contact_field_int64(val, val + vlen, "row_exp", 7, &row_exp);
+	cdbn_contact_field_int64(val, val + vlen, "schema_version", 14, &schema);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)

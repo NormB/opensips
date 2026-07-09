@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: nats_cache_update treated NATS_NOT_FOUND from kvStore_Get
  * as a fatal error, so the very first cdbf.update() against a fresh AoR
@@ -17,7 +31,7 @@
  * iteration's Get finds the now-existing doc and proceeds via Update.
  *
  * This file unit-tests the two helpers introduced for the fix:
- *   _build_seed_doc()    — render a single-field JSON object for the seed.
+ *   cdbn_build_seed_doc()    — render a single-field JSON object for the seed.
  *   _json_apply_pair()   — already covered by test_update_nested_dict, used
  *                          here to verify the seed → apply → final flow.
  *
@@ -88,7 +102,7 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 /* Build a malloc'd seed JSON document {"<field>":"<val>"} for first-insert.
  * Both field name and value are RFC 8259 escaped. If field is empty or
  * NULL the seed is the empty object "{}".  Returns NULL on error. */
-static char *_build_seed_doc(const char *field, int flen,
+static char *cdbn_build_seed_doc(const char *field, int flen,
 	const char *val, int vlen, int *out_len)
 {
 	char *buf, *esc_field, *esc_val;
@@ -192,31 +206,31 @@ int main(void)
 	int len;
 
 	/* A. typical AoR filter */
-	out = _build_seed_doc("aor", 3, "alice@example.com", 17, &len);
+	out = cdbn_build_seed_doc("aor", 3, "alice@example.com", 17, &len);
 	check("A: seed for usrloc-style AoR filter",
 		out, "{\"aor\":\"alice@example.com\"}");
 	free(out);
 
 	/* B. empty filter value (allowed: AoR may be the empty string in tests) */
-	out = _build_seed_doc("aor", 3, "", 0, &len);
+	out = cdbn_build_seed_doc("aor", 3, "", 0, &len);
 	check("B: empty value yields empty quoted string",
 		out, "{\"aor\":\"\"}");
 	free(out);
 
 	/* C. null/empty filter field name yields "{}" so the doc is still valid */
-	out = _build_seed_doc(NULL, 0, "anything", 8, &len);
+	out = cdbn_build_seed_doc(NULL, 0, "anything", 8, &len);
 	check("C: null field yields empty object",
 		out, "{}");
 	free(out);
 
 	/* D. value escaping: a hostile AoR containing a quote must round-trip */
-	out = _build_seed_doc("aor", 3, "ev\"il", 5, &len);
+	out = cdbn_build_seed_doc("aor", 3, "ev\"il", 5, &len);
 	check("D: value escaping works",
 		out, "{\"aor\":\"ev\\\"il\"}");
 	free(out);
 
 	/* E. field-name escaping: field with backslash (artificial but valid) */
-	out = _build_seed_doc("a\\b", 3, "v", 1, &len);
+	out = cdbn_build_seed_doc("a\\b", 3, "v", 1, &len);
 	check("E: field-name escaping",
 		out, "{\"a\\\\b\":\"v\"}");
 	free(out);
@@ -225,7 +239,7 @@ int main(void)
 	 *    apply path. We don't carry _json_apply_pair here (that's covered by
 	 *    test_update_nested_dict); instead we just verify the seed parses
 	 *    as a JSON object by checking it starts with '{' and ends with '}'. */
-	out = _build_seed_doc("aor", 3, "alice", 5, &len);
+	out = cdbn_build_seed_doc("aor", 3, "alice", 5, &len);
 	if (!out || len < 2 || out[0] != '{' || out[len - 1] != '}') {
 		fprintf(stderr, "FAIL: F: seed is not a valid JSON object: \"%s\"\n",
 			out ? out : "<NULL>");

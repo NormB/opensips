@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P2.1 / SPEC.md §3.3 §3.2 §4.1 [REV-34 + REV-25 + REV-18]: compute the
  * row-level expiry sentinel `row_exp` from the merged contact set and emit it
@@ -18,7 +32,7 @@
  *   - only 0 is the sentinel; a negative (already-past) expiry is a real
  *     candidate value, NOT a permanent marker.
  *
- * Part B — _row_finalize_metadata(json,len): recompute row_exp+schema_version
+ * Part B — cdbn_row_finalize_metadata(json,len): recompute row_exp+schema_version
  *   over the MERGED contacts (§4.1 step 3) and re-emit them as top-level peers
  *   [REV-18/D3], replacing any stale ones; a document with no top-level
  *   "contacts" object is returned byte-for-byte unchanged (other cachedb_nats
@@ -27,7 +41,7 @@
  * RED/GREEN from one file (carried-copy convention, matches the Tier-1 suite):
  *   gcc -DROWEXP_CURRENT ... -> a naive int32 min, no permanent sentinel; this
  *                               clamps/mis-drives both _row_exp_min AND the
- *                               row_exp emitted by _row_finalize_metadata
+ *                               row_exp emitted by cdbn_row_finalize_metadata
  *                               => RED.
  *   gcc ...                   -> the FIXED int64 sentinel-aware helper => GREEN.
  *
@@ -82,13 +96,13 @@ static int64_t _row_exp_min(const int64_t *exp, int n)
 
 /* ─── carried copy: JSON walkers (cachedb_nats_json_index.c) ─────── */
 
-static const char *_skip_ws(const char *p, const char *end)
+static const char *cdbn_skip_ws(const char *p, const char *end)
 {
 	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 		p++;
 	return p;
 }
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out, int *out_len)
 {
 	const char *start;
@@ -102,10 +116,10 @@ static const char *_parse_json_string(const char *p, const char *end,
 	*out = start; *out_len = (int)(p - start);
 	return p + 1;
 }
-static const char *_skip_json_value(const char *p, const char *end)
+static const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end) return NULL;
 	switch (*p) {
 	case '"':
@@ -143,7 +157,7 @@ static const char *_skip_json_value(const char *p, const char *end)
 /* ─── carried copy: minimal json_sink_t (cachedb_nats_json_ser.c) ── */
 
 typedef struct { char *buf; int len; int cap; int oom; } json_sink_t;
-static int _sink_init(json_sink_t *s, int initial)
+static int cdbn_sink_init(json_sink_t *s, int initial)
 {
 	s->buf = malloc(initial > 0 ? initial : 16);
 	if (!s->buf) return -1;
@@ -160,30 +174,30 @@ static int _sink_grow(json_sink_t *s, int need)
 	s->buf = nb; s->cap = ncap;
 	return 0;
 }
-static int _sink_write(json_sink_t *s, const char *p, int n)
+static int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom) return -1;
 	if (s->cap - s->len < n && _sink_grow(s, n) < 0) return -1;
 	memcpy(s->buf + s->len, p, n); s->len += n;
 	return 0;
 }
-static int _sink_putc(json_sink_t *s, char c) { return _sink_write(s, &c, 1); }
-static int _sink_emit_raw_string(json_sink_t *s, const char *p, int n)
+static int cdbn_sink_putc(json_sink_t *s, char c) { return cdbn_sink_write(s, &c, 1); }
+static int cdbn_sink_emit_raw_string(json_sink_t *s, const char *p, int n)
 {
-	if (_sink_putc(s, '"') < 0) return -1;
-	if (_sink_write(s, p, n) < 0) return -1;
-	return _sink_putc(s, '"');
+	if (cdbn_sink_putc(s, '"') < 0) return -1;
+	if (cdbn_sink_write(s, p, n) < 0) return -1;
+	return cdbn_sink_putc(s, '"');
 }
-static int _sink_emit_int(json_sink_t *s, int64_t v)
+static int cdbn_sink_emit_int(json_sink_t *s, int64_t v)
 {
 	char tmp[32];
 	int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
-	return _sink_write(s, tmp, n);
+	return cdbn_sink_write(s, tmp, n);
 }
-static char *_sink_take(json_sink_t *s, int *out_len)
+static char *cdbn_sink_take(json_sink_t *s, int *out_len)
 {
 	if (s->oom) { free(s->buf); return NULL; }
-	if (_sink_putc(s, '\0') < 0) return NULL;
+	if (cdbn_sink_putc(s, '\0') < 0) return NULL;
 	if (out_len) *out_len = s->len - 1;
 	return s->buf;
 }
@@ -206,29 +220,29 @@ static const char *_json_parse_int64(const char *p, const char *end, int64_t *ou
 	*out = neg ? -(int64_t)mag : (int64_t)mag;
 	return p;
 }
-static int _contact_expires(const char *vstart, const char *vend, int64_t *out)
+static int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *out)
 {
-	const char *p = _skip_ws(vstart, vend);
+	const char *p = cdbn_skip_ws(vstart, vend);
 	if (p >= vend || *p != '{') return -1;
 	p++;
 	while (p < vend) {
 		const char *name, *vs; int nlen;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend) return -1;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, vend, &name, &nlen);
+		p = cdbn_parse_json_string(p, vend, &name, &nlen);
 		if (!p) return -1;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend || *p != ':') return -1;
 		p++;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
 			if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
-		p = _skip_json_value(p, vend);
+		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;
 	}
 	return -1;
@@ -236,27 +250,27 @@ static int _contact_expires(const char *vstart, const char *vend, int64_t *out)
 static int _row_collect_expiries(const char *vstart, const char *vend,
 	int64_t **out_arr, int *out_n)
 {
-	const char *p = _skip_ws(vstart, vend);
+	const char *p = cdbn_skip_ws(vstart, vend);
 	int64_t *arr = NULL; int n = 0, cap = 0;
 	*out_arr = NULL; *out_n = 0;
 	if (p >= vend || *p != '{') return -1;
 	p++;
 	while (p < vend) {
 		const char *name, *cvs; int nlen; int64_t e;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend) { free(arr); return -1; }
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, vend, &name, &nlen);
+		p = cdbn_parse_json_string(p, vend, &name, &nlen);
 		if (!p) { free(arr); return -1; }
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend || *p != ':') { free(arr); return -1; }
 		p++;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		cvs = p;
-		p = _skip_json_value(p, vend);
+		p = cdbn_skip_json_value(p, vend);
 		if (!p) { free(arr); return -1; }
-		if (_contact_expires(cvs, p, &e) == 0) {
+		if (cdbn_contact_expires(cvs, p, &e) == 0) {
 			if (n == cap) {
 				int ncap = cap ? cap * 2 : 8;
 				int64_t *na = realloc(arr, ncap * sizeof(*na));
@@ -269,7 +283,7 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
 	*out_arr = arr; *out_n = n;
 	return 0;
 }
-static char *_row_finalize_metadata(const char *json, int len, int *out_len)
+static char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len)
 {
 	const char *p, *end, *c_vs = NULL, *c_ve = NULL;
 	int64_t *exps = NULL; int n_exp = 0, first = 1;
@@ -277,23 +291,23 @@ static char *_row_finalize_metadata(const char *json, int len, int *out_len)
 	json_sink_t s;
 	if (!json || len <= 0) return NULL;
 	end = json + len;
-	p = _skip_ws(json, end);
+	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{') return NULL;
 	p++;
 	while (p < end) {
 		const char *name, *vs; int nlen;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) return NULL;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) return NULL;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') return NULL;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) return NULL;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) { c_vs = vs; c_ve = p; }
 	}
@@ -307,39 +321,39 @@ static char *_row_finalize_metadata(const char *json, int len, int *out_len)
 	if (_row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0) return NULL;
 	row_exp = _row_exp_min(exps, n_exp);
 	free(exps);
-	if (_sink_init(&s, len + 64) < 0) return NULL;
-	if (_sink_putc(&s, '{') < 0) goto fail;
-	p = _skip_ws(json, end); p++;
+	if (cdbn_sink_init(&s, len + 64) < 0) return NULL;
+	if (cdbn_sink_putc(&s, '{') < 0) goto fail;
+	p = cdbn_skip_ws(json, end); p++;
 	while (p < end) {
 		const char *name, *vs; int nlen;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) goto fail;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) goto fail;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') goto fail;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) goto fail;
 		if ((nlen == 7 && memcmp(name, "row_exp", 7) == 0) ||
 		    (nlen == 14 && memcmp(name, "schema_version", 14) == 0))
 			continue;
-		if (!first && _sink_putc(&s, ',') < 0) goto fail;
+		if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
 		first = 0;
-		if (_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
-		if (_sink_putc(&s, ':') < 0) goto fail;
-		if (_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
+		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
+		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
+		if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 	}
-	if (!first && _sink_putc(&s, ',') < 0) goto fail;
-	if (_sink_write(&s, "\"row_exp\":", 10) < 0) goto fail;
-	if (_sink_emit_int(&s, row_exp) < 0) goto fail;
-	if (_sink_write(&s, ",\"schema_version\":1", 19) < 0) goto fail;
-	if (_sink_putc(&s, '}') < 0) goto fail;
-	return _sink_take(&s, out_len);
+	if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
+	if (cdbn_sink_write(&s, "\"row_exp\":", 10) < 0) goto fail;
+	if (cdbn_sink_emit_int(&s, row_exp) < 0) goto fail;
+	if (cdbn_sink_write(&s, ",\"schema_version\":1", 19) < 0) goto fail;
+	if (cdbn_sink_putc(&s, '}') < 0) goto fail;
+	return cdbn_sink_take(&s, out_len);
 fail:
 	free(s.buf);
 	return NULL;
@@ -373,7 +387,7 @@ static int _count(const char *hay, const char *needle)
 /* finalize a literal doc; returns malloc'd output (caller frees). */
 static char *_fin(const char *doc)
 {
-	return _row_finalize_metadata(doc, (int)strlen(doc), NULL);
+	return cdbn_row_finalize_metadata(doc, (int)strlen(doc), NULL);
 }
 
 int main(void)

@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * [P3.5] (ptr,len) threading through the update compose path: every
  * builder stage already knows the length of the document it produced
@@ -86,7 +100,7 @@ int main(void)
 	ASSERT(body != NULL, "found _apply_pairs_one_pass");
 	if (body) {
 		ASSERT(strstr(body, "out_len") != NULL ||
-		       count(body, "_sink_take(") == 0,
+		       count(body, "cdbn_sink_take(") == 0,
 			"merge stage surfaces the sink's length (out_len)");
 		free(body);
 	}

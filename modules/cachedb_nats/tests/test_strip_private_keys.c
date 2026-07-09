@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P2.6 / SPEC.md §3.2 §4.2-step-3 [REV-18 / REV-35]: the cdb_row_t handed back
  * to usrloc must be exactly {contacts, aorhash}.  `row_exp` and `schema_version`
@@ -53,7 +67,7 @@ static int _is_private_top_key(const char *name, int len)
 	       (len == 14 && memcmp(name, "schema_version", 14) == 0);
 }
 
-/* carried copy of the strip surgery (mirrors _row_strip_private_keys). */
+/* carried copy of the strip surgery (mirrors cdbn_row_strip_private_keys). */
 static void strip(struct list_head *dict)
 {
 #ifndef STRIP_CURRENT

@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P5 / TTL-SOLUTION-SPEC.md §2.5: delete / purge expressed as a publish.
  *
@@ -29,7 +43,7 @@
 #endif
 
 /* ─── carried copy of the production helper (cachedb_nats_expiry.c) ─── */
-static const char *_ttl_delete_op(int purge)
+static const char *cdbn_ttl_delete_op(int purge)
 {
 	return purge ? NATS_KV_OP_PURGE : NATS_KV_OP_DEL;
 }
@@ -48,13 +62,13 @@ int main(void)
 
 	printf("[§2.5] KV-Operation header name + values are byte-exact:\n");
 	CHECK(strcmp(NATS_KV_OP_HDR, "KV-Operation") == 0, "header name == 'KV-Operation'");
-	CHECK(strcmp(_ttl_delete_op(0), "DEL") == 0, "delete op == 'DEL' (tombstone)");
-	CHECK(strcmp(_ttl_delete_op(1), "PURGE") == 0, "purge op == 'PURGE' (drop history)");
+	CHECK(strcmp(cdbn_ttl_delete_op(0), "DEL") == 0, "delete op == 'DEL' (tombstone)");
+	CHECK(strcmp(cdbn_ttl_delete_op(1), "PURGE") == 0, "purge op == 'PURGE' (drop history)");
 
 	printf("[§2.5] case-exact (a wrong case is silently ignored by the server):\n");
-	CHECK(strcmp(_ttl_delete_op(0), "del") != 0, "not lowercase 'del'");
-	CHECK(strcmp(_ttl_delete_op(0), "DELETE") != 0, "not 'DELETE'");
-	CHECK(strcmp(_ttl_delete_op(1), "purge") != 0, "not lowercase 'purge'");
+	CHECK(strcmp(cdbn_ttl_delete_op(0), "del") != 0, "not lowercase 'del'");
+	CHECK(strcmp(cdbn_ttl_delete_op(0), "DELETE") != 0, "not 'DELETE'");
+	CHECK(strcmp(cdbn_ttl_delete_op(1), "purge") != 0, "not lowercase 'purge'");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
 	return fails ? 1 : 0;

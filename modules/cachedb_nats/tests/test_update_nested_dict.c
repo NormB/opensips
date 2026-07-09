@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: cachedb_nats_json.c::nats_cache_update silently dropped
  * every non-string pair. usrloc's cdb_flush_urecord passes contacts as
@@ -30,14 +44,14 @@
 
 /* ─── carried copy of the production helpers under test ──────────── */
 
-static const char *_skip_ws(const char *p, const char *end)
+static const char *cdbn_skip_ws(const char *p, const char *end)
 {
 	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 		p++;
 	return p;
 }
 
-static const char *_parse_json_string(const char *p, const char *end,
+static const char *cdbn_parse_json_string(const char *p, const char *end,
 	const char **out_s, int *out_len)
 {
 	const char *start;
@@ -54,14 +68,14 @@ static const char *_parse_json_string(const char *p, const char *end,
 	return p + 1;
 }
 
-static const char *_skip_json_value(const char *p, const char *end)
+static const char *cdbn_skip_json_value(const char *p, const char *end)
 {
 	int depth;
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end) return NULL;
 	if (*p == '"') {
 		const char *s; int n;
-		return _parse_json_string(p, end, &s, &n);
+		return cdbn_parse_json_string(p, end, &s, &n);
 	}
 	if (*p == '{' || *p == '[') {
 		char open = *p, close = (open == '{') ? '}' : ']';
@@ -69,7 +83,7 @@ static const char *_skip_json_value(const char *p, const char *end)
 		while (p < end && depth > 0) {
 			if (*p == '"') {
 				const char *s; int n;
-				p = _parse_json_string(p, end, &s, &n);
+				p = cdbn_parse_json_string(p, end, &s, &n);
 				if (!p) return NULL;
 				continue;
 			}
@@ -138,11 +152,11 @@ static int _find_field(const char *json, int json_len,
 	int jflen;
 	int saw_field = 0;
 
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end || *p != '{') return -1;
 	p++;
 	while (p < end) {
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) return -1;
 		if (*p == '}') {
 			*insert_pos = p;
@@ -150,21 +164,21 @@ static int _find_field(const char *json, int json_len,
 			return 1;
 		}
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &jfield, &jflen);
+		p = cdbn_parse_json_string(p, end, &jfield, &jflen);
 		if (!p) return -1;
 		saw_field = 1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (jflen == flen && memcmp(jfield, field, flen) == 0) {
 			*vstart = p;
-			p = _skip_json_value(p, end);
+			p = cdbn_skip_json_value(p, end);
 			if (!p) return -1;
 			*vend = p;
 			return 0;
 		}
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) return -1;
 	}
 	return -1;
@@ -398,7 +412,7 @@ static char *_json_apply_pair(const char *json, int json_len,
 
 		if (rc < 0) return NULL;
 		if (rc == 0) {
-			const char *p = _skip_ws(vstart, vend);
+			const char *p = cdbn_skip_ws(vstart, vend);
 			if (p >= vend || *p != '{') return NULL;
 			inner = vstart;
 			inner_len = (int)(vend - vstart);

@@ -3,7 +3,21 @@
  *
  * This file is part of opensips, a free SIP server.
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Implementation of the SHM string intern table -- see header
  * for the rationale.  ~half of all opensips CPU at 100k AoRs
@@ -27,7 +41,7 @@
 
 #include "fts_index.h"
 #include "fts_intern.h"
-#include "../cachedb_nats/cachedb_nats_json_internal.h"  /* g_idx, _find_entry, shard locks */
+#include "../cachedb_nats/cachedb_nats_json_internal.h"  /* g_idx, fts_find_entry, shard locks */
 
 extern int fts_max_results;   /* modparam (cachedb_nats_fts.c) */
 
@@ -39,7 +53,7 @@ extern int fts_max_results;   /* modparam (cachedb_nats_fts.c) */
  * _lookup() — Look up the index entry for a field + value pair.
  *
  * Builds the composite "field:value" string in a stack buffer, then calls
- * _find_entry() to locate the hash table entry.  Returns the entry (whose
+ * fts_find_entry() to locate the hash table entry.  Returns the entry (whose
  * ->keys / ->num_keys describe the matching document set) or NULL if no
  * documents contain this field:value pair.  Caller must hold the entry's
  * shard lock.
@@ -65,7 +79,7 @@ static nats_idx_entry *_lookup(const char *field, int flen,
 	memcpy(fv_buf + flen + 1, val, vlen);
 	fv_buf[fv_len] = '\0';
 
-	return _find_entry(fv_buf, fv_len);
+	return fts_find_entry(fv_buf, fv_len);
 }
 
 /* Same hash as _lookup but returns the shard index instead of the
@@ -87,7 +101,7 @@ static int _lookup_shard(const char *field, int flen,
 	memcpy(fv_buf, field, flen);
 	fv_buf[flen] = ':';
 	memcpy(fv_buf + flen + 1, val, vlen);
-	b = _hash(fv_buf, fv_len);
+	b = fts_hash(fv_buf, fv_len);
 	return NATS_IDX_SHARD_OF(b);
 }
 
@@ -229,8 +243,8 @@ static int _intersect_keys(char **a, int a_count,
 /* ------------------------------------------------------------------ */
 
 /* Release one query reference per key and the array itself.  Balances
- * the nats_intern_retain() snapshots taken in _query_match_keys(). */
-void _release_keyset(char **keys, int count)
+ * the nats_intern_retain() snapshots taken in fts_query_match_keys(). */
+void fts_release_keyset(char **keys, int count)
 {
 	int k;
 	if (!keys)
@@ -244,7 +258,7 @@ void _release_keyset(char **keys, int count)
 /* Resolve the AND-filter chain against the search index, leaving the
  * surviving keyset (one query reference per key) in *out_keys.  An
  * empty intersection is success with *out_count == 0. */
-int _query_match_keys(const cdb_filter_t *filter,
+int fts_query_match_keys(const cdb_filter_t *filter,
 	char ***out_keys, int *out_count)
 {
 	const cdb_filter_t *it;
@@ -272,7 +286,7 @@ int _query_match_keys(const cdb_filter_t *filter,
 		if (it->op != CDB_OP_EQ) {
 			LM_ERR("only CDB_OP_EQ supported for NATS JSON search "
 				"(got op %d)\n", it->op);
-			_release_keyset(match_keys, match_count);
+			fts_release_keyset(match_keys, match_count);
 			return -1;
 		}
 
@@ -287,7 +301,7 @@ int _query_match_keys(const cdb_filter_t *filter,
 		if (!e || e->num_keys == 0) {
 			_idx_unlock_shard(g_idx, shard);
 			/* no match for this filter — intersection is empty */
-			_release_keyset(match_keys, match_count);
+			fts_release_keyset(match_keys, match_count);
 			match_keys = NULL;
 			match_count = 0;
 			break;
@@ -305,7 +319,7 @@ int _query_match_keys(const cdb_filter_t *filter,
 				e->num_keys,
 				sizeof(char *) * e->num_keys);
 			_idx_unlock_shard(g_idx, shard);
-			_release_keyset(match_keys, match_count);
+			fts_release_keyset(match_keys, match_count);
 			return -1;
 		}
 		{
@@ -341,8 +355,8 @@ int _query_match_keys(const cdb_filter_t *filter,
 					iter_keys, iter_count,
 					&new_keys, &new_count) < 0) {
 				LM_ERR("intersection failed\n");
-				_release_keyset(iter_keys, iter_count);
-				_release_keyset(match_keys, match_count);
+				fts_release_keyset(iter_keys, iter_count);
+				fts_release_keyset(match_keys, match_count);
 				return -1;
 			}
 			{
@@ -354,8 +368,8 @@ int _query_match_keys(const cdb_filter_t *filter,
 				for (k = 0; k < new_count; k++)
 					nats_intern_retain(new_keys[k]);
 			}
-			_release_keyset(iter_keys, iter_count);
-			_release_keyset(match_keys, match_count);
+			fts_release_keyset(iter_keys, iter_count);
+			fts_release_keyset(match_keys, match_count);
 			match_keys = new_keys;
 			match_count = new_count;
 		}
@@ -379,7 +393,7 @@ int _query_match_keys(const cdb_filter_t *filter,
 
 /* single-key resolve for cachedb_nats's update(): first indexed doc key
  * matching field=val.  1 = hit (out filled), 0 = miss, -1 = overflow. */
-int _fts_resolve_key(const str *field, const str *val, char *out, int out_len)
+int fts_resolve_key(const str *field, const str *val, char *out, int out_len)
 {
 	nats_idx_entry *e;
 	int rc = 0;

@@ -1,19 +1,33 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * TTL-HISTORY-FIX-SPEC.md D6 [HREV-6]: mod_init validation of the new
  * operator parameters.  A bad value must refuse startup (fail loudly at boot,
  * never misbehave silently at runtime):
  *
- *   _linger_guard(linger)        0 ok / -1 refuse.  Range 0..86400: negative
+ *   cdbn_linger_guard(linger)        0 ok / -1 refuse.  Range 0..86400: negative
  *                                is meaningless; > 1 day is almost certainly
  *                                a typo'd epoch pasted into the config.
  *   _marker_ttl_guard(secs)      0 ok / -1 refuse.  Minimum 1 (the server's
  *                                floor for marker TTLs); 0/negative would ask
  *                                for markers that never/instantly vanish.
- *   _reap_interval_guard(interval, unsafe_ttl_only, native_ttl)
+ *   cdbn_reap_interval_guard(interval, unsafe_ttl_only, native_ttl)
  *                                EXTENDED [D6]: with the reaper off
  *                                (interval<=0), nats_unsafe_ttl_only=1 only
  *                                suffices while the native-TTL path is still
@@ -32,7 +46,7 @@
 /* ─── carried copies of the production helpers (cachedb_nats_expiry.c /
  *     cachedb_nats_expiry.c) ─────────────────────────────────────── */
 
-static int _linger_guard(int linger)
+static int cdbn_linger_guard(int linger)
 {
 #ifdef GUARDS_CURRENT
 	(void)linger; return 0;                    /* no guard */
@@ -50,7 +64,7 @@ static int _marker_ttl_guard(int marker_ttl)
 #endif
 }
 
-static int _reap_interval_guard(int interval, int unsafe_ttl_only,
+static int cdbn_reap_interval_guard(int interval, int unsafe_ttl_only,
 	int native_ttl)
 {
 #ifdef GUARDS_CURRENT
@@ -82,12 +96,12 @@ int main(void)
 #endif
 
 	printf("[D6] nats_expired_linger range 0..86400:\n");
-	CHECK(_linger_guard(0) == 0, "0 (default, reclaim ASAP) => ok");
-	CHECK(_linger_guard(30) == 0, "30 => ok");
-	CHECK(_linger_guard(86400) == 0, "86400 (1 day, the ceiling) => ok");
-	CHECK(_linger_guard(-1) == -1, "-1 => refused");
-	CHECK(_linger_guard(86401) == -1, "86401 => refused (typo'd epoch)");
-	CHECK(_linger_guard(-2147483647) == -1, "INT_MIN-ish => refused");
+	CHECK(cdbn_linger_guard(0) == 0, "0 (default, reclaim ASAP) => ok");
+	CHECK(cdbn_linger_guard(30) == 0, "30 => ok");
+	CHECK(cdbn_linger_guard(86400) == 0, "86400 (1 day, the ceiling) => ok");
+	CHECK(cdbn_linger_guard(-1) == -1, "-1 => refused");
+	CHECK(cdbn_linger_guard(86401) == -1, "86401 => refused (typo'd epoch)");
+	CHECK(cdbn_linger_guard(-2147483647) == -1, "INT_MIN-ish => refused");
 
 	printf("[D6] kv_marker_ttl minimum 1 s:\n");
 	CHECK(_marker_ttl_guard(30) == 0, "30 (default) => ok");
@@ -96,14 +110,14 @@ int main(void)
 	CHECK(_marker_ttl_guard(-5) == -1, "negative => refused");
 
 	printf("[D6] extended reap guard: no-mechanism combo always refused:\n");
-	CHECK(_reap_interval_guard(30, 0, 1) == 0, "reaper on, ttl on => ok");
-	CHECK(_reap_interval_guard(30, 0, 0) == 0, "reaper on, ttl OFF => ok (reaper covers)");
-	CHECK(_reap_interval_guard(0, 1, 1) == 0, "reaper off + ack, ttl on => ok (pre-D6 contract kept)");
-	CHECK(_reap_interval_guard(0, 0, 1) == -1, "reaper off, no ack => refused (pre-D6 contract kept)");
-	CHECK(_reap_interval_guard(0, 1, 0) == -1,
+	CHECK(cdbn_reap_interval_guard(30, 0, 1) == 0, "reaper on, ttl on => ok");
+	CHECK(cdbn_reap_interval_guard(30, 0, 0) == 0, "reaper on, ttl OFF => ok (reaper covers)");
+	CHECK(cdbn_reap_interval_guard(0, 1, 1) == 0, "reaper off + ack, ttl on => ok (pre-D6 contract kept)");
+	CHECK(cdbn_reap_interval_guard(0, 0, 1) == -1, "reaper off, no ack => refused (pre-D6 contract kept)");
+	CHECK(cdbn_reap_interval_guard(0, 1, 0) == -1,
 	      "reaper off + ack BUT native ttl off => refused (no mechanism left)");
-	CHECK(_reap_interval_guard(0, 0, 0) == -1, "everything off, no ack => refused");
-	CHECK(_reap_interval_guard(-1, 1, 0) == -1, "negative interval + ttl off => refused");
+	CHECK(cdbn_reap_interval_guard(0, 0, 0) == -1, "everything off, no ack => refused");
+	CHECK(cdbn_reap_interval_guard(-1, 1, 0) == -1, "negative interval + ttl off => refused");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
 	return fails ? 1 : 0;

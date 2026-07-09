@@ -60,11 +60,11 @@ char *fmt_take(struct fmt_table *t, int *out_len);
 void  fmt_free(struct fmt_table *t);
 
 /* "json"/"csv"/"txt" -> enum, -1 unknown [FMT-4]. */
-int _fmt_kind_parse(const char *v, int n);
+int cdbn_fmt_kind_parse(const char *v, int n);
 /* The positional format parameter: "<fmt>[;eol=lf|crlf][;header=0|1]" (a
  * bare kind is shorthand; "format=<fmt>" long form accepted).  0 ok, -1
  * refused [FMT-5]. */
-int _fmt_opts_parse(const char *s, int len,
+int cdbn_fmt_opts_parse(const char *s, int len,
 	int *kind, int *eol_lf, int *header);
 
 #endif /* CACHEDB_NATS_FMT_H */

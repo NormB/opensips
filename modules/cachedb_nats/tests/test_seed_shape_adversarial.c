@@ -1,10 +1,24 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * TTL-HISTORY-FIX-SPEC.md D2 [HREV-2] regression lock: the seedless first
- * insert reuses the SAME _build_seed_doc output as the old write-the-seed
+ * insert reuses the SAME cdbn_build_seed_doc output as the old write-the-seed
  * flow, now purely as the in-memory merge base.  If the builder's
  * serialization drifted, a first-insert row would silently differ from what
  * every pre-D2 deployment stored -- so its shape is locked here byte-for-byte
@@ -59,7 +73,7 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 	return w;
 }
 
-static char *_build_seed_doc(const char *field, int flen,
+static char *cdbn_build_seed_doc(const char *field, int flen,
 	const char *val, int vlen, int *out_len)
 {
 	char *buf, *esc_field, *esc_val;
@@ -96,7 +110,7 @@ static void lock(const char *label, const char *field, const char *val,
 	const char *golden)
 {
 	int len = 0;
-	char *out = _build_seed_doc(field, field ? (int)strlen(field) : 0,
+	char *out = cdbn_build_seed_doc(field, field ? (int)strlen(field) : 0,
 		val, val ? (int)strlen(val) : 0, &len);
 	if (!out) {
 		fprintf(stderr, "FAIL: %s: builder returned NULL\n", label);
@@ -141,7 +155,7 @@ int main(void)
 		char *out;
 		memset(big, 'a', 255); big[255] = '\0';
 		snprintf(golden, sizeof(golden), "{\"aor\":\"%s\"}", big);
-		out = _build_seed_doc("aor", 3, big, 255, &len);
+		out = cdbn_build_seed_doc("aor", 3, big, 255, &len);
 		if (!out || strcmp(out, golden) != 0) {
 			fprintf(stderr, "FAIL: 255-char AoR truncated or mangled\n");
 			g_fails++;
@@ -151,7 +165,7 @@ int main(void)
 	}
 
 	/* NUL handling note: an embedded NUL never reaches the builder -- the
-	 * update path rejects it earlier (_dict_has_nul_field, P2.3 [REV-20],
+	 * update path rejects it earlier (cdbn_dict_has_nul_field, P2.3 [REV-20],
 	 * locked by test_update_nul_poison).  Locked here: a NUL-terminated
 	 * prefix is serialized as-is, not silently extended. */
 	lock("value stops at NUL (upstream guard owns rejection)", "aor", "ab",

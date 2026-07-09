@@ -560,7 +560,7 @@ static int init_check_params(void)
 	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS
 	 * (expires==0) -- data loss in a registration store.  Refuse to start
 	 * (fail closed) before any bucket is created/bound. */
-	if (_kv_ttl_guard(kv_ttl) != 0) {
+	if (cdbn_kv_ttl_guard(kv_ttl) != 0) {
 		LM_ERR("cachedb_nats: kv_ttl=%d invalid -- a non-zero kv_ttl sets the "
 		       "KV bucket MaxAge, which overrides per-message TTL and would "
 		       "EXPIRE PERMANENT CONTACTS (expires==0). Set kv_ttl=0 [REV-7].\n",
@@ -570,7 +570,7 @@ static int init_check_params(void)
 
 	/* [D6/HREV-6] validate the new operator params -- fail loudly at boot,
 	 * never misbehave silently at runtime. */
-	if (_linger_guard(nats_expired_linger) != 0) {
+	if (cdbn_linger_guard(nats_expired_linger) != 0) {
 		LM_ERR("cachedb_nats: nats_expired_linger=%d out of range (0..86400); "
 		       "large retention wants a different tool than this module\n",
 		       nats_expired_linger);
@@ -775,7 +775,7 @@ static int init_services(void)
 	 * SINGLE expiry mechanism (P1.5), so a non-positive interval is
 	 * refused.  Index-independent (enumerates via kvStore_Keys), so it
 	 * runs regardless of enable_search_index. */
-	if (_reap_interval_guard(nats_reap_interval) < 0) {
+	if (cdbn_reap_interval_guard(nats_reap_interval) < 0) {
 		LM_ERR("nats_reap_interval=%d disables the reaper, the only "
 			"expiry mechanism -- expired bindings would never be "
 			"reclaimed; set nats_reap_interval > 0\n",
@@ -883,7 +883,7 @@ static int child_init(int rank)
 	if (rank == 1) {
 		int64_t maxage_ns = 0, mmps = 0;
 		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
-				_kv_legacy_bucket_maxage_warn(maxage_ns)) {
+				cdbn_kv_legacy_bucket_maxage_warn(maxage_ns)) {
 			if (require_usrloc_safe_bucket) {
 				LM_ERR("cachedb_nats: bound bucket '%s' has a non-zero "
 					"backing-stream MaxAge (%lld ns) and "

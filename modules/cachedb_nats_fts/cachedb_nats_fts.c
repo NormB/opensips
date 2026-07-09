@@ -3,7 +3,21 @@
  *
  * This file is part of opensips, a free SIP server.
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Implementation of the SHM string intern table -- see header
  * for the rationale.  ~half of all opensips CPU at 100k AoRs
@@ -43,10 +57,10 @@ static void mod_destroy(void);
 int fts_max_results = 100;
 /* nats_idx_buckets / nats_idx_bucket_mask are defined in fts_index.c */
 
-int _query_match_keys(const cdb_filter_t *filter,
+int fts_query_match_keys(const cdb_filter_t *filter,
 		char ***out_keys, int *out_count);
-void _release_keyset(char **keys, int count);
-int _fts_resolve_key(const str *field, const str *val,
+void fts_release_keyset(char **keys, int count);
+int fts_resolve_key(const str *field, const str *val,
 		char *out, int out_len);
 
 static int cdbn_fts_bind(cdbn_fts_api_t *api)
@@ -60,9 +74,9 @@ static int cdbn_fts_bind(cdbn_fts_api_t *api)
 	api->remove_by_revmap  = nats_json_index_remove_by_revmap;
 	api->remove_fields     = nats_json_index_remove_fields;
 	api->count             = nats_json_index_count;
-	api->query_match_keys  = _query_match_keys;
-	api->release_keyset    = _release_keyset;
-	api->resolve_key       = _fts_resolve_key;
+	api->query_match_keys  = fts_query_match_keys;
+	api->release_keyset    = fts_release_keyset;
+	api->resolve_key       = fts_resolve_key;
 	return 0;
 }
 

@@ -1,13 +1,27 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: the PK fast-path query did two heap allocations per
  * usrloc read (a malloc for the percent-encoded value + a pkg_malloc for
  * the prefixed target key), for keys that are typically well under 100
  * bytes.  Fix: build the target key into a 512-byte stack buffer, falling
- * back to the heap only for the rare long key (_pk_target_key).
+ * back to the heap only for the rare long key (cdbn_pk_target_key).
  *
  * This carries a copy of the build/encode logic and verifies it produces
  * the correct "<prefix><percent-encoded value>" and only heap-allocates
@@ -37,7 +51,7 @@ static int kv_char_safe(unsigned char c)
 	return 0;
 }
 
-/* carried copy of _pk_target_key */
+/* carried copy of cdbn_pk_target_key */
 static char *pk_target_key(const char *val, int val_len,
 	char *stackbuf, int stackcap, int *heap)
 {
@@ -112,11 +126,11 @@ int main(void)
 	/* Production wiring: the PK query path uses the stack-buffer helper. */
 	{
 		const char *json = "../cachedb_nats_json.c";
-		ASSERT(file_contains(json, "_pk_target_key"),
+		ASSERT(file_contains(json, "cdbn_pk_target_key"),
 			"json defines the stack-buffer PK key helper");
 		/* the PK branch now lives in the _query_pk_fast_path helper
 		 * extracted from nats_cache_query (the design notes decomposition) */
-		ASSERT(grep_in_function(json, "_query_pk_fast_path", "_pk_target_key") >= 1,
+		ASSERT(grep_in_function(json, "_query_pk_fast_path", "cdbn_pk_target_key") >= 1,
 			"PK query path uses the stack-buffer key build");
 		ASSERT(grep_in_function(json, "_query_pk_fast_path", "pkg_malloc(plen + enc") == 0,
 			"PK query path no longer pkg_mallocs the target key");

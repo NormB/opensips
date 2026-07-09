@@ -1,15 +1,29 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * MAINTAINABILITY-PERF-SPEC.md P2.5: the ONE top-level JSON field
  * iterator behind the row-mutation paths.  The hand-rolled
- * _skip_ws/_parse_json_string/_skip_json_value walk skeleton used to
+ * cdbn_skip_ws/cdbn_parse_json_string/cdbn_skip_json_value walk skeleton used to
  * be copy-pasted through _apply_pairs_one_pass /
- * _row_finalize_metadata / _reap_project_survivors /
+ * cdbn_row_finalize_metadata / cdbn_reap_project_survivors /
  * _sink_merge_subkeys; they all now walk through
- * _json_foreach_top_field(json, len, cb, ud).  This locks the
+ * cdbn_json_foreach_top_field(json, len, cb, ud).  This locks the
  * iterator against the PRODUCTION walker TU (#included directly):
  *
  *   - every top-level field visited exactly once, name span and RAW
@@ -83,7 +97,7 @@ static int rec_cb(const char *fname, int flen,
 static int walk(const char *json, struct rec *r)
 {
 	memset(r, 0, sizeof(*r));
-	return _json_foreach_top_field(json, (int)strlen(json), rec_cb, r);
+	return cdbn_json_foreach_top_field(json, (int)strlen(json), rec_cb, r);
 }
 
 int main(void)
@@ -116,7 +130,7 @@ int main(void)
 	printf("[P2.5] cb abort stops the walk:\n");
 	memset(&r, 0, sizeof(r));
 	r.abort_after = 2;
-	CHECK(_json_foreach_top_field("{\"a\":1,\"b\":2,\"c\":3}", 21,
+	CHECK(cdbn_json_foreach_top_field("{\"a\":1,\"b\":2,\"c\":3}", 21,
 			rec_cb, &r) == -1 && r.visited == 2,
 		"abort after 2 fields: walk stops, -1 surfaced");
 
@@ -128,9 +142,9 @@ int main(void)
 	CHECK(walk("{\"a\":\"unterminated}", &r) == -1,
 		"unterminated string value");
 	CHECK(walk("", &r) == -1, "empty input");
-	CHECK(_json_foreach_top_field(NULL, 5, rec_cb, &r) == -1,
+	CHECK(cdbn_json_foreach_top_field(NULL, 5, rec_cb, &r) == -1,
 		"NULL json guarded");
-	CHECK(_json_foreach_top_field("{}", 2, NULL, &r) == -1,
+	CHECK(cdbn_json_foreach_top_field("{}", 2, NULL, &r) == -1,
 		"NULL callback guarded");
 
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED",

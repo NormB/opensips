@@ -1,13 +1,27 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * P11b / IMPLEMENTATION-PLAN P11b [REV-25], SPEC §5.3 [REV-7]: migration policy
  * for a PRE-EXISTING bucket whose backing stream already carries a non-zero
  * MaxAge.
  *
- * The P7 guard `_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
+ * The P7 guard `cdbn_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
  * `kv_ttl` MODPARAM — it stops THIS module from CREATING a MaxAge bucket.  It
  * does NOT cover the migration case: on first deploy against an EXISTING bucket
  * created by an older deployment (or another tool), the bound stream may already
@@ -16,7 +30,7 @@
  * data loss.  The module binds to existing buckets (nats_pool.c js_KeyValue),
  * so without a check this is silent.
  *
- * `_kv_legacy_bucket_maxage_warn(maxage_ns)` is the policy decision: a bound
+ * `cdbn_kv_legacy_bucket_maxage_warn(maxage_ns)` is the policy decision: a bound
  * bucket with a non-zero MaxAge warrants a loud startup WARN naming the
  * permanent-contact-expiry risk + remediation (recreate the bucket MaxAge=0 /
  * kv_ttl=0).  This is the "documented policy, not a silent permanent-contact
@@ -40,7 +54,7 @@
  * @maxage_ns: the bound bucket's backing-stream MaxAge in nanoseconds.
  * @return    1 => warn (non-zero MaxAge will expire permanent contacts),
  *            0 => clean (MaxAge==0, the only safe config for a usrloc store). */
-static int _kv_legacy_bucket_maxage_warn(int64_t maxage_ns)
+static int cdbn_kv_legacy_bucket_maxage_warn(int64_t maxage_ns)
 {
 #ifdef LEGACY_BUCKET_CURRENT
 	(void)maxage_ns; return 0;   /* today: bound silently, no policy */
@@ -62,15 +76,15 @@ int main(void)
 #endif
 
 	printf("[REV-7/REV-25] MaxAge==0 is the ONLY safe config -> no warn:\n");
-	CHECK(_kv_legacy_bucket_maxage_warn(0) == 0, "MaxAge=0 => clean (no warn)");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(0) == 0, "MaxAge=0 => clean (no warn)");
 
 	printf("[REV-7/REV-25] any non-zero MaxAge would expire permanent contacts -> WARN:\n");
-	CHECK(_kv_legacy_bucket_maxage_warn(30LL * NATS_NS_PER_S) == 1, "MaxAge=30s => WARN");
-	CHECK(_kv_legacy_bucket_maxage_warn(1) == 1, "MaxAge=1ns (sub-second) => WARN");
-	CHECK(_kv_legacy_bucket_maxage_warn(86400LL * NATS_NS_PER_S) == 1, "MaxAge=1d => WARN");
-	CHECK(_kv_legacy_bucket_maxage_warn(INT64_MAX) == 1, "MaxAge=INT64_MAX => WARN");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(30LL * NATS_NS_PER_S) == 1, "MaxAge=30s => WARN");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(1) == 1, "MaxAge=1ns (sub-second) => WARN");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(86400LL * NATS_NS_PER_S) == 1, "MaxAge=1d => WARN");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(INT64_MAX) == 1, "MaxAge=INT64_MAX => WARN");
 	/* defensive: a negative (corrupt) MaxAge is still non-zero => warn, never silent */
-	CHECK(_kv_legacy_bucket_maxage_warn(-1) == 1, "MaxAge=-1 (corrupt) => WARN (never silent)");
+	CHECK(cdbn_kv_legacy_bucket_maxage_warn(-1) == 1, "MaxAge=-1 (corrupt) => WARN (never silent)");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED",
 		fails, fails == 1 ? "" : "s");

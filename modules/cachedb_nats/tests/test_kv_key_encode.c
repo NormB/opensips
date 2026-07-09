@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: NATS-KV subject tokens reject characters outside
  * [-./_=a-zA-Z0-9]. usrloc
@@ -43,7 +57,7 @@ static int _kv_char_safe(unsigned char c)
  * Returns malloc'd null-terminated string of length *out_len, or NULL
  * on alloc failure. The literal '=' itself is escaped to '=3D' so the
  * decoder never has to disambiguate. */
-static char *_kv_encode_key(const char *in, int in_len, int *out_len)
+static char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 {
 	int i, w = 0;
 	int cap = in_len * 3 + 1;
@@ -94,7 +108,7 @@ int main(void)
 	int n;
 
 	/* A. usrloc AoR with '@' */
-	out = _kv_encode_key("alice@example.com", 17, &n);
+	out = cdbn_kv_encode_key("alice@example.com", 17, &n);
 	check("A: SIP AoR @ encoded as =40",
 		out, "alice=40example.com");
 	if (out && !kv_key_valid(out)) {
@@ -104,42 +118,42 @@ int main(void)
 	free(out);
 
 	/* B. plain user (no encoding needed) */
-	out = _kv_encode_key("alice", 5, &n);
+	out = cdbn_kv_encode_key("alice", 5, &n);
 	check("B: alphanumeric passthrough", out, "alice");
 	free(out);
 
 	/* C. dotted hostname stays as-is */
-	out = _kv_encode_key("alice_at_example.com", 20, &n);
+	out = cdbn_kv_encode_key("alice_at_example.com", 20, &n);
 	check("C: '.' passes through", out, "alice_at_example.com");
 	free(out);
 
 	/* D. ':' (colon) is encoded — NATS-KV reserves it */
-	out = _kv_encode_key("user:pw@host", 12, &n);
+	out = cdbn_kv_encode_key("user:pw@host", 12, &n);
 	check("D: ':' and '@' both encoded",
 		out, "user=3Apw=40host");
 	free(out);
 
 	/* E. literal '=' is escaped to =3D */
-	out = _kv_encode_key("a=b", 3, &n);
+	out = cdbn_kv_encode_key("a=b", 3, &n);
 	check("E: literal '=' becomes =3D", out, "a=3Db");
 	free(out);
 
 	/* F. wildcards rejected by NATS-KV are encoded */
-	out = _kv_encode_key("a*b>c", 5, &n);
+	out = cdbn_kv_encode_key("a*b>c", 5, &n);
 	check("F: wildcards encoded", out, "a=2Ab=3Ec");
 	free(out);
 
 	/* G. high bytes (UTF-8) are encoded */
 	{
 		const char in[] = {'a', (char)0xC3, (char)0xA9, 'b', 0};
-		out = _kv_encode_key(in, 4, &n);
+		out = cdbn_kv_encode_key(in, 4, &n);
 		check("G: UTF-8 bytes encoded as =HH=HH",
 			out, "a=C3=A9b");
 		free(out);
 	}
 
 	/* H. empty input */
-	out = _kv_encode_key("", 0, &n);
+	out = cdbn_kv_encode_key("", 0, &n);
 	check("H: empty input -> empty", out, "");
 	free(out);
 

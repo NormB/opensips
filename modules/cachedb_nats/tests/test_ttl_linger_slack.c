@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * TTL-HISTORY-FIX-SPEC.md D3 [HREV-3]: nats_expired_linger slack composition.
  *
@@ -37,13 +51,13 @@
 /* cachedb_nats_expiry.c (unchanged single-slack signature); referenced
  * only by the -D*_CURRENT red arm, hence the unused attribute */
 static __attribute__((unused))
-int64_t _ttl_seconds(int64_t row_exp, int64_t now, int slack)
+int64_t cdbn_ttl_seconds(int64_t row_exp, int64_t now, int slack)
 {
 	return row_exp - now + (int64_t)slack;
 }
 /* HREV-3 floor variant (see test_ttl_compute_boundary.c) */
 static __attribute__((unused))
-int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
+int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds)
 {
 	int64_t ms;
 	if (ttl_seconds <= 0)
@@ -56,7 +70,7 @@ int64_t _ttl_msgttl_ms(int64_t ttl_seconds)
 	return ms;
 }
 /* cachedb_nats_expiry.c (unchanged single-slack signature) */
-static int _reap_row_due(int64_t row_exp, time_t now, int slack)
+static int cdbn_reap_row_due(int64_t row_exp, time_t now, int slack)
 {
 	return row_exp != 0 && (row_exp + (int64_t)slack) <= (int64_t)now;
 }
@@ -74,7 +88,7 @@ static int _slack(int grace, int linger)
 /* reaper path: is the row due for physical reclamation? */
 static int reap_due(int64_t row_exp, time_t now, int grace, int linger)
 {
-	return _reap_row_due(row_exp, now, _slack(grace, linger));
+	return cdbn_reap_row_due(row_exp, now, _slack(grace, linger));
 }
 /* read path: NEVER lingers (visibility cutoff stays grace-only) */
 static int contact_visible(int64_t expires, time_t now, int grace)

@@ -90,15 +90,15 @@ struct reg_row_info {
 };
 
 /* ---- pure helpers (unit-locked in tests/test_reg_*.c) ------------- */
-int  _reg_contact_state(int64_t expires, time_t now, int grace);
-int  _reg_domain_of(const char *aor, int len, const char **dom, int *dlen);
-int  _reg_ci_eq(const char *a, int alen, const char *b, int blen);
-int  _reg_substr(const char *hay, int hlen, const char *nee, int nlen);
-int  _reg_filter_parse(const char *s, int len, struct reg_filter *f);
-void _reg_page(long total, long limit, long offset, long *start, long *count);
-int  _reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b,
+int  cdbn_reg_contact_state(int64_t expires, time_t now, int grace);
+int  cdbn_reg_domain_of(const char *aor, int len, const char **dom, int *dlen);
+int  cdbn_reg_ci_eq(const char *a, int alen, const char *b, int blen);
+int  cdbn_reg_substr(const char *hay, int hlen, const char *nee, int nlen);
+int  cdbn_reg_filter_parse(const char *s, int len, struct reg_filter *f);
+void cdbn_reg_page(long total, long limit, long offset, long *start, long *count);
+int  cdbn_reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b,
 	int sort, int desc);
-int  _reg_row_scan(const char *json, int len, time_t now, int grace,
+int  cdbn_reg_row_scan(const char *json, int len, time_t now, int grace,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *out);
 

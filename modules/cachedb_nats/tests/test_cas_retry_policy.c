@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Regression test: the KV compare-and-swap loops in nats_cache_counter_op
  * (cachedb_nats_dbase.c) and nats_cache_update (cachedb_nats_json.c)
@@ -87,12 +101,12 @@ int main(void)
 	/* The CAS write step + its conflict/non-conflict split live in the
 	 * shared row-write helper (cachedb_nats_expiry.c), the §2.0 entry
 	 * point both writers use.  Since P1.5 (reaper-only) the classification
-	 * is _ttl_classify over the inline jsErrCode: 10071 -> RETRY, anything
+	 * is cdbn_ttl_classify over the inline jsErrCode: 10071 -> RETRY, anything
 	 * else non-OK -> FAIL_SAVE (no legacy kvStore_UpdateString fallback
 	 * remains to guard). */
 	ASSERT(grep_in_function("../cachedb_nats_expiry.c",
-		"nats_kv_put_row", "_ttl_classify") >= 1,
-		"row-write helper classifies conflicts via _ttl_classify");
+		"nats_kv_put_row", "cdbn_ttl_classify") >= 1,
+		"row-write helper classifies conflicts via cdbn_ttl_classify");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

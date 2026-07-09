@@ -1,12 +1,26 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
  *
- * Regression test for the _sink_emit_string / _json_escape out_sz
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ *
+ * Regression test for the cdbn_sink_emit_string / _json_escape out_sz
  * off-by-one in cachedb_nats_json.c.
  *
- * Bug: _sink_emit_string() called
+ * Bug: cdbn_sink_emit_string() called
  *     _json_escape(p, n, s->buf + s->len, esc_len)
  * but _json_escape reserves one byte of out_sz for a trailing NUL and
  * rejects an exact fit (`if (w >= out_sz) return -1`).  esc_len is the
@@ -19,7 +33,7 @@
  * strings two ways -- with out_sz = esc_len (buggy) and esc_len + 1
  * (fixed) -- proving the buggy form fails/oom's on non-empty input while
  * the fixed form produces correct, untruncated JSON.  A source-structure
- * assertion ties the production _sink_emit_string to the fixed argument.
+ * assertion ties the production cdbn_sink_emit_string to the fixed argument.
  *
  * Self-contained; run from the tests/ directory (reads ../cachedb_nats_json.c).
  */
@@ -39,7 +53,7 @@ static int g_fails;
 /* ---- faithful copies of the production helpers ---- */
 typedef struct { char *buf; int len; int cap; int oom; } json_sink_t;
 
-static int _sink_init(json_sink_t *s, int initial)
+static int cdbn_sink_init(json_sink_t *s, int initial)
 {
 	s->cap = initial > 16 ? initial : 16;
 	s->len = 0; s->oom = 0;
@@ -134,7 +148,7 @@ static void emit_case(const char *in, int n, const char *want, int nul_reserve)
 {
 	json_sink_t s;
 	char label[256];
-	_sink_init(&s, 16);
+	cdbn_sink_init(&s, 16);
 	int rc = emit_string(&s, in, n, nul_reserve);
 	snprintf(label, sizeof(label),
 		"FIXED emit(\"%s\") -> rc=0, no oom, == %s", in, want);
@@ -194,7 +208,7 @@ int main(void)
 	/* (2) BUGGY form: out_sz == esc_len makes _json_escape reject any
 	 * non-empty string -> sticky oom + truncated output. */
 	{
-		json_sink_t s; _sink_init(&s, 16);
+		json_sink_t s; cdbn_sink_init(&s, 16);
 		int rc = emit_string(&s, "hello", 5, 0 /* buggy */);
 		ASSERT(rc == -1 && s.oom,
 			"BUGGY emit(\"hello\") fails and sets oom (the original bug)");
@@ -204,8 +218,8 @@ int main(void)
 	/* (3) source: production passes esc_len + 1, not bare esc_len */
 	{
 		char *b = extract_func_body("../cachedb_nats_json_ser.c",
-			"_sink_emit_string");
-		ASSERT(b != NULL, "found production _sink_emit_string body");
+			"cdbn_sink_emit_string");
+		ASSERT(b != NULL, "found production cdbn_sink_emit_string body");
 		if (b) {
 			ASSERT(strstr(b, "s->buf + s->len, esc_len + 1") != NULL,
 				"production _json_escape call reserves the NUL byte "

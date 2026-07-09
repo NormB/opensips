@@ -1,7 +1,21 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This file is part of opensips, a free SIP server.
+ *
+ * opensips is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * opensips is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * TU-split test (the design notes, cachedb_nats half):
  *
@@ -75,14 +89,14 @@ int main(void)
 	/* --- serializer TU owns escape/sink/encode --- */
 	ASSERT(file_contains(SER, "_sink_emit_cdb_dict"),
 		"ser TU owns the cdb-dict sink serializer");
-	ASSERT(file_contains(SER, "char *_kv_encode_key"),
-		"ser TU owns _kv_encode_key");
-	ASSERT(file_contains(SER, "char *_build_seed_doc"),
-		"ser TU owns _build_seed_doc");
+	ASSERT(file_contains(SER, "char *cdbn_kv_encode_key"),
+		"ser TU owns cdbn_kv_encode_key");
+	ASSERT(file_contains(SER, "char *cdbn_build_seed_doc"),
+		"ser TU owns cdbn_build_seed_doc");
 
 	/* --- rowmeta TU owns the usrloc row-metadata denormalization --- */
-	ASSERT(file_contains(RM, "char *_row_finalize_metadata"),
-		"rowmeta TU owns _row_finalize_metadata");
+	ASSERT(file_contains(RM, "char *cdbn_row_finalize_metadata"),
+		"rowmeta TU owns cdbn_row_finalize_metadata");
 	ASSERT(file_contains(RM, "static int64_t _row_exp_min"),
 		"rowmeta TU owns _row_exp_min");
 
@@ -99,7 +113,7 @@ int main(void)
 		"sink type moved out of cachedb_nats_json.c");
 	ASSERT(!file_contains(QU, "static void nats_rev_put"),
 		"revmap moved out of cachedb_nats_json.c");
-	ASSERT(!file_contains(QU, "char *_row_finalize_metadata"),
+	ASSERT(!file_contains(QU, "char *cdbn_row_finalize_metadata"),
 		"row metadata moved out of cachedb_nats_json.c");
 
 	/* --- shared private surface lives in the internal header --- */
@@ -127,7 +141,7 @@ int main(void)
 	 * remains a real anti-monolith guard; if it approaches the cap again, split
 	 * read-side vs write-side transforms into two TUs. */
 	/* Cap 960 (raised from 900 for the P8 §5 eligibility out-params on
-	 * _row_finalize_metadata: row_exp / n_contacts / all_same). */
+	 * cdbn_row_finalize_metadata: row_exp / n_contacts / all_same). */
 	ASSERT(n_rm > 0 && n_rm < 960, "rowmeta TU under 960 lines");
 	/* Cap 1650 (raised from 1600 for the P8 R4 empty-value-marker re-create
 	 * branch in _update_fetch_or_seed).  P8's TTL write/activation logic lives

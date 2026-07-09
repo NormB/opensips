@@ -27,7 +27,7 @@
  * generic single-pass merge (cachedb_nats_json.c) and the cdb-dict serializer
  * (cachedb_nats_json_ser.c) so that usrloc-specific row semantics never leak
  * into the paths shared by other cachedb_nats consumers.  Built on the shared
- * iterative JSON walkers (_skip_ws/_parse_json_string/_skip_json_value) and the
+ * iterative JSON walkers (cdbn_skip_ws/cdbn_parse_json_string/cdbn_skip_json_value) and the
  * json_sink_t serializer declared in cachedb_nats_json_internal.h.
  */
 
@@ -74,7 +74,7 @@ static int _field_has_nul(const char *s, int len)
  * contacts.<id>, so a NUL can sit at any depth); return 1 if any CDB_STR field
  * value carries an embedded NUL.  Run before any merge / kvStore op so the save
  * can be refused with no partial row (SPEC §4.1 step 0 [REV-20]). */
-int _dict_has_nul_field(const cdb_dict_t *dict)
+int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
 {
 	struct list_head *pos;
 	cdb_pair_t *pair;
@@ -92,7 +92,7 @@ int _dict_has_nul_field(const cdb_dict_t *dict)
 				return 1;
 			break;
 		case CDB_DICT:
-			if (_dict_has_nul_field(&pair->val.val.dict))
+			if (cdbn_dict_has_nul_field(&pair->val.val.dict))
 				return 1;
 			break;
 		default:
@@ -165,10 +165,10 @@ static int64_t _row_exp_min(const int64_t *exp, int n)
  * slice is not an object, or the field is absent / not an integer.  Shared by
  * the row_exp `expires` scan (write side) and the int64 `last_mod` post-patch
  * (read side, P2.4). */
-int _contact_field_int64(const char *vstart, const char *vend,
+int cdbn_contact_field_int64(const char *vstart, const char *vend,
 	const char *fname, int flen, int64_t *out)
 {
-	const char *p = _skip_ws(vstart, vend);
+	const char *p = cdbn_skip_ws(vstart, vend);
 
 	if (p >= vend || *p != '{')
 		return -1;
@@ -177,21 +177,21 @@ int _contact_field_int64(const char *vstart, const char *vend,
 		const char *name, *vs;
 		int nlen;
 
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend)
 			return -1;
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
 
-		p = _parse_json_string(p, vend, &name, &nlen);
+		p = cdbn_parse_json_string(p, vend, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v;
@@ -202,7 +202,7 @@ int _contact_field_int64(const char *vstart, const char *vend,
 			/* present but not an integer — keep scanning (no dup key
 			 * expected, but be tolerant); fall through to skip. */
 		}
-		p = _skip_json_value(p, vend);
+		p = cdbn_skip_json_value(p, vend);
 		if (!p)
 			return -1;
 	}
@@ -212,9 +212,9 @@ int _contact_field_int64(const char *vstart, const char *vend,
 /* row_exp's per-contact `expires` accessor (write side).  A contact with no
  * usable expiry contributes nothing to row_exp; fail-closed read handling of a
  * poison/absent expiry is P2.5 [REV-26]. */
-int _contact_expires(const char *vstart, const char *vend, int64_t *out)
+int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *out)
 {
-	return _contact_field_int64(vstart, vend, "expires", 7, out);
+	return cdbn_contact_field_int64(vstart, vend, "expires", 7, out);
 }
 
 /* Collect every contact's integer `expires` from a "contacts" object slice
@@ -223,7 +223,7 @@ int _contact_expires(const char *vstart, const char *vend, int64_t *out)
 static int _row_collect_expiries(const char *vstart, const char *vend,
 	int64_t **out_arr, int *out_n)
 {
-	const char *p = _skip_ws(vstart, vend);
+	const char *p = cdbn_skip_ws(vstart, vend);
 	int64_t *arr = NULL;
 	int n = 0, cap = 0;
 
@@ -237,23 +237,23 @@ static int _row_collect_expiries(const char *vstart, const char *vend,
 		int nlen;
 		int64_t e;
 
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend) { pkg_free(arr); return -1; }
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
 
-		p = _parse_json_string(p, vend, &name, &nlen); /* contact subkey */
+		p = cdbn_parse_json_string(p, vend, &name, &nlen); /* contact subkey */
 		if (!p) { pkg_free(arr); return -1; }
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		if (p >= vend || *p != ':') { pkg_free(arr); return -1; }
 		p++;
-		p = _skip_ws(p, vend);
+		p = cdbn_skip_ws(p, vend);
 		cvs = p;
-		p = _skip_json_value(p, vend);
+		p = cdbn_skip_json_value(p, vend);
 		if (!p) { pkg_free(arr); return -1; }
 
-		if (_contact_expires(cvs, p, &e) == 0) {
+		if (cdbn_contact_expires(cvs, p, &e) == 0) {
 			if (n == cap) {
 				int ncap = cap ? cap * 2 : 8;
 				int64_t *na = pkg_realloc(arr, ncap * sizeof(*na));
@@ -312,19 +312,19 @@ static int _copy_minus_meta_cb(const char *name, int nlen,
 	if ((nlen == 7 && memcmp(name, "row_exp", 7) == 0) ||
 	    (nlen == 14 && memcmp(name, "schema_version", 14) == 0))
 		return 0;            /* drop stale private peer */
-	if (!c->first && _sink_putc(c->s, ',') < 0)
+	if (!c->first && cdbn_sink_putc(c->s, ',') < 0)
 		return -1;
 	c->first = 0;
-	if (_sink_emit_raw_string(c->s, name, nlen) < 0)
+	if (cdbn_sink_emit_raw_string(c->s, name, nlen) < 0)
 		return -1;
-	if (_sink_putc(c->s, ':') < 0)
+	if (cdbn_sink_putc(c->s, ':') < 0)
 		return -1;
-	if (_sink_write(c->s, vstart, (int)(vend - vstart)) < 0)
+	if (cdbn_sink_write(c->s, vstart, (int)(vend - vstart)) < 0)
 		return -1;
 	return 0;
 }
 
-char *_row_finalize_metadata(const char *json, int len, int *out_len,
+char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same)
 {
 	const char *c_vs = NULL, *c_ve = NULL;
@@ -345,7 +345,7 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 	/* Pass 1: locate the top-level "contacts" object [P2.5]. */
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
-		if (_json_foreach_top_field(json, len,
+		if (cdbn_json_foreach_top_field(json, len,
 				_find_contacts_cb, &fc) < 0)
 			return NULL;
 		c_vs = fc.vs;
@@ -384,28 +384,28 @@ char *_row_finalize_metadata(const char *json, int len, int *out_len,
 
 	/* Pass 2: copy through every top-level field except the private peers,
 	 * then append freshly computed row_exp + schema_version. */
-	if (_sink_init(&s, len + 64) < 0)
+	if (cdbn_sink_init(&s, len + 64) < 0)
 		return NULL;
-	if (_sink_putc(&s, '{') < 0)
+	if (cdbn_sink_putc(&s, '{') < 0)
 		goto fail;
 	{
 		struct copy_minus_meta_ctx cm = { &s, 1 };
-		if (_json_foreach_top_field(json, len,
+		if (cdbn_json_foreach_top_field(json, len,
 				_copy_minus_meta_cb, &cm) < 0)
 			goto fail;
 		first = cm.first;
 	}
-	if (!first && _sink_putc(&s, ',') < 0)
+	if (!first && cdbn_sink_putc(&s, ',') < 0)
 		goto fail;
-	if (_sink_write(&s, "\"row_exp\":", 10) < 0)
+	if (cdbn_sink_write(&s, "\"row_exp\":", 10) < 0)
 		goto fail;
-	if (_sink_emit_int(&s, row_exp) < 0)
+	if (cdbn_sink_emit_int(&s, row_exp) < 0)
 		goto fail;
-	if (_sink_write(&s, ",\"schema_version\":1", 19) < 0)
+	if (cdbn_sink_write(&s, ",\"schema_version\":1", 19) < 0)
 		goto fail;
-	if (_sink_putc(&s, '}') < 0)
+	if (cdbn_sink_putc(&s, '}') < 0)
 		goto fail;
-	return _sink_take(&s, out_len);
+	return cdbn_sink_take(&s, out_len);
 
 fail:
 	pkg_free(s.buf);
@@ -423,7 +423,7 @@ fail:
 static int _raw_find_contact(const char *c_vs, const char *c_ve,
 	const char *id, int id_len, const char **out_vs, const char **out_ve)
 {
-	const char *p = _skip_ws(c_vs, c_ve);
+	const char *p = cdbn_skip_ws(c_vs, c_ve);
 
 	if (p >= c_ve || *p != '{')
 		return -1;
@@ -432,23 +432,23 @@ static int _raw_find_contact(const char *c_vs, const char *c_ve,
 		const char *name, *vs;
 		int nlen;
 
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve)
 			return -1;
 		if (*p == '}')
 			break;
 		if (*p == ',') { p++; continue; }
 
-		p = _parse_json_string(p, c_ve, &name, &nlen);
+		p = cdbn_parse_json_string(p, c_ve, &name, &nlen);
 		if (!p)
 			return -1;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		if (p >= c_ve || *p != ':')
 			return -1;
 		p++;
-		p = _skip_ws(p, c_ve);
+		p = cdbn_skip_ws(p, c_ve);
 		vs = p;
-		p = _skip_json_value(p, c_ve);
+		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
 		if (nlen == id_len && memcmp(name, id, id_len) == 0) {
@@ -468,7 +468,7 @@ static int _raw_find_contact(const char *c_vs, const char *c_ve,
  * is widened — `expires` stays int32-bounded at the usrloc boundary [REV-30].
  * A no-op for a document without a top-level "contacts" object (non-usrloc row)
  * and for any contact whose last_mod is absent / non-integer (left untouched). */
-void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
+void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 {
 	const char *c_vs = NULL, *c_ve = NULL;
 	struct list_head *pos;
@@ -480,7 +480,7 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 	/* locate the raw top-level "contacts" object slice [P2.5] */
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
-		if (_json_foreach_top_field(json, len,
+		if (cdbn_json_foreach_top_field(json, len,
 				_find_contacts_cb, &fc) < 0)
 			return;
 		c_vs = fc.vs;
@@ -511,7 +511,7 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
 			if (_raw_find_contact(c_vs, c_ve, cpair->key.name.s,
 					cpair->key.name.len, &rc_vs, &rc_ve) != 0)
 				continue;
-			if (_contact_field_int64(rc_vs, rc_ve, "last_mod", 8, &lm) != 0)
+			if (cdbn_contact_field_int64(rc_vs, rc_ve, "last_mod", 8, &lm) != 0)
 				continue;   /* absent / non-integer: leave the pair as-is */
 
 			list_for_each(fpos, &cpair->val.val.dict) {
@@ -543,7 +543,7 @@ void _row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
  *                     `data[0]=='{'` gate masks this as an empty AoR — a silent
  *                     deregistration a stale node / co-writer / attacker could
  *                     plant — so [REV-26] alarms + counts instead. */
-int _value_classify(const char *data, int len)
+int cdbn_value_classify(const char *data, int len)
 {
 	const char *p, *end;
 
@@ -594,7 +594,7 @@ static void _free_one_pair(cdb_pair_t *p)
  * (row_exp, schema_version) at row assembly — they are top-level peers, not
  * members of any contact subdict, so this is a top-level walk.  Safe against
  * removal mid-iteration (list_for_each_safe). */
-void _row_strip_private_keys(cdb_dict_t *row_dict)
+void cdbn_row_strip_private_keys(cdb_dict_t *row_dict)
 {
 	struct list_head *pos, *tmp;
 
@@ -648,39 +648,39 @@ static int _pair_contact_expires(const cdb_pair_t *p, int64_t *out)
 static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	const char **ids, const int *id_lens, int n_ids)
 {
-	const char *p = _skip_ws(cvs, cve), *end = cve;
+	const char *p = cdbn_skip_ws(cvs, cve), *end = cve;
 	int first = 1;
 
 	if (p >= end || *p != '{') return -1;
-	if (_sink_putc(s, '{') < 0) return -1;
+	if (cdbn_sink_putc(s, '{') < 0) return -1;
 	p++;
 	while (p < end) {
 		const char *name, *vs;
 		int nlen, i, drop = 0;
 
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) return -1;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) return -1;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') return -1;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) return -1;
 		for (i = 0; i < n_ids; i++)
 			if (nlen == id_lens[i] && memcmp(name, ids[i], nlen) == 0) { drop = 1; break; }
 		if (drop) continue;
-		if (!first && _sink_putc(s, ',') < 0) return -1;
+		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
-		if (_sink_emit_raw_string(s, name, nlen) < 0) return -1;
-		if (_sink_putc(s, ':') < 0) return -1;
-		if (_sink_write(s, vs, (int)(p - vs)) < 0) return -1;
+		if (cdbn_sink_emit_raw_string(s, name, nlen) < 0) return -1;
+		if (cdbn_sink_putc(s, ':') < 0) return -1;
+		if (cdbn_sink_write(s, vs, (int)(p - vs)) < 0) return -1;
 	}
-	if (_sink_putc(s, '}') < 0) return -1;
+	if (cdbn_sink_putc(s, '}') < 0) return -1;
 	return 0;
 }
 
@@ -695,40 +695,40 @@ static char *_contacts_drop_subkeys(const char *json, int len,
 
 	if (!json || len <= 0) return NULL;
 	end = json + len;
-	p = _skip_ws(json, end);
+	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{') return NULL;
-	if (_sink_init(&s, len + 16) < 0) return NULL;
-	if (_sink_putc(&s, '{') < 0) goto fail;
+	if (cdbn_sink_init(&s, len + 16) < 0) return NULL;
+	if (cdbn_sink_putc(&s, '{') < 0) goto fail;
 	p++;
 	while (p < end) {
 		const char *name, *vs;
 		int nlen;
 
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end) goto fail;
 		if (*p == '}') break;
 		if (*p == ',') { p++; continue; }
-		p = _parse_json_string(p, end, &name, &nlen);
+		p = cdbn_parse_json_string(p, end, &name, &nlen);
 		if (!p) goto fail;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':') goto fail;
 		p++;
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		vs = p;
-		p = _skip_json_value(p, end);
+		p = cdbn_skip_json_value(p, end);
 		if (!p) goto fail;
-		if (!first && _sink_putc(&s, ',') < 0) goto fail;
+		if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
 		first = 0;
-		if (_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
-		if (_sink_putc(&s, ':') < 0) goto fail;
+		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
+		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
 			if (_emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
 		} else {
-			if (_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
+			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}
 	}
-	if (_sink_putc(&s, '}') < 0) goto fail;
-	return _sink_take(&s, out_len);
+	if (cdbn_sink_putc(&s, '}') < 0) goto fail;
+	return cdbn_sink_take(&s, out_len);
 fail:
 	pkg_free(s.buf);
 	return NULL;
@@ -740,7 +740,7 @@ fail:
  * merged-in contact is never even considered — no collateral cross-node delete.
  * A pair's subkey equals the stored contact key (base64, escape-free).  Returns
  * a fresh pkg doc (caller pkg_frees): unchanged when nothing is due.  NULL on error. */
-char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
+char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	time_t now, int grace, int *out_len)
 {
 	const char *ids[NATS_MAX_DROP_IDS];
@@ -790,19 +790,19 @@ char *_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
  * generic merge's behavior for every non-usrloc cachedb_nats consumer and any
  * non-object value.  Without this, a delayed/retransmitted REGISTER with an
  * older cseq would roll the binding backward versus the SQL backend. */
-int _cseq_new_wins(const char *new_json, int new_len,
+int cdbn_cseq_new_wins(const char *new_json, int new_len,
 	const char *old_json, int old_len)
 {
 	int64_t nc, oc, nlm = 0, olm = 0;
 
-	if (_contact_field_int64(new_json, new_json + new_len, "cseq", 4, &nc) != 0)
+	if (cdbn_contact_field_int64(new_json, new_json + new_len, "cseq", 4, &nc) != 0)
 		return 1;
-	if (_contact_field_int64(old_json, old_json + old_len, "cseq", 4, &oc) != 0)
+	if (cdbn_contact_field_int64(old_json, old_json + old_len, "cseq", 4, &oc) != 0)
 		return 1;
 	if (nc != oc)
 		return nc > oc;
-	(void)_contact_field_int64(new_json, new_json + new_len, "last_mod", 8, &nlm);
-	(void)_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
+	(void)cdbn_contact_field_int64(new_json, new_json + new_len, "last_mod", 8, &nlm);
+	(void)cdbn_contact_field_int64(old_json, old_json + old_len, "last_mod", 8, &olm);
 	return nlm > olm;
 }
 
@@ -814,7 +814,7 @@ int _cseq_new_wins(const char *new_json, int new_len,
  * the guard is disabled (unbounded).  Checked on the FINAL merged row just
  * before the CAS write, so an over-limit save fails cleanly with the previous
  * revision untouched — never a silent truncation or a broker-side size error. */
-int _value_size_ok(int len, int max)
+int cdbn_value_size_ok(int len, int max)
 {
 	if (max <= 0)
 		return 1;
@@ -849,7 +849,7 @@ static int _dict_int_field(const cdb_dict_t *d, const char *name, int len,
  * now is expired (omitted); an absent / non-integer expires is fail-closed
  * (treated expired, never served).  Pure read mutation of @row_dict — NO writes
  * to NATS.  If every contact is omitted the row keeps an empty contacts dict. */
-void _row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace)
+void cdbn_row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grace)
 {
 	struct list_head *pos;
 

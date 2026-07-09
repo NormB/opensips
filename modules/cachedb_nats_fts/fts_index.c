@@ -84,7 +84,7 @@ int nats_idx_buckets = NATS_IDX_DEFAULT_BUCKETS;
 int nats_idx_bucket_mask = NATS_IDX_DEFAULT_BUCKETS - 1;
 
 /**
- * _hash() — Compute a bucket index using the djb2 hash algorithm.
+ * fts_hash() — Compute a bucket index using the djb2 hash algorithm.
  *
  * Takes a byte string of length @len and produces a value in
  * [0, nats_idx_buckets).  djb2 is a fast, well-distributed hash suitable
@@ -93,7 +93,7 @@ int nats_idx_bucket_mask = NATS_IDX_DEFAULT_BUCKETS - 1;
  * original comp.lang.c posting.  The bucket count is forced to a power
  * of two at init, so `& nats_idx_bucket_mask` replaces the modulo.
  */
-unsigned int _hash(const char *s, int len)
+unsigned int fts_hash(const char *s, int len)
 {
 	unsigned int h = 5381;
 	int i;
@@ -107,8 +107,8 @@ unsigned int _hash(const char *s, int len)
 /*                    Simple JSON field parser                         */
 /* ------------------------------------------------------------------ */
 
-/* The shared JSON walkers (_skip_ws, _parse_json_string,
- * _skip_json_value, _safe_json_to_dict) stay in cachedb_nats's JSON
+/* The shared JSON walkers (cdbn_skip_ws, cdbn_parse_json_string,
+ * cdbn_skip_json_value, cdbn_safe_json_to_dict) stay in cachedb_nats's JSON
  * layer (cachedb_nats_json.c) -- both sides use them via
  * cachedb_nats_json_internal.h. */
 
@@ -142,13 +142,13 @@ static int _parse_json_fields(const char *json, int len,
 	int flen, vlen;
 	int count = 0;
 
-	p = _skip_ws(p, end);
+	p = cdbn_skip_ws(p, end);
 	if (p >= end || *p != '{')
 		return -1;
 	p++; /* skip '{' */
 
 	while (1) {
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end)
 			return -1;
 		if (*p == '}')
@@ -157,18 +157,18 @@ static int _parse_json_fields(const char *json, int len,
 		/* expect comma between pairs (skip it) */
 		if (*p == ',') {
 			p++;
-			p = _skip_ws(p, end);
+			p = cdbn_skip_ws(p, end);
 			if (p >= end)
 				return -1;
 		}
 
 		/* parse field name */
-		p = _parse_json_string(p, end, &field, &flen);
+		p = cdbn_parse_json_string(p, end, &field, &flen);
 		if (!p)
 			return -1;
 
 		/* expect colon */
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end || *p != ':')
 			return -1;
 		p++;
@@ -176,21 +176,21 @@ static int _parse_json_fields(const char *json, int len,
 			return -1;
 
 		/* check if value is a string */
-		p = _skip_ws(p, end);
+		p = cdbn_skip_ws(p, end);
 		if (p >= end)
 			return -1;
 
 		if (*p == '"') {
 			/* string value — parse and invoke the caller's callback
 			 * with field name + value slices from the original buffer */
-			p = _parse_json_string(p, end, &val, &vlen);
+			p = cdbn_parse_json_string(p, end, &val, &vlen);
 			if (!p)
 				return -1;
 			callback(field, flen, val, vlen, ctx);
 			count++;
 		} else {
 			/* non-string value — skip without invoking callback */
-			p = _skip_json_value(p, end);
+			p = cdbn_skip_json_value(p, end);
 			if (!p)
 				return -1;
 		}
@@ -204,7 +204,7 @@ static int _parse_json_fields(const char *json, int len,
 /* ------------------------------------------------------------------ */
 
 /**
- * _find_entry() — Look up an index entry by its "field:value" key.
+ * fts_find_entry() — Look up an index entry by its "field:value" key.
  *
  * Hashes @fv to select a bucket, then walks the singly-linked chain of
  * entries in that bucket comparing both length and content.  Returns the
@@ -213,7 +213,7 @@ static int _parse_json_fields(const char *json, int len,
 static nats_idx_entry *_find_entry_in(nats_search_idx *idx,
 	const char *fv, int fv_len)
 {
-	unsigned int bucket = _hash(fv, fv_len);
+	unsigned int bucket = fts_hash(fv, fv_len);
 	nats_idx_entry *e;
 
 	for (e = idx->buckets[bucket]; e; e = e->next) {
@@ -224,7 +224,7 @@ static nats_idx_entry *_find_entry_in(nats_search_idx *idx,
 	return NULL;
 }
 
-nats_idx_entry *_find_entry(const char *fv, int fv_len)
+nats_idx_entry *fts_find_entry(const char *fv, int fv_len)
 {
 	return _find_entry_in(g_idx, fv, fv_len);
 }
@@ -232,7 +232,7 @@ nats_idx_entry *_find_entry(const char *fv, int fv_len)
 /**
  * _get_or_create_entry() — Find or create an index entry for a field:value.
  *
- * First tries _find_entry(); if the entry does not exist, allocates a new
+ * First tries fts_find_entry(); if the entry does not exist, allocates a new
  * nats_idx_entry, copies the "field:value" string, pre-allocates the key
  * array (initial capacity 8), and inserts the entry at the head of the
  * bucket's chain.  Must be called with the entry's shard lock held.
@@ -300,7 +300,7 @@ static nats_idx_entry *_get_or_create_entry_in(nats_search_idx *idx,
 	e->alloc_keys = NATS_IDX_KEYS_INLINE;
 	e->num_keys   = 0;
 
-	bucket = _hash(fv, fv_len);
+	bucket = fts_hash(fv, fv_len);
 	e->next = idx->buckets[bucket];
 	idx->buckets[bucket] = e;
 
@@ -546,7 +546,7 @@ static void _index_field_cb(const char *field, int flen,
  */
 /* Round @v up to the next power of two, with a floor at @min.
  * Used to coerce the operator-supplied `index_buckets` modparam
- * into a power-of-two value so `_hash` can use a bitmask. */
+ * into a power-of-two value so `fts_hash` can use a bitmask. */
 static int _round_up_pow2(int v, int min)
 {
 	int r = 1;
@@ -688,7 +688,7 @@ static void nats_rev_put(const char *key, int key_len,
 	}
 	memcpy(blob_copy, blob, (size_t)blob_len);
 
-	hash   = _hash(key, key_len);
+	hash   = fts_hash(key, key_len);
 	bucket = hash;
 	shard  = NATS_IDX_SHARD_OF(bucket);
 
@@ -742,7 +742,7 @@ static int nats_rev_contains(const char *key, int key_len)
 	if (!g_rev || !key || key_len <= 0)
 		return 0;
 
-	hash   = _hash(key, key_len);
+	hash   = fts_hash(key, key_len);
 	bucket = hash;
 	shard  = NATS_IDX_SHARD_OF(bucket);
 
@@ -771,7 +771,7 @@ static void nats_rev_remove(const char *key)
 	if (key_len <= 0)
 		return;
 
-	hash   = _hash(key, key_len);
+	hash   = fts_hash(key, key_len);
 	bucket = hash;
 	shard  = NATS_IDX_SHARD_OF(bucket);
 
@@ -931,7 +931,7 @@ int nats_json_index_remove_by_revmap(const char *key)
 	if (key_len <= 0)
 		return -1;
 
-	hash   = _hash(key, key_len);
+	hash   = fts_hash(key, key_len);
 	bucket = hash;
 	shard  = NATS_IDX_SHARD_OF(bucket);
 
@@ -964,7 +964,7 @@ have_blob:
 	int removed_any = 0;
 	for (i = 0; i < n_fv && off < blob_len; i++) {
 		int flen = (int)strlen(p);
-		unsigned int fb = _hash(p, flen);
+		unsigned int fb = fts_hash(p, flen);
 		int fs = NATS_IDX_SHARD_OF(fb);
 		nats_idx_entry *e;
 
@@ -1312,7 +1312,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 			}
 		}
 
-		bucket = _hash(fv_buf, fv_len);
+		bucket = fts_hash(fv_buf, fv_len);
 		shard  = NATS_IDX_SHARD_OF(bucket);
 
 		_idx_lock_shard(g_idx, shard);
@@ -1440,7 +1440,7 @@ static void _index_remove_field_cb(const char *field, int flen,
 	memcpy(fv_buf + flen + 1, val, vlen);
 	fv_buf[fv_len] = '\0';
 
-	bucket = _hash(fv_buf, fv_len);
+	bucket = fts_hash(fv_buf, fv_len);
 	shard  = NATS_IDX_SHARD_OF(bucket);
 
 	_idx_lock_shard(g_idx, shard);

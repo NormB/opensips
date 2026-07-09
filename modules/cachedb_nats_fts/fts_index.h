@@ -315,11 +315,11 @@ nats_search_idx *nats_json_get_index(void);
 extern nats_search_idx *g_idx;
 
 /* djb2 over "field:value"; returns a bucket in [0, nats_idx_buckets). */
-unsigned int _hash(const char *s, int len);
+unsigned int fts_hash(const char *s, int len);
 
 /* Locate the index entry for a composite "field:value" key.  Caller
  * must hold the entry's shard lock. */
-nats_idx_entry *_find_entry(const char *fv, int fv_len);
+nats_idx_entry *fts_find_entry(const char *fv, int fv_len);
 
 /* Shard-locking helpers.  Whole-index ops acquire shards in index
  * order to keep the lock hierarchy consistent.  The lock set itself
