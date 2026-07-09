@@ -304,4 +304,20 @@ done
 
 aggregate
 
+# --- STRICT release-gate arm ----------------------------------------
+# Developer default: always exit 0 (the table/CSV is the product and a
+# failed cell is visible there).  STRICT=1: any (scale,mode) cell with
+# ZERO successful trials fails the run -- a missing dependency or a
+# collapsed benchmark must not read as a green pipeline.
+if [ "${STRICT:-0}" = "1" ]; then
+    if ! awk -F, 'NR>1 { tot[$1","$2]++; if ($11==0) ok[$1","$2]++ }
+        END { n=0
+              for (c in tot) if (!(c in ok)) { print "  " c; n++ }
+              exit(n ? 1 : 0) }' "$RUNS_CSV" > "$OUT/strict_bad_cells.txt"
+    then
+        echo "STRICT=1: benchmark cells with no successful trial:"
+        cat "$OUT/strict_bad_cells.txt"
+        exit 1
+    fi
+fi
 exit 0

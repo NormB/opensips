@@ -57,11 +57,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# STRICT=1 (release-gate mode) turns every missing-prerequisite skip
+# into a hard FAILURE: a missing dependency must not read as a green
+# pipeline.  Default keeps the autotools-style 77 for developer runs.
+skip() {
+    echo "$*"
+    if [ "${STRICT:-0}" = "1" ]; then
+        echo "STRICT=1: missing prerequisite is a FAILURE"
+        exit 1
+    fi
+    exit 77
+}
+
 need() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "missing required tool: $1"
-        exit 77
-    }
+    command -v "$1" >/dev/null 2>&1 || skip "missing required tool: $1"
 }
 need nats; need sipsak; need nc
 
@@ -69,25 +78,21 @@ need nats; need sipsak; need nc
 # kvConfig.LimitMarkerTTL) -- the nats CLI on this host is too old for
 # per-message TTL and would create buckets that latch native TTL off.
 if ! make -C "$HERE" kvctl >/dev/null 2>&1 || [ ! -x "$HERE/kvctl" ]; then
-    echo "kvctl build failed (needs a libnats with the PR #1000 KV TTL API)"
-    exit 77
+    skip "kvctl build failed (needs a libnats with the PR #1000 KV TTL API)"
 fi
 KVCTL="$HERE/kvctl"
 
 if [ ! -x "$OPENSIPS_BIN" ]; then
-    echo "opensips binary not found at $OPENSIPS_BIN"
-    exit 77
+    skip "opensips binary not found at $OPENSIPS_BIN"
 fi
 if [ ! -d "$OPENSIPS_MODULES" ]; then
-    echo "module directory not found at $OPENSIPS_MODULES"
-    exit 77
+    skip "module directory not found at $OPENSIPS_MODULES"
 fi
 
 if ! nats --server "$NATS_URL" server check connection \
         > "$WORKDIR/conn.out" 2>&1; then
-    echo "NATS broker not reachable at $NATS_URL"
     cat "$WORKDIR/conn.out"
-    exit 77
+    skip "NATS broker not reachable at $NATS_URL"
 fi
 
 # Fresh bucket for this run -- history=1 [HREV-1] + marker TTL, exactly the
