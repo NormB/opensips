@@ -148,6 +148,7 @@ loaded:
 		nats_dl.sym = (__typeof__(nats_dl.sym)) dlsym(_handle, #sym); \
 		if (!nats_dl.sym) { \
 			const char *_dlerr = dlerror(); \
+			(void)_dlerr; /* LM_ERR is a no-op in unit builds */ \
 			LM_ERR("nats_dl: '%s' missing required libnats " \
 			       "symbol '%s' (%s)\n", _path, #sym, \
 			       _dlerr ? _dlerr : "no error string"); \

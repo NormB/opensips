@@ -49,8 +49,11 @@ static inline gen_lock_set_t *lock_set_alloc(int n)        { (void)n; return cal
 static inline void            lock_set_dealloc(gen_lock_set_t *s) { free(s); }
 static inline gen_lock_set_t *lock_set_init(gen_lock_set_t *s)    { return s; }
 static inline void            lock_set_destroy(gen_lock_set_t *s) { (void)s; }
-static inline void            lock_set_get(gen_lock_set_t *s, int i) { (void)s; (void)i; }
-static inline void            lock_set_release(gen_lock_set_t *s, int i) { (void)s; (void)i; }
+/* unused in this test's paths; kept for seam completeness */
+static inline __attribute__((unused))
+void lock_set_get(gen_lock_set_t *s, int i) { (void)s; (void)i; }
+static inline __attribute__((unused))
+void lock_set_release(gen_lock_set_t *s, int i) { (void)s; (void)i; }
 
 #define LM_ERR(fmt, ...)  fprintf(stderr, "ERR: " fmt, ##__VA_ARGS__)
 #define LM_DBG(fmt, ...)  do { } while (0)

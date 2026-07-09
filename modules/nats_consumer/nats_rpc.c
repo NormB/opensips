@@ -166,7 +166,7 @@ static int hdr_stream_find(const nats_cur_msg_t *cur, const str *name,
 		const char *kstart;
 		const char *vstart;
 
-		if (p + 2 > end) return 0;
+		/* p + 2 <= end is the loop condition: klen is readable here */
 		klen = (uint16_t)((unsigned char)p[0] |
 			((unsigned char)p[1] << 8));
 		p += 2;

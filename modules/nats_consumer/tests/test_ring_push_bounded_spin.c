@@ -115,7 +115,7 @@ static void test_free_slot_still_pushes(void)
 {
 	nats_ring_t      *r = nats_ring_create(4);
 	nats_ring_slot_t  out;
-	int rc;
+	volatile int rc;	/* survives the SIGALRM longjmp (-Wclobbered) */
 
 	ASSERT(r != NULL, "ring created");
 	if (!r) return;

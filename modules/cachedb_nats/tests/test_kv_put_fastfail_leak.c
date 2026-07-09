@@ -165,7 +165,8 @@ static int         put_last_len;
 static natsStatus fake_kvStore_Put(uint64_t *rev, kvStore *kv,
 	const char *k, const void *data, int len)
 { (void)kv; (void)k; put_last_data = data; put_last_len = len;
-  if (rev) *rev = 3; return NATS_OK; }
+  if (rev) *rev = 3;
+  return NATS_OK; }
 static const char *fake_kvEntry_ValueString(const kvEntry *e)
 { (void)e; return fake_entry_val; }
 static int fake_kvEntry_ValueLen(const kvEntry *e)
