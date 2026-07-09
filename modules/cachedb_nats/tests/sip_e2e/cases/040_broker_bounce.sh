@@ -118,8 +118,10 @@ for i in $(seq 1 10); do
     sleep 0.5
 done
 
-# nats.c reconnect logic should re-establish the connection within ~5s
-sleep 5
+# nats.c reconnect logic re-establishes the connection; the pool logs
+# the KV-cache clear on that transition.  Poll it, bounded, instead of
+# a blind sleep (the log line is [P5.5]'s observable condition here).
+wait_for_log 15 "KV cache cleared after reconnect" || true
 
 # Post-bounce REGISTER should succeed
 timeout 5 sipsak -U -C "sip:post@127.0.0.1:${BOUNCE_SIP_PORT}" \

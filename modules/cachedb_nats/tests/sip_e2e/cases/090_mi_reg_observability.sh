@@ -164,7 +164,10 @@ check "fmt: summary csv totals record (scope=total, empty domain)" \
 # ── reaper-pass gauges: restart on a 5 s reaper and let one pass run ──
 stop_opensips_a
 REAP_INTERVAL=5 start_opensips_a
-sleep 8
+_reap_stamped() {
+    [ "$(mifield "$(mi nats_cdb_stats)" reap_last_run)" -gt 0 ] 2>/dev/null
+}
+wait_for 20 _reap_stamped || true
 
 out=$(mi nats_cdb_stats)
 check "stats: reap_last_run stamped by a pass" \

@@ -10,30 +10,11 @@
 : "${MI_PORT_A:=8889}"
 : "${MI_PORT_B:=8890}"
 
-SUITE_PASS=0
-SUITE_FAIL=0
-declare -a FAILED_CASES
+# ── shared core (result aggregation + bounded pollers) [P5.5] ────
+# HERE is the sip_e2e dir (set by run.sh before sourcing us).
+. "${HERE}/../../../../lib/nats/tests/e2e_harness.sh"
 
-case_name=""
-case_begin() {
-    case_name="$1"
-    echo "[$(date +%H:%M:%S)] CASE: $case_name"
-}
 
-check() {
-    local label=$1
-    local ok=$2
-    local detail=${3:-}
-    if [ "$ok" = ok ]; then
-        echo "  PASS: $label"
-        SUITE_PASS=$((SUITE_PASS + 1))
-    else
-        echo "  FAIL: $label"
-        [ -n "$detail" ] && echo "        $detail"
-        SUITE_FAIL=$((SUITE_FAIL + 1))
-        FAILED_CASES+=("${case_name}::${label}")
-    fi
-}
 
 # ── nats CLI wrapper ────────────────────────────────────────────
 n() { nats --server "$NATS_URL" "$@"; }
@@ -250,20 +231,7 @@ mi_named() {
         | timeout 3 nc -u -w 2 127.0.0.1 "$port"
 }
 
-# ── log assertions ──────────────────────────────────────────────
-log_contains() {
-    grep -q -- "$1" "$WORKDIR/opensips.log"
-}
 
-wait_for_log() {
-    local timeout=$1; local pattern=$2
-    local end=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$end" ]; do
-        log_contains "$pattern" && return 0
-        sleep 0.2
-    done
-    return 1
-}
 
 # ── SIP REGISTER via sipsak ─────────────────────────────────────
 register_one() {

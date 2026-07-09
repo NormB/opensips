@@ -13,9 +13,13 @@ for i in $(seq 1 10); do
     pids+=( $! )
 done
 for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
-sleep 3
 
-# Watcher counts puts on this key.
+# Watcher counts puts on this key.  Poll for the full count, bounded,
+# instead of a blind settle sleep [P5.5].
+_all_puts_seen() {
+    [ "$(grep -c "E_NATS_KV_CHANGE op=put key=${key} " "$WORKDIR/opensips.log")" -ge 10 ]
+}
+wait_for 10 _all_puts_seen || true
 got=$(grep -c "E_NATS_KV_CHANGE op=put key=${key} " "$WORKDIR/opensips.log")
 if [ "$got" -ge 10 ]; then
     check "10 concurrent puts on a single key all observed" ok

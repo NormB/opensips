@@ -13,31 +13,11 @@
 : "${SIP_HOST:=127.0.0.1}"
 : "${SIP_PORT:=5072}"
 
-# ── result aggregation ──────────────────────────────────────────
-SUITE_PASS=0
-SUITE_FAIL=0
-declare -a FAILED_CASES
+# ── shared core (result aggregation + bounded pollers) [P5.5] ────
+# HERE is the sip_e2e dir (set by run.sh before sourcing us).
+. "${HERE}/../../../../lib/nats/tests/e2e_harness.sh"
 
-case_name=""
-case_begin() {
-    case_name="$1"
-    echo "[$(date +%H:%M:%S)] CASE: $case_name"
-}
 
-check() {
-    local label=$1
-    local ok=$2
-    local detail=${3:-}
-    if [ "$ok" = ok ]; then
-        echo "  PASS: $label"
-        SUITE_PASS=$((SUITE_PASS + 1))
-    else
-        echo "  FAIL: $label"
-        [ -n "$detail" ] && echo "        $detail"
-        SUITE_FAIL=$((SUITE_FAIL + 1))
-        FAILED_CASES+=("${case_name}::${label}")
-    fi
-}
 
 # ── nats CLI wrappers ───────────────────────────────────────────
 n() { nats --server "$NATS_URL" "$@"; }
@@ -108,28 +88,12 @@ mi() {
         "$MI_DGRAM_HOST" "$MI_DGRAM_PORT"
 }
 
-# ── log assertions ──────────────────────────────────────────────
-log_contains() {
-    # log_contains <pattern>  -> 0 if found, 1 otherwise
-    grep -q -- "$1" "$WORKDIR/opensips.log"
-}
 
 log_count() {
     # log_count <pattern>
     grep -c -- "$1" "$WORKDIR/opensips.log" 2>/dev/null || echo 0
 }
 
-wait_for_log() {
-    # wait_for_log <timeout-sec> <pattern>  -> 0 on hit, 1 on timeout
-    local timeout=$1
-    local pattern=$2
-    local end=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$end" ]; do
-        log_contains "$pattern" && return 0
-        sleep 0.2
-    done
-    return 1
-}
 
 # ── sipp wrappers ───────────────────────────────────────────────
 sipp_send() {

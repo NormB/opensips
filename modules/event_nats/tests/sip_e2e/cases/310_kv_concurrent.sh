@@ -10,7 +10,14 @@ done
 # Wait ONLY for the kv_put pids, NOT the bare `wait` which would
 # block on the parent opensips process.
 for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
-sleep 3
+
+# Poll for the full event count, bounded, instead of a blind settle
+# sleep [P5.5].
+_all_concur_seen() {
+    [ "$(grep -c "E_NATS_KV_CHANGE op=put key=concur-${run_id}-" \
+        "$WORKDIR/opensips.log" 2>/dev/null || echo 0)" -ge 20 ]
+}
+wait_for 10 _all_concur_seen || true
 
 # Count distinct put events for our run_id.
 got=$(grep -c "E_NATS_KV_CHANGE op=put key=concur-${run_id}-" \
