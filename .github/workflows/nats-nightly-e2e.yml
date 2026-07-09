@@ -66,3 +66,35 @@ jobs:
             echo "e2e rc=$rc (77 = missing prerequisite: a FAILURE on the nightly gate)"
             exit 1
           fi
+
+  static_analysis:
+    name: cppcheck (NATS lib + modules)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cppcheck
+
+      # Analyzes only the NATS-owned trees; findings in CORE headers and
+      # cppcheck config gaps are suppressed via the committed list (see
+      # scripts/build/cppcheck-nats.supp for the rationale).  The LM_*
+      # log macros are blanked: their varargs expansion dominates the
+      # parse otherwise and log arguments are already covered by the
+      # -Werror leg's format checking.
+      - name: cppcheck
+        run: |
+          cppcheck --error-exitcode=1 --enable=warning,portability \
+            --inline-suppr --quiet -I. \
+            -DFAST_LOCK -D__CPU_x86_64 \
+            -DF_MALLOC -DQ_MALLOC -DHP_MALLOC -DF_PARALLEL_MALLOC \
+            -D'LM_ERR(...)=' -D'LM_WARN(...)=' -D'LM_INFO(...)=' \
+            -D'LM_NOTICE(...)=' -D'LM_DBG(...)=' \
+            --suppressions-list=scripts/build/cppcheck-nats.supp \
+            lib/nats modules/cachedb_nats modules/cachedb_nats_fts \
+            modules/event_nats modules/nats_consumer \
+            -i modules/cachedb_nats/tests -i modules/event_nats/tests \
+            -i modules/nats_consumer/tests -i lib/nats/tests

@@ -165,3 +165,75 @@ jobs:
               CFLAGS="-DTEST_SHIM -I. -I../../.. ${SAN_CFLAGS}" \
               LDFLAGS="-lpthread ${SAN_LDFLAGS}" \
               "${CHECK_TARGET}"
+
+  # Plain-compiler warning gate (P5.6): gcc + clang at -O2 with -Werror.
+  # -O2 matters -- flow-dependent warnings (-Wclobbered and friends) only
+  # fire with optimization, and the sanitizer legs build -O0.  Runs the
+  # check-tsan subset: that list is exactly "tests that do not REQUIRE a
+  # sanitizer runtime" (the ASan-pinned UAF/leak canaries prove their bug
+  # class through ASan and cannot pass without it).
+  #
+  # The -Wno- suppressions are for CORE headers the NATS code includes
+  # but does not own:
+  #   -Wno-sign-compare        parser/msg_parser.h
+  #   -Wno-unused-parameter    mem/f_parallel_malloc.h
+  #   -Wno-ignored-attributes  dprint.h (clang)
+  werror:
+    name: werror_${{ matrix.cc }}
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      WFLAGS: "-g -O2 -Wall -Wextra -Werror -Wno-sign-compare -Wno-unused-parameter -Wno-ignored-attributes"
+      MCC: ${{ matrix.cc }}
+
+    steps:
+      - name: Bootstrap git for checkout
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps + libnats (pinned)
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential clang pkg-config libssl-dev libuv1-dev cmake wget
+          sh scripts/build/install_libnats.sh
+
+      - name: Build NATS lib .o files
+        run: |
+          set -eu
+          common_defs="-fPIC -DPIC -I. -I./parser \
+            -DNAME='\"opensips\"' -DVERSION='\"4.1.0-dev\"' \
+            -DARCH='\"x86_64\"' -DOS='\"linux\"' -DCOMPILER='\"cc\"' \
+            -DCFG_DIR='\"/etc/opensips/\"' -DVERSIONTYPE='\"git\"' \
+            -DTHISREVISION='\"werror-ci\"'"
+          ${MCC} ${WFLAGS} ${common_defs} \
+            -c lib/nats/nats_redact.c   -o lib/nats/nats_redact.o
+          ${MCC} ${WFLAGS} ${common_defs} \
+            -c lib/nats/nats_validate.c -o lib/nats/nats_validate.o
+          ${MCC} ${WFLAGS} ${common_defs} \
+            -c lib/nats/nats_rank.c     -o lib/nats/nats_rank.o
+
+      - name: lib/nats unit tests (-Werror)
+        run: make -C lib/nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+
+      - name: event_nats unit tests (-Werror)
+        run: make -C modules/event_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+
+      - name: cachedb_nats unit tests (-Werror)
+        run: make -C modules/cachedb_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+
+      - name: nats_consumer unit tests (-Werror)
+        run: |
+          make -C modules/nats_consumer/tests CC="${MCC}" \
+            CFLAGS="-DTEST_SHIM -I. -I../../.. ${WFLAGS}" \
+            LDFLAGS="-lpthread" check-tsan
