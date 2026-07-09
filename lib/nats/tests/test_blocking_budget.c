@@ -34,7 +34,12 @@ static char *slurp(const char *path)
 	if (!f) return NULL;
 	fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET);
 	buf = malloc(n + 1);
-	if (buf) { fread(buf, 1, n, f); buf[n] = '\0'; }
+	if (buf) {
+		/* short read -> truncate at what arrived; the source-pattern
+		 * asserts below fail loudly on truncated input anyway */
+		size_t got = fread(buf, 1, n, f);
+		buf[got] = '\0';
+	}
 	fclose(f);
 	return buf;
 }

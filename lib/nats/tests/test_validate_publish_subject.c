@@ -33,8 +33,12 @@ int nats_validate_publish_subject(const char *s, int len);
 
 static int g_fails;
 #define EXPECT(want_rc, s, label) do { \
-	int got = nats_validate_publish_subject((s), \
-		(s) ? (int)strlen(s) : 0); \
+	/* volatile launder: the NULL-argument arms are DELIBERATE
+	 * adversarial inputs; without it gcc's -Wnonnull rejects the
+	 * compile-time NULL under -O2 (fires on gcc 13, not 14) */ \
+	const char *volatile _s = (s); \
+	int got = nats_validate_publish_subject(_s, \
+		_s ? (int)strlen(_s) : 0); \
 	if (got != (want_rc)) { \
 		fprintf(stderr, "FAIL: %s want=%d got=%d\n", \
 			(label), (want_rc), got); \

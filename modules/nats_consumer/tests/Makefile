@@ -42,7 +42,7 @@ TESTS_TSAN_SAFE = test_registry test_parser test_ring test_ack_token \
                   test_rpc_inbox_auth test_registry_lookup_ref \
                   test_consumer_proc_boot_retry test_rpc_subject_validation \
                   test_registry_index_recycle test_registry_ring_alloc_order test_bind_modparam test_ring_push_bounded_spin test_ring_force_unwedge \
-                  test_pool_self_register test_msg_ref_orphan_reap \
+                  test_pool_self_register \
                   test_retired_no_sub_reap test_sub_identity_match \
                   test_fetch_budget test_ring_wake_one \
                   test_bind_bounds test_rpc_tunables \
@@ -303,6 +303,10 @@ test_ensure_backoff: test_ensure_backoff.c
 
 # Behavioural (ASan): the consumer reaps msg-ref slots orphaned by a
 # worker that died before acking (no leak; table doesn't wedge).
+# ASan is PINNED in the rule, so this stays out of TESTS_TSAN_SAFE like
+# the other sanitizer-runtime-required canaries: the check-tsan subset
+# doubles as the plain -Werror leg's build list, where no compiler
+# sanitizer runtime is guaranteed (clang needs libclang-rt-*-dev).
 test_msg_ref_orphan_reap: test_msg_ref_orphan_reap.c
 	$(CC) -g -O0 -fsanitize=address -Wall -o $@ $<
 
