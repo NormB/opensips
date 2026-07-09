@@ -49,6 +49,7 @@
 #include "../../mem/mem.h"   /* [P3.5] pkg buffers on the projection path */
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"     /* nats_pool_get_js */
+#include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
 #include "cachedb_nats.h"          /* cdbn_fts_on (resync gate) */
 #include "cachedb_nats_dbase.h"    /* kv_bucket / kv_replicas / ... */
 #include "cachedb_nats_watch.h"    /* [P3.3] proc guard + resync body */
@@ -222,8 +223,10 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	 * subject -- that would land the value where the reader never queries
 	 * (silent split-brain).  Fail the save instead. */
 	if (nats_kv_key_to_subject(bucket, key, subj, sizeof(subj)) < 0) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key, _rk, sizeof(_rk));
 		LM_ERR("nats_kv_put_row: subject overflow for key '%s' -- failing "
-			"the save\n", key);
+			"the save\n", _rk);
 		return TTL_FAIL_SAVE;
 	}
 
@@ -287,7 +290,8 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 		 * and gets the full libnats detail: status text + jsErrCode
 		 * (10077 = message-TTL unsupported, 10052 = bad request --
 		 * the classes that bit during the 2.11 TTL bring-up) +
-		 * bucket/key so the operator can find the row. */
+		 * bucket + redacted key (stable hash: correlates repeat
+		 * failures without logging the AoR) to find the row. */
 		if (out == TTL_RETRY) {
 			LM_DBG("nats_kv_put_row: CAS conflict on '%s.%s' at rev "
 				"%llu; retrying\n", bucket, key,
@@ -297,11 +301,14 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 				LM_DBG("nats_kv_put_row: CAS write of '%s.%s' "
 					"failed, broker down: %s\n", bucket, key,
 					nats_dl.natsStatus_GetText(s));
-			else
+			else {
+				char _rk[NATS_REDACT_KEY_BUF];
+				nats_redact_key(key, _rk, sizeof(_rk));
 				LM_ERR("nats_kv_put_row: CAS write of '%s.%s' "
 					"failed: %s (jsErrCode %d) -- failing the "
-					"save\n", bucket, key,
+					"save\n", bucket, _rk,
 					nats_dl.natsStatus_GetText(s), (int)je);
+			}
 		}
 		return out;
 	}

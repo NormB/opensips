@@ -78,12 +78,12 @@ test_sink_emit_int: ../cachedb_nats_json_ser.c ../cachedb_nats_json_internal.h
 
 # P0.1: kv_epoch must not latch on a failed refresh — links the real
 # nats_con_refresh_kv() from ../cachedb_nats_dbase.c with a fake pool.
-test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c
+test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c ../../../lib/nats/nats_redact.c
 test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
 
 # P0.4: kv_put/kv_update fast-fail must not leak the pkg value copy;
 # kv_get must fail when the pvar write fails.  Links ../cachedb_nats_native.c.
-test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c
+test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c ../../../lib/nats/nats_redact.c
 test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 
 # P0.6: a KV snapshot stalling mid-stream must fail the index build/rebuild

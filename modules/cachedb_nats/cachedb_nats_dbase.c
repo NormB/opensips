@@ -61,6 +61,7 @@
 #include "cachedb_nats_watch.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
 #include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 #include "../../lib/nats/nats_str.h"
@@ -342,8 +343,10 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 		return -2;
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -441,8 +444,10 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 		val->len > 0 ? val->len : 0);
 
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Put failed for key '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -490,8 +495,10 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 
 	s = nats_dl.kvStore_Delete(ncon->kv, key_buf);
 	if (s != NATS_OK && s != NATS_NOT_FOUND) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Delete failed for key '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -644,15 +651,19 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			if (bad) {
+				char _rk[NATS_REDACT_KEY_BUF];
+				nats_redact_key(key_buf, _rk, sizeof(_rk));
 				LM_ERR("counter '%s' stored value is not a valid 32-bit "
-					"integer ('%s'); refusing op\n", key_buf, cur_txt);
+					"integer ('%s'); refusing op\n", _rk, cur_txt);
 				return -1;
 			}
 			current = parsed;
 		}
 		else if (s != NATS_NOT_FOUND) {
+			char _rk[NATS_REDACT_KEY_BUF];
+			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-				key_buf, nats_dl.natsStatus_GetText(s));
+				_rk, nats_dl.natsStatus_GetText(s));
 			NATS_CDB_STATS_INC(op_failed);
 			return -1;
 		}
@@ -808,8 +819,10 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 		return -2;
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -825,8 +838,10 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 		 * silently returning 0 (strtoll's result for "abc") or a truncated
 		 * int.  Parse while the entry is alive; val_str points into it. */
 		if (nats_counter_parse(val_str, &parsed) < 0) {
+			char _rk[NATS_REDACT_KEY_BUF];
+			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_ERR("counter '%s' value is not a valid 32-bit integer "
-				"('%s')\n", key_buf, val_str ? val_str : "(null)");
+				"('%s')\n", _rk, val_str ? val_str : "(null)");
 			nats_dl.kvEntry_Destroy(entry);
 			return -1;
 		}

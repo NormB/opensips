@@ -52,6 +52,7 @@
 #include "cachedb_nats.h"
 #include "cachedb_nats_dbase.h"
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
 #include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
 #include "cachedb_nats_expiry.h"
 #include "../../lib/nats/nats_str.h"
@@ -140,8 +141,10 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		return -2;
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_History failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -226,11 +229,14 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		hist_trunc = 1;
 	if (hist_trunc) {
 		static time_t rl_trunc;
-		if (nats_rl_pass(&rl_trunc, time(NULL), 30))
+		if (nats_rl_pass(&rl_trunc, time(NULL), 30)) {
+			char _rk[NATS_REDACT_KEY_BUF];
+			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_WARN("kv_history('%s'): history JSON exceeds "
 				"NATS_HISTORY_BUF (%d bytes) -- result truncated "
 				"at %d/%d entries (repeats suppressed for 30s)\n",
-				key_buf, NATS_HISTORY_BUF, i, entry_count);
+				_rk, NATS_HISTORY_BUF, i, entry_count);
+		}
 		LM_DBG("kv_history('%s'): truncated at %d/%d entries\n",
 			key_buf, i, entry_count);
 	}
@@ -315,8 +321,10 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		return -2;
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -347,8 +355,10 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		val.rs.s = value_copy;
 		val.rs.len = entry_len;
 		if (pv_set_value(msg, value_var, 0, &val) < 0) {
+			char _rk[NATS_REDACT_KEY_BUF];
+			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_ERR("failed to set value pvar — script would read a "
-				"stale value as key '%s'\n", key_buf);
+				"stale value as key '%s'\n", _rk);
 			pkg_free(value_copy);
 			return -1;
 		}
@@ -459,8 +469,10 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		(value->s && value->len > 0) ? value->s : NULL,
 		value->len > 0 ? value->len : 0);
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Put failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -553,8 +565,10 @@ int w_nats_kv_update(struct sip_msg *msg, str *bucket, str *key,
 			goto out;
 		}
 		if (o != TTL_DONE) {
+			char _rk[NATS_REDACT_KEY_BUF];
+			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_ERR("kv update CAS failed for '%s' (outcome %d)\n",
-				key_buf, (int)o);
+				_rk, (int)o);
 			rc = -1;
 			goto out;
 		}
@@ -614,8 +628,10 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 
 	s = nats_dl.kvStore_Delete(kv, key_buf);
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Delete failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -678,8 +694,10 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 		return -2;
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			key_buf, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 
@@ -705,8 +723,10 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 	val.rs.len = rev_buf_len;
 	val.ri = (int)rev;
 	if (pv_set_value(msg, rev_var, 0, &val) < 0) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("failed to set revision pvar — script would read a "
-			"stale revision for key '%s'\n", key_buf);
+			"stale revision for key '%s'\n", _rk);
 		return -1;
 	}
 
@@ -971,8 +991,9 @@ static int raw_kv_purge(kvStore *kv, const char *key)
 	key_s.s = (char *)key;
 	key_s.len = key ? (int)strlen(key) : 0;
 	if (validate_kv_key(&key_s) < 0) {
-		LM_ERR("KV PURGE: refusing invalid/wildcard key '%s'\n",
-			key ? key : "(null)");
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key, _rk, sizeof(_rk));
+		LM_ERR("KV PURGE: refusing invalid/wildcard key '%s'\n", _rk);
 		return -1;
 	}
 
@@ -982,8 +1003,10 @@ static int raw_kv_purge(kvStore *kv, const char *key)
 		return 0; /* idempotent */
 	}
 	if (s != NATS_OK) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Purge failed for key '%s': %s\n",
-			key, nats_dl.natsStatus_GetText(s));
+			_rk, nats_dl.natsStatus_GetText(s));
 		return -1;
 	}
 

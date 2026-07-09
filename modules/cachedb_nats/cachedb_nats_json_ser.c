@@ -349,7 +349,7 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 		default:
 			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
 				pair->val.type, pair->key.name.len,
-				pair->key.name.s);
+				pair->key.name.s); /* not PII: field name only */
 			s->oom = 1;
 			return -1;
 		}

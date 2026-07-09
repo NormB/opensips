@@ -85,9 +85,10 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 	target_key = _pk_target_key(filter->val.s.s, filter->val.s.len,
 		key_stack, sizeof(key_stack), &key_heap);
 	if (!target_key) {
-		LM_ERR("PK query: target-key build failed (filter '%.*s'='%.*s')\n",
+		LM_ERR("PK query: target-key build failed (filter '%.*s', "
+			"value len %d)\n", /* not PII: field name only */
 			filter->key.name.len, filter->key.name.s,
-			filter->val.s.len, filter->val.s.s);
+			filter->val.s.len);
 		return -1;
 	}
 
@@ -459,7 +460,7 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 		default:
 			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
 				pair->val.type, pair->key.name.len,
-				pair->key.name.s);
+				pair->key.name.s); /* not PII: field name only */
 			_free_apply_ops(ops, n);
 			return NULL;
 		}
@@ -821,10 +822,9 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
 			row_filter->val.s.len, &enc_len);
 		if (!enc) {
 			LM_ERR("update: malloc for KV-key encode buffer "
-				"failed (filter '%.*s'='%.*s', encode budget "
-				"%d bytes)\n",
+				"failed (filter '%.*s', encode budget "
+				"%d bytes)\n", /* not PII: field name only */
 				row_filter->key.name.len, row_filter->key.name.s,
-				row_filter->val.s.len, row_filter->val.s.s,
 				row_filter->val.s.len * 3 + 1);
 			return NULL;
 		}
@@ -1218,7 +1218,8 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		NATS_CDB_STATS_INC(nul_fields_rejected);
 		LM_ERR("update rejected: a contact field for filter '%.*s' "
 			"contains an embedded NUL (value redacted)\n",
-			row_filter->key.name.len, row_filter->key.name.s);
+			row_filter->key.name.len,
+			row_filter->key.name.s); /* not PII: field name only */
 		return -1;
 	}
 

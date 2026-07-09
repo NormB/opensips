@@ -7,7 +7,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-TESTS = test_redact_url test_validate_publish_subject test_validate_modes test_pool_merge \
+TESTS = test_redact_url test_key_redaction test_validate_publish_subject test_validate_modes test_pool_merge \
         test_validate_subject_cache test_nats_dl test_nats_ca_dir \
         test_nats_pool_fixes test_unsafe_log_clamp test_server_info_redact \
         test_js_pending_cap test_pool_refcount \
@@ -26,6 +26,10 @@ all: $(TESTS)
 # the parent Makefile) to avoid duplicating its source here.
 test_redact_url: test_redact_url.c ../nats_redact.o
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_redact_url.c ../nats_redact.o
+
+# nats_redact_key() also lives in nats_redact.c.
+test_key_redaction: test_key_redaction.c ../nats_redact.o
+	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_key_redaction.c ../nats_redact.o
 
 
 # nats_validate_publish_subject() lives in nats_validate.c.

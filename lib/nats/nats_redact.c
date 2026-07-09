@@ -150,3 +150,53 @@ void nats_redact_url(const char *url, char *out, size_t out_sz)
 	}
 	*dst = '\0';
 }
+
+/* Longest leading namespace token nats_redact_key() will show literally.
+ * A configured row-key prefix ("usrloc") fits; an AoR fragment does not. */
+#define REDACT_KEY_NS_MAX 12
+
+static int _ns_char_safe(unsigned char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+
+void nats_redact_key(const char *key, char *out, size_t out_sz)
+{
+	if (out_sz == 0) return;
+	out[0] = '\0';
+	if (!key) {
+		snprintf(out, out_sz, "(null)");
+		return;
+	}
+	if (!*key) {
+		snprintf(out, out_sz, "(empty)");
+		return;
+	}
+
+	/* FNV-1a 32-bit over the whole key: stable correlation handle */
+	unsigned int h = 2166136261u;
+	size_t len = 0;
+	for (const unsigned char *p = (const unsigned char *)key; *p; p++, len++) {
+		h ^= *p;
+		h *= 16777619u;
+	}
+
+	/* show the leading '.'-terminated token only when it can only be a
+	 * namespace prefix, never an AoR fragment */
+	size_t pfx = 0;
+	const char *dot = strchr(key, '.');
+	if (dot && dot != key && (size_t)(dot - key) <= REDACT_KEY_NS_MAX) {
+		size_t i, n = (size_t)(dot - key);
+		for (i = 0; i < n && _ns_char_safe((unsigned char)key[i]); i++)
+			;
+		if (i == n)
+			pfx = n + 1;	/* include the '.' */
+	}
+
+	if (pfx)
+		snprintf(out, out_sz, "%.*s~%08x/%lu",
+			(int)pfx, key, h, (unsigned long)len);
+	else
+		snprintf(out, out_sz, "~%08x/%lu", h, (unsigned long)len);
+}
