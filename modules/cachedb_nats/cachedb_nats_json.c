@@ -193,7 +193,9 @@ static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			 * the truth is the KV, so the result set stays
 			 * complete (this row genuinely no longer exists). */
 			NATS_CDB_STATS_INC(index_miss_kv);
-			cdbn_fts.remove(match_keys[i]);
+			/* interned keys carry no length here; cold path. */
+			cdbn_fts.remove(match_keys[i],
+				(int)strlen(match_keys[i]));
 			LM_DBG("evicted stale index entry for '%s'\n",
 				match_keys[i]);
 			continue;
@@ -792,9 +794,11 @@ out:
  * search index first (the stored key is already KV-safe); PK filters
  * and index misses build "<fts_json_prefix>" + encoded filter value.
  * Returns a pkg_malloc'd key, or NULL on error (logged). */
-static char *update_resolve_target_key(const cdb_filter_t *row_filter)
+static char *update_resolve_target_key(const cdb_filter_t *row_filter,
+	int *out_key_len)
 {
 	char *target_key = NULL;
+	int target_key_len = 0;
 
 	/* Try the index first when the filter is non-PK (via the optional
 	 * cachedb_nats_fts binds); on hit, the stored key was assigned at
@@ -812,6 +816,7 @@ static char *update_resolve_target_key(const cdb_filter_t *row_filter)
 				return NULL;
 			}
 			memcpy(target_key, kbuf, klen + 1);
+			target_key_len = (int)klen;
 		}
 	}
 
@@ -854,6 +859,7 @@ static char *update_resolve_target_key(const cdb_filter_t *row_filter)
 			memcpy(target_key, fts_json_prefix, plen);
 			memcpy(target_key + plen, enc, enc_len);
 			target_key[plen + enc_len] = '\0';
+			target_key_len = plen + enc_len;
 		} else {
 			target_key = pkg_malloc(enc_len + 1);
 			if (!target_key) {
@@ -866,10 +872,13 @@ static char *update_resolve_target_key(const cdb_filter_t *row_filter)
 			}
 			memcpy(target_key, enc, enc_len);
 			target_key[enc_len] = '\0';
+			target_key_len = enc_len;
 		}
 		pkg_free(enc);
 	}
 
+	if (target_key && out_key_len)
+		*out_key_len = target_key_len;
 	return target_key;
 }
 
@@ -1019,7 +1028,8 @@ static int update_fetch_or_seed(nats_cachedb_con *ncon,
  * the new one).  Returns 1 on a CAS conflict the caller should retry,
  * -1 on fatal error.  @json_buf stays owned by the caller. */
 static int update_apply_and_cas(nats_cachedb_con *ncon,
-	const char *target_key, const char *json_buf, int old_len,
+	const char *target_key, int target_key_len,
+	const char *json_buf, int old_len,
 	const cdb_dict_t *pairs, uint64_t rev)
 {
 	char *new_json;
@@ -1097,8 +1107,10 @@ static int update_apply_and_cas(nats_cachedb_con *ncon,
 		/* Targeted index update: remove the key from only the entries it
 		 * was in (from the OLD json_buf), then add it from the NEW JSON. */
 		if (cdbn_fts_on) {
-			cdbn_fts.remove_fields(target_key, json_buf, old_len);
-			cdbn_fts.add(target_key, new_json, new_len);
+			cdbn_fts.remove_fields(target_key, target_key_len,
+				json_buf, old_len);
+			cdbn_fts.add(target_key, target_key_len,
+				new_json, new_len);
 		}
 		LM_DBG("updated key '%s' rev=%llu\n", target_key,
 			(unsigned long long)new_rev);
@@ -1139,6 +1151,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 {
 	nats_cachedb_con *ncon;
 	char *target_key = NULL;
+	int target_key_len = 0;
 	char *json_buf = NULL;
 	int json_len = 0;
 	uint64_t rev = 0;
@@ -1211,7 +1224,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
-	target_key = update_resolve_target_key(row_filter);
+	target_key = update_resolve_target_key(row_filter, &target_key_len);
 	if (!target_key)
 		return -1;
 
@@ -1234,8 +1247,8 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			continue;
 		}
 
-		rc = update_apply_and_cas(ncon, target_key, json_buf,
-			json_len, pairs, rev);
+		rc = update_apply_and_cas(ncon, target_key, target_key_len,
+			json_buf, json_len, pairs, rev);
 		pkg_free(json_buf);
 		json_buf = NULL;
 		if (rc == 0) {

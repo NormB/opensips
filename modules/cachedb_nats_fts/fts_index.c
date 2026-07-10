@@ -324,11 +324,10 @@ static nats_idx_entry *get_or_create_entry_in(nats_search_idx *idx,
  *
  * Returns 0 on success, -1 on allocation failure.
  */
-static int entry_add_key(nats_idx_entry *e, const char *key)
+static int entry_add_key(nats_idx_entry *e, const char *key, int klen)
 {
 	int i;
 	char *interned;
-	int   klen = (int)strlen(key);
 
 	/* Intern up front so the dup check can compare pointers instead
 	 * of running strcmp on every stored key.  All stored keys are
@@ -414,11 +413,10 @@ static int entry_add_key(nats_idx_entry *e, const char *key)
  * keeps the array compact.  Returns 1 if the key was removed, 0 if not
  * found.  Must be called with the entry's shard lock held.
  */
-static int entry_remove_key(nats_idx_entry *e, const char *key)
+static int entry_remove_key(nats_idx_entry *e, const char *key, int klen)
 {
 	int   i;
 	char *interned;
-	int   klen = (int)strlen(key);
 
 	/* Intern to get the canonical pointer; subsequent scan is O(1)
 	 * pointer compare.  This adds an extra acquire+release per call
@@ -486,6 +484,7 @@ static void free_entry(nats_idx_entry *e)
 
 typedef struct _idx_add_ctx {
 	const char *doc_key;     /* the KV key for this document */
+	int         doc_key_len;
 	nats_search_idx *target; /* destination index — NULL means g_idx */
 } idx_add_ctx;
 
@@ -527,7 +526,7 @@ static void index_field_cb(const char *field, int flen,
 	if (!e)
 		return;
 
-	entry_add_key(e, actx->doc_key);
+	entry_add_key(e, actx->doc_key, actx->doc_key_len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -759,16 +758,13 @@ static int nats_rev_contains(const char *key, int key_len)
 }
 
 /* Drop the reverse-map record for @key (if any). */
-static void nats_rev_remove(const char *key)
+static void nats_rev_remove(const char *key, int key_len)
 {
 	unsigned int hash, bucket;
-	int shard, key_len;
+	int shard;
 	nats_rev_node *n, **pp;
 
-	if (!g_rev || !key)
-		return;
-	key_len = (int)strlen(key);
-	if (key_len <= 0)
+	if (!g_rev || !key || key_len <= 0)
 		return;
 
 	hash   = fts_hash(key, key_len);
@@ -916,19 +912,16 @@ static inline void idx_unlock_all(nats_search_idx *idx)
  * lock, which is released BEFORE any forward-index shard lock is taken, so
  * the two (separate) lock sets are never held simultaneously.
  */
-int nats_json_index_remove_by_revmap(const char *key)
+int nats_json_index_remove_by_revmap(const char *key, int key_len)
 {
 	unsigned int hash, bucket;
-	int shard, key_len, i;
+	int shard, i;
 	nats_rev_node *n, **pp;
 	char *blob = NULL;
 	int blob_len = 0, n_fv = 0, off;
 	const char *p;
 
-	if (!g_idx || !g_rev || !key)
-		return -1;
-	key_len = (int)strlen(key);
-	if (key_len <= 0)
+	if (!g_idx || !g_rev || !key || key_len <= 0)
 		return -1;
 
 	hash   = fts_hash(key, key_len);
@@ -971,7 +964,7 @@ have_blob:
 		idx_lock_shard(g_idx, fs);
 		e = find_entry_in(g_idx, p, flen);
 		if (e)
-			removed_any |= entry_remove_key(e, key);
+			removed_any |= entry_remove_key(e, key, key_len);
 		idx_unlock_shard(g_idx, fs);
 
 		off += flen + 1;
@@ -1095,7 +1088,8 @@ static int build_snapshot_cb(const char *key,
 		return -1;
 	if (data[0] != '{')
 		return -1;
-	return nats_json_index_add(key, data, data_len);
+	/* cnats snapshot keys carry no length; strlen ONCE at the boundary. */
+	return nats_json_index_add(key, (int)strlen(key), data, data_len);
 }
 
 /**
@@ -1214,13 +1208,14 @@ static void collect_fv_cb(const char *field, int flen,
 	l->items[l->n++] = (_idx_fv_t){field, flen, val, vlen};
 }
 
-int nats_json_index_add(const char *key, const char *json_str, int json_len)
+int nats_json_index_add(const char *key, int key_len,
+	const char *json_str, int json_len)
 {
 	_idx_fv_list_t list;
 	int rc, i;
 	int was_present;
 
-	if (!g_idx || !key || !json_str)
+	if (!g_idx || !key || key_len <= 0 || !json_str)
 		return -1;
 
 	/* REV-26: count this doc-key ONCE.  A node indexes its own write twice —
@@ -1229,7 +1224,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 	 * read ~2x the true cardinality until a fresh build).  Capture membership
 	 * BEFORE the field inserts / rev_put below; only a genuinely-new key (or a
 	 * re-add after remove_fields, which dropped the rev record) increments. */
-	was_present = nats_rev_contains(key, (int)strlen(key));
+	was_present = nats_rev_contains(key, key_len);
 
 	/* Parse the document into a flat (field, value) list with no
 	 * lock held.  The parser is CPU-bound at ~bytes/cycle, so this
@@ -1318,7 +1313,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 		idx_lock_shard(g_idx, shard);
 		e = get_or_create_entry_in(g_idx, fv_buf, fv_len);
 		if (e)
-			entry_add_key(e, key);
+			entry_add_key(e, key, key_len);
 		idx_unlock_shard(g_idx, shard);
 	}
 
@@ -1328,7 +1323,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
 
 	/* Record (or replace) the doc's fv set for fast delete-by-key. */
 	if (!rev_oom && rev_nfv > 0)
-		nats_rev_put(key, (int)strlen(key), rev_blob, rev_len, rev_nfv);
+		nats_rev_put(key, key_len, rev_blob, rev_len, rev_nfv);
 	if (rev_blob != rev_stack)
 		free(rev_blob);
 
@@ -1343,13 +1338,14 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len)
  * (the rebuild path holds it on a thread-local shadow until the
  * atomic swap). */
 static int index_add_into(nats_search_idx *target, const char *key,
-	const char *json_str, int json_len)
+	int key_len, const char *json_str, int json_len)
 {
 	idx_add_ctx ctx;
 	int rc;
 
-	if (!target || !key || !json_str) return -1;
+	if (!target || !key || key_len <= 0 || !json_str) return -1;
 	ctx.doc_key = key;
+	ctx.doc_key_len = key_len;
 	ctx.target = target;
 	rc = parse_json_fields(json_str, json_len, index_field_cb, &ctx);
 	if (rc >= 0)
@@ -1369,7 +1365,7 @@ static int index_add_into(nats_search_idx *target, const char *key,
  *
  * Returns 0 on success, -1 if parameters are NULL or index is uninitialised.
  */
-int nats_json_index_remove(const char *key)
+int nats_json_index_remove(const char *key, int key_len)
 {
 	unsigned int b;
 	nats_idx_entry *e;
@@ -1382,7 +1378,7 @@ int nats_json_index_remove(const char *key)
 	int removed_any = 0;
 	for (b = 0; b < (unsigned int)nats_idx_buckets; b++) {
 		for (e = g_idx->buckets[b]; e; e = e->next)
-			removed_any |= entry_remove_key(e, key);
+			removed_any |= entry_remove_key(e, key, key_len);
 	}
 
 	idx_unlock_all(g_idx);
@@ -1395,7 +1391,7 @@ int nats_json_index_remove(const char *key)
 			memory_order_relaxed);
 
 	/* Drop any reverse-map record so it can't go stale. */
-	nats_rev_remove(key);
+	nats_rev_remove(key, key_len);
 
 	LM_DBG("removed key '%s' from index\n", key);
 	return 0;
@@ -1419,7 +1415,8 @@ int nats_json_index_count(void)
  * value byte slices alias into the caller-owned old JSON, which
  * stays live across this entire call sequence. */
 typedef struct {
-	const char *doc_key;
+	const char *doc_key;	int         doc_key_len;
+
 	int         removed_any;   /* set if any field entry actually held the key */
 } _idx_remove_ctx;
 
@@ -1446,20 +1443,22 @@ static void index_remove_field_cb(const char *field, int flen,
 	idx_lock_shard(g_idx, shard);
 	e = find_entry_in(g_idx, fv_buf, fv_len);
 	if (e)
-		rctx->removed_any |= entry_remove_key(e, rctx->doc_key);
+		rctx->removed_any |= entry_remove_key(e, rctx->doc_key,
+			rctx->doc_key_len);
 	idx_unlock_shard(g_idx, shard);
 }
 
-int nats_json_index_remove_fields(const char *key,
+int nats_json_index_remove_fields(const char *key, int key_len,
 	const char *json_str, int json_len)
 {
 	_idx_remove_ctx ctx;
 	int rc;
 
-	if (!g_idx || !key || !json_str || json_len <= 0)
+	if (!g_idx || !key || key_len <= 0 || !json_str || json_len <= 0)
 		return 0;
 
 	ctx.doc_key = key;
+	ctx.doc_key_len = key_len;
 	ctx.removed_any = 0;
 	rc = parse_json_fields(json_str, json_len, index_remove_field_cb,
 		&ctx);
@@ -1475,7 +1474,7 @@ int nats_json_index_remove_fields(const char *key,
 	/* The doc's fv set is changing (this is the remove half of an
 	 * update); drop the old reverse-map record -- the add half re-puts
 	 * the new one. */
-	nats_rev_remove(key);
+	nats_rev_remove(key, key_len);
 
 	LM_DBG("removed key '%s' (%d field entries) from index\n",
 		key, rc);
@@ -1545,7 +1544,9 @@ static int rebuild_snapshot_cb(const char *key,
 		return -1;
 	if (data[0] != '{')
 		return -1;
-	return index_add_into(rctx->shadow, key, data, data_len);
+	/* cnats snapshot keys carry no length; strlen ONCE at the boundary. */
+	return index_add_into(rctx->shadow, key, (int)strlen(key),
+		data, data_len);
 }
 
 int nats_json_index_rebuild(kvStore *kv, const char *prefix)

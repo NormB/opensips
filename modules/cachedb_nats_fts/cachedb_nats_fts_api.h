@@ -88,8 +88,11 @@ typedef struct cdbn_fts_api {
 	 * for an already-indexed key (duplicate doc keys are de-duped per
 	 * entry).
 	 *
-	 * @param key      Doc key (NUL-terminated); borrowed -- copied
-	 *                 into the SHM intern table as needed.
+	 * @param key      Doc key bytes; borrowed -- copied into the SHM
+	 *                 intern table as needed.  Need NOT be
+	 *                 NUL-terminated ([P3.5]: exactly @key_len bytes
+	 *                 are read; no strlen on the hot path).
+	 * @param key_len  Length of @key in bytes (> 0).
 	 * @param json_str Raw JSON bytes; borrowed, parsed unlocked.
 	 * @param json_len Length of @json_str in bytes.
 	 * @return 0 on success, -1 on parse error / SHM exhaustion /
@@ -100,13 +103,16 @@ typedef struct cdbn_fts_api {
 	 * time.  Context: cachedb_nats's dedicated watcher process (KV
 	 * watch loop) and SIP workers on the update() write path.
 	 */
-	int  (*add)(const char *key, const char *json_str, int json_len);
+	int  (*add)(const char *key, int key_len,
+	            const char *json_str, int json_len);
 
 	/**
 	 * Remove a document from the index by walking every bucket (impl:
 	 * nats_json_index_remove).  Idempotent: an unknown key is success.
 	 *
-	 * @param key Doc key (NUL-terminated); borrowed.
+	 * @param key     Doc key bytes; borrowed.  Need NOT be
+	 *                NUL-terminated ([P3.5]).
+	 * @param key_len Length of @key in bytes (> 0).
 	 * @return 0 on success or key not found, -1 on error.
 	 *
 	 * Allocation: frees SHM entries/interned refs as they empty.
@@ -114,14 +120,16 @@ typedef struct cdbn_fts_api {
 	 * watcher process (delete/expiry fallback when remove_by_revmap
 	 * misses) and SIP workers (query-path stale-index self-heal).
 	 */
-	int  (*remove)(const char *key);
+	int  (*remove)(const char *key, int key_len);
 
 	/**
 	 * Fast delete-by-key via the doc-key -> field:value reverse map
 	 * (impl: nats_json_index_remove_by_revmap): O(fields) instead of a
 	 * full bucket walk.
 	 *
-	 * @param key Doc key (NUL-terminated); borrowed.
+	 * @param key     Doc key bytes; borrowed.  Need NOT be
+	 *                NUL-terminated ([P3.5]).
+	 * @param key_len Length of @key in bytes (> 0).
 	 * @return 0 on a hit (key removed), -1 on a miss -- the caller
 	 *         MUST fall back to remove(key) on -1.
 	 *
@@ -130,7 +138,7 @@ typedef struct cdbn_fts_api {
 	 * (never held simultaneously).  Context: the watcher process's
 	 * delete/expiry path.
 	 */
-	int  (*remove_by_revmap)(const char *key);
+	int  (*remove_by_revmap)(const char *key, int key_len);
 
 	/**
 	 * Targeted removal given the document's OLD JSON (impl:
@@ -138,7 +146,9 @@ typedef struct cdbn_fts_api {
 	 * entries the key was indexed under, O(F) work.  No-op (success)
 	 * when @json is NULL/empty.
 	 *
-	 * @param key  Doc key (NUL-terminated); borrowed.
+	 * @param key      Doc key bytes; borrowed.  Need NOT be
+	 *                 NUL-terminated ([P3.5]).
+	 * @param key_len  Length of @key in bytes (> 0).
 	 * @param json Pre-write JSON the key was indexed against; borrowed
 	 *             and must stay live across the call.
 	 * @param len  Length of @json in bytes.
@@ -148,7 +158,8 @@ typedef struct cdbn_fts_api {
 	 * the update() path (after a successful CAS write, paired with
 	 * add() of the new JSON).
 	 */
-	int  (*remove_fields)(const char *key, const char *json, int len);
+	int  (*remove_fields)(const char *key, int key_len,
+	                      const char *json, int len);
 
 	/**
 	 * Live count of unique doc keys in the forward index (impl:

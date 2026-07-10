@@ -495,6 +495,9 @@ static void watcher_loop(void)
 			}
 
 			if (cdbn_fts_on) {
+				/* [P3.5] one strlen at the cnats boundary; the
+				 * index entry points take (key, key_len). */
+				int         fts_key_len = (int)strlen(key);
 				const char *val     = (op == kvOp_Put) ?
 					nats_dl.kvEntry_ValueString(entry) : NULL;
 				int         val_len = (op == kvOp_Put) ?
@@ -507,7 +510,8 @@ static void watcher_loop(void)
 					 * Non-JSON keys are silently skipped -- no spam. */
 					if (prefix_len == 0 ||
 					    strncmp(key, fts_json_prefix, prefix_len) == 0)
-						cdbn_fts.add(key, val, val_len);
+						cdbn_fts.add(key, fts_key_len,
+							val, val_len);
 				} else if (act == WATCH_IDX_REMOVE) {
 					/* Delete/Purge OR an empty-value Put (MaxAge
 					 * tombstone, [R1]).  Fast path: remove only the
@@ -518,9 +522,11 @@ static void watcher_loop(void)
 					 * is now removed; <0 => no revmap record (a full-walk
 					 * fallback covers a possibly-stale entry). */
 					int before = cdbn_fts.count();
-					int was_indexed = (cdbn_fts.remove_by_revmap(key) == 0);
+					int was_indexed =
+						(cdbn_fts.remove_by_revmap(key,
+							fts_key_len) == 0);
 					if (!was_indexed)
-						cdbn_fts.remove(key);
+						cdbn_fts.remove(key, fts_key_len);
 					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
 					 * REV-26] observability: a server-side TTL expiry
 					 * surfaces (cnats <=3.12) as an empty-value Put;

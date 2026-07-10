@@ -95,6 +95,12 @@ test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_index_partial_snapshot: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c ../cachedb_nats_json.h
 
+# [P3.5 residue] FTS write-side entry points take (key, key_len): every
+# key is an exactly-sized NON-NUL-terminated heap slice, so a surviving
+# strlen in the production TUs trips ASan.  Links the real FTS TUs.
+test_fts_key_len: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+test_fts_key_len: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+
 # [P3.5 fold] cdbn_row_hygiene_finalize must be byte-identical to the
 # sequential drop-expired -> finalize reference pair, on the REAL
 # rowmeta/ser/walk TUs; also prints the old-vs-fold micro-bench.

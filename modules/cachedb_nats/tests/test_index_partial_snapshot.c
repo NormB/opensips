@@ -209,9 +209,9 @@ int main(void)
 	ASSERT(nats_json_index_init() == 0, "index init");
 
 	/* seed the LIVE index with two complete documents */
-	ASSERT(nats_json_index_add("doc.a1", "{\"aor\":\"alice\"}", 16) == 0,
+	ASSERT(nats_json_index_add("doc.a1", 6, "{\"aor\":\"alice\"}", 16) == 0,
 		"seed doc a1");
-	ASSERT(nats_json_index_add("doc.a2", "{\"aor\":\"anna\"}", 15) == 0,
+	ASSERT(nats_json_index_add("doc.a2", 6, "{\"aor\":\"anna\"}", 15) == 0,
 		"seed doc a2");
 	ASSERT(nats_json_index_count() == 2, "live index holds 2 documents");
 

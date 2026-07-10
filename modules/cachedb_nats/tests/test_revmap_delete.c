@@ -278,7 +278,7 @@ int main(void)
 			"index_add populates the reverse map");
 		ASSERT(file_contains(watch, "cdbn_fts.remove_by_revmap"),
 			"watcher delete path uses the reverse-map fast delete");
-		ASSERT(file_contains(watch, "cdbn_fts.remove(key)"),
+		ASSERT(file_contains(watch, "cdbn_fts.remove(key, fts_key_len)"),
 			"watcher keeps the full-walk remove as the fallback");
 	}
 

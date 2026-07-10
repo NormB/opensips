@@ -217,7 +217,8 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix);
  *
  * Thread safety: Acquires the per-shard SHM locks internally.
  */
-int nats_json_index_add(const char *key, const char *json_str, int json_len);
+int nats_json_index_add(const char *key, int key_len,
+	const char *json_str, int json_len);
 
 /*
  * Remove a document from the search index.
@@ -230,7 +231,7 @@ int nats_json_index_add(const char *key, const char *json_str, int json_len);
  *
  * Thread safety: Acquires the per-shard SHM locks internally.
  */
-int nats_json_index_remove(const char *key);
+int nats_json_index_remove(const char *key, int key_len);
 
 /*
  * P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: live forward-index
@@ -250,7 +251,7 @@ int nats_json_index_count(void);
  * Thread safety: takes the reverse-map shard lock, then forward-index
  * shard locks (never simultaneously); safe from the watcher thread.
  */
-int nats_json_index_remove_by_revmap(const char *key);
+int nats_json_index_remove_by_revmap(const char *key, int key_len);
 
 /*
  * Targeted variant of index_remove that takes the document's old
@@ -275,7 +276,7 @@ int nats_json_index_remove_by_revmap(const char *key);
  *
  * Thread safety: takes one shard at a time per field.
  */
-int nats_json_index_remove_fields(const char *key,
+int nats_json_index_remove_fields(const char *key, int key_len,
 	const char *json_str, int json_len);
 
 /*
