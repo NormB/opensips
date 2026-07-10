@@ -78,6 +78,7 @@
 #include "../../mem/mem.h"
 #include "../../ut.h"
 #include "nats_pool.h"
+#include "nats_js_opts.h"
 #include "nats_redact.h"
 #include "nats_ca_dir.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
@@ -94,11 +95,9 @@
 #define NATS_POOL_DEFAULT_RECONNECT_WAIT 2000
 #define NATS_POOL_DEFAULT_MAX_RECONNECT  60
 
-/* Max in-flight JetStream async publishes per process before
- * js_PublishAsync errors (bounds per-worker memory under a slow-acking
- * broker), and how long a full queue may stall the worker before it does. */
-#define NATS_JS_PUBLISH_ASYNC_MAX_PENDING    4096
-#define NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS  50
+/* Async-publish cap / stall policy lives in nats_js_opts.h
+ * (nats_pool_js_opts_apply), behaviourally locked by
+ * tests/test_js_opts_policy.c. */
 
 /* Connection liveness probing so a black-holed broker is declared dead in
  * ~20 s (vs cnats's ~4-minute default) -- shrinks the window where inline
@@ -1088,23 +1087,12 @@ jsCtx *nats_pool_get_js(void)
 	if (!_nc && !nats_pool_get())
 		return NULL;
 
-	/* Initialize JetStream options with async publish ack handler */
+	/* Initialize JetStream options, then apply the shared policy (ack
+	 * handler, MaxPending cap, StallWait, per-op Wait timeout) — see
+	 * nats_js_opts.h for the rationale on each knob. */
 	nats_dl.jsOptions_Init(&jsOpts);
-	jsOpts.PublishAsync.AckHandler = _js_pub_ack_handler;
-	/* Cap in-flight async publishes.  Left at 0 (cnats default = unlimited)
-	 * a degraded-but-connected JetStream would let every event queue inside
-	 * cnats in each SIP worker until OOM, with no fast-fail (the connection
-	 * is still up).  With a cap, js_PublishAsync returns an error once the
-	 * queue is full — counted as a drop by the producer's `failed` stat —
-	 * instead of growing memory.  A small StallWait bounds how long a full
-	 * queue blocks the worker before erroring. */
-	jsOpts.PublishAsync.MaxPending = NATS_JS_PUBLISH_ASYNC_MAX_PENDING;
-	jsOpts.PublishAsync.StallWait  = NATS_JS_PUBLISH_ASYNC_STALL_WAIT_MS;
-	/* Per-op request timeout for JetStream/KV operations.  Left at 0 cnats
-	 * uses its 5 s default, which is far above any per-REGISTER budget on
-	 * the usrloc hot path; let the operator tune it down. */
-	if (nats_pool_kv_op_timeout_ms > 0)
-		jsOpts.Wait = nats_pool_kv_op_timeout_ms;
+	nats_pool_js_opts_apply(&jsOpts, _js_pub_ack_handler,
+		nats_pool_kv_op_timeout_ms);
 
 	s = nats_dl.natsConnection_JetStream(&_js, _nc, &jsOpts);
 	if (s != NATS_OK) {

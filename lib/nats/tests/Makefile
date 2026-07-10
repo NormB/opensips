@@ -94,20 +94,17 @@ test_unsafe_log_clamp: test_unsafe_log_clamp.c
 test_server_info_redact: test_server_info_redact.c
 	$(CC) $(CFLAGS) -o $@ test_server_info_redact.c
 
-# Source-pattern: nats_pool_get_js() caps PublishAsync.MaxPending so a
-# slow-acking JetStream cannot grow per-worker memory without bound.
-test_js_pending_cap: test_js_pending_cap.c
-	$(CC) $(CFLAGS) -o $@ test_js_pending_cap.c
+# Behavioural (ASan): the JetStream context options policy
+# (nats_js_opts.h) on a real cnats jsOptions — MaxPending cap, StallWait,
+# ack handler install, kv_op_timeout_ms -> Wait plumbing.
+test_js_opts_policy: test_js_opts_policy.c ../nats_js_opts.h
+	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_js_opts_policy.c
 
 # Behavioural refcount model + source-pattern: the pool is torn down only
 # on the last unregister, waits for async publishes before jsCtx_Destroy,
 # and event_nats frees stats after the pool.
 test_pool_refcount: test_pool_refcount.c
 	$(CC) $(CFLAGS) -o $@ test_pool_refcount.c
-
-# Source-pattern: jsOpts.Wait is set from a configurable kv_op_timeout_ms.
-test_kv_op_timeout: test_kv_op_timeout.c
-	$(CC) $(CFLAGS) -o $@ test_kv_op_timeout.c
 
 # Source-pattern: reconnect jitter (cnats option + per-process retry sleep).
 test_reconnect_jitter: test_reconnect_jitter.c
