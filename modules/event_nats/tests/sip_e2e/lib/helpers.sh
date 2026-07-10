@@ -112,7 +112,15 @@ nats_sub_oneshot() {
     # attached ("Subscribing on <subject>" in the out file) so callers
     # can publish immediately -- replaces the blind post-launch sleeps
     # the cases used to carry.
-    n sub "$1" --count=1 > "$2" 2>&1 &
+    #
+    # Deliberately NOT the n() wrapper: backgrounding a shell FUNCTION
+    # forks an intermediate subshell and $! is ITS pid -- killing it
+    # (the case-030 rebind pattern) orphaned the actual nats process,
+    # which then blocked forever on --count=1 (contract locked by
+    # ../selftest_sub_oneshot.sh).  timeout(1) is a simple command
+    # whose pid IS $!; it forwards TERM to the subscriber and bounds a
+    # never-messaged subscriber's lifetime as a backstop.
+    timeout 120 nats --server "$NATS_URL" sub "$1" --count=1 > "$2" 2>&1 &
     local pid=$!
     wait_for 5 sub_banner_present "$2"
     echo "$pid"
