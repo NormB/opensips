@@ -7,14 +7,13 @@
 case_begin "050_ttl_expiry"
 
 kv_clear
-sleep 0.5
 
 register_one ttl050 3
 rc=$?
 check "REGISTER ttl050 expires=3 accepted" \
     $([ "$rc" = 0 ] && echo ok || echo fail) "rc=$rc"
 
-sleep 0.5
+wait_kv_aor "ttl050@127.0.0.1" 2
 doc=$(kv_aor_get "ttl050@127.0.0.1")
 check "doc present right after REGISTER" \
     $([ -n "$doc" ] && echo ok || echo fail)

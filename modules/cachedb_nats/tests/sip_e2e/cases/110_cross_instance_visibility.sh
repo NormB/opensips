@@ -8,10 +8,9 @@
 case_begin "110_cross_instance_visibility"
 
 kv_clear
-sleep 0.5
 
 start_opensips_b
-sleep 1
+wait_for 10 mi_ready "$MI_PORT_B"
 check "instance B boots" \
     $([ -n "$OPENSIPS_PID_B" ] && echo ok || echo fail) \
     "pid=$OPENSIPS_PID_B"
@@ -20,7 +19,7 @@ check "instance B boots" \
 register_one alice 3600 "$SIP_PORT_A"
 check "REGISTER alice on instance A" \
     $([ "$?" = 0 ] && echo ok || echo fail)
-sleep 0.5
+wait_kv_aor "alice@127.0.0.1"
 
 # alice's KV doc must be visible to anyone reading the bucket
 doc=$(kv_aor_get "alice@127.0.0.1")
@@ -31,7 +30,7 @@ check "alice's KV doc readable from the shared bucket" \
 
 # Register bob on B; both A and B should now see both AoRs in the bucket
 register_one bob 3600 "$SIP_PORT_B"
-sleep 0.5
+wait_kv_aor "bob@127.0.0.1"
 
 bob_doc=$(kv_aor_get "bob@127.0.0.1")
 echo "$bob_doc" | grep -q '"aor":"bob@127.0.0.1"'

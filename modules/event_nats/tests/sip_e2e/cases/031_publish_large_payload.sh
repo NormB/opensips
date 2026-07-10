@@ -7,7 +7,6 @@ big_signature=$(echo "$big" | head -c 32)
 
 sub_out="$WORKDIR/031_sub.out"
 sub_pid=$(nats_sub_oneshot "test.large" "$sub_out")
-sleep 0.5
 
 publish_subject "test.large" "$big"
 for i in $(seq 1 5); do kill -0 "$sub_pid" 2>/dev/null || break; sleep 1; done

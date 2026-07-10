@@ -6,14 +6,13 @@
 case_begin "010_register_roundtrip"
 
 kv_clear
-sleep 0.5
 
 register_one alice 3600
 rc=$?
 check "sipsak REGISTER alice exits 0" \
     $([ "$rc" = 0 ] && echo ok || echo fail) "rc=$rc"
 
-sleep 0.5
+wait_kv_count 1
 
 # KV bucket should have one json_-prefixed doc
 n_keys=$(kv_aor_count)

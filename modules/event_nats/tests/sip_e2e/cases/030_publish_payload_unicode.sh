@@ -3,7 +3,6 @@ case_begin "030_publish_payload_unicode"
 
 sub_out="$WORKDIR/030_sub.out"
 sub_pid=$(nats_sub_oneshot "test.sip.unicode" "$sub_out")
-sleep 0.5
 
 # Publish via the route with a Unicode payload by sending a MESSAGE
 # whose body is UTF-8.  The route forwards $rb to NATS.
@@ -33,7 +32,6 @@ EOF
 # Re-bind sub to test.sip.message (that's where the route publishes).
 kill "$sub_pid" 2>/dev/null
 sub_pid=$(nats_sub_oneshot "test.sip.message" "$sub_out")
-sleep 0.5
 
 sipp_send "$WORKDIR/030.xml"
 for i in $(seq 1 5); do kill -0 "$sub_pid" 2>/dev/null || break; sleep 1; done

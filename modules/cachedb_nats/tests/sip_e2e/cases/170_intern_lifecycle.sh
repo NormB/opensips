@@ -26,11 +26,10 @@ if [ "${ENABLE_INDEX:-1}" = "0" ]; then
 fi
 
 kv_clear
-sleep 0.5
 
 # Step 1: initial REGISTER seeds the doc key in the intern table.
 register_one "lifecycle1" 3600
-sleep 0.5
+wait_for 5 kv_count_ge 1
 n1=$(kv_aor_count | head -1)
 check "initial REGISTER creates KV doc" \
     $([ "$n1" -ge 1 ] && echo ok || echo fail) "n1=$n1"
@@ -66,7 +65,7 @@ post_count=$(kv_aor_count | head -1)
 # This exercises the "string was freed; re-insert into a possibly
 # now-empty bucket chain" path of the intern table.
 register_one "lifecycle1" 3600
-sleep 0.5
+wait_for 5 kv_count_ge 1
 post_re=$(kv_aor_count | head -1)
 check "re-register after de-register works (intern accepts new entry)" \
     $([ "$post_re" -ge 1 ] && echo ok || echo fail) \

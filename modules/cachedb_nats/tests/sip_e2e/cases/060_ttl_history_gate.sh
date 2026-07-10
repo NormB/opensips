@@ -15,12 +15,12 @@ stop_opensips_a
 check "history=3 bucket created" $([ "$?" = 0 ] && echo ok || echo fail)
 
 REAP_INTERVAL=5 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 
 register_one ttl060 3
 check "REGISTER ttl060 expires=3 accepted" \
     $([ "$?" = 0 ] && echo ok || echo fail)
-sleep 0.5
+wait_kv_aor "ttl060@127.0.0.1" 2
 
 doc=$(kv_aor_get "ttl060@127.0.0.1")
 check "doc present right after REGISTER" \
@@ -40,4 +40,4 @@ check "no rolled-back/leftover AoR key remains" \
 stop_opensips_a
 kv_clear
 start_opensips_a
-sleep 1
+wait_for 10 mi_ready

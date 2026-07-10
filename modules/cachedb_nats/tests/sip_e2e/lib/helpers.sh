@@ -30,6 +30,51 @@ kv_clear() {
     : "${KVCTL:?run.sh must export KVCTL}"
     "$KVCTL" rm "$NATS_URL" "$KV_BUCKET" >/dev/null 2>&1 || true
     "$KVCTL" mk "$NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 >/dev/null 2>&1 || true
+    # Settle bounded [P5.5]: the recreated bucket must be listable and
+    # empty before the case proceeds (replaces the blind post-clear
+    # sleeps the cases used to carry).
+    wait_for 5 kv_bucket_empty
+}
+
+# Condition: the bucket answers a live-key listing and has no keys.
+kv_bucket_empty() {
+    local out
+    out=$("$KVCTL" ls "$NATS_URL" "$KV_BUCKET" 2>/dev/null) || return 1
+    [ -z "$out" ]
+}
+
+# Bounded poll until an AoR's KV doc EXISTS.  wait_kv_aor <aor> [timeout_s].
+wait_kv_aor() {
+    local aor=$1 timeout=${2:-5}
+    wait_for "$timeout" kv_aor_present "$aor"
+}
+kv_aor_present() {
+    [ -n "$(kv_aor_get "$1")" ]
+}
+
+# Bounded poll until the bucket holds exactly <n> AoR docs.
+# wait_kv_count <n> [timeout_s].
+wait_kv_count() {
+    local n=$1 timeout=${2:-5}
+    wait_for "$timeout" kv_count_is "$n"
+}
+kv_count_is() {
+    [ "$(kv_aor_count)" -eq "$1" ] 2>/dev/null
+}
+kv_count_ge() {
+    [ "$(kv_aor_count)" -ge "$1" ] 2>/dev/null
+}
+
+# Condition: the MI datagram socket answers a version call.
+# mi_ready [port] -- start_opensips already waits for the LISTEN sockets;
+# this closes the gap to "MI actually serves requests".
+mi_ready() {
+    mi_at "${1:-$MI_PORT_A}" version 2>/dev/null | grep -q '"jsonrpc"'
+}
+
+# Condition: a user's binding is served at the SIP level (MESSAGE -> 202).
+binding_visible() {
+    [ "$(probe_binding "$1")" = 202 ]
 }
 
 kv_get_raw() {

@@ -7,7 +7,6 @@ stream_purge TEST
 
 sub_out="$WORKDIR/010_sub.out"
 sub_pid=$(nats_sub_oneshot "test.sip.register" "$sub_out")
-sleep 0.5
 
 sipp_send "${HERE}/scenarios/register.xml"
 rc=$?

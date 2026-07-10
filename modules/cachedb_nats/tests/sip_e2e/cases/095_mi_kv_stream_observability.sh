@@ -6,11 +6,10 @@
 case_begin "095_mi_kv_stream_observability"
 
 kv_clear
-sleep 0.5
 
 register_one kvobs1 3600
 register_one kvobs2 3600
-sleep 0.5
+wait_kv_count 2
 
 mifield() { printf '%s' "$1" | sed -n "s/.*\"$2\": *\([0-9-][0-9]*\).*/\1/p" | head -1; }
 

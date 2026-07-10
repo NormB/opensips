@@ -6,7 +6,6 @@
 case_begin "085_multi_contact_same_expiry"
 
 kv_clear
-sleep 0.5
 
 # Same expires on both REGISTERs.  The stored absolute expiry is computed
 # per-write (now+6), so both must land within one wall-clock second or the

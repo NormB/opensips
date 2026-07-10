@@ -22,7 +22,6 @@ if [ "${ENABLE_INDEX:-1}" = "0" ]; then
 fi
 
 kv_clear
-sleep 0.5
 
 # Pre-clean: capture stat baseline so a partial earlier-case state
 # doesn't leak into the assertion.  kv_aor_count's `|| echo 0`

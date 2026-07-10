@@ -7,10 +7,9 @@ case_begin "055_expired_linger"
 
 stop_opensips_a
 EXPIRED_LINGER=30 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 
 kv_clear
-sleep 0.5
 
 register_one ttl055 3
 check "REGISTER ttl055 expires=3 accepted" \
@@ -35,7 +34,7 @@ register_one lng055 3600
 rc=$?
 check "re-REGISTER during linger accepted (no lockout)" \
     $([ "$rc" = 0 ] && echo ok || echo fail) "rc=$rc"
-sleep 0.5
+wait_for 5 binding_visible lng055
 vis=$(probe_binding lng055)
 check "re-registered binding served again (MESSAGE -> 202)" \
     $([ "$vis" = 202 ] && echo ok || echo fail) "vis=$vis"
@@ -52,5 +51,5 @@ check "record reclaimed after the linger window" \
 # restore the default instance (linger=0) for the rest of the suite
 stop_opensips_a
 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 kv_clear

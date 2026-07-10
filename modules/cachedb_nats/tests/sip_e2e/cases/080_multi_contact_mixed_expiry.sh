@@ -15,10 +15,9 @@ case_begin "080_multi_contact_mixed_expiry"
 
 stop_opensips_a
 REAP_INTERVAL=5 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 
 kv_clear
-sleep 0.5
 
 register_contact mc080 6081 25
 check "REGISTER contact#1 (port 6081, expires=25) accepted" \
@@ -27,7 +26,7 @@ register_contact mc080 6082 4
 check "REGISTER contact#2 (port 6082, expires=4) accepted" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 t0=$(date +%s)
-sleep 0.5
+wait_kv_aor "mc080@127.0.0.1"
 
 doc=$(kv_aor_get "mc080@127.0.0.1")
 echo "$doc" | grep -q '127.0.0.1:6081' && echo "$doc" | grep -q '127.0.0.1:6082'
@@ -92,5 +91,5 @@ check "no binding served at the end (404)" \
 # restore the default instance
 stop_opensips_a
 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 kv_clear

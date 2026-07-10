@@ -13,10 +13,9 @@ case_begin "090_mi_reg_observability"
 
 stop_opensips_a
 REAP_INTERVAL=120 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 
 kv_clear
-sleep 0.5
 
 register_one     alpha 3600
 register_contact beta  6087 3600
@@ -24,7 +23,7 @@ register_contact beta  6088 3600
 register_contact gamma 6089 3
 register_contact gamma 6090 3600
 register_one     delta 300
-sleep 0.5
+wait_for 5 kv_count_ge 4
 
 # let gamma's short contact pass logical expiry (3+5=8 s)
 sleep 9
@@ -184,5 +183,5 @@ check "stats: gamma's expired binding counted as pruned" \
 # restore the default instance
 stop_opensips_a
 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 kv_clear

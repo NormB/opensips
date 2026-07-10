@@ -7,11 +7,10 @@
 case_begin "020_cold_start_hydration"
 
 kv_clear
-sleep 0.5
 
 # Register 5 distinct users on instance A
 register_n_parallel "user" 5
-sleep 0.5
+wait_for 5 kv_count_ge 5
 
 before=$(kv_aor_count)
 check "5 AoR docs in KV before restart" \
@@ -19,7 +18,6 @@ check "5 AoR docs in KV before restart" \
 
 # Kill opensips A
 stop_opensips_a
-sleep 1
 
 # KV should still hold the entries
 between=$(kv_aor_count)
@@ -29,7 +27,7 @@ check "KV bucket persists across opensips restart" \
 
 # Restart instance A — its child_init must rebuild the index from KV
 start_opensips_a
-sleep 1
+wait_for 10 mi_ready
 
 # When the index is enabled, child_init logs the number of docs
 # it rehydrated from KV.  When ENABLE_INDEX=0 the module skips the

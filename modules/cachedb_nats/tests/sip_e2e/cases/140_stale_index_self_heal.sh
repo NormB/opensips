@@ -13,7 +13,6 @@
 case_begin "140_stale_index_self_heal"
 
 kv_clear
-sleep 0.5
 
 # Seed a doc directly so both instances' next index rebuild picks it up.
 # (Use a NATS-safe key — the encoding rule applies to anything we put
@@ -25,7 +24,7 @@ n kv put "$KV_BUCKET" "json_extern=40host" \
 # else to drive a flush which calls nats_json_index_add for that doc and
 # leaves the seed doc in place.
 register_one warmup 3600 "$SIP_PORT_A" >/dev/null 2>&1
-sleep 0.5
+wait_kv_aor "warmup@127.0.0.1"
 
 before_stats=$(mi_cdb_stats "$MI_PORT_A")
 before_miss=$(printf '%s' "$before_stats" | sed -n 's/.*index_miss_kv=\([0-9]*\).*/\1/p')

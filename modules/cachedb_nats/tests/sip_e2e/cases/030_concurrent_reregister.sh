@@ -5,7 +5,6 @@
 case_begin "030_concurrent_reregister"
 
 kv_clear
-sleep 0.5
 
 before_stats=$(mi_cdb_stats)
 before_retry=$(printf '%s' "$before_stats" | sed -n 's/.*cas_retry=\([0-9]*\).*/\1/p')
@@ -13,7 +12,7 @@ before_exhausted=$(printf '%s' "$before_stats" | sed -n 's/.*cas_exhausted=\([0-
 
 # Fire 20 concurrent re-REGISTERs for the same AoR
 register_same_aor_concurrent contended 20
-sleep 1
+wait_kv_aor "contended@127.0.0.1"
 
 after_stats=$(mi_cdb_stats)
 after_retry=$(printf '%s' "$after_stats" | sed -n 's/.*cas_retry=\([0-9]*\).*/\1/p')

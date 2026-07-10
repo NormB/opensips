@@ -4,16 +4,15 @@
 case_begin "130_instance_restart_isolation"
 
 kv_clear
-sleep 0.5
 
 start_opensips_b
-sleep 1
+wait_for 10 mi_ready "$MI_PORT_B"
 
 # Pre-populate via A; both instances' indexes will see these via
 # their own child_init build (already done) — but for this test we
 # care that B keeps working when A goes away.
 register_n_parallel "pre" 3 "$SIP_PORT_A"
-sleep 0.3
+wait_for 5 kv_count_ge 3
 
 # Kill A while traffic continues
 b_before=$(kv_aor_count)
@@ -33,7 +32,7 @@ check "bucket grew while A was down" \
 # Restart A — its index_build must rebuild from the KV that B has been
 # updating in the meantime
 start_opensips_a
-sleep 1.5
+wait_for 10 mi_ready
 
 # With the index enabled, A's child_init logs how many docs it
 # rebuilt; with ENABLE_INDEX=0 there is no rebuild because there
@@ -56,7 +55,7 @@ fi
 
 # A new REGISTER on A should land alongside everything else
 register_one apost 3600 "$SIP_PORT_A"
-sleep 0.3
+wait_for 5 kv_count_ge "$(( b_during + 1 ))"
 final=$(kv_aor_count)
 check "A continues serving after restart" \
     $([ "$final" -gt "$b_during" ] && echo ok || echo fail) \

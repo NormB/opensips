@@ -4,7 +4,6 @@ case_begin "011_publish_invite"
 
 sub_out="$WORKDIR/011_sub.out"
 sub_pid=$(nats_sub_oneshot "test.sip.invite" "$sub_out")
-sleep 0.5
 
 sipp_send "${HERE}/scenarios/invite.xml"
 

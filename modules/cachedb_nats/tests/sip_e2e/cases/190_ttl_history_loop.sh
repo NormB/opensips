@@ -6,7 +6,6 @@
 case_begin "190_ttl_history_loop"
 
 kv_clear
-sleep 0.5
 
 CYCLES=4
 lost=0

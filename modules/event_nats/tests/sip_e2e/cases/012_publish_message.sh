@@ -4,7 +4,6 @@ case_begin "012_publish_message"
 
 sub_out="$WORKDIR/012_sub.out"
 sub_pid=$(nats_sub_oneshot "test.sip.message" "$sub_out")
-sleep 0.5
 
 sipp_send "${HERE}/scenarios/message.xml"
 

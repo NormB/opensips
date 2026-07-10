@@ -3,7 +3,6 @@ case_begin "035_publish_special_chars"
 
 sub_out="$WORKDIR/035_sub.out"
 sub_pid=$(nats_sub_oneshot "test.special" "$sub_out")
-sleep 0.5
 
 # nats CLI publish with quoted special chars.
 publish_subject "test.special" 'with "quotes" and \backslash and pipes|and|stuff'

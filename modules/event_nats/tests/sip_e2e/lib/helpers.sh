@@ -108,8 +108,17 @@ sipp_send() {
 # ── nats subscriber (one-shot, count=1) ─────────────────────────
 nats_sub_oneshot() {
     # nats_sub_oneshot <subject> <out-file>  -> background pid
+    # Bounded [P5.5]: returns once the CLI reports the subscription
+    # attached ("Subscribing on <subject>" in the out file) so callers
+    # can publish immediately -- replaces the blind post-launch sleeps
+    # the cases used to carry.
     n sub "$1" --count=1 > "$2" 2>&1 &
-    echo $!
+    local pid=$!
+    wait_for 5 sub_banner_present "$2"
+    echo "$pid"
+}
+sub_banner_present() {
+    grep -q 'Subscribing on' "$1" 2>/dev/null
 }
 
 # ── consumer bind helper ────────────────────────────────────────

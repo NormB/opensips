@@ -7,10 +7,9 @@
 case_begin "120_concurrent_two_instances"
 
 kv_clear
-sleep 0.5
 
 start_opensips_b
-sleep 1
+wait_for 10 mi_ready "$MI_PORT_B"
 check "instance B boots" \
     $([ -n "$OPENSIPS_PID_B" ] && echo ok || echo fail)
 
@@ -31,7 +30,7 @@ for i in $(seq 1 10); do
     pids="$pids $!"
 done
 for p in $pids; do wait "$p"; done
-sleep 1
+wait_kv_aor "shared@127.0.0.1"
 
 a_after=$(mi_cdb_stats "$MI_PORT_A")
 b_after=$(mi_cdb_stats "$MI_PORT_B")

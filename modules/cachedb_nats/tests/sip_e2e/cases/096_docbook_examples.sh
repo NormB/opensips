@@ -23,7 +23,6 @@ DOCBOOK="${TREE_ROOT}/modules/cachedb_nats/doc/cachedb_nats_admin.xml"
 [ -r "$DOCBOOK" ] || { check "docbook readable" fail "$DOCBOOK"; return 0; }
 
 kv_clear
-sleep 0.5
 
 # ── the documented population ──
 raw_register alice example.com "sip:alice@10.0.0.1:5060" 3600 "Yealink T54W"
@@ -34,7 +33,7 @@ raw_register bob   example.com "sip:bob@10.0.0.3:5060"   3600 "Grandstream GXP21
 r3=$?
 check "documented population registered (alice x2, bob x1)" \
     $([ "$r1$r2$r3" = "000" ] && echo ok || echo fail) "rc=$r1$r2$r3"
-sleep 0.5
+wait_kv_count 2
 
 # ── mechanical sweep: run EVERY docbook MI example ──
 # Extraction emits one TAB-separated line per example: method, then args.

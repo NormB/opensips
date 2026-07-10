@@ -5,12 +5,11 @@
 case_begin "070_first_insert_seedless"
 
 kv_clear
-sleep 0.5
 
 register_one seed070 3600
 check "cold REGISTER seed070 accepted" \
     $([ "$?" = 0 ] && echo ok || echo fail)
-sleep 0.5
+wait_kv_aor "seed070@127.0.0.1"
 
 revs=$(kv_aor_revisions "seed070@127.0.0.1")
 check "AoR key holds exactly ONE revision (no standalone seed write)" \

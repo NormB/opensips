@@ -73,7 +73,13 @@ LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$BOUNCE_CFG" -m 64 -M 4 \
     > "$WORKDIR/opensips_bounce.log" 2>&1 &
 BOUNCE_OPENSIPS_PID=$!
-sleep 2
+# Bounded [P5.5]: the ad-hoc instance is up once its SIP+MI UDP
+# sockets listen (same condition run.sh's start_opensips polls).
+bounce_ports_up() {
+    ss -lnu 2>/dev/null | grep -q "127.0.0.1:${BOUNCE_SIP_PORT}" && \
+    ss -lnu 2>/dev/null | grep -q "127.0.0.1:${BOUNCE_MI_PORT}"
+}
+wait_for 10 bounce_ports_up
 
 if ! kill -0 "$BOUNCE_OPENSIPS_PID" 2>/dev/null; then
     check "bounce-instance opensips boots" fail \
@@ -93,7 +99,11 @@ check "pre-bounce REGISTER ok" \
 # Kill the broker mid-flight
 kill "$BOUNCE_NATS_PID" 2>/dev/null
 wait "$BOUNCE_NATS_PID" 2>/dev/null
-sleep 1
+# Bounded [P5.5]: the broker is down once its TCP listener is gone.
+bounce_broker_gone() {
+    ! ss -lnt 2>/dev/null | grep -q ":${BOUNCE_NATS_PORT} "
+}
+wait_for 5 bounce_broker_gone
 
 # REGISTER attempted while broker is down; must not hang or crash.
 # We use a 3-second timeout to bound the assertion.
