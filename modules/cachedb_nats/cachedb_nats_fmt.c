@@ -30,7 +30,7 @@
 
 #include "cachedb_nats_fmt.h"
 
-static int _fmt_put(struct fmt_table *t, const char *p, int n)
+static int fmt_put(struct fmt_table *t, const char *p, int n)
 {
 	if (t->oom)
 		return -1;
@@ -50,23 +50,23 @@ static int _fmt_put(struct fmt_table *t, const char *p, int n)
 	return 0;
 }
 
-static void _fmt_eol(struct fmt_table *t)
+static void fmt_eol(struct fmt_table *t)
 {
 	if (t->eol_lf)
-		_fmt_put(t, "\n", 1);
+		fmt_put(t, "\n", 1);
 	else
-		_fmt_put(t, "\r\n", 2);
+		fmt_put(t, "\r\n", 2);
 }
 
-static void _fmt_sep(struct fmt_table *t)
+static void fmt_sep(struct fmt_table *t)
 {
 	if (t->col++ == 0)
 		return;
-	_fmt_put(t, t->kind == FMT_CSV ? "," : "\t", 1);
+	fmt_put(t, t->kind == FMT_CSV ? "," : "\t", 1);
 }
 
 /* csv: RFC 4180 quoting; txt: TAB/CR/LF in the value -> one space */
-static void _fmt_value(struct fmt_table *t, const char *s, int n)
+static void fmt_value(struct fmt_table *t, const char *s, int n)
 {
 	int i, needs_quote = 0;
 
@@ -75,7 +75,7 @@ static void _fmt_value(struct fmt_table *t, const char *s, int n)
 			char c = s[i];
 			if (c == '\t' || c == '\r' || c == '\n')
 				c = ' ';
-			_fmt_put(t, &c, 1);
+			fmt_put(t, &c, 1);
 		}
 		return;
 	}
@@ -85,40 +85,40 @@ static void _fmt_value(struct fmt_table *t, const char *s, int n)
 			break;
 		}
 	if (!needs_quote) {
-		_fmt_put(t, s, n);
+		fmt_put(t, s, n);
 		return;
 	}
-	_fmt_put(t, "\"", 1);
+	fmt_put(t, "\"", 1);
 	for (i = 0; i < n; i++) {
 		if (s[i] == '"')
-			_fmt_put(t, "\"\"", 2);
+			fmt_put(t, "\"\"", 2);
 		else
-			_fmt_put(t, &s[i], 1);
+			fmt_put(t, &s[i], 1);
 	}
-	_fmt_put(t, "\"", 1);
+	fmt_put(t, "\"", 1);
 }
 
 void fmt_str(struct fmt_table *t, const char *s, int n)
 {
-	_fmt_sep(t);
-	_fmt_value(t, s, n);
+	fmt_sep(t);
+	fmt_value(t, s, n);
 }
 
 void fmt_int(struct fmt_table *t, long long v)
 {
 	char num[24];
-	_fmt_sep(t);
-	_fmt_put(t, num, snprintf(num, sizeof(num), "%lld", v));
+	fmt_sep(t);
+	fmt_put(t, num, snprintf(num, sizeof(num), "%lld", v));
 }
 
 void fmt_empty(struct fmt_table *t)
 {
-	_fmt_sep(t);
+	fmt_sep(t);
 }
 
 void fmt_end_record(struct fmt_table *t)
 {
-	_fmt_eol(t);
+	fmt_eol(t);
 	t->col = 0;
 }
 
@@ -132,11 +132,11 @@ int fmt_init(struct fmt_table *t, int kind, int eol_lf, int header,
 	if (!header)
 		return 0;
 	if (kind == FMT_TXT)
-		_fmt_put(t, "# ", 2);
+		fmt_put(t, "# ", 2);
 	for (i = 0; i < ncols; i++) {
 		if (i)
-			_fmt_put(t, kind == FMT_CSV ? "," : "\t", 1);
-		_fmt_put(t, cols[i], (int)strlen(cols[i]));
+			fmt_put(t, kind == FMT_CSV ? "," : "\t", 1);
+		fmt_put(t, cols[i], (int)strlen(cols[i]));
 	}
 	fmt_end_record(t);
 	t->col = 0;
@@ -175,7 +175,7 @@ int cdbn_fmt_kind_parse(const char *v, int n)
 
 /* One row per k=v option (P2.3); a leading bare token is the format
  * kind shorthand ("csv;eol=lf" == "format=csv;eol=lf"). */
-static int _fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
+static int fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
 	int *kind, int *eol_lf, int *header)
 {
 	if (klen == 6 && memcmp(k, "format", 6) == 0) {
@@ -228,7 +228,7 @@ int cdbn_fmt_opts_parse(const char *s, int len,
 			if (k < 0)
 				return -1;
 			*kind = k;
-		} else if (_fmt_apply_kv(tok, (int)(eq - tok),
+		} else if (fmt_apply_kv(tok, (int)(eq - tok),
 				eq + 1, (int)(te - eq - 1),
 				kind, eol_lf, header) < 0) {
 			return -1;

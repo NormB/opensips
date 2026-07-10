@@ -24,7 +24,7 @@
  * a duplicate remove hits nothing.  That drives num_documents negative and
  * skews the stat.
  *
- * Fix: _entry_remove_key returns whether it removed the key; the remove paths
+ * Fix: entry_remove_key returns whether it removed the key; the remove paths
  * OR those results and decrement only when the key was actually present.
  *
  * Models the gated decrement:
@@ -59,7 +59,7 @@ static int file_contains(const char *path, const char *needle)
 
 static int num_documents;
 
-/* Model of a remove path: @removed_any is whether _entry_remove_key found and
+/* Model of a remove path: @removed_any is whether entry_remove_key found and
  * stripped the key from at least one field entry. */
 static void index_remove(int removed_any)
 {
@@ -101,7 +101,7 @@ int main(void)
 		ASSERT(file_contains(src, "removed_any"),
 			"remove paths gate the decrement on actual removal (removed_any)");
 		ASSERT(file_contains(src, "return 1;   /* removed */"),
-			"_entry_remove_key reports whether it removed the key");
+			"entry_remove_key reports whether it removed the key");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

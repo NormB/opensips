@@ -87,7 +87,7 @@ int main(void)
 		"index TU defines nats_json_index_destroy");
 
 	/* --- serializer TU owns escape/sink/encode --- */
-	ASSERT(file_contains(SER, "_sink_emit_cdb_dict"),
+	ASSERT(file_contains(SER, "sink_emit_cdb_dict"),
 		"ser TU owns the cdb-dict sink serializer");
 	ASSERT(file_contains(SER, "char *cdbn_kv_encode_key"),
 		"ser TU owns cdbn_kv_encode_key");
@@ -97,8 +97,8 @@ int main(void)
 	/* --- rowmeta TU owns the usrloc row-metadata denormalization --- */
 	ASSERT(file_contains(RM, "char *cdbn_row_finalize_metadata"),
 		"rowmeta TU owns cdbn_row_finalize_metadata");
-	ASSERT(file_contains(RM, "static int64_t _row_exp_min"),
-		"rowmeta TU owns _row_exp_min");
+	ASSERT(file_contains(RM, "static int64_t row_exp_min"),
+		"rowmeta TU owns row_exp_min");
 
 	/* --- query+update remain in cachedb_nats_json.c --- */
 	ASSERT(file_contains(QU, "int nats_cache_query(cachedb_con *con"),
@@ -124,7 +124,7 @@ int main(void)
 		"extern nats_search_idx *g_idx;"),
 		"FTS header exposes g_idx to the FTS query TU");
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.h",
-		"static inline void _idx_lock_shard"),
+		"static inline void idx_lock_shard"),
 		"internal header carries the shard-lock inlines");
 
 	/* --- the split actually shrank things; cap each TU --- */
@@ -144,7 +144,7 @@ int main(void)
 	 * cdbn_row_finalize_metadata: row_exp / n_contacts / all_same). */
 	ASSERT(n_rm > 0 && n_rm < 960, "rowmeta TU under 960 lines");
 	/* Cap 1650 (raised from 1600 for the P8 R4 empty-value-marker re-create
-	 * branch in _update_fetch_or_seed).  P8's TTL write/activation logic lives
+	 * branch in update_fetch_or_seed).  P8's TTL write/activation logic lives
 	 * in cachedb_nats_expiry.c, NOT here, to keep this TU bounded. */
 	ASSERT(n_qu > 0 && n_qu < 1650, "query+update TU under 1650 lines");
 

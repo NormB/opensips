@@ -386,7 +386,7 @@ err_free_partial:
  *     bounded atomic write(2), so copying a payload into SHM and
  *     dispatching it to a worker IS the sanctioned foreign-thread
  *     handoff — event_nats_sub.c's message callback and the watcher's
- *     _raise_kv_change_event are the canonical pattern.  Caveat: on
+ *     raise_kv_change_event are the canonical pattern.  Caveat: on
  *     DBG_MALLOC / SHM_EXTRA_STATS builds the shm wrappers touch
  *     process_no-indexed accounting; if such a build is ever the
  *     target, re-verify this path before shipping.

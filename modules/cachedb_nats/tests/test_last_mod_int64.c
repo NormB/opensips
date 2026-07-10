@@ -109,7 +109,7 @@ static const char *cdbn_skip_json_value(const char *p, const char *end)
 }
 
 /* ─── carried copy: int64 parse + field extractor (rowmeta TU) ───── */
-static const char *_json_parse_int64(const char *p, const char *end, int64_t *out)
+static const char *json_parse_int64(const char *p, const char *end, int64_t *out)
 {
 	int neg = 0;
 	uint64_t mag = 0;
@@ -148,7 +148,7 @@ static int cdbn_contact_field_int64(const char *vstart, const char *vend,
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
+			if (json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
 		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;

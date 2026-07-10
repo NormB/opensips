@@ -22,7 +22,7 @@
  * cachedb_nats MUST emit a startup LM_WARN when cachedb_url is plaintext
  * nats:// and/or carries no credentials, naming the data classification.
  *
- * _nats_url_insecure(url) drives the WARN: 1 if the URL must be warned about
+ * nats_url_insecure(url) drives the WARN: 1 if the URL must be warned about
  * (not tls://, OR no "user[:pass]@" in the authority), else 0.  Credentials are
  * only recognized in the AUTHORITY (between "://" and the first "/"), so an "@"
  * in a path/query is not mistaken for credentials.
@@ -39,7 +39,7 @@
 #include <string.h>
 
 /* ─── carried copy of the production helper (cachedb_nats.c) ─────── */
-static int _nats_url_insecure(const char *url)
+static int nats_url_insecure(const char *url)
 {
 #ifdef SEC_CURRENT
 	(void)url; return 0;   /* today: no security classification */
@@ -72,20 +72,20 @@ int main(void)
 #endif
 
 	printf("[REV-24] insecure URLs MUST warn:\n");
-	CHECK(_nats_url_insecure("nats://host:4222") == 1, "plaintext + no creds => WARN");
-	CHECK(_nats_url_insecure("nats://user:pass@host:4222") == 1, "plaintext WITH creds => still WARN (no TLS)");
-	CHECK(_nats_url_insecure("tls://host:4222") == 1, "TLS but NO creds => WARN");
-	CHECK(_nats_url_insecure("192.0.2.31:4222") == 1, "no scheme => WARN (malformed)");
-	CHECK(_nats_url_insecure(NULL) == 1, "NULL url => WARN");
+	CHECK(nats_url_insecure("nats://host:4222") == 1, "plaintext + no creds => WARN");
+	CHECK(nats_url_insecure("nats://user:pass@host:4222") == 1, "plaintext WITH creds => still WARN (no TLS)");
+	CHECK(nats_url_insecure("tls://host:4222") == 1, "TLS but NO creds => WARN");
+	CHECK(nats_url_insecure("192.0.2.31:4222") == 1, "no scheme => WARN (malformed)");
+	CHECK(nats_url_insecure(NULL) == 1, "NULL url => WARN");
 
 	printf("[REV-24] only TLS + credentials is clean (no warn):\n");
-	CHECK(_nats_url_insecure("tls://user:pass@host:4222") == 0, "tls + user:pass => no WARN");
-	CHECK(_nats_url_insecure("tls://user@host:4222") == 0, "tls + user@ (creds present) => no WARN");
-	CHECK(_nats_url_insecure("tls://u:p@host:4222/path") == 0, "tls + creds + path => no WARN");
+	CHECK(nats_url_insecure("tls://user:pass@host:4222") == 0, "tls + user:pass => no WARN");
+	CHECK(nats_url_insecure("tls://user@host:4222") == 0, "tls + user@ (creds present) => no WARN");
+	CHECK(nats_url_insecure("tls://u:p@host:4222/path") == 0, "tls + creds + path => no WARN");
 
 	printf("[REV-24] adversarial: '@' in the path is NOT a credential:\n");
-	CHECK(_nats_url_insecure("tls://host:4222/a@b") == 1, "'@' only in path => no creds => WARN");
-	CHECK(_nats_url_insecure("nats://host/u:p@x") == 1, "plaintext, '@' in path => WARN");
+	CHECK(nats_url_insecure("tls://host:4222/a@b") == 1, "'@' only in path => no creds => WARN");
+	CHECK(nats_url_insecure("nats://host/u:p@x") == 1, "plaintext, '@' in path => WARN");
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails==1?"":"s");
 	return fails ? 1 : 0;

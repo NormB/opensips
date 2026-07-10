@@ -166,9 +166,9 @@ int main(void)
 			"op_failed bumped on KV-error paths");
 
 		const char *w = "../cachedb_nats_watch.c";
-		ASSERT(grep_in_function(w, "_watcher_loop",
+		ASSERT(grep_in_function(w, "watcher_loop",
 				"NATS_CDB_STATS_INC(watcher_restarts)") >= 1,
-			"_watcher_loop bumps watcher_restarts on rebuild");
+			"watcher_loop bumps watcher_restarts on rebuild");
 	}
 
 	if (g_fails == 0) fprintf(stderr, "\n=== ALL PASS (fails=0) ===\n");

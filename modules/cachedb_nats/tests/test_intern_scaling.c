@@ -27,7 +27,7 @@
  *     deployment instead of being fixed at 1024; and
  *   - store the FNV hash in each node so a probe can compare the 4-byte
  *     hash before the memcmp, and so release does not have to re-hash the
- *     key (it re-ran _fnv1a over the whole string every time).
+ *     key (it re-ran intern_fnv1a over the whole string every time).
  *
  * Source-pattern test; run from the tests/ directory.
  *
@@ -107,8 +107,8 @@ int main(void)
 	/* Release uses the cached hash instead of re-hashing the string. */
 	ASSERT(grep_in_function(src, "nats_intern_release", "->hash") >= 1,
 		"release uses the cached hash");
-	ASSERT(grep_in_function(src, "nats_intern_release", "_fnv1a") == 0,
-		"release no longer re-hashes the whole key (_fnv1a gone)");
+	ASSERT(grep_in_function(src, "nats_intern_release", "intern_fnv1a") == 0,
+		"release no longer re-hashes the whole key (intern_fnv1a gone)");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

@@ -36,7 +36,7 @@
 
 /* ─── carried copies (cachedb_nats_json.c) ────────────────────────── */
 
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -89,8 +89,8 @@ static char *cdbn_build_seed_doc(const char *field, int flen,
 	esc_field = malloc(flen * 6 + 1);
 	esc_val   = malloc((vlen > 0 ? vlen : 1) * 6 + 1);
 	if (!esc_field || !esc_val) { free(esc_field); free(esc_val); return NULL; }
-	esc_field_len = _json_escape(field, flen, esc_field, flen * 6 + 1);
-	esc_val_len   = _json_escape(val, vlen, esc_val, (vlen > 0 ? vlen : 1) * 6 + 1);
+	esc_field_len = json_escape(field, flen, esc_field, flen * 6 + 1);
+	esc_val_len   = json_escape(val, vlen, esc_val, (vlen > 0 ? vlen : 1) * 6 + 1);
 	if (esc_field_len < 0 || esc_val_len < 0) {
 		free(esc_field); free(esc_val);
 		return NULL;

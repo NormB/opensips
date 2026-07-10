@@ -260,7 +260,7 @@ static char *extract_func_body(const char *path, const char *funcname)
 	while ((p = strstr(p, funcname)) != NULL) {
 		char *q = p + flen;
 		/* Require a word boundary before the name so a search for
-		 * "_fetch_batch" does not match inside "eff_fetch_batch". */
+		 * "proc_fetch_batch" does not match inside "eff_fetch_batch". */
 		if (p != buf) {
 			char c = p[-1];
 			if (c == '_' || (c >= 'a' && c <= 'z') ||
@@ -319,7 +319,7 @@ static void test_source_structure(void)
 		const char *src = "../nats_consumer_proc.c";
 		const char *sites[] = {
 			"tear_down_retired_subs",   /* retire teardown */
-			"_fetch_batch",             /* vanished/GC'd consumer destroy */
+			"proc_fetch_batch",             /* vanished/GC'd consumer destroy */
 			"nats_consumer_proc_main",  /* reconnect-epoch sub refresh */
 		};
 		size_t i;

@@ -27,7 +27,7 @@
  *
  * Fix: subscribe FIRST, then rebuild.  The watcher's pending queue captures
  * mutations from subscribe-time, and the consume loop applies them after the
- * index swap; the snapshot/live overlap is idempotent (_entry_add_key dedups,
+ * index swap; the snapshot/live overlap is idempotent (entry_add_key dedups,
  * removes are membership-gated).
  *
  * This asserts the ordering in the production source: kvStore_WatchMulti must

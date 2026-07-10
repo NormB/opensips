@@ -326,7 +326,7 @@ typedef struct nats_rpc_call_wrap {
  * when first used. */
 int nats_rpc_async_poll_ms = 100;
 
-static long _async_poll_ns(void)
+static long async_poll_ns(void)
 {
 	int ms = nats_rpc_async_poll_ms;
 	if (ms < 1)    ms = 1;
@@ -717,7 +717,7 @@ int w_nats_request_async(struct sip_msg *msg, async_ctx *ctx,
 	}
 	memset(&its, 0, sizeof(its));
 	{
-		long poll_ns = _async_poll_ns();
+		long poll_ns = async_poll_ns();
 		its.it_value.tv_sec     = 0;
 		its.it_value.tv_nsec    = poll_ns;
 		its.it_interval.tv_sec  = 0;

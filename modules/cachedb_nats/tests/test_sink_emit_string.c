@@ -17,14 +17,14 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test for the cdbn_sink_emit_string / _json_escape out_sz
+ * Regression test for the cdbn_sink_emit_string / json_escape out_sz
  * off-by-one in cachedb_nats_json.c.
  *
  * Bug: cdbn_sink_emit_string() called
- *     _json_escape(p, n, s->buf + s->len, esc_len)
- * but _json_escape reserves one byte of out_sz for a trailing NUL and
+ *     json_escape(p, n, s->buf + s->len, esc_len)
+ * but json_escape reserves one byte of out_sz for a trailing NUL and
  * rejects an exact fit (`if (w >= out_sz) return -1`).  esc_len is the
- * EXACT escaped length, so _json_escape returned -1 for ANY non-empty
+ * EXACT escaped length, so json_escape returned -1 for ANY non-empty
  * string -- tripping the sink's sticky `oom` flag and truncating the
  * serialized JSON.  Fix: pass esc_len + 1 (the sink already reserved
  * the byte; the NUL is overwritten by the closing quote).
@@ -60,7 +60,7 @@ static int cdbn_sink_init(json_sink_t *s, int initial)
 	s->buf = malloc(s->cap);
 	return s->buf ? 0 : -1;
 }
-static int _sink_grow(json_sink_t *s, int need)
+static int sink_grow(json_sink_t *s, int need)
 {
 	int newcap; char *nb;
 	if (s->oom) return -1;
@@ -75,7 +75,7 @@ static int _sink_grow(json_sink_t *s, int need)
 	s->buf = nb; s->cap = newcap;
 	return 0;
 }
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -111,7 +111,7 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 	out[w] = '\0';
 	return w;
 }
-static int _json_escape_len(const char *in, int in_len)
+static int json_escape_len(const char *in, int in_len)
 {
 	int i, out = 0;
 	for (i = 0; i < in_len; i++) {
@@ -130,12 +130,12 @@ static int emit_string(json_sink_t *s, const char *p, int n, int nul_reserve)
 {
 	int esc_len, needed;
 	if (s->oom) return -1;
-	esc_len = _json_escape_len(p, n);
+	esc_len = json_escape_len(p, n);
 	needed = esc_len + 2;
-	if (_sink_grow(s, needed + 1) < 0) return -1;
+	if (sink_grow(s, needed + 1) < 0) return -1;
 	s->buf[s->len++] = '"';
 	if (esc_len > 0) {
-		int written = _json_escape(p, n, s->buf + s->len, esc_len + nul_reserve);
+		int written = json_escape(p, n, s->buf + s->len, esc_len + nul_reserve);
 		if (written < 0) { s->oom = 1; return -1; }
 		s->len += written;
 	}
@@ -203,9 +203,9 @@ int main(void)
 	emit_case("hello", 5, "\"hello\"", 1);
 	emit_case("he\"llo", 6, "\"he\\\"llo\"", 1);
 	emit_case(tab, 3, "\"t\\tx\"", 1);
-	emit_case("", 0, "\"\"", 1);   /* empty: skips _json_escape entirely */
+	emit_case("", 0, "\"\"", 1);   /* empty: skips json_escape entirely */
 
-	/* (2) BUGGY form: out_sz == esc_len makes _json_escape reject any
+	/* (2) BUGGY form: out_sz == esc_len makes json_escape reject any
 	 * non-empty string -> sticky oom + truncated output. */
 	{
 		json_sink_t s; cdbn_sink_init(&s, 16);
@@ -222,7 +222,7 @@ int main(void)
 		ASSERT(b != NULL, "found production cdbn_sink_emit_string body");
 		if (b) {
 			ASSERT(strstr(b, "s->buf + s->len, esc_len + 1") != NULL,
-				"production _json_escape call reserves the NUL byte "
+				"production json_escape call reserves the NUL byte "
 				"(esc_len + 1)");
 			ASSERT(strstr(b, "s->buf + s->len, esc_len)") == NULL,
 				"production no longer passes the bare (off-by-one) esc_len");

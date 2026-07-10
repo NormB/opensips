@@ -30,7 +30,7 @@
  * tracking via nats_stats).
  *
  * Connection handles are injected via set functions during child_init,
- * obtained from the shared connection pool (nats_pool_get / _get_js).
+ * obtained from the shared connection pool (nats_pool_get / get_js).
  *
  * Key functions:
  *   nats_producer_set_connection() — inject core NATS connection

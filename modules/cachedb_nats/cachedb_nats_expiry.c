@@ -143,7 +143,7 @@ int nats_kv_key_to_subject(const char *bucket, const char *key,
 /* ==================================================================== */
 
 /* natsStatus -> ttl_pub_status, so the classifier stays free of nats.h coupling. */
-static enum ttl_pub_status _pub_status(natsStatus s)
+static enum ttl_pub_status pub_status(natsStatus s)
 {
 	if (s == NATS_OK)
 		return TTL_PUB_OK;
@@ -249,7 +249,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 				*out_rev = rev;
 			return TTL_DONE;
 		}
-		if (_pub_status(s) == TTL_PUB_CONN_DOWN) {
+		if (pub_status(s) == TTL_PUB_CONN_DOWN) {
 			/* [P3.7] outage itself is covered by the pool transition
 			 * + rate-limited fast-fail WARNs; per-write detail DBG */
 			LM_DBG("nats_kv_put_row: create of '%s.%s' failed, "
@@ -281,7 +281,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	nats_dl.natsMsg_Destroy(m);
 
 	{
-		enum ttl_outcome out = cdbn_ttl_classify(_pub_status(s), je);
+		enum ttl_outcome out = cdbn_ttl_classify(pub_status(s), je);
 
 		/* [P3.7] this is the PRIMARY usrloc write path -- a failed
 		 * save used to produce zero diagnostics.  A CAS conflict is
@@ -297,7 +297,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 				"%llu; retrying\n", bucket, key,
 				(unsigned long long)cas_seq);
 		} else if (out == TTL_FAIL_SAVE) {
-			if (_pub_status(s) == TTL_PUB_CONN_DOWN)
+			if (pub_status(s) == TTL_PUB_CONN_DOWN)
 				LM_DBG("nats_kv_put_row: CAS write of '%s.%s' "
 					"failed, broker down: %s\n", bucket, key,
 					nats_dl.natsStatus_GetText(s));
@@ -404,7 +404,7 @@ int cdbn_reap_row_due_json(const char *json, int len, time_t now, int grace)
  * parseable integer `expires` -- fail-closed: a binding we cannot prove is live
  * is reaped, never retained [REV-26].  expires==0 is permanent and never due
  * (cdbn_reap_row_due returns 0 for it). */
-static int _reap_contact_due(const char *cvs, const char *cve, time_t now, int grace)
+static int reap_contact_due(const char *cvs, const char *cve, time_t now, int grace)
 {
 	int64_t e;
 	if (cdbn_contact_expires(cvs, cve, &e) != 0)
@@ -415,7 +415,7 @@ static int _reap_contact_due(const char *cvs, const char *cve, time_t now, int g
 /* Emit a "contacts" object holding only the surviving (non-due) contacts of
  * [c_vs,c_ve), verbatim, and report the survivor count via *n_surv.  Returns 0
  * ok / -1 on sink OOM or malformed input. */
-static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs,
+static int emit_survivor_contacts(json_sink_t *s, const char *c_vs,
 	const char *c_ve, time_t now, int grace, int *n_surv)
 {
 	const char *p = cdbn_skip_ws(c_vs, c_ve);
@@ -447,7 +447,7 @@ static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs,
 		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
-		if (_reap_contact_due(cvs, p, now, grace))
+		if (reap_contact_due(cvs, p, now, grace))
 			continue;                      /* drop a due contact */
 		if (!first && cdbn_sink_putc(s, ',') < 0)
 			return -1;
@@ -478,7 +478,7 @@ static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs,
  * schema_version over exactly those survivors — so the 0=permanent sentinel and
  * int64 arithmetic have a single owner (the rowmeta TU). */
 /* [P2.5] pass-1: is this a usrloc row?  (has a top-level "contacts") */
-static int _find_contacts_flag_cb(const char *name, int nlen,
+static int find_contacts_flag_cb(const char *name, int nlen,
 	const char *vstart, const char *vend, void *ud)
 {
 	int *has = ud;
@@ -499,7 +499,7 @@ struct project_walk_ctx {
 	int          first;
 };
 
-static int _project_field_cb(const char *name, int nlen,
+static int project_field_cb(const char *name, int nlen,
 	const char *vstart, const char *vend, void *ud)
 {
 	struct project_walk_ctx *c = ud;
@@ -512,7 +512,7 @@ static int _project_field_cb(const char *name, int nlen,
 	if (cdbn_sink_putc(c->s, ':') < 0)
 		return -1;
 	if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-		if (_emit_survivor_contacts(c->s, vstart, vend,
+		if (emit_survivor_contacts(c->s, vstart, vend,
 				c->now, c->grace, &c->n_surv) < 0)
 			return -1;
 	} else {
@@ -541,7 +541,7 @@ char *cdbn_reap_project_survivors(const char *json, int len, time_t now, int gra
 		return NULL;
 	/* pass 1: is this a usrloc row at all? [P2.5] */
 	if (cdbn_json_foreach_top_field(json, len,
-			_find_contacts_flag_cb, &has_contacts) < 0)
+			find_contacts_flag_cb, &has_contacts) < 0)
 		return NULL;
 	if (!has_contacts) {                       /* non-usrloc doc -> skip */
 		char *copy = pkg_malloc(len + 1);
@@ -565,7 +565,7 @@ char *cdbn_reap_project_survivors(const char *json, int len, time_t now, int gra
 	{
 		struct project_walk_ctx pw = { &s, now, grace, 0, 1 };
 		if (cdbn_json_foreach_top_field(json, len,
-				_project_field_cb, &pw) < 0)
+				project_field_cb, &pw) < 0)
 			goto fail;
 		n_surv = pw.n_surv;
 	}
@@ -603,7 +603,7 @@ extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
  * makes the delete FAIL (jerr 10071) instead of destroying the renew.  A blind
  * kvStore_Delete() would lose that race -- never use it here.
  * Returns 0 deleted, 1 CAS-lost (a renew won -- leave the key), -1 on error. */
-static int _reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
+static int reap_cas_delete(jsCtx *js, const char *bucket, const char *key,
 	uint64_t rev)
 {
 	char subj[512];
@@ -652,7 +652,7 @@ struct reap_pass_ctx {
  * survives.  The entry (key/val) is owned by the enumerator and valid
  * for the duration of this call only; proj is independent of val.
  * Always returns 0: per-row problems skip the row, never the pass. */
-static int _reap_pass_entry(kvEntry *e, void *arg)
+static int reap_pass_entry(kvEntry *e, void *arg)
 {
 	struct reap_pass_ctx *c = arg;
 	const char *key = nats_dl.kvEntry_Key(e);
@@ -702,7 +702,7 @@ static int _reap_pass_entry(kvEntry *e, void *arg)
 		return 0;
 	}
 	if (n_surv == 0) {
-		if (_reap_cas_delete(c->js, kv_bucket, key, rev) == 0) {
+		if (reap_cas_delete(c->js, kv_bucket, key, rev) == 0) {
 			NATS_CDB_STATS_INC(rows_reaped);
 			c->reaped++;
 		}
@@ -778,7 +778,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		? fts_json_prefix_len : 0;
 
 	rc = nats_kv_enum_live_values(kv, NATS_KV_ENUM_NEXT_TIMEOUT_MS,
-		_reap_pass_entry, &c);
+		reap_pass_entry, &c);
 	if (rc < 0)
 		/* watch create failed or the pass ended early (broker stall):
 		 * whatever was visited is already handled; the reaper is
@@ -826,7 +826,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 
 static time_t _ttl_canary_deadline = 0;   /* 0 = idle / verdict delivered */
 
-static void _ttl_canary_arm(void)
+static void ttl_canary_arm(void)
 {
 	kvStore *kv;
 	uint64_t rev = 0;
@@ -861,7 +861,7 @@ static void _ttl_canary_arm(void)
 		NATS_TTL_CANARY_TTL_MS, NATS_TTL_CANARY_WAIT_S);
 }
 
-static void _ttl_canary_check(time_t now)
+static void ttl_canary_check(time_t now)
 {
 	kvStore *kv;
 	kvEntry *e = NULL;
@@ -950,11 +950,11 @@ void nats_cdb_reaper_proc_main(int rank)
 		(unsigned int)getpid());
 
 	/* [TTL-BELOW-MARKER] arm the broker-truth canary once. */
-	_ttl_canary_arm();
+	ttl_canary_arm();
 
 	for (;;) {
 		sleep(1);
-		_ttl_canary_check(time(NULL));
+		ttl_canary_check(time(NULL));
 		nats_cdb_proc_sched_due(&sc, time(NULL), nats_reap_interval,
 			resync_iv, &run_reap, &run_resync);
 		if (run_reap)

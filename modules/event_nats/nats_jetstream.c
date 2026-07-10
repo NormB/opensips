@@ -47,7 +47,7 @@
 #define JS_ERR_MSG_NOT_FOUND        10037  /* JSNoMessageFoundErr */
 
 /* Helper: get JetStream context, return MI error if unavailable */
-static jsCtx *_get_js(void)
+static jsCtx *get_js(void)
 {
 	jsCtx *js = nats_pool_get_js();
 	if (!js)
@@ -56,7 +56,7 @@ static jsCtx *_get_js(void)
 }
 
 /* Helper: parse retention string to enum */
-static jsRetentionPolicy _parse_retention(const char *s, int len)
+static jsRetentionPolicy parse_retention(const char *s, int len)
 {
 	if (len == 8 && strncasecmp(s, "interest", 8) == 0)
 		return js_InterestPolicy;
@@ -66,7 +66,7 @@ static jsRetentionPolicy _parse_retention(const char *s, int len)
 }
 
 /* Helper: parse storage string to enum */
-static jsStorageType _parse_storage(const char *s, int len)
+static jsStorageType parse_storage(const char *s, int len)
 {
 	if (len == 6 && strncasecmp(s, "memory", 6) == 0)
 		return js_MemoryStorage;
@@ -83,14 +83,14 @@ static jsStorageType _parse_storage(const char *s, int len)
 /* Validate a NATS identifier (stream or consumer name): single token, no
  * dots/wildcards/path chars/whitespace/control.  Thin wrapper over the shared
  * lib/nats validator (P3-64). */
-static int _valid_nats_name(const char *s, int len)
+static int valid_nats_name(const char *s, int len)
 {
 	return nats_validate(s, len, NATS_VALIDATE_STREAM_NAME);
 }
 
 /* Validate a NATS subscribe-filter subject: dots and wildcards ('*','>')
  * allowed; control/whitespace/empty rejected.  Thin wrapper (P3-64). */
-static int _valid_nats_subject(const char *s, int len)
+static int valid_nats_subject(const char *s, int len)
 {
 	return nats_validate(s, len, NATS_VALIDATE_FILTER_SUBJECT);
 }
@@ -107,7 +107,7 @@ mi_response_t *mi_nats_account_info(const mi_params_t *params,
 	mi_response_t *resp;
 	mi_item_t *resp_obj, *api_obj, *limits_obj;
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -195,7 +195,7 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 
 	if (name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("name too long"));
-	if (_valid_nats_name(name, name_len) < 0)
+	if (valid_nats_name(name, name_len) < 0)
 		return init_mi_error(400,
 			MI_SSTR("invalid stream name (empty, wildcard, dot, or control char)"));
 	memcpy(name_buf, name, name_len);
@@ -206,7 +206,7 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	memcpy(subj_buf, subjects_str, subjects_len);
 	subj_buf[subjects_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -228,7 +228,7 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 					MI_SSTR("too many subjects (max 32)"));
 			tok_start = p;
 			while (*p && *p != ',') p++;
-			if (_valid_nats_subject(tok_start, (int)(p - tok_start)) < 0)
+			if (valid_nats_subject(tok_start, (int)(p - tok_start)) < 0)
 				return init_mi_error(400,
 					MI_SSTR("invalid subject token (whitespace or control char)"));
 			subj_ptrs[subj_count++] = tok_start;
@@ -249,10 +249,10 @@ mi_response_t *mi_nats_stream_create(const mi_params_t *params,
 	}
 	if (try_get_mi_string_param(params, "retention",
 			&retention_str, &retention_len) == 0)
-		cfg.Retention = _parse_retention(retention_str, retention_len);
+		cfg.Retention = parse_retention(retention_str, retention_len);
 	if (try_get_mi_string_param(params, "storage",
 			&storage_str, &storage_len) == 0)
-		cfg.Storage = _parse_storage(storage_str, storage_len);
+		cfg.Storage = parse_storage(storage_str, storage_len);
 
 	/* Optional numeric params. Values are int on the wire; -1 is the NATS
 	 * sentinel for "unlimited" on msgs/bytes but not age. max_age in seconds
@@ -322,12 +322,12 @@ mi_response_t *mi_nats_stream_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -361,12 +361,12 @@ mi_response_t *mi_nats_stream_purge(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -404,12 +404,12 @@ mi_response_t *mi_nats_consumer_list(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -507,19 +507,19 @@ mi_response_t *mi_nats_consumer_info(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
-	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+	if (valid_nats_name(consumer_name, consumer_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -644,19 +644,19 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
-	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+	if (valid_nats_name(consumer_name, consumer_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -669,7 +669,7 @@ mi_response_t *mi_nats_consumer_create(const mi_params_t *params,
 			&filter_subject, &filter_subject_len) == 0) {
 		if (filter_subject_len >= (int)sizeof(filter_buf))
 			return init_mi_error(400, MI_SSTR("filter_subject too long"));
-		if (_valid_nats_subject(filter_subject, filter_subject_len) < 0)
+		if (valid_nats_subject(filter_subject, filter_subject_len) < 0)
 			return init_mi_error(400,
 				MI_SSTR("invalid filter_subject (whitespace or control char)"));
 		memcpy(filter_buf, filter_subject, filter_subject_len);
@@ -755,19 +755,19 @@ mi_response_t *mi_nats_consumer_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(stream_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(stream_buf, stream_name, stream_name_len);
 	stream_buf[stream_name_len] = '\0';
 
 	if (consumer_name_len >= (int)sizeof(consumer_buf))
 		return init_mi_error(400, MI_SSTR("consumer name too long"));
-	if (_valid_nats_name(consumer_name, consumer_name_len) < 0)
+	if (valid_nats_name(consumer_name, consumer_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid consumer name"));
 	memcpy(consumer_buf, consumer_name, consumer_name_len);
 	consumer_buf[consumer_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -848,12 +848,12 @@ mi_response_t *mi_nats_msg_get(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 
@@ -920,12 +920,12 @@ mi_response_t *mi_nats_msg_delete(const mi_params_t *params,
 
 	if (stream_name_len >= (int)sizeof(name_buf))
 		return init_mi_error(400, MI_SSTR("stream name too long"));
-	if (_valid_nats_name(stream_name, stream_name_len) < 0)
+	if (valid_nats_name(stream_name, stream_name_len) < 0)
 		return init_mi_error(400, MI_SSTR("invalid stream name"));
 	memcpy(name_buf, stream_name, stream_name_len);
 	name_buf[stream_name_len] = '\0';
 
-	js = _get_js();
+	js = get_js();
 	if (!js)
 		return init_mi_error(500, MI_SSTR("JetStream not available"));
 

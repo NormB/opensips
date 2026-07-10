@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Registration MI enumeration [IMPROVEMENT Tier-2]: _reg_scan_bucket()
+ * Registration MI enumeration [IMPROVEMENT Tier-2]: reg_scan_bucket()
  * must enumerate via the shared value-carrying watch pass
  * (nats_kv_enum_live_values, the renamed reaper enumerator), NOT via
  * kvStore_Keys() + one kvStore_Get() per AoR.  The Keys+Get pattern
@@ -27,7 +27,7 @@
  * commands an operator runs mid-incident.
  *
  * Locks:
- *   1. production _reg_scan_bucket() body: calls the shared
+ *   1. production reg_scan_bucket() body: calls the shared
  *      enumerator; contains NO kvStore_Keys / kvStore_Get,
  *   2. reg.c includes the shared enumerator header,
  *   3. the shared enumerator keeps IgnoreDeletes (live keys only --
@@ -117,9 +117,9 @@ int main(void)
 	/* ---- production wiring locks -------------------------------- */
 	{
 		char *s = fn_body("../cachedb_nats_reg.c",
-			"static int _reg_scan_bucket(");
-		char *body = s ? strstr(s, "static int _reg_scan_bucket(") : NULL;
-		ASSERT(body != NULL, "_reg_scan_bucket present");
+			"static int reg_scan_bucket(");
+		char *body = s ? strstr(s, "static int reg_scan_bucket(") : NULL;
+		ASSERT(body != NULL, "reg_scan_bucket present");
 		if (body) {
 			ASSERT(strstr(body, "nats_kv_enum_live_values") != NULL,
 				"scan uses the shared value-carrying enumerator");

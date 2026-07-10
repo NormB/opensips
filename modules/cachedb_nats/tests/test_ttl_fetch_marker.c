@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P8 Stage 2 [R4 / TTL-SOLUTION-SPEC §2.2 TREV-2a]: _update_fetch_or_seed()'s
+ * P8 Stage 2 [R4 / TTL-SOLUTION-SPEC §2.2 TREV-2a]: update_fetch_or_seed()'s
  * routing for an empty-value entry.  cnats 3.12 surfaces a server-side MaxAge
  * delete marker as kvStore_Get => NATS_OK with len 0 (NOT NATS_NOT_FOUND).  The
  * fetch path must NOT treat that as an error: it must re-create the AoR OVER the
@@ -38,7 +38,7 @@
 enum gs { GS_OK = 0, GS_NOT_FOUND = 1, GS_OTHER = 2 };
 enum fr { FR_CREATE = 0, FR_UPDATE = 1, FR_ERROR = 2 };
 
-/* carried copy of _update_fetch_or_seed's routing decision (cachedb_nats_json.c) */
+/* carried copy of update_fetch_or_seed's routing decision (cachedb_nats_json.c) */
 static enum fr fetch_decide(enum gs status, int data_len, int has_identity)
 {
 	if (status == GS_NOT_FOUND)
@@ -67,7 +67,7 @@ static void expect(const char *what, enum fr got, enum fr want)
 
 int main(void)
 {
-	printf("[R4] _update_fetch_or_seed routing:\n");
+	printf("[R4] update_fetch_or_seed routing:\n");
 
 	expect("OK, live doc (len>0)",            fetch_decide(GS_OK, 120, 1), FR_UPDATE);
 	/* the load-bearing case: empty-value MaxAge marker */

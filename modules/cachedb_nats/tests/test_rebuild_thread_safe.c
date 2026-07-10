@@ -99,13 +99,13 @@ int main(void)
 	 * leaks visible to pkg stats.  pkg OOM falls back to shm
 	 * (availability over the optimisation): both allocators must
 	 * appear, pkg first. */
-	ASSERT(count(body, "_scratch_alloc(") >= 2,
-		"rebuild allocates both scratch arrays via _scratch_alloc");
-	ASSERT(count(body, "_scratch_free(") >= 2,
-		"scratch is released via the owner-aware _scratch_free");
+	ASSERT(count(body, "scratch_alloc(") >= 2,
+		"rebuild allocates both scratch arrays via scratch_alloc");
+	ASSERT(count(body, "scratch_free(") >= 2,
+		"scratch is released via the owner-aware scratch_free");
 	{
-		char *helper = body_after(src, "_scratch_alloc(size_t bytes");
-		ASSERT(helper != NULL, "found the _scratch_alloc helper");
+		char *helper = body_after(src, "scratch_alloc(size_t bytes");
+		ASSERT(helper != NULL, "found the scratch_alloc helper");
 		if (helper) {
 			ASSERT(count(helper, "pkg_malloc(") >= 1,
 				"scratch prefers pkg (dedicated-proc main thread)");

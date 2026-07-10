@@ -55,7 +55,7 @@ struct reg_row_sum {
 	int64_t last_mod;
 };
 
-static int _aor_cmp(const struct reg_row_sum *a, const struct reg_row_sum *b)
+static int reg_aor_cmp(const struct reg_row_sum *a, const struct reg_row_sum *b)
 {
 	int n = a->aor_len < b->aor_len ? a->aor_len : b->aor_len;
 	int c = memcmp(a->aor, b->aor, n);
@@ -86,9 +86,9 @@ static int cdbn_reg_row_cmp(const struct reg_row_sum *a,
 		break;
 	}
 	if (c == 0 && sort != REG_SORT_AOR)
-		return _aor_cmp(a, b);                  /* tie-break: AoR, ALWAYS asc */
+		return reg_aor_cmp(a, b);                  /* tie-break: AoR, ALWAYS asc */
 	if (sort == REG_SORT_AOR)
-		c = _aor_cmp(a, b);
+		c = reg_aor_cmp(a, b);
 	return desc ? -c : c;
 #endif
 }

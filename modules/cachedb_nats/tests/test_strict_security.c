@@ -26,7 +26,7 @@
  *   require_secure_url=1        refuse to start when the effective
  *                               connection URL is insecure for a PII
  *                               store (plaintext nats:// and/or no
- *                               credentials -- _nats_url_insecure()),
+ *                               credentials -- nats_url_insecure()),
  *   require_usrloc_safe_bucket=1  refuse to start when the bound
  *                               pre-existing bucket carries a non-zero
  *                               backing-stream MaxAge (it would

@@ -94,7 +94,7 @@ typedef struct {
 
 static nats_intern_table_t *g_t = NULL;
 
-static inline unsigned int _fnv1a(const char *s, int len)
+static inline unsigned int intern_fnv1a(const char *s, int len)
 {
 	unsigned int h = 2166136261u;
 	int i;
@@ -132,7 +132,7 @@ static void nats_intern_destroy(void)
 static char *nats_intern_acquire(const char *s, int len)
 {
 	if (!g_t || !s || len < 0) return NULL;
-	unsigned int hash   = _fnv1a(s, len);
+	unsigned int hash   = intern_fnv1a(s, len);
 	unsigned int bucket = hash & NATS_INTERN_BMASK;
 	nats_intern_node_t *n;
 	for (n = g_t->buckets[bucket]; n; n = n->next) {
@@ -158,7 +158,7 @@ static void nats_intern_release(char *p)
 	if (!p || !g_t) return;
 	nats_intern_node_t *n = (nats_intern_node_t *)
 		(p - offsetof(nats_intern_node_t, str));
-	unsigned int hash   = _fnv1a(n->str, n->len);
+	unsigned int hash   = intern_fnv1a(n->str, n->len);
 	unsigned int bucket = hash & NATS_INTERN_BMASK;
 	nats_intern_node_t **prev;
 	/* Locate the node in its chain BEFORE touching refcount: on a

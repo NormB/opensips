@@ -23,8 +23,8 @@
  * can return NULL for a malformed / header-only KV entry; a NULL key
  * then crashes strlen / strncmp.  There are three call sites:
  *
- *   - _raise_kv_change_event(): HAVE_EVI path  (key -> strlen, memcpy)
- *   - _raise_kv_change_event(): non-EVI path   (key -> LM_DBG %s)
+ *   - raise_kv_change_event(): HAVE_EVI path  (key -> strlen, memcpy)
+ *   - raise_kv_change_event(): non-EVI path   (key -> LM_DBG %s)
  *   - the watcher event loop:   key -> strncmp / index add/remove
  *
  * The fix adds a NULL check at each site (early return / continue).

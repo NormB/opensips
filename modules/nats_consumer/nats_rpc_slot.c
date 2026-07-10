@@ -128,7 +128,7 @@ void nats_rpc_slot_destroy(void)
 
 /* CLOCK_MONOTONIC microseconds (system-wide, comparable across
  * processes) for the [P2.2] orphan-reaper age stamps. */
-static long long _slot_now_us(void)
+static long long slot_now_us(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -184,7 +184,7 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 			s->reply_has_reply_to     = 0;
 			/* [P2.2] age tracking for the orphan reaper */
 			atomic_store_explicit(&s->claimed_at_us,
-				_slot_now_us(), memory_order_relaxed);
+				slot_now_us(), memory_order_relaxed);
 			atomic_store_explicit(&s->deadline_us, 0,
 				memory_order_relaxed);
 			/* [P3.1] no wake owner until the worker stamps

@@ -113,7 +113,7 @@ int main(void)
 		 * libnats thread where dprint is off-limits (same rule as the
 		 * pool callbacks), so the warning rides the raw-write path,
 		 * gated once per interval. */
-		ASSERT(file_contains(c, "_drop_warn_unsafe"),
+		ASSERT(file_contains(c, "drop_warn_unsafe"),
 			"drop branches emit the rate-limited unsafe warning");
 	}
 

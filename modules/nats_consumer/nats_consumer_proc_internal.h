@@ -46,7 +46,7 @@
  * Pure inline; no allocation, no locking; safe in any process or
  * thread.
  */
-static inline long long _now_monotonic_us(void)
+static inline long long now_monotonic_us(void)
 {
 	struct timespec ts;
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;

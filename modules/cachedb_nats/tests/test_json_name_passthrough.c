@@ -17,8 +17,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test: cachedb_nats_json.c::_apply_pairs_one_pass /
- * _sink_merge_subkeys re-escaped EXISTING JSON field/subkey NAMES when
+ * Regression test: cachedb_nats_json.c::apply_pairs_one_pass /
+ * sink_merge_subkeys re-escaped EXISTING JSON field/subkey NAMES when
  * copying them through on a KV-doc update.
  *
  * Those names come straight out of cdbn_parse_json_string(), which returns
@@ -34,7 +34,7 @@
  * UN-escaped) still go through cdbn_sink_emit_string().
  *
  * This test carries byte-for-byte copies of the production helpers
- * (_json_escape, _json_escape_len, _sink_*, cdbn_parse_json_string) so it
+ * (json_escape, json_escape_len, _sink_*, cdbn_parse_json_string) so it
  * runs standalone, then drives a copy-through of a parsed name with
  * both the buggy emitter and the fixed emitter and asserts:
  *   - fixed emitter: name survives unchanged (idempotent round-trip)
@@ -69,7 +69,7 @@ static int cdbn_sink_init(json_sink_t *s, int cap)
 	return 0;
 }
 
-static int _sink_grow(json_sink_t *s, int extra)
+static int sink_grow(json_sink_t *s, int extra)
 {
 	if (s->oom) return -1;
 	if (s->len + extra <= s->cap) return 0;
@@ -84,7 +84,7 @@ static int _sink_grow(json_sink_t *s, int extra)
 static int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom || n <= 0) return s->oom ? -1 : 0;
-	if (_sink_grow(s, n + 1) < 0) return -1;
+	if (sink_grow(s, n + 1) < 0) return -1;
 	memcpy(s->buf + s->len, p, n);
 	s->len += n;
 	s->buf[s->len] = '\0';
@@ -96,7 +96,7 @@ static int cdbn_sink_putc(json_sink_t *s, char c)
 	return cdbn_sink_write(s, &c, 1);
 }
 
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -135,7 +135,7 @@ static int _json_escape(const char *in, int in_len, char *out, int out_sz)
 	return w;
 }
 
-static int _json_escape_len(const char *in, int in_len)
+static int json_escape_len(const char *in, int in_len)
 {
 	int i, out = 0;
 	for (i = 0; i < in_len; i++) {
@@ -154,7 +154,7 @@ static int _json_escape_len(const char *in, int in_len)
 }
 
 /* Model of the BUGGY pre-fix name-emit path: it escaped the name with
- * _json_escape and wrapped it in quotes.  We give _json_escape a
+ * json_escape and wrapped it in quotes.  We give json_escape a
  * generous buffer here (the production sink off-by-one is a separate
  * issue, irrelevant to the NAME double-escape we are demonstrating) so
  * that the escaping itself succeeds and the double-escape is visible. */
@@ -163,8 +163,8 @@ static int cdbn_sink_emit_string(json_sink_t *s, const char *p, int n)
 	char tmp[512];
 	int written;
 	if (s->oom) return -1;
-	(void)_json_escape_len;
-	written = _json_escape(p, n, tmp, (int)sizeof(tmp));
+	(void)json_escape_len;
+	written = json_escape(p, n, tmp, (int)sizeof(tmp));
 	if (written < 0) { s->oom = 1; return -1; }
 	if (cdbn_sink_putc(s, '"') < 0) return -1;
 	if (cdbn_sink_write(s, tmp, written) < 0) return -1;

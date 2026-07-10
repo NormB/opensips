@@ -523,7 +523,7 @@ struct module_exports exports = {
  * Returns 1 when the WARN must fire: not tls://, OR no "user[:pass]@" in the
  * authority (between "://" and the first '/').  Credentials in a path/query do
  * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
-static int _nats_url_insecure(const char *url)
+static int nats_url_insecure(const char *url)
 {
 	const char *sep, *authority, *slash, *at;
 	int is_tls, has_creds;
@@ -656,7 +656,7 @@ static int init_pool(void)
 		 * store (subscriber IP, UA, call-id, path) and NATS KV has no
 		 * per-key ACL.  Transport + auth are mandatory: warn loudly when
 		 * the connection URL is plaintext and/or carries no credentials. */
-		if (_nats_url_insecure(url_to_use)) {
+		if (nats_url_insecure(url_to_use)) {
 			/* the URL may carry nats://user:pass@host credentials —
 			 * never log it raw */
 			char _redacted_url[512];

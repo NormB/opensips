@@ -160,7 +160,7 @@ uint64_t store_msg_ref(uint16_t handle_idx, uint32_t ring_capacity,
 			slot->msg           = m;
 			slot->in_use        = 1;
 			slot->generation    = (uint16_t)(slot->generation + 1);
-			slot->claimed_at_us = _now_monotonic_us();
+			slot->claimed_at_us = now_monotonic_us();
 			row->next_slot      = (idx + 1) % row->capacity;
 			*ok = 1;
 			return nats_ack_token_pack(handle_idx, idx, slot->generation);
@@ -262,7 +262,7 @@ void purge_msg_ref_row(uint16_t handle_idx)
  */
 int reap_orphan_msg_refs(void)
 {
-	long long now = _now_monotonic_us();
+	long long now = now_monotonic_us();
 	int reaped = 0;
 	uint32_t h, i;
 

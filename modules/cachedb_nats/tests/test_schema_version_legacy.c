@@ -27,13 +27,13 @@
  * The read path MUST tolerate both — read best-effort, NEVER reject a row or
  * crash on the version value — or every real upgrade breaks.
  *
- * The production read path achieves this STRUCTURALLY: `_is_private_top_key`
+ * The production read path achieves this STRUCTURALLY: `is_private_top_key`
  * matches "schema_version" (and "row_exp") by NAME and `cdbn_row_strip_private_keys`
  * removes the peer before usrloc sees it; the version VALUE is never parsed or
  * branched on.  So absent / 1 / any-higher all read identically.
  *
  * This test pins that invariant two ways:
- *   (1) the carried `_is_private_top_key` strips schema_version by NAME for any
+ *   (1) the carried `is_private_top_key` strips schema_version by NAME for any
  *       value (it never inspects the value);
  *   (2) a carried `_schema_read_accept(present, version)` models the read
  *       decision: the lenient (production) reader ACCEPTS every shape; the RED
@@ -53,8 +53,8 @@
 #include <limits.h>
 
 /* ─── carried copy of the production strip-by-name predicate
- * (cachedb_nats_json_rowmeta.c _is_private_top_key) ───────────────── */
-static int _is_private_top_key(const char *name, int len)
+ * (cachedb_nats_json_rowmeta.c is_private_top_key) ───────────────── */
+static int is_private_top_key(const char *name, int len)
 {
 	return (len == 7  && memcmp(name, "row_exp", 7) == 0) ||
 	       (len == 14 && memcmp(name, "schema_version", 14) == 0);
@@ -89,13 +89,13 @@ int main(void)
 #endif
 
 	printf("[REV-25] schema_version is a private peer stripped by NAME (value never read):\n");
-	CHECK(_is_private_top_key("schema_version", 14) == 1, "\"schema_version\" => private (stripped)");
-	CHECK(_is_private_top_key("row_exp", 7) == 1, "\"row_exp\" => private (stripped)");
-	CHECK(_is_private_top_key("contacts", 8) == 0, "\"contacts\" => NOT private (kept)");
-	CHECK(_is_private_top_key("aorhash", 7) == 0, "\"aorhash\" => NOT private (kept)");
+	CHECK(is_private_top_key("schema_version", 14) == 1, "\"schema_version\" => private (stripped)");
+	CHECK(is_private_top_key("row_exp", 7) == 1, "\"row_exp\" => private (stripped)");
+	CHECK(is_private_top_key("contacts", 8) == 0, "\"contacts\" => NOT private (kept)");
+	CHECK(is_private_top_key("aorhash", 7) == 0, "\"aorhash\" => NOT private (kept)");
 	/* adversarial: a near-miss name must NOT be stripped */
-	CHECK(_is_private_top_key("schema_versio", 13) == 0, "truncated name => not matched");
-	CHECK(_is_private_top_key("schema_version2", 15) == 0, "longer name => not matched");
+	CHECK(is_private_top_key("schema_versio", 13) == 0, "truncated name => not matched");
+	CHECK(is_private_top_key("schema_version2", 15) == 0, "longer name => not matched");
 
 	printf("[REV-25] the read path MUST accept legacy AND future rows (read best-effort):\n");
 	CHECK(_schema_read_accept(0, 0) == 1, "LEGACY: schema_version ABSENT => read (not rejected)");

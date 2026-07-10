@@ -2,9 +2,9 @@
 #
 # The single-allocation entry blob inlines an 8-slot keys[] array.
 # When more than 8 distinct AoRs share the same indexed (field, value),
-# _entry_add_key must (a) shm_malloc a fresh keys[] array,
+# entry_add_key must (a) shm_malloc a fresh keys[] array,
 # (b) memcpy the inline contents over, (c) clear the keys_inline flag,
-# (d) free the new keys[] separately on _free_entry.
+# (d) free the new keys[] separately on free_entry.
 #
 # This case drives 12 distinct AoRs from the same domain so the
 # domain-field entry's keys[] is forced past the 8-slot inline limit.

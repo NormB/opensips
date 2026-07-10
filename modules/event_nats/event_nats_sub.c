@@ -391,7 +391,7 @@ void nats_consumer_process(int rank)
  * class.  The authoritative signal remains the MI counters
  * (inbound_dropped_oversize / inbound_dropped_backpressure).
  */
-static void _drop_warn_unsafe(time_t *rl_slot, const char *line, size_t len)
+static void drop_warn_unsafe(time_t *rl_slot, const char *line, size_t len)
 {
 	time_t now = time(NULL);
 
@@ -443,7 +443,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 		if (g_inbound)
 			atomic_fetch_add_explicit(&g_inbound->dropped_oversize, 1,
 				memory_order_relaxed);
-		_drop_warn_unsafe(&rl_oversize, warn, sizeof(warn) - 1);
+		drop_warn_unsafe(&rl_oversize, warn, sizeof(warn) - 1);
 		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}
@@ -459,7 +459,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 
 		atomic_fetch_add_explicit(&g_inbound->dropped_backpressure, 1,
 			memory_order_relaxed);
-		_drop_warn_unsafe(&rl_backpressure, warn, sizeof(warn) - 1);
+		drop_warn_unsafe(&rl_backpressure, warn, sizeof(warn) - 1);
 		nats_dl.natsMsg_Destroy(msg);
 		return;
 	}

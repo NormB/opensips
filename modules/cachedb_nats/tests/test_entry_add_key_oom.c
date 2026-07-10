@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test: cachedb_nats_json.c::_entry_add_key leaked the
+ * Regression test: cachedb_nats_json.c::entry_add_key leaked the
  * interned doc-key reference it acquires up front when the keys[]
  * array growth (shm_malloc on the inline->heap transition, or
  * shm_realloc on a subsequent grow) failed.  The function returned -1
@@ -28,7 +28,7 @@
  * The fix releases the ref before both OOM `return -1`s.
  *
  * This test carries a stripped intern table (same model as
- * test_intern_unit.c) plus a faithful copy of _entry_add_key, and a
+ * test_intern_unit.c) plus a faithful copy of entry_add_key, and a
  * failable allocator.  It asserts that after a forced grow-OOM the
  * intern table refcount is balanced (size returns to 0 once the
  * successfully-stored keys are removed) -- i.e. the failed-add did NOT
@@ -86,7 +86,7 @@ typedef struct nats_intern_node {
 static nats_intern_node_t *g_buckets[NATS_INTERN_BUCKETS];
 static int g_intern_size;
 
-static unsigned int _fnv1a(const char *s, int len)
+static unsigned int intern_fnv1a(const char *s, int len)
 {
 	unsigned int h = 2166136261u;
 	int i;
@@ -99,7 +99,7 @@ static unsigned int _fnv1a(const char *s, int len)
  * keys[] array allocation failing, not the intern allocation. */
 static char *nats_intern_acquire(const char *s, int len)
 {
-	unsigned int b = _fnv1a(s, len) & NATS_INTERN_BMASK;
+	unsigned int b = intern_fnv1a(s, len) & NATS_INTERN_BMASK;
 	nats_intern_node_t *n;
 	for (n = g_buckets[b]; n; n = n->next)
 		if (n->len == len && memcmp(n->str, s, (size_t)len) == 0) {
@@ -118,7 +118,7 @@ static void nats_intern_release(char *p)
 {
 	nats_intern_node_t *n = (nats_intern_node_t *)
 		(p - offsetof(nats_intern_node_t, str));
-	unsigned int b = _fnv1a(n->str, n->len) & NATS_INTERN_BMASK;
+	unsigned int b = intern_fnv1a(n->str, n->len) & NATS_INTERN_BMASK;
 	nats_intern_node_t **prev;
 	if (--n->refcount > 0) return;
 	for (prev = &g_buckets[b]; *prev; prev = &(*prev)->next)
@@ -127,7 +127,7 @@ static void nats_intern_release(char *p)
 
 static int nats_intern_size(void) { return g_intern_size; }
 
-/* ── entry struct + carried copy of _entry_add_key (FIXED form) ───── */
+/* ── entry struct + carried copy of entry_add_key (FIXED form) ───── */
 
 #define NATS_IDX_KEYS_INLINE 8
 
@@ -157,8 +157,8 @@ static void entry_free(nats_idx_entry *e)
 		shm_free(e->keys);
 }
 
-/* Faithful copy of the FIXED production _entry_add_key. */
-static int _entry_add_key(nats_idx_entry *e, const char *key)
+/* Faithful copy of the FIXED production entry_add_key. */
+static int entry_add_key(nats_idx_entry *e, const char *key)
 {
 	int i;
 	char *interned;
@@ -229,19 +229,19 @@ static void test_grow_oom(int fail_realloc)
 	if (fail_realloc) {
 		for (i = 0; i < NATS_IDX_KEYS_INLINE + 1; i++) {
 			snprintf(buf, sizeof(buf), "doc_key_%d", i);
-			ASSERT(_entry_add_key(&e, buf) == 0, "pre-grow add ok");
+			ASSERT(entry_add_key(&e, buf) == 0, "pre-grow add ok");
 		}
 		ASSERT(e.keys_inline == 0, "keys[] now on heap (realloc path)");
 		/* fill remaining heap capacity so the next add grows again */
 		while (e.num_keys < e.alloc_keys) {
 			snprintf(buf, sizeof(buf), "doc_key_%d", i++);
-			ASSERT(_entry_add_key(&e, buf) == 0, "fill heap capacity");
+			ASSERT(entry_add_key(&e, buf) == 0, "fill heap capacity");
 		}
 		g_fail_next_realloc = 1;
 	} else {
 		for (i = 0; i < NATS_IDX_KEYS_INLINE; i++) {
 			snprintf(buf, sizeof(buf), "doc_key_%d", i);
-			ASSERT(_entry_add_key(&e, buf) == 0, "fill inline capacity");
+			ASSERT(entry_add_key(&e, buf) == 0, "fill inline capacity");
 		}
 		g_fail_next_malloc = 1;
 	}
@@ -251,7 +251,7 @@ static void test_grow_oom(int fail_realloc)
 	/* This add must trigger a grow, the grow fails, the function
 	 * returns -1 -- and (with the fix) releases its acquired ref. */
 	snprintf(buf, sizeof(buf), "OOM_VICTIM_KEY");
-	int rc = _entry_add_key(&e, buf);
+	int rc = entry_add_key(&e, buf);
 	ASSERT(rc == -1, "add returns -1 on grow OOM");
 
 	/* The victim key must NOT be left interned with a stuck refcount:

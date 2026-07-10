@@ -29,7 +29,7 @@
  * Why this exists.  At 100k AoRs / 2000 RPS the watcher's
  * nats_json_index_add hot path was spending ~half of all opensips
  * CPU in sem_wait -> hp_shm_malloc paths (design-repo PERF_NOTES.md).
- * Each indexed field on a usrloc contact triggers _entry_add_key
+ * Each indexed field on a usrloc contact triggers entry_add_key
  * -> shm_malloc(klen+1) for a duplicate of the document key,
  * which then takes a per-bucket SHM_LOCK semaphore inside
  * HP_MALLOC.  ~5 indexed fields per contact x 2000 events/s =
@@ -59,8 +59,8 @@
  *
  * Lifetime: nodes are kept in SHM until refcount hits zero,
  * which happens when the last index entry that referenced
- * the doc key is freed (typically via _entry_remove_key when
- * an AoR de-registers, or _free_entry on full index destroy).
+ * the doc key is freed (typically via entry_remove_key when
+ * an AoR de-registers, or free_entry on full index destroy).
  *
  * Thread safety: every operation locks the relevant shard.
  * Multi-process safe: the table lives in SHM, the locks are

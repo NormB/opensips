@@ -132,7 +132,7 @@ static int cdbn_reg_ci_eq(const char *a, int alen, const char *b, int blen)
 }
 
 /* one key=value token; 0 ok, -1 reject */
-static int _reg_filter_kv(struct reg_filter *f, const char *k, int klen,
+static int reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	char num[24];
@@ -190,7 +190,7 @@ static int _reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 }
 
 /* [FMT-4/7] string-valued format keys, shared shape with the kvobs parser */
-static int _reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
+static int reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	if (klen == 6 && memcmp(k, "format", 6) == 0) {
@@ -238,14 +238,14 @@ static int cdbn_reg_filter_parse(const char *s, int len, struct reg_filter *f)
 			if (eq == te || eq == tok)
 				return -1;                     /* no '=' or empty key */
 			{
-				int r = _reg_filter_fmt_kv(f, tok, (int)(eq - tok),
+				int r = reg_filter_fmt_kv(f, tok, (int)(eq - tok),
 					eq + 1, (int)(te - eq - 1));
 				if (r < 0)
 					return -1;
 				if (r == 0)
 					continue;
 			}
-			if (_reg_filter_kv(f, tok, (int)(eq - tok),
+			if (reg_filter_kv(f, tok, (int)(eq - tok),
 					eq + 1, (int)(te - eq - 1)) < 0)
 				return -1;
 		}

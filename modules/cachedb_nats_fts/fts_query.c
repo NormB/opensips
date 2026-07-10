@@ -21,7 +21,7 @@
  *
  * Implementation of the SHM string intern table -- see header
  * for the rationale.  ~half of all opensips CPU at 100k AoRs
- * was sem_wait -> hp_shm_malloc on the watcher's _entry_add_key
+ * was sem_wait -> hp_shm_malloc on the watcher's entry_add_key
  * path; this module collapses those allocations into a single
  * intern-or-acquire per unique doc key, with refcounted release.
  */
@@ -50,7 +50,7 @@ extern int fts_max_results;   /* modparam (cachedb_nats_fts.c) */
 /* ------------------------------------------------------------------ */
 
 /**
- * _lookup() — Look up the index entry for a field + value pair.
+ * qry_lookup() — Look up the index entry for a field + value pair.
  *
  * Builds the composite "field:value" string in a stack buffer, then calls
  * fts_find_entry() to locate the hash table entry.  Returns the entry (whose
@@ -58,7 +58,7 @@ extern int fts_max_results;   /* modparam (cachedb_nats_fts.c) */
  * documents contain this field:value pair.  Caller must hold the entry's
  * shard lock.
  */
-static nats_idx_entry *_lookup(const char *field, int flen,
+static nats_idx_entry *qry_lookup(const char *field, int flen,
 	const char *val, int vlen)
 {
 	char fv_buf[1024];
@@ -82,11 +82,11 @@ static nats_idx_entry *_lookup(const char *field, int flen,
 	return fts_find_entry(fv_buf, fv_len);
 }
 
-/* Same hash as _lookup but returns the shard index instead of the
+/* Same hash as qry_lookup but returns the shard index instead of the
  * entry.  Used by query callers that want to lock the right shard
- * before calling _lookup, so concurrent queries on different shards
+ * before calling qry_lookup, so concurrent queries on different shards
  * proceed without serialising. */
-static int _lookup_shard(const char *field, int flen,
+static int lookup_shard(const char *field, int flen,
 	const char *val, int vlen)
 {
 	char fv_buf[1024];
@@ -106,7 +106,7 @@ static int _lookup_shard(const char *field, int flen,
 }
 
 /**
- * _intersect_keys() — Compute the set intersection of two key arrays.
+ * qry_intersect_keys() — Compute the set intersection of two key arrays.
  *
  * Produces a new array containing only the keys present in both @a and @b.
  * The result array is allocated with min(a_count, b_count) slots (the
@@ -119,7 +119,7 @@ static int _lookup_shard(const char *field, int flen,
  *
  * Returns 0 on success, -1 on allocation failure.
  */
-/* Open-addressed pointer hash set used by _intersect_keys.  Keys
+/* Open-addressed pointer hash set used by qry_intersect_keys.  Keys
  * are NUL-terminated strings, but we hash by string content (not
  * pointer) so the set is correct even if A and B contain
  * independent strdup'd copies of the same content.  When all keys
@@ -131,7 +131,7 @@ typedef struct {
 	int          count;
 } _intkeyset_t;
 
-static uint32_t _intkeyset_hash(const char *s)
+static uint32_t intkeyset_hash(const char *s)
 {
 	/* FNV-1a 32-bit. */
 	uint32_t h = 2166136261u;
@@ -142,7 +142,7 @@ static uint32_t _intkeyset_hash(const char *s)
 	return h;
 }
 
-static int _intkeyset_init(_intkeyset_t *set, int min_capacity)
+static int intkeyset_init(_intkeyset_t *set, int min_capacity)
 {
 	int cap = 8;
 	while (cap < min_capacity * 2) cap <<= 1;
@@ -153,15 +153,15 @@ static int _intkeyset_init(_intkeyset_t *set, int min_capacity)
 	return 0;
 }
 
-static void _intkeyset_free(_intkeyset_t *set)
+static void intkeyset_free(_intkeyset_t *set)
 {
 	free(set->slots);
 	set->slots = NULL;
 }
 
-static int _intkeyset_insert(_intkeyset_t *set, const char *key)
+static int intkeyset_insert(_intkeyset_t *set, const char *key)
 {
-	uint32_t idx = _intkeyset_hash(key) & set->mask;
+	uint32_t idx = intkeyset_hash(key) & set->mask;
 	while (set->slots[idx]) {
 		if (strcmp(set->slots[idx], key) == 0)
 			return 0; /* dup */
@@ -172,9 +172,9 @@ static int _intkeyset_insert(_intkeyset_t *set, const char *key)
 	return 1;
 }
 
-static int _intkeyset_contains(const _intkeyset_t *set, const char *key)
+static int intkeyset_contains(const _intkeyset_t *set, const char *key)
 {
-	uint32_t idx = _intkeyset_hash(key) & set->mask;
+	uint32_t idx = intkeyset_hash(key) & set->mask;
 	while (set->slots[idx]) {
 		if (strcmp(set->slots[idx], key) == 0)
 			return 1;
@@ -183,7 +183,7 @@ static int _intkeyset_contains(const _intkeyset_t *set, const char *key)
 	return 0;
 }
 
-static int _intersect_keys(char **a, int a_count,
+static int qry_intersect_keys(char **a, int a_count,
 	char **b, int b_count,
 	char ***out_keys, int *out_count)
 {
@@ -211,7 +211,7 @@ static int _intersect_keys(char **a, int a_count,
 	 * matched keys per filter); below that the constant factors
 	 * cancel.  Falls back to the old nested-loop semantics on
 	 * allocation failure. */
-	if (_intkeyset_init(&bset, b_count) < 0) {
+	if (intkeyset_init(&bset, b_count) < 0) {
 		int j;
 		for (i = 0; i < a_count; i++) {
 			for (j = 0; j < b_count; j++) {
@@ -226,12 +226,12 @@ static int _intersect_keys(char **a, int a_count,
 		return 0;
 	}
 	for (i = 0; i < b_count; i++)
-		_intkeyset_insert(&bset, b[i]);
+		intkeyset_insert(&bset, b[i]);
 	for (i = 0; i < a_count; i++) {
-		if (_intkeyset_contains(&bset, a[i]))
+		if (intkeyset_contains(&bset, a[i]))
 			result[n++] = a[i];
 	}
-	_intkeyset_free(&bset);
+	intkeyset_free(&bset);
 
 	*out_keys = result;
 	*out_count = n;
@@ -290,16 +290,16 @@ int fts_query_match_keys(const cdb_filter_t *filter,
 			return -1;
 		}
 
-		shard = _lookup_shard(it->key.name.s, it->key.name.len,
+		shard = lookup_shard(it->key.name.s, it->key.name.len,
 			it->val.s.s, it->val.s.len);
 		if (shard < 0) continue;
 
-		_idx_lock_shard(g_idx, shard);
-		e = _lookup(it->key.name.s, it->key.name.len,
+		idx_lock_shard(g_idx, shard);
+		e = qry_lookup(it->key.name.s, it->key.name.len,
 			it->val.s.s, it->val.s.len);
 
 		if (!e || e->num_keys == 0) {
-			_idx_unlock_shard(g_idx, shard);
+			idx_unlock_shard(g_idx, shard);
 			/* no match for this filter — intersection is empty */
 			fts_release_keyset(match_keys, match_count);
 			match_keys = NULL;
@@ -318,7 +318,7 @@ int fts_query_match_keys(const cdb_filter_t *filter,
 				it->val.s.len, it->val.s.s,
 				e->num_keys,
 				sizeof(char *) * e->num_keys);
-			_idx_unlock_shard(g_idx, shard);
+			idx_unlock_shard(g_idx, shard);
 			fts_release_keyset(match_keys, match_count);
 			return -1;
 		}
@@ -335,7 +335,7 @@ int fts_query_match_keys(const cdb_filter_t *filter,
 				iter_keys[k] = nats_intern_retain(e->keys[k]);
 			iter_count = e->num_keys;
 		}
-		_idx_unlock_shard(g_idx, shard);
+		idx_unlock_shard(g_idx, shard);
 
 		if (first) {
 			/* first filter — adopt iter_keys directly */
@@ -351,7 +351,7 @@ int fts_query_match_keys(const cdb_filter_t *filter,
 			char **new_keys = NULL;
 			int new_count = 0;
 
-			if (_intersect_keys(match_keys, match_count,
+			if (qry_intersect_keys(match_keys, match_count,
 					iter_keys, iter_count,
 					&new_keys, &new_count) < 0) {
 				LM_ERR("intersection failed\n");
@@ -397,12 +397,12 @@ int fts_resolve_key(const str *field, const str *val, char *out, int out_len)
 {
 	nats_idx_entry *e;
 	int rc = 0;
-	int shard = _lookup_shard(field->s, field->len, val->s, val->len);
+	int shard = lookup_shard(field->s, field->len, val->s, val->len);
 
 	if (shard < 0 || !g_idx)
 		return 0;
-	_idx_lock_shard(g_idx, shard);
-	e = _lookup(field->s, field->len, val->s, val->len);
+	idx_lock_shard(g_idx, shard);
+	e = qry_lookup(field->s, field->len, val->s, val->len);
 	if (e && e->num_keys > 0) {
 		size_t klen = strlen(e->keys[0]);
 		if ((int)klen + 1 > out_len) {
@@ -412,6 +412,6 @@ int fts_resolve_key(const str *field, const str *val, char *out, int out_len)
 			rc = 1;
 		}
 	}
-	_idx_unlock_shard(g_idx, shard);
+	idx_unlock_shard(g_idx, shard);
 	return rc;
 }

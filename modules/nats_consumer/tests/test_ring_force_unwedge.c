@@ -35,7 +35,7 @@
  *     resurrected worker's late release cannot REGRESS a consumed_gen
  *     the force (and later laps) moved past,
  *   - pop re-checks ready_gen == t after copying the payload
- *     (_ring_pop_still_owned): if the slot was recycled under a
+ *     (ring_pop_still_owned): if the slot was recycled under a
  *     stalled copy, the torn payload is dropped, never delivered.
  *
  * Drives the PRODUCTION TU (#include "../nats_ring.c") with the forge
@@ -142,9 +142,9 @@ int main(void)
 		uint64_t saved = __atomic_load_n(&s0->ready_gen,
 			__ATOMIC_ACQUIRE);
 		__atomic_store_n(&s0->ready_gen, 7, __ATOMIC_RELEASE);
-		ASSERT(_ring_pop_still_owned(s0, 7) == 1,
+		ASSERT(ring_pop_still_owned(s0, 7) == 1,
 			"still-owned: ready_gen matches the claimed generation");
-		ASSERT(_ring_pop_still_owned(s0, 4) == 0,
+		ASSERT(ring_pop_still_owned(s0, 4) == 0,
 			"recycled under a stalled copy: ownership check fails "
 			"(torn payload dropped)");
 		__atomic_store_n(&s0->ready_gen, saved, __ATOMIC_RELEASE);

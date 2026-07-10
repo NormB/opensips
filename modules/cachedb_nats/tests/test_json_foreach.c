@@ -20,9 +20,9 @@
  * MAINTAINABILITY-PERF-SPEC.md P2.5: the ONE top-level JSON field
  * iterator behind the row-mutation paths.  The hand-rolled
  * cdbn_skip_ws/cdbn_parse_json_string/cdbn_skip_json_value walk skeleton used to
- * be copy-pasted through _apply_pairs_one_pass /
+ * be copy-pasted through apply_pairs_one_pass /
  * cdbn_row_finalize_metadata / cdbn_reap_project_survivors /
- * _sink_merge_subkeys; they all now walk through
+ * sink_merge_subkeys; they all now walk through
  * cdbn_json_foreach_top_field(json, len, cb, ud).  This locks the
  * iterator against the PRODUCTION walker TU (#included directly):
  *

@@ -135,7 +135,7 @@ static inline void nats_consumer_hb_tick(void)
 	atomic_fetch_add_explicit(&nats_consumer_hb->tick, 1,
 		memory_order_relaxed);
 	atomic_store_explicit(&nats_consumer_hb->last_tick_us,
-		_now_monotonic_us(), memory_order_relaxed);
+		now_monotonic_us(), memory_order_relaxed);
 }
 
 /* ── tuning ──────────────────────────────────────────────────── */
@@ -357,7 +357,7 @@ done_vals:
  * errors).  Fills *list and returns 1 when there are messages to
  * process; 0 when this pull is done (nothing fetched / flow-control
  * skip / error already accounted). */
-static int _fetch_batch(proc_sub_state_t *ss, int budget_ms,
+static int proc_fetch_batch(proc_sub_state_t *ss, int budget_ms,
 	natsMsgList *list)
 {
 	natsStatus s;
@@ -480,7 +480,7 @@ static int _fetch_batch(proc_sub_state_t *ss, int budget_ms,
  * For JS-delivered messages we extract that header and surface it as
  * the reply; without it, the message has no application reply
  * destination. */
-static void _resolve_app_reply(natsMsg *m, const char **reply,
+static void resolve_app_reply(natsMsg *m, const char **reply,
 	size_t *reply_len)
 {
 	if (*reply_len >= 8 &&
@@ -505,7 +505,7 @@ static void _resolve_app_reply(natsMsg *m, const char **reply,
  * Always consumes @m (ownership transferred to the ref table on
  * success, destroyed otherwise).  Returns 1 iff the message was
  * pushed to the ring. */
-static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
+static int push_one_msg(proc_sub_state_t *ss, natsMsg *m)
 {
 	const char *subject;
 	const char *data;
@@ -544,7 +544,7 @@ static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
 	/* JetStream pull deliveries carry the $JS.ACK subject in the
 	 * reply slot; surface the publisher's Nats-Reply-To header (if
 	 * any) as the application reply instead. */
-	_resolve_app_reply(m, &reply, &reply_len);
+	resolve_app_reply(m, &reply, &reply_len);
 
 	/* Serialize headers into the per-message stack buffer; ring_push
 	 * copies the bytes into the slot so this local array's lifetime
@@ -656,7 +656,7 @@ static int _push_one_msg(proc_sub_state_t *ss, natsMsg *m)
 			/* Rate-limit: a stream of oversize messages must not
 			 * flood the log (the `terms` counter below still records
 			 * every one). */
-			long long now = _now_monotonic_us();
+			long long now = now_monotonic_us();
 			if (now - ss->last_oversize_warn_us >=
 					NATS_OVERSIZE_WARN_INTERVAL_US) {
 				LM_WARN("nats_consumer_proc: oversize message on "
@@ -689,7 +689,7 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 	 * Paired with the dec below. */
 	nats_handle_pending_inc(ss->h_ref);
 
-	if (!_fetch_batch(ss, budget_ms, &list))
+	if (!proc_fetch_batch(ss, budget_ms, &list))
 		goto out;
 
 	ss->last_fetch = time(NULL);
@@ -698,8 +698,8 @@ static int pull_one_batch(proc_sub_state_t *ss, int budget_ms)
 		natsMsg *m = list.Msgs[i];
 		if (!m)
 			continue;
-		pushed += _push_one_msg(ss, m);
-		/* _push_one_msg always consumes the message (ref table on
+		pushed += push_one_msg(ss, m);
+		/* push_one_msg always consumes the message (ref table on
 		 * success, destroyed otherwise). */
 		list.Msgs[i] = NULL;
 	}
@@ -964,7 +964,7 @@ void nats_consumer_proc_main(int rank)
 		nats_consumer_hb_tick();
 	}
 
-	long long last_reap_us = _now_monotonic_us();
+	long long last_reap_us = now_monotonic_us();
 
 	for (;;) {
 		nats_consumer_hb_tick();
@@ -976,7 +976,7 @@ void nats_consumer_proc_main(int rank)
 		 * died after popping a message but before acking (otherwise the
 		 * per-handle table fills and delivery stalls). */
 		{
-			long long now = _now_monotonic_us();
+			long long now = now_monotonic_us();
 			if (now - last_reap_us >= NATS_MSG_REF_REAP_INTERVAL_US) {
 				reap_orphan_msg_refs();
 				/* [P2.2] also reclaim RPC slots whose owning

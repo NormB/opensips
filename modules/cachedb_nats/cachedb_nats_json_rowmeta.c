@@ -51,7 +51,7 @@
  * 6-byte JSON escape "\u0000" (which cJSON decodes to 0x00); else 0.  Fail
  * closed: a value embedding the literal escape is conservatively refused (a
  * real SIP UA/attr never carries it). */
-static int _field_has_nul(const char *s, int len)
+static int field_has_nul(const char *s, int len)
 {
 	int i;
 
@@ -87,7 +87,7 @@ int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
 			continue;
 		switch (pair->val.type) {
 		case CDB_STR:
-			if (_field_has_nul(pair->val.val.st.s,
+			if (field_has_nul(pair->val.val.st.s,
 					pair->val.val.st.len))
 				return 1;
 			break;
@@ -112,7 +112,7 @@ int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
  * whitespace must already be skipped.  Fractions/exponents are rejected — a
  * usrloc `expires` is always an integer epoch; anything else is "not a number"
  * and the caller treats the contact as having no usable expiry. [REV-34] */
-static const char *_json_parse_int64(const char *p, const char *end,
+static const char *json_parse_int64(const char *p, const char *end,
 	int64_t *out)
 {
 	int neg = 0;
@@ -142,7 +142,7 @@ static const char *_json_parse_int64(const char *p, const char *end,
  * empty/NULL set yields 0.  Otherwise the minimum (earliest) expiry.  int64
  * throughout: no int32 clamp, so post-2038 epochs survive.  Only 0 is the
  * sentinel; a negative (already-past) expiry is a real candidate value. */
-static int64_t _row_exp_min(const int64_t *exp, int n)
+static int64_t row_exp_min(const int64_t *exp, int n)
 {
 	int64_t m = 0;
 	int i, seen = 0;
@@ -195,7 +195,7 @@ int cdbn_contact_field_int64(const char *vstart, const char *vend,
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, vend, &v)) {
+			if (json_parse_int64(vs, vend, &v)) {
 				*out = v;
 				return 0;
 			}
@@ -220,7 +220,7 @@ int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *out)
 /* Collect every contact's integer `expires` from a "contacts" object slice
  * [vstart,vend) into a fresh pkg array (caller pkg_frees *out_arr).
  * Returns 0 on success (possibly 0 entries), -1 on malformed input. */
-static int _row_collect_expiries(const char *vstart, const char *vend,
+static int row_collect_expiries(const char *vstart, const char *vend,
 	int64_t **out_arr, int *out_n)
 {
 	const char *p = cdbn_skip_ws(vstart, vend);
@@ -285,7 +285,7 @@ struct find_contacts_ctx {
 	const char *vs, *ve;
 };
 
-static int _find_contacts_cb(const char *name, int nlen,
+static int find_contacts_cb(const char *name, int nlen,
 	const char *vstart, const char *vend, void *ud)
 {
 	struct find_contacts_ctx *c = ud;
@@ -304,7 +304,7 @@ struct copy_minus_meta_ctx {
 	int          first;
 };
 
-static int _copy_minus_meta_cb(const char *name, int nlen,
+static int copy_minus_meta_cb(const char *name, int nlen,
 	const char *vstart, const char *vend, void *ud)
 {
 	struct copy_minus_meta_ctx *c = ud;
@@ -346,7 +346,7 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
 		if (cdbn_json_foreach_top_field(json, len,
-				_find_contacts_cb, &fc) < 0)
+				find_contacts_cb, &fc) < 0)
 			return NULL;
 		c_vs = fc.vs;
 		c_ve = fc.ve;
@@ -364,9 +364,9 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 		return copy;
 	}
 
-	if (_row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0)
+	if (row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0)
 		return NULL;
-	row_exp = _row_exp_min(exps, n_exp);
+	row_exp = row_exp_min(exps, n_exp);
 
 	/* P8 [§5]: per-message-TTL eligibility inputs.  A row gets a TTL only when
 	 * it is a single contact OR all contacts share one expiry (else a min-expiry
@@ -391,7 +391,7 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	{
 		struct copy_minus_meta_ctx cm = { &s, 1 };
 		if (cdbn_json_foreach_top_field(json, len,
-				_copy_minus_meta_cb, &cm) < 0)
+				copy_minus_meta_cb, &cm) < 0)
 			goto fail;
 		first = cm.first;
 	}
@@ -420,7 +420,7 @@ fail:
  * "contacts" object slice [c_vs,c_ve).  Contact ids are base64(matchkey), so
  * they are JSON-escape-free and a byte compare against the raw (un-decoded) key
  * is exact.  Returns 0 + [*out_vs,*out_ve) on success, -1 if not found. */
-static int _raw_find_contact(const char *c_vs, const char *c_ve,
+static int raw_find_contact(const char *c_vs, const char *c_ve,
 	const char *id, int id_len, const char **out_vs, const char **out_ve)
 {
 	const char *p = cdbn_skip_ws(c_vs, c_ve);
@@ -481,7 +481,7 @@ void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_di
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
 		if (cdbn_json_foreach_top_field(json, len,
-				_find_contacts_cb, &fc) < 0)
+				find_contacts_cb, &fc) < 0)
 			return;
 		c_vs = fc.vs;
 		c_ve = fc.ve;
@@ -508,7 +508,7 @@ void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_di
 
 			if (cpair->val.type != CDB_DICT)
 				continue;
-			if (_raw_find_contact(c_vs, c_ve, cpair->key.name.s,
+			if (raw_find_contact(c_vs, c_ve, cpair->key.name.s,
 					cpair->key.name.len, &rc_vs, &rc_ve) != 0)
 				continue;
 			if (cdbn_contact_field_int64(rc_vs, rc_ve, "last_mod", 8, &lm) != 0)
@@ -563,7 +563,7 @@ int cdbn_value_classify(const char *data, int len)
 /* ------------------------------------------------------------------ */
 
 /* True for the cachedb_nats-private top-level peers usrloc must never see. */
-static int _is_private_top_key(const char *name, int len)
+static int is_private_top_key(const char *name, int len)
 {
 	return (len == 7  && memcmp(name, "row_exp", 7) == 0) ||
 	       (len == 14 && memcmp(name, "schema_version", 14) == 0);
@@ -573,7 +573,7 @@ static int _is_private_top_key(const char *name, int len)
  * cdb_free_rows will not reach it).  row_exp/schema_version are normally
  * CDB_INT32, but a crafted-yet-valid object could carry them as a string or a
  * nested dict (P2.5 only gates the top-level value type), so free by type. */
-static void _free_one_pair(cdb_pair_t *p)
+static void free_one_pair(cdb_pair_t *p)
 {
 	switch (p->val.type) {
 	case CDB_DICT:
@@ -602,9 +602,9 @@ void cdbn_row_strip_private_keys(cdb_dict_t *row_dict)
 		return;
 	list_for_each_safe(pos, tmp, row_dict) {
 		cdb_pair_t *pair = list_entry(pos, cdb_pair_t, list);
-		if (_is_private_top_key(pair->key.name.s, pair->key.name.len)) {
+		if (is_private_top_key(pair->key.name.s, pair->key.name.len)) {
 			list_del(&pair->list);
-			_free_one_pair(pair);
+			free_one_pair(pair);
 		}
 	}
 }
@@ -620,14 +620,14 @@ void cdbn_row_strip_private_keys(cdb_dict_t *row_dict)
 
 /* [REV-1/REV-21] A contact is already-expired when its absolute `expires` plus
  * the skew grace S has passed node-local `now`.  expires==0 is permanent. */
-static int _contact_is_expired(int64_t expires, time_t now, int grace)
+static int contact_is_expired(int64_t expires, time_t now, int grace)
 {
 	return expires != 0 && (expires + (int64_t)grace) <= (int64_t)now;
 }
 
 /* Extract a set-contact pair's own `expires` (CDB_INT32/INT64) from its value
  * dict.  Returns 0 + *out, or -1 if absent / not an integer. */
-static int _pair_contact_expires(const cdb_pair_t *p, int64_t *out)
+static int pair_contact_expires(const cdb_pair_t *p, int64_t *out)
 {
 	struct list_head *pos;
 
@@ -645,7 +645,7 @@ static int _pair_contact_expires(const cdb_pair_t *p, int64_t *out)
 }
 
 /* Rewrite a "contacts" object slice [cvs,cve), dropping any subkey in @ids. */
-static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
+static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	const char **ids, const int *id_lens, int n_ids)
 {
 	const char *p = cdbn_skip_ws(cvs, cve), *end = cve;
@@ -686,7 +686,7 @@ static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve
 
 /* Copy @json through, dropping subkeys @ids from the top-level "contacts"
  * object.  Returns a fresh pkg doc (caller pkg_frees), or NULL on error/OOM. */
-static char *_contacts_drop_subkeys(const char *json, int len,
+static char *contacts_drop_subkeys(const char *json, int len,
 	const char **ids, const int *id_lens, int n_ids, int *out_len)
 {
 	const char *p, *end;
@@ -722,7 +722,7 @@ static char *_contacts_drop_subkeys(const char *json, int len,
 		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
 		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			if (_emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
+			if (emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
 		} else {
 			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}
@@ -758,8 +758,8 @@ char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pai
 			if (p->key.name.len != 8 || memcmp(p->key.name.s, "contacts", 8) != 0)
 				continue;
 			if (p->subkey.len <= 0 || !p->subkey.s) continue;
-			if (_pair_contact_expires(p, &exp) != 0) continue;
-			if (!_contact_is_expired(exp, now, grace)) continue;
+			if (pair_contact_expires(p, &exp) != 0) continue;
+			if (!contact_is_expired(exp, now, grace)) continue;
 			if (n < NATS_MAX_DROP_IDS) {
 				ids[n] = p->subkey.s;
 				id_lens[n] = p->subkey.len;
@@ -775,7 +775,7 @@ char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pai
 		if (out_len) *out_len = len;
 		return copy;
 	}
-	return _contacts_drop_subkeys(json, len, ids, id_lens, n, out_len);
+	return contacts_drop_subkeys(json, len, ids, id_lens, n, out_len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -827,7 +827,7 @@ int cdbn_value_size_ok(int len, int max)
 
 /* Read an integer field @name from a parsed contact dict.  Returns 0 + *out
  * (CDB_INT32/INT64), or -1 if absent / present-but-not-an-integer. */
-static int _dict_int_field(const cdb_dict_t *d, const char *name, int len,
+static int dict_int_field(const cdb_dict_t *d, const char *name, int len,
 	int64_t *out)
 {
 	struct list_head *pos;
@@ -872,13 +872,13 @@ void cdbn_row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grac
 
 			if (c->val.type != CDB_DICT)
 				continue;
-			if (_dict_int_field(&c->val.val.dict, "expires", 7, &exp) != 0)
+			if (dict_int_field(&c->val.val.dict, "expires", 7, &exp) != 0)
 				omit = 1;   /* fail-closed: absent / unparseable */
 			else
-				omit = _contact_is_expired(exp, now, grace);
+				omit = contact_is_expired(exp, now, grace);
 			if (omit) {
 				list_del(&c->list);
-				_free_one_pair(c);
+				free_one_pair(c);
 			}
 		}
 		break;             /* only one top-level "contacts" */

@@ -36,7 +36,7 @@
  *   gcc ...               -> the FIXED ordering => GREEN.
  *
  * Rule 6: the AUTHORITATIVE proof is the Tier-2 e2e (an out-of-order REGISTER
- * must not roll a binding backward) vs the production _sink_merge_subkeys.
+ * must not roll a binding backward) vs the production sink_merge_subkeys.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_cseq_merge_ordering test_cseq_merge_ordering.c
  */
@@ -82,7 +82,7 @@ static const char *cdbn_skip_json_value(const char *p, const char *end)
 		return p;
 	}
 }
-static const char *_json_parse_int64(const char *p, const char *end, int64_t *out)
+static const char *json_parse_int64(const char *p, const char *end, int64_t *out)
 {
 	int neg = 0; uint64_t mag = 0;
 	if (p >= end) return NULL;
@@ -116,7 +116,7 @@ static int cdbn_contact_field_int64(const char *vstart, const char *vend,
 		p = cdbn_skip_ws(p, vend);
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
-			int64_t v; if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
+			int64_t v; if (json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
 		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;

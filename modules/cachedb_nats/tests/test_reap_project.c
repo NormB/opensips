@@ -55,7 +55,7 @@
 #include <string.h>
 
 /* ─── carried copy: row_exp arithmetic (cachedb_nats_json_rowmeta.c) ── */
-static int64_t _row_exp_min(const int64_t *exp, int n)
+static int64_t row_exp_min(const int64_t *exp, int n)
 {
 	int64_t m = 0;
 	int i, seen = 0;
@@ -126,7 +126,7 @@ static int cdbn_sink_init(json_sink_t *s, int initial)
 	s->len = 0; s->cap = initial > 0 ? initial : 16; s->oom = 0;
 	return 0;
 }
-static int _sink_grow(json_sink_t *s, int need)
+static int sink_grow(json_sink_t *s, int need)
 {
 	int ncap = s->cap; char *nb;
 	while (ncap - s->len < need) ncap *= 2;
@@ -138,7 +138,7 @@ static int _sink_grow(json_sink_t *s, int need)
 static int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom) return -1;
-	if (s->cap - s->len < n && _sink_grow(s, n) < 0) return -1;
+	if (s->cap - s->len < n && sink_grow(s, n) < 0) return -1;
 	memcpy(s->buf + s->len, p, n); s->len += n;
 	return 0;
 }
@@ -164,7 +164,7 @@ static char *cdbn_sink_take(json_sink_t *s, int *out_len)
 }
 
 /* ─── carried copy: per-contact expiry parse (rowmeta) ──────────────── */
-static const char *_json_parse_int64(const char *p, const char *end, int64_t *out)
+static const char *json_parse_int64(const char *p, const char *end, int64_t *out)
 {
 	int neg = 0; uint64_t mag = 0;
 	if (p >= end) return NULL;
@@ -200,7 +200,7 @@ static int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *o
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
+			if (json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
 		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;
@@ -230,7 +230,7 @@ static int cdbn_contact_field_int64(const char *vstart, const char *vend,
 		vs = p;
 		if (nlen == flen && memcmp(name, fname, flen) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
+			if (json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 			return -1;
 		}
 		p = cdbn_skip_json_value(p, vend);
@@ -252,7 +252,7 @@ static int cdbn_reap_row_due_json(const char *json, int len, long now, int grace
 /* ─── the unit under test: reaper survivor projection ───────────────── */
 
 /* per-contact DUE decision (1 = drop). */
-static int _reap_contact_due(int has_exp, int64_t expires, long now, int grace)
+static int reap_contact_due(int has_exp, int64_t expires, long now, int grace)
 {
 #ifdef REAP_PROJECT_CURRENT
 	/* CURRENT (buggy): fail-OPEN on an absent expires (keeps an unprovable
@@ -266,7 +266,7 @@ static int _reap_contact_due(int has_exp, int64_t expires, long now, int grace)
 }
 
 /* Emit a filtered "contacts" object holding only surviving contacts, verbatim. */
-static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs, const char *c_ve,
+static int emit_survivor_contacts(json_sink_t *s, const char *c_vs, const char *c_ve,
 	long now, int grace)
 {
 	const char *p = cdbn_skip_ws(c_vs, c_ve);
@@ -290,7 +290,7 @@ static int _emit_survivor_contacts(json_sink_t *s, const char *c_vs, const char 
 		p = cdbn_skip_json_value(p, c_ve);
 		if (!p) return -1;
 		has = (cdbn_contact_expires(cvs, p, &e) == 0);
-		if (_reap_contact_due(has, e, now, grace))
+		if (reap_contact_due(has, e, now, grace))
 			continue;                              /* drop this contact */
 		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
@@ -364,7 +364,7 @@ static char *cdbn_reap_project_survivors(const char *json, int len, long now, in
 			q = cdbn_skip_json_value(q, c_ve);
 			if (!q) { free(surv); free(allc); return NULL; }
 			has = (cdbn_contact_expires(cvs, q, &e) == 0);
-			due = _reap_contact_due(has, e, now, grace);
+			due = reap_contact_due(has, e, now, grace);
 			/* "all kept" set: every contact's parseable expiry (CURRENT bug
 			 * computes row_exp over THIS instead of survivors). */
 			if (has) {
@@ -388,9 +388,9 @@ static char *cdbn_reap_project_survivors(const char *json, int len, long now, in
 		}
 	}
 #ifdef REAP_PROJECT_CURRENT
-	row_exp = _row_exp_min(allc, n_all_kept);      /* BUG: incl. dropped contacts */
+	row_exp = row_exp_min(allc, n_all_kept);      /* BUG: incl. dropped contacts */
 #else
-	row_exp = _row_exp_min(surv, n_surv);          /* survivors only */
+	row_exp = row_exp_min(surv, n_surv);          /* survivors only */
 #endif
 	free(surv); free(allc);
 
@@ -421,7 +421,7 @@ static char *cdbn_reap_project_survivors(const char *json, int len, long now, in
 		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
 		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			if (_emit_survivor_contacts(&s, vs, p, now, grace) < 0) goto fail;
+			if (emit_survivor_contacts(&s, vs, p, now, grace) < 0) goto fail;
 		} else {
 			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}

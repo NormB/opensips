@@ -39,7 +39,7 @@
 
 /*
  * Defensive limits for broker-supplied JSON documents before they reach
- * the recursive cJSON_Parse() (see _json_parse_guard).  cJSON recurses
+ * the recursive cJSON_Parse() (see json_parse_guard).  cJSON recurses
  * one C stack frame per nesting level with no internal cap, so an
  * attacker who can publish to the KV bucket could otherwise crash a SIP
  * worker with a deeply nested value.  Depth 64 is far beyond any real
@@ -170,7 +170,7 @@ const char *cdbn_skip_json_value(const char *p, const char *end)
 }
 
 /**
- * _json_parse_guard() — defensive pre-validation of broker-supplied JSON
+ * json_parse_guard() — defensive pre-validation of broker-supplied JSON
  * before it is handed to the recursive cJSON_Parse() in cdb_json_to_dict.
  *
  * The bundled cJSON (lib/cJSON.c) recurses one C stack frame per nesting
@@ -188,7 +188,7 @@ const char *cdbn_skip_json_value(const char *p, const char *end)
  *
  * Mirrored by tests/test_json_parse_guard.c — keep the two in sync.
  */
-static int _json_parse_guard(const char *data, int data_len,
+static int json_parse_guard(const char *data, int data_len,
 		int max_depth, int max_bytes)
 {
 	int i, depth = 0, in_string = 0;
@@ -219,7 +219,7 @@ static int _json_parse_guard(const char *data, int data_len,
 /**
  * cdbn_safe_json_to_dict() — guard + parse a broker-supplied JSON document.
  *
- * Runs _json_parse_guard() to reject hostile input (deep nesting, raw
+ * Runs json_parse_guard() to reject hostile input (deep nesting, raw
  * NUL, oversize), then hands cdb_json_to_dict() a guaranteed
  * NUL-terminated copy — the kvEntry value bytes are not contractually
  * NUL-terminated, and the recursive C-string parser must never run off
@@ -233,7 +233,7 @@ int cdbn_safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
 	char *buf;
 	int rc;
 
-	if (_json_parse_guard(data, data_len,
+	if (json_parse_guard(data, data_len,
 			NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES) != 0) {
 		LM_WARN("rejecting broker JSON document (%d bytes): failed "
 			"depth/size/NUL guard before parse\n", data_len);

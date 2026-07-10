@@ -23,11 +23,11 @@
  * the reader is `cJSON_Parse` + `str.len = strlen(valuestring)`
  * (cachedb/cachedb_dict.c:565), so an interior NUL silently truncates the value
  * — corruption.  A raw NUL in the wire buffer is already caught by
- * `_json_parse_guard`, but the ESCAPED form `\u0000` slips through the guard,
+ * `json_parse_guard`, but the ESCAPED form `\u0000` slips through the guard,
  * is decoded by cJSON into a `0x00`, and then truncates on `strlen`.  v1 refuses
  * the save (no partial row, integrity counter ++) for EITHER form.
  *
- * _field_has_nul(s,len) is the byte-level detector: 1 if @s contains a raw
+ * field_has_nul(s,len) is the byte-level detector: 1 if @s contains a raw
  * `0x00` OR the 6-byte JSON escape `\u0000` (decodes to NUL); else 0.  It is
  * fail-closed: a value embedding the literal escape sequence is conservatively
  * refused (a real SIP UA/attr never carries it; correctness over permissiveness).
@@ -49,7 +49,7 @@
 
 /* ─── carried copy of the production helper (cachedb_nats_json_rowmeta.c) ─── */
 
-static int _field_has_nul(const char *s, int len)
+static int field_has_nul(const char *s, int len)
 {
 #ifdef NULCHK_CURRENT
 	(void)s; (void)len; return 0;   /* TODAY: write path does no NUL reject */
@@ -77,7 +77,7 @@ static int fails = 0;
 	else printf("  ok:   %s\n", msg); } while (0)
 
 /* len-explicit helper so embedded NULs are honoured (no strlen). */
-#define HASNUL(lit) _field_has_nul((lit), (int)(sizeof(lit) - 1))
+#define HASNUL(lit) field_has_nul((lit), (int)(sizeof(lit) - 1))
 
 int main(void)
 {
@@ -89,17 +89,17 @@ int main(void)
 
 	printf("[REV-20] clean fields are accepted (no NUL):\n");
 	CHECK(HASNUL("alice@example.com") == 0, "plain AoR-ish value accepted");
-	CHECK(_field_has_nul("", 0) == 0, "empty value accepted");
-	CHECK(_field_has_nul(NULL, 0) == 0, "NULL value accepted (defensive)");
+	CHECK(field_has_nul("", 0) == 0, "empty value accepted");
+	CHECK(field_has_nul(NULL, 0) == 0, "NULL value accepted (defensive)");
 	CHECK(HASNUL("Acme-UA/3.14 (x86_64)") == 0, "typical UA string accepted");
 	CHECK(HASNUL("version0000build") == 0, "bare '0000' digits NOT a false positive");
 	CHECK(HASNUL("u0000") == 0, "'u0000' without backslash accepted");
 
 	printf("[REV-20] a raw 0x00 byte is rejected:\n");
-	{ const char v[] = {'a','\0','b'};  CHECK(_field_has_nul(v, 3) == 1, "interior raw NUL rejected"); }
-	{ const char v[] = {'\0','a','b'};  CHECK(_field_has_nul(v, 3) == 1, "leading raw NUL rejected"); }
-	{ const char v[] = {'a','b','\0'};  CHECK(_field_has_nul(v, 3) == 1, "trailing raw NUL rejected"); }
-	{ const char v[] = {'\0'};          CHECK(_field_has_nul(v, 1) == 1, "lone raw NUL rejected"); }
+	{ const char v[] = {'a','\0','b'};  CHECK(field_has_nul(v, 3) == 1, "interior raw NUL rejected"); }
+	{ const char v[] = {'\0','a','b'};  CHECK(field_has_nul(v, 3) == 1, "leading raw NUL rejected"); }
+	{ const char v[] = {'a','b','\0'};  CHECK(field_has_nul(v, 3) == 1, "trailing raw NUL rejected"); }
+	{ const char v[] = {'\0'};          CHECK(field_has_nul(v, 1) == 1, "lone raw NUL rejected"); }
 
 	printf("[REV-20] the escaped form \\u0000 is equally rejected:\n");
 	CHECK(HASNUL("\\u0000") == 1, "bare \\u0000 rejected");

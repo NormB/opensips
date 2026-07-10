@@ -43,7 +43,7 @@ enum { kvOp_Unknown = 0, kvOp_Put = 1, kvOp_Delete = 2, kvOp_Purge = 3 };
 /* ─── carried copy of the production classifier (cachedb_nats_watch.c) ─── */
 enum watch_idx_action { WATCH_IDX_SKIP = 0, WATCH_IDX_ADD = 1, WATCH_IDX_REMOVE = 2 };
 
-static enum watch_idx_action _watch_index_action(int op, int val_len, char val0)
+static enum watch_idx_action watch_index_action(int op, int val_len, char val0)
 {
 	if (op == kvOp_Delete || op == kvOp_Purge)
 		return WATCH_IDX_REMOVE;
@@ -71,20 +71,20 @@ int main(void)
 	printf("[R1] watcher index action over KV entry ops:\n");
 
 	/* the load-bearing case: an empty-value Put is a server MaxAge tombstone */
-	expect("Put, empty value (MaxAge marker)", _watch_index_action(kvOp_Put, 0, 0), WATCH_IDX_REMOVE);
+	expect("Put, empty value (MaxAge marker)", watch_index_action(kvOp_Put, 0, 0), WATCH_IDX_REMOVE);
 
 	/* normal live row: a JSON document is indexed */
-	expect("Put, JSON '{...}'",               _watch_index_action(kvOp_Put, 42, '{'), WATCH_IDX_ADD);
+	expect("Put, JSON '{...}'",               watch_index_action(kvOp_Put, 42, '{'), WATCH_IDX_ADD);
 
 	/* a non-JSON value is not indexed (and is not a tombstone) */
-	expect("Put, non-JSON value",             _watch_index_action(kvOp_Put, 5, 'x'), WATCH_IDX_SKIP);
+	expect("Put, non-JSON value",             watch_index_action(kvOp_Put, 5, 'x'), WATCH_IDX_SKIP);
 
 	/* explicit delete / purge ops remove */
-	expect("Delete op",                       _watch_index_action(kvOp_Delete, 0, 0), WATCH_IDX_REMOVE);
-	expect("Purge op",                        _watch_index_action(kvOp_Purge, 0, 0), WATCH_IDX_REMOVE);
+	expect("Delete op",                       watch_index_action(kvOp_Delete, 0, 0), WATCH_IDX_REMOVE);
+	expect("Purge op",                        watch_index_action(kvOp_Purge, 0, 0), WATCH_IDX_REMOVE);
 
 	/* unknown / other ops are ignored */
-	expect("Unknown op",                      _watch_index_action(kvOp_Unknown, 10, '{'), WATCH_IDX_SKIP);
+	expect("Unknown op",                      watch_index_action(kvOp_Unknown, 10, '{'), WATCH_IDX_SKIP);
 
 	if (fails) { printf("\nFAILED (%d)\n", fails); return 1; }
 	printf("\n=== ALL PASS (fails=0) ===\n");

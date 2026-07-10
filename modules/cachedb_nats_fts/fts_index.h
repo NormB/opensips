@@ -49,7 +49,7 @@ typedef struct __kvStore kvStore;
  * blob.  Chosen so a typical low-fanout (field, value) entry never
  * triggers a separate keys[] allocation -- 8 doc keys cover the
  * usrloc "high-uniqueness" fields (aor, contact).  When num_keys
- * exceeds this, _entry_add_key allocates a fresh keys[] from SHM
+ * exceeds this, entry_add_key allocates a fresh keys[] from SHM
  * and the inline slots become dead memory inside the blob (~64 B
  * waste per grown entry; trivial against the index footprint). */
 #define NATS_IDX_KEYS_INLINE 8
@@ -76,7 +76,7 @@ typedef struct _nats_idx_entry {
 	int keys_inline;            /* 1 if keys[] still points into the
 	                             * entry blob (initial state); 0 once
 	                             * it has been grown to a separate
-	                             * allocation.  _free_entry uses this
+	                             * allocation.  free_entry uses this
 	                             * to decide whether to shm_free
 	                             * keys[] separately. */
 	struct _nats_idx_entry *next; /* Next entry in the hash bucket chain
@@ -324,11 +324,11 @@ nats_idx_entry *fts_find_entry(const char *fv, int fv_len);
 /* Shard-locking helpers.  Whole-index ops acquire shards in index
  * order to keep the lock hierarchy consistent.  The lock set itself
  * is SHM-backed so cross-process synchronisation is safe. */
-static inline void _idx_lock_shard(nats_search_idx *idx, int shard)
+static inline void idx_lock_shard(nats_search_idx *idx, int shard)
 {
 	lock_set_get(idx->shard_locks, shard);
 }
-static inline void _idx_unlock_shard(nats_search_idx *idx, int shard)
+static inline void idx_unlock_shard(nats_search_idx *idx, int shard)
 {
 	lock_set_release(idx->shard_locks, shard);
 }

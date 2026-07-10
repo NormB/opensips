@@ -21,7 +21,7 @@
  *
  * Implementation of the SHM string intern table -- see header
  * for the rationale.  ~half of all opensips CPU at 100k AoRs
- * was sem_wait -> hp_shm_malloc on the watcher's _entry_add_key
+ * was sem_wait -> hp_shm_malloc on the watcher's entry_add_key
  * path; this module collapses those allocations into a single
  * intern-or-acquire per unique doc key, with refcounted release.
  */

@@ -61,7 +61,7 @@ static struct tpair *mk(const char *name, int val_type)
 }
 
 /* ─── carried copy of the production predicate (rowmeta TU) ──────── */
-static int _is_private_top_key(const char *name, int len)
+static int is_private_top_key(const char *name, int len)
 {
 	return (len == 7  && memcmp(name, "row_exp", 7) == 0) ||
 	       (len == 14 && memcmp(name, "schema_version", 14) == 0);
@@ -74,14 +74,14 @@ static void strip(struct list_head *dict)
 	struct list_head *pos, *tmp;
 	list_for_each_safe(pos, tmp, dict) {
 		struct tpair *p = list_entry(pos, struct tpair, list);
-		if (_is_private_top_key(p->name, p->name_len)) {
+		if (is_private_top_key(p->name, p->name_len)) {
 			list_del(&p->list);
 			free(p);
 		}
 	}
 #else
 	(void)dict;   /* today: nothing stripped — private keys reach usrloc */
-	(void)_is_private_top_key;
+	(void)is_private_top_key;
 #endif
 }
 

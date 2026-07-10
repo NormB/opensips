@@ -122,7 +122,7 @@ int main(void)
 	 * counter stays exported, expected 0, so dashboards keep working) */
 	{
 		const char *w = "../cachedb_nats_watch.c";
-		ASSERT(grep_in_function(w, "_watcher_loop",
+		ASSERT(grep_in_function(w, "watcher_loop",
 				"NATS_CDB_STATS_INC(watcher_handle_leaks)") == 0,
 			"watcher no longer counts intentional leaks (destroy unconditional)");
 	}

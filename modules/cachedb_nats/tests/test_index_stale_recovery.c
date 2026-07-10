@@ -93,19 +93,19 @@ int main(void)
 
 	/* (a) the query function must distinguish NATS_NOT_FOUND from other
 	 *     non-OK statuses on the result-fetch path */
-	/* the result-fetch loop now lives in the _query_fetch_rows helper
+	/* the result-fetch loop now lives in the query_fetch_rows helper
 	 * extracted from nats_cache_query (the design notes decomposition) */
-	n = grep_in_function(path, "_query_fetch_rows", "NATS_NOT_FOUND");
+	n = grep_in_function(path, "query_fetch_rows", "NATS_NOT_FOUND");
 	ASSERT(n >= 1,
 		"nats_cache_query distinguishes NATS_NOT_FOUND in fetch loop");
 
 	/* (b) on stale-index detection, the entry is evicted from the index */
-	n = grep_in_function(path, "_query_fetch_rows", "cdbn_fts.remove");
+	n = grep_in_function(path, "query_fetch_rows", "cdbn_fts.remove");
 	ASSERT(n >= 1,
 		"nats_cache_query evicts stale index entries on KV miss");
 
 	/* (c) the index_miss_kv counter is bumped so operators can monitor */
-	n = grep_in_function(path, "_query_fetch_rows", "index_miss_kv");
+	n = grep_in_function(path, "query_fetch_rows", "index_miss_kv");
 	ASSERT(n >= 1,
 		"nats_cache_query bumps index_miss_kv counter on stale hit");
 

@@ -32,7 +32,7 @@
  * keeping an untouched-yet-expired contact while dropping a touched-and-expired
  * one in the same row.
  *
- *   gcc -DHYGIENE_CURRENT ... -> today: no write hygiene (_contact_is_expired
+ *   gcc -DHYGIENE_CURRENT ... -> today: no write hygiene (contact_is_expired
  *                                disabled) => expired-own contact kept => RED.
  *   gcc ...                  -> the FIXED hygiene => GREEN.
  *
@@ -47,7 +47,7 @@
 #include <string.h>
 
 /* ─── carried copy: the expiry decision (rowmeta TU) ────────────── */
-static int _contact_is_expired(int64_t expires, long now, int grace)
+static int contact_is_expired(int64_t expires, long now, int grace)
 {
 #ifdef HYGIENE_CURRENT
 	(void)expires; (void)now; (void)grace; return 0;  /* today: no hygiene */
@@ -97,14 +97,14 @@ static const char *cdbn_skip_json_value(const char *p, const char *end)
 }
 typedef struct { char *buf; int len; int cap; int oom; } json_sink_t;
 static int cdbn_sink_init(json_sink_t *s, int n){ s->buf=malloc(n>0?n:16); if(!s->buf)return -1; s->len=0; s->cap=n>0?n:16; s->oom=0; return 0; }
-static int _sink_grow(json_sink_t *s,int need){ int c=s->cap; char *b; while(c-s->len<need)c*=2; b=realloc(s->buf,c); if(!b){s->oom=1;return -1;} s->buf=b; s->cap=c; return 0; }
-static int cdbn_sink_write(json_sink_t *s,const char *p,int n){ if(s->oom)return -1; if(s->cap-s->len<n&&_sink_grow(s,n)<0)return -1; memcpy(s->buf+s->len,p,n); s->len+=n; return 0; }
+static int sink_grow(json_sink_t *s,int need){ int c=s->cap; char *b; while(c-s->len<need)c*=2; b=realloc(s->buf,c); if(!b){s->oom=1;return -1;} s->buf=b; s->cap=c; return 0; }
+static int cdbn_sink_write(json_sink_t *s,const char *p,int n){ if(s->oom)return -1; if(s->cap-s->len<n&&sink_grow(s,n)<0)return -1; memcpy(s->buf+s->len,p,n); s->len+=n; return 0; }
 static int cdbn_sink_putc(json_sink_t *s,char c){ return cdbn_sink_write(s,&c,1); }
 static int cdbn_sink_emit_raw_string(json_sink_t *s,const char *p,int n){ if(cdbn_sink_putc(s,'"')<0)return -1; if(cdbn_sink_write(s,p,n)<0)return -1; return cdbn_sink_putc(s,'"'); }
 static char *cdbn_sink_take(json_sink_t *s,int *out_len){ if(s->oom){free(s->buf);return NULL;} if(cdbn_sink_putc(s,'\0')<0)return NULL; if(out_len)*out_len=s->len-1; return s->buf; }
 
 /* ─── carried copy: contacts-subkey removal (rowmeta TU) ─────────── */
-static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
+static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	const char **ids, const int *id_lens, int n_ids)
 {
 	const char *p = cdbn_skip_ws(cvs, cve), *end = cve;
@@ -139,7 +139,7 @@ static int _emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve
 	if (cdbn_sink_putc(s, '}') < 0) return -1;
 	return 0;
 }
-static char *_contacts_drop_subkeys(const char *json, int len,
+static char *contacts_drop_subkeys(const char *json, int len,
 	const char **ids, const int *id_lens, int n_ids, int *out_len)
 {
 	const char *p, *end;
@@ -172,7 +172,7 @@ static char *_contacts_drop_subkeys(const char *json, int len,
 		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
 		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			if (_emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
+			if (emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
 		} else {
 			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}
@@ -189,7 +189,7 @@ static int fails = 0;
 	else printf("  ok:   %s\n", msg); } while (0)
 static int has(const char *hay, const char *needle){ return strstr(hay,needle)!=NULL; }
 static char *drop1(const char *doc, const char *id)
-{ const char *ids[1]={id}; int il[1]={(int)strlen(id)}; return _contacts_drop_subkeys(doc,(int)strlen(doc),ids,il,1,NULL); }
+{ const char *ids[1]={id}; int il[1]={(int)strlen(id)}; return contacts_drop_subkeys(doc,(int)strlen(doc),ids,il,1,NULL); }
 
 int main(void)
 {
@@ -200,23 +200,23 @@ int main(void)
 #endif
 
 	printf("[REV-21/1] expiry decision (now=1000, grace S=5):\n");
-	CHECK(_contact_is_expired(990, 1000, 5) == 1, "990+5<=1000 => expired");
-	CHECK(_contact_is_expired(995, 1000, 5) == 1, "995+5==1000 boundary => expired");
-	CHECK(_contact_is_expired(996, 1000, 5) == 0, "996+5>1000 => live (within skew)");
-	CHECK(_contact_is_expired(2000, 1000, 5) == 0, "future expiry => live");
-	CHECK(_contact_is_expired(0, 1000, 5) == 0, "expires==0 (permanent) => never expired");
-	CHECK(_contact_is_expired(5000000000LL, 1000, 5) == 0, "int64 future expiry => live");
+	CHECK(contact_is_expired(990, 1000, 5) == 1, "990+5<=1000 => expired");
+	CHECK(contact_is_expired(995, 1000, 5) == 1, "995+5==1000 boundary => expired");
+	CHECK(contact_is_expired(996, 1000, 5) == 0, "996+5>1000 => live (within skew)");
+	CHECK(contact_is_expired(2000, 1000, 5) == 0, "future expiry => live");
+	CHECK(contact_is_expired(0, 1000, 5) == 0, "expires==0 (permanent) => never expired");
+	CHECK(contact_is_expired(5000000000LL, 1000, 5) == 0, "int64 future expiry => live");
 
 	/* The removal transform itself is not toggled (it is mechanical); it always
 	 * drops exactly the subkeys it is given and nothing else. */
-	printf("[REV-21] _contacts_drop_subkeys removes exactly the named subkeys:\n");
+	printf("[REV-21] contacts_drop_subkeys removes exactly the named subkeys:\n");
 	{ char *o = drop1("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2},\"c\":{\"expires\":3}},\"aorhash\":7}", "b");
 	  CHECK(o && has(o,"\"a\":") && has(o,"\"c\":") && !has(o,"\"b\":"), "drop middle 'b' keeps a,c");
 	  CHECK(o && has(o,"\"aorhash\":7"), "aorhash preserved"); free(o); }
 	{ char *o = drop1("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2}},\"aorhash\":7}", "a");
 	  CHECK(o && !has(o,"\"a\":") && has(o,"\"b\":"), "drop head 'a'"); free(o); }
 	{ const char *ids[2]={"a","b"}; int il[2]={1,1};
-	  char *o=_contacts_drop_subkeys("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2}}}",(int)strlen("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2}}}"),ids,il,2,NULL);
+	  char *o=contacts_drop_subkeys("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2}}}",(int)strlen("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2}}}"),ids,il,2,NULL);
 	  CHECK(o && has(o,"\"contacts\":{}"), "drop all => empty contacts {}"); free(o); }
 	{ char *o = drop1("{\"contacts\":{\"a\":{\"expires\":1}},\"aorhash\":7}", "zzz");
 	  CHECK(o && has(o,"\"a\":"), "drop nonexistent id => unchanged"); free(o); }
@@ -238,10 +238,10 @@ int main(void)
 			{"own_exp", 900}, {"own_live", 2000} };
 		const char *ids[4]; int il[4], n = 0, k;
 		for (k = 0; k < 2; k++)
-			if (_contact_is_expired(touched[k].exp, 1000, 5)) {
+			if (contact_is_expired(touched[k].exp, 1000, 5)) {
 				ids[n] = touched[k].id; il[n] = (int)strlen(touched[k].id); n++;
 			}
-		char *o = _contacts_drop_subkeys(doc, (int)strlen(doc), ids, il, n, NULL);
+		char *o = contacts_drop_subkeys(doc, (int)strlen(doc), ids, il, n, NULL);
 		CHECK(o && !has(o, "\"own_exp\":"), "touched + expired 'own_exp' dropped");
 		CHECK(o && has(o, "\"own_live\":"), "touched + live 'own_live' kept");
 		CHECK(o && has(o, "\"other_exp\":"), "UNTOUCHED expired 'other_exp' KEPT (no collateral delete)");

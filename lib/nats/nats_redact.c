@@ -169,7 +169,7 @@ void nats_redact_url(const char *url, char *out, size_t out_sz)
  * A configured row-key prefix ("usrloc") fits; an AoR fragment does not. */
 #define REDACT_KEY_NS_MAX 12
 
-static int _ns_char_safe(unsigned char c)
+static int ns_char_safe(unsigned char c)
 {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
 	       (c >= '0' && c <= '9') || c == '_' || c == '-';
@@ -202,7 +202,7 @@ void nats_redact_key(const char *key, char *out, size_t out_sz)
 	const char *dot = strchr(key, '.');
 	if (dot && dot != key && (size_t)(dot - key) <= REDACT_KEY_NS_MAX) {
 		size_t i, n = (size_t)(dot - key);
-		for (i = 0; i < n && _ns_char_safe((unsigned char)key[i]); i++)
+		for (i = 0; i < n && ns_char_safe((unsigned char)key[i]); i++)
 			;
 		if (i == n)
 			pfx = n + 1;	/* include the '.' */

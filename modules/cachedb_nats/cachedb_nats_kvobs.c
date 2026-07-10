@@ -59,7 +59,7 @@
 /* pure helpers — byte-identical to the carried copies in tests/        */
 /* ==================================================================== */
 
-static int _kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
+static int kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	char num[24];
@@ -133,7 +133,7 @@ int cdbn_kvobs_filter_parse(const char *s, int len, struct kvobs_filter *f)
 			;
 		if (eq == te || eq == tok)
 			return -1;
-		if (_kvobs_filter_kv(f, tok, (int)(eq - tok),
+		if (kvobs_filter_kv(f, tok, (int)(eq - tok),
 				eq + 1, (int)(te - eq - 1)) < 0)
 			return -1;
 	}
@@ -156,12 +156,12 @@ int cdbn_kvobs_bucket_of_stream(const char *stream, int len,
 /* MI handlers                                                          */
 /* ==================================================================== */
 
-static const char *_storage_name(int st)
+static const char *kvobs_storage_name(int st)
 {
 	return st == js_MemoryStorage ? "memory" : "file";
 }
 
-static const char *_retention_name(int r)
+static const char *retention_name(int r)
 {
 	switch (r) {
 	case js_InterestPolicy:  return "interest";
@@ -172,7 +172,7 @@ static const char *_retention_name(int r)
 
 /* ---- nats_stream_list ---------------------------------------------- */
 
-static int _stream_name_cmp(const void *a, const void *b)
+static int stream_name_cmp(const void *a, const void *b)
 {
 	const jsStreamInfo *sa = *(jsStreamInfo * const *)a;
 	const jsStreamInfo *sb = *(jsStreamInfo * const *)b;
@@ -229,7 +229,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 			continue;
 		match[n++] = si;
 	}
-	qsort(match, n, sizeof(*match), _stream_name_cmp);
+	qsort(match, n, sizeof(*match), stream_name_cmp);
 	cdbn_reg_page(n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
@@ -253,7 +253,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 		for (i = start; i < start + count && rc == 0; i++) {
 			jsStreamInfo *si = match[i];
 			const char *name = si->Config->Name;
-			const char *stn = _storage_name(si->Config->Storage);
+			const char *stn = kvobs_storage_name(si->Config->Storage);
 			const char *bk; int bl;
 
 			rc |= nats_emit_rec(&em);
@@ -348,8 +348,8 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 		char *blob;
 		int blen;
 		const char *bk = NULL; int bl = 0;
-		const char *stn = _storage_name(si->Config->Storage);
-		const char *rtn = _retention_name(si->Config->Retention);
+		const char *stn = kvobs_storage_name(si->Config->Storage);
+		const char *rtn = retention_name(si->Config->Retention);
 
 		cdbn_kvobs_bucket_of_stream(sname, name.len, &bk, &bl);
 		if (fk == FMT_CSV) {
@@ -430,11 +430,11 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 				(int)strlen(si->Config->Subjects[i])) < 0)
 			goto oom;
 	if (add_mi_string(cfg, MI_SSTR("storage"),
-			(char *)_storage_name(si->Config->Storage),
-			(int)strlen(_storage_name(si->Config->Storage))) < 0 ||
+			(char *)kvobs_storage_name(si->Config->Storage),
+			(int)strlen(kvobs_storage_name(si->Config->Storage))) < 0 ||
 	    add_mi_string(cfg, MI_SSTR("retention"),
-			(char *)_retention_name(si->Config->Retention),
-			(int)strlen(_retention_name(si->Config->Retention))) < 0 ||
+			(char *)retention_name(si->Config->Retention),
+			(int)strlen(retention_name(si->Config->Retention))) < 0 ||
 	    add_mi_number(cfg, MI_SSTR("replicas"),
 			(double)si->Config->Replicas) < 0 ||
 	    add_mi_number(cfg, MI_SSTR("max_msgs_per_subject"),
@@ -477,14 +477,14 @@ oom:
 
 /* ---- nats_kv_keys ---------------------------------------------------- */
 
-static int _key_name_cmp(const void *a, const void *b)
+static int key_name_cmp(const void *a, const void *b)
 {
 	return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
 
 /* glob-filter + sort the live keys into a fresh malloc'd view (may stay
  * NULL when there is nothing to match).  Match count, or -1 on OOM. */
-static long _kv_keys_match(const kvKeysList *keys, int have_keys,
+static long kv_keys_match(const kvKeysList *keys, int have_keys,
 	const struct kvobs_filter *f, const char ***match_out)
 {
 	const char **match;
@@ -504,13 +504,13 @@ static long _kv_keys_match(const kvKeysList *keys, int have_keys,
 			continue;
 		match[n++] = keys->Keys[i];
 	}
-	qsort(match, n, sizeof(*match), _key_name_cmp);
+	qsort(match, n, sizeof(*match), key_name_cmp);
 	*match_out = match;
 	return n;
 }
 
 /* the kv_keys response envelope: bucket + counts + page.  0/-1. */
-static int _kv_keys_meta(mi_item_t *obj, const char *bucket, long live,
+static int kv_keys_meta(mi_item_t *obj, const char *bucket, long live,
 	long n, long start, long count)
 {
 	if (add_mi_string(obj, MI_SSTR("bucket"),
@@ -525,7 +525,7 @@ static int _kv_keys_meta(mi_item_t *obj, const char *bucket, long live,
 
 /* detail=1: one Get for @key -- revision/created/size; a key that vanished
  * mid-scan gets three empty table cells, or a json `note`. */
-static int _kv_key_detail(struct nats_emit *em, kvStore *kv, const char *key)
+static int kv_key_detail(struct nats_emit *em, kvStore *kv, const char *key)
 {
 	kvEntry *e = NULL;
 	int rc = 0;
@@ -587,7 +587,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 		return init_mi_error(503, MI_SSTR("key listing failed"));
 	}
 
-	n = _kv_keys_match(&keys, s == NATS_OK, &f, &match);
+	n = kv_keys_match(&keys, s == NATS_OK, &f, &match);
 	if (n < 0) {
 		nats_dl.kvKeysList_Destroy(&keys);
 		nats_dl.kvStore_Destroy(kv);
@@ -598,7 +598,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (_kv_keys_meta(obj, bucket, s == NATS_OK ? keys.Count : 0,
+	if (kv_keys_meta(obj, bucket, s == NATS_OK ? keys.Count : 0,
 			n, start, count) < 0)
 		goto oom;
 	if (f.format == FMT_JSON && !f.detail) {
@@ -628,7 +628,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 			rc |= nats_emit_str(&em, MI_SSTR("key"),
 				match[i], (int)strlen(match[i]));
 			if (f.detail)
-				rc |= _kv_key_detail(&em, kv, match[i]);
+				rc |= kv_key_detail(&em, kv, match[i]);
 			rc |= nats_emit_end(&em);
 		}
 		if (rc < 0) {

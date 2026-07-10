@@ -51,7 +51,7 @@
 
 /* ─── carried copy of the production helpers (cachedb_nats_json_ser.c) ─── */
 
-static int _kv_char_safe(unsigned char c)
+static int sink_kv_char_safe(unsigned char c)
 {
 	if ((c >= '0' && c <= '9') ||
 	    (c >= 'A' && c <= 'Z') ||
@@ -78,7 +78,7 @@ char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 	if (!out) return NULL;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
-		if (c != '=' && _kv_char_safe(c)) {
+		if (c != '=' && sink_kv_char_safe(c)) {
 			out[w++] = (char)c;
 		} else {
 			out[w++] = '=';
@@ -164,7 +164,7 @@ int main(void)
 #endif
 	printf("[REV-23] backslash is escaped:\n");
 	CHECK(enc_has("a\\b", "=5C"), "'\\\\' -> =5C (escaped, not literal)");
-	CHECK(!_kv_char_safe('\\'), "_kv_char_safe('\\\\') == 0");
+	CHECK(!sink_kv_char_safe('\\'), "sink_kv_char_safe('\\\\') == 0");
 
 	printf("[REV-23] reserved/separator handling:\n");
 	CHECK(enc_has("a@b", "=40"), "'@' -> =40");

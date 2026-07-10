@@ -18,7 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Structural wiring test for the single-allocation index-entry
- * blob.  Cuts _get_or_create_entry_in's 3 shm_mallocs (entry
+ * blob.  Cuts get_or_create_entry_in's 3 shm_mallocs (entry
  * struct + field_value + keys[] array) into one combined blob,
  * with the keys[] inline until it grows past NATS_IDX_KEYS_INLINE
  * and is replaced by a separate allocation.
@@ -26,11 +26,11 @@
  * Asserts:
  *  - The struct gained the keys_inline flag and the
  *    NATS_IDX_KEYS_INLINE macro
- *  - _get_or_create_entry_in does ONE shm_malloc, with field_value
+ *  - get_or_create_entry_in does ONE shm_malloc, with field_value
  *    and keys[] both pointer-arithmetic'd into the same blob
  *  - The keys[] grow path detects keys_inline=1, allocates a fresh
  *    array, copies the inline contents, clears the flag
- *  - _free_entry skips the separate shm_free for the inline case
+ *  - free_entry skips the separate shm_free for the inline case
  *  - The single-blob shm_free covers the entry + field_value +
  *    inline keys
  *
@@ -71,15 +71,15 @@ int main(void)
 		"int keys_inline"),
 		"nats_idx_entry struct has keys_inline flag");
 
-	/* Single-alloc layout in _get_or_create_entry_in.  The blob is
+	/* Single-alloc layout in get_or_create_entry_in.  The blob is
 	 * the size of the entry struct + field_value bytes + inline
 	 * keys[] slots, all in one shm_malloc. */
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"size_t blob_sz"),
-		"_get_or_create_entry_in computes a single blob size");
+		"get_or_create_entry_in computes a single blob size");
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"shm_malloc(blob_sz)"),
-		"_get_or_create_entry_in does ONE shm_malloc for the blob");
+		"get_or_create_entry_in does ONE shm_malloc for the blob");
 
 	/* The blob's three regions are pointer-arithmetic'd, NOT
 	 * separately shm_malloc'd. */
@@ -93,21 +93,21 @@ int main(void)
 		"e->keys_inline  = 1"),
 		"keys_inline flag set to 1 on initial blob allocation");
 
-	/* The grow path in _entry_add_key handles inline -> external. */
+	/* The grow path in entry_add_key handles inline -> external. */
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"e->keys_inline  = 0"),
-		"_entry_add_key clears keys_inline when growing");
+		"entry_add_key clears keys_inline when growing");
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"if (e->keys_inline)"),
-		"_entry_add_key branches on keys_inline at grow site");
+		"entry_add_key branches on keys_inline at grow site");
 
-	/* _free_entry conditionally frees keys[]. */
+	/* free_entry conditionally frees keys[]. */
 	ASSERT(file_contains("../../cachedb_nats_fts/fts_index.c",
 		"if (!e->keys_inline && e->keys)"),
-		"_free_entry skips keys[] free when still inline");
+		"free_entry skips keys[] free when still inline");
 
 	/* The old multi-shm_malloc layout is gone -- exactly one
-	 * shm_malloc in _get_or_create_entry_in.  This catches a
+	 * shm_malloc in get_or_create_entry_in.  This catches a
 	 * regression where someone accidentally re-introduces a
 	 * separate allocation for field_value or keys.  The check
 	 * counts shm_malloc lines between the function header and
@@ -119,7 +119,7 @@ int main(void)
 		int in_func = 0;
 		int mallocs_in_func = 0;
 		while (f && fgets(line, sizeof(line), f)) {
-			if (strstr(line, "_get_or_create_entry_in(nats_search_idx"))
+			if (strstr(line, "get_or_create_entry_in(nats_search_idx"))
 				in_func = 1;
 			if (in_func) {
 				if (strstr(line, "shm_malloc("))
@@ -134,7 +134,7 @@ int main(void)
 		}
 		if (f) fclose(f);
 		ASSERT(mallocs_in_func == 1,
-		       "_get_or_create_entry_in does exactly one shm_malloc");
+		       "get_or_create_entry_in does exactly one shm_malloc");
 	}
 
 	/* The intern table is still wired -- the blob change must

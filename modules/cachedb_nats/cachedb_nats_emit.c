@@ -35,13 +35,13 @@
 /* table backend — names ignored, cells appended in call order          */
 /* ==================================================================== */
 
-static int _emt_rec(struct nats_emit *e)
+static int emt_rec(struct nats_emit *e)
 {
 	(void)e;
 	return 0;
 }
 
-static int _emt_str(struct nats_emit *e, const char *name, int nlen,
+static int emt_str(struct nats_emit *e, const char *name, int nlen,
 	const char *v, int vlen)
 {
 	(void)name; (void)nlen;
@@ -49,7 +49,7 @@ static int _emt_str(struct nats_emit *e, const char *name, int nlen,
 	return e->t.oom ? -1 : 0;
 }
 
-static int _emt_i64(struct nats_emit *e, const char *name, int nlen,
+static int emt_i64(struct nats_emit *e, const char *name, int nlen,
 	long long v)
 {
 	(void)name; (void)nlen;
@@ -57,32 +57,32 @@ static int _emt_i64(struct nats_emit *e, const char *name, int nlen,
 	return e->t.oom ? -1 : 0;
 }
 
-static int _emt_absent(struct nats_emit *e, const char *name, int nlen)
+static int emt_absent(struct nats_emit *e, const char *name, int nlen)
 {
 	(void)name; (void)nlen;
 	fmt_empty(&e->t);
 	return e->t.oom ? -1 : 0;
 }
 
-static int _emt_lit(struct nats_emit *e, const char *v, int vlen)
+static int emt_lit(struct nats_emit *e, const char *v, int vlen)
 {
 	fmt_str(&e->t, v, vlen);
 	return e->t.oom ? -1 : 0;
 }
 
-static int _emt_end(struct nats_emit *e)
+static int emt_end(struct nats_emit *e)
 {
 	fmt_end_record(&e->t);
 	return e->t.oom ? -1 : 0;
 }
 
 static const struct nats_emit_ops _emit_table_ops = {
-	.rec    = _emt_rec,
-	.str    = _emt_str,
-	.i64    = _emt_i64,
-	.absent = _emt_absent,
-	.lit    = _emt_lit,
-	.end    = _emt_end,
+	.rec    = emt_rec,
+	.str    = emt_str,
+	.i64    = emt_i64,
+	.absent = emt_absent,
+	.lit    = emt_lit,
+	.end    = emt_end,
 };
 
 int nats_emit_open_fmt(struct nats_emit *e, int kind, int eol_lf, int header,
@@ -113,13 +113,13 @@ void nats_emit_abort(struct nats_emit *e)
 /* MI backend — rows become objects in a json array; absent/lit no-ops  */
 /* ==================================================================== */
 
-static int _emi_rec(struct nats_emit *e)
+static int emi_rec(struct nats_emit *e)
 {
 	e->cur = add_mi_object(e->arr, NULL, 0);
 	return e->cur ? 0 : -1;
 }
 
-static int _emi_str(struct nats_emit *e, const char *name, int nlen,
+static int emi_str(struct nats_emit *e, const char *name, int nlen,
 	const char *v, int vlen)
 {
 	if (!e->cur)                    /* rec() failed or never called */
@@ -127,7 +127,7 @@ static int _emi_str(struct nats_emit *e, const char *name, int nlen,
 	return add_mi_string(e->cur, (char *)name, nlen, (char *)v, vlen);
 }
 
-static int _emi_i64(struct nats_emit *e, const char *name, int nlen,
+static int emi_i64(struct nats_emit *e, const char *name, int nlen,
 	long long v)
 {
 	if (!e->cur)
@@ -135,31 +135,31 @@ static int _emi_i64(struct nats_emit *e, const char *name, int nlen,
 	return add_mi_number(e->cur, (char *)name, nlen, (double)v);
 }
 
-static int _emi_absent(struct nats_emit *e, const char *name, int nlen)
+static int emi_absent(struct nats_emit *e, const char *name, int nlen)
 {
 	(void)e; (void)name; (void)nlen;
 	return 0;
 }
 
-static int _emi_lit(struct nats_emit *e, const char *v, int vlen)
+static int emi_lit(struct nats_emit *e, const char *v, int vlen)
 {
 	(void)e; (void)v; (void)vlen;
 	return 0;
 }
 
-static int _emi_end(struct nats_emit *e)
+static int emi_end(struct nats_emit *e)
 {
 	(void)e;
 	return 0;
 }
 
 static const struct nats_emit_ops _emit_mi_ops = {
-	.rec    = _emi_rec,
-	.str    = _emi_str,
-	.i64    = _emi_i64,
-	.absent = _emi_absent,
-	.lit    = _emi_lit,
-	.end    = _emi_end,
+	.rec    = emi_rec,
+	.str    = emi_str,
+	.i64    = emi_i64,
+	.absent = emi_absent,
+	.lit    = emi_lit,
+	.end    = emi_end,
 };
 
 int nats_emit_open_mi(struct nats_emit *e, mi_item_t *obj,
@@ -180,14 +180,14 @@ int nats_emit_open(struct nats_emit *e, mi_item_t *obj,
 	return nats_emit_open_fmt(e, kind, eol_lf, header, cols, ncols);
 }
 
-static const char *_emit_fmt_name(int kind)
+static const char *emit_fmt_name(int kind)
 {
 	return kind == FMT_CSV ? "csv" : kind == FMT_TXT ? "txt" : "json";
 }
 
 int nats_emit_attach_blob(mi_item_t *obj, int kind, char *blob, int blen)
 {
-	const char *fn = _emit_fmt_name(kind);
+	const char *fn = emit_fmt_name(kind);
 	int rc = -1;
 
 	if (blob &&

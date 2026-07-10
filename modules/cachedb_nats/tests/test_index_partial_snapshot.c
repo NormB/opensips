@@ -21,7 +21,7 @@
  * (NATS_TIMEOUT after the subscription is established but before the
  * end-of-snapshot sentinel) must be treated as a FAILED snapshot.
  *
- * The defect: _drain_kv_snapshot() broke out of its loop on
+ * The defect: drain_kv_snapshot() broke out of its loop on
  * NATS_TIMEOUT and returned the partial entry count as success, and
  * nats_json_index_rebuild() then atomically swapped the PARTIAL shadow
  * index over the complete live one (it even coerced a -1 drain to

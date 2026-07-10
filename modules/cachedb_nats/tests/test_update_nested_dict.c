@@ -99,7 +99,7 @@ static const char *cdbn_skip_json_value(const char *p, const char *end)
 	return p;
 }
 
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -215,7 +215,7 @@ static char *_render_leaf(char val_type,
 		buf = malloc(cap);
 		if (!buf) return NULL;
 		buf[0] = '"';
-		n = _json_escape(val_str, val_len, buf + 1, cap - 2);
+		n = json_escape(val_str, val_len, buf + 1, cap - 2);
 		if (n < 0) { free(buf); return NULL; }
 		buf[1 + n] = '"';
 		buf[2 + n] = '\0';
@@ -260,7 +260,7 @@ static char *_kv_token(const char *field, int flen,
 	char *buf = malloc(cap);
 	if (!buf) return NULL;
 	buf[0] = '"';
-	n = _json_escape(field, flen, buf + 1, cap - 3 - rendered_len);
+	n = json_escape(field, flen, buf + 1, cap - 3 - rendered_len);
 	if (n < 0) { free(buf); return NULL; }
 	buf[1 + n]     = '"';
 	buf[1 + n + 1] = ':';

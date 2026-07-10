@@ -83,11 +83,11 @@ int main(void)
 		"no kvStore_Keys() enumeration left");
 	/* The reap SWEEP must issue zero per-key Gets (the watch pass carries
 	 * values).  The only allowed kvStore_Get in this TU is the TTL
-	 * canary's single one-shot verdict read (_ttl_canary_check) -- one
+	 * canary's single one-shot verdict read (ttl_canary_check) -- one
 	 * key, once per process lifetime, not O(bucket). */
 	{
 		int gets = count(src, "nats_dl.kvStore_Get(");
-		const char *canary = strstr(src, "_ttl_canary_check");
+		const char *canary = strstr(src, "ttl_canary_check");
 		ASSERT(gets <= 1, "at most one kvStore_Get in the TU");
 		if (gets == 1) {
 			ASSERT(canary != NULL

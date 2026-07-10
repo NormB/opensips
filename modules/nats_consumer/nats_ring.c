@@ -213,7 +213,7 @@ void nats_ring_destroy(nats_ring_t *r)
 #define NATS_RING_PUSH_SPIN_MAX  4096u
 
 /* CLOCK_MONOTONIC microseconds for the [P2.2] unwedge tracker. */
-static long long _ring_now_us(void)
+static long long ring_now_us(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -230,10 +230,10 @@ static long long _ring_now_us(void)
  * so JetStream redelivers it.  Returns 1 if push should retry the
  * wait (recovered), 0 to bail full as before.
  */
-static int _ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
+static int ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
 	uint64_t want)
 {
-	long long now = _ring_now_us();
+	long long now = ring_now_us();
 	long long since = atomic_load_explicit(&r->unwedge_since_us,
 		memory_order_relaxed);
 	uint64_t got;
@@ -279,7 +279,7 @@ static int _ring_try_force_unwedge(nats_ring_t *r, nats_ring_slot_t *slot,
  * the slot back to the producer under a STALLED copy; if the slot was
  * republished, the copy is torn and must be dropped (the message was
  * never acked -- JetStream redelivers). */
-static inline int _ring_pop_still_owned(const nats_ring_slot_t *slot,
+static inline int ring_pop_still_owned(const nats_ring_slot_t *slot,
 	uint64_t t)
 {
 	return __atomic_load_n(&slot->ready_gen, __ATOMIC_ACQUIRE) == t;
@@ -362,7 +362,7 @@ int nats_ring_push(nats_ring_t *r, const nats_ring_msg_t *m)
 					if (++spins >= NATS_RING_PUSH_SPIN_MAX) {
 						/* [P2.2] dead-popper recovery
 						 * before bailing full */
-						if (_ring_try_force_unwedge(r,
+						if (ring_try_force_unwedge(r,
 								slot, want)) {
 							spins = 0;
 							continue;
@@ -564,7 +564,7 @@ int nats_ring_pop(nats_ring_t *r, nats_ring_slot_t *out)
 	/* [P2.2] If a force-unwedge recycled this slot under a stalled
 	 * copy, the bytes above are torn: drop them (never released, never
 	 * acked -- JetStream redelivers the message). */
-	if (!_ring_pop_still_owned(slot, t))
+	if (!ring_pop_still_owned(slot, t))
 		return -1;
 
 	/* Mark the slot consumed at generation t so the matching producer

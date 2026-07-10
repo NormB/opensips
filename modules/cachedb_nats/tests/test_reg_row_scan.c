@@ -117,7 +117,7 @@ static const char *cdbn_skip_json_value(const char *p, const char *end)
 	}
 }
 
-static const char *_json_parse_int64(const char *p, const char *end,
+static const char *json_parse_int64(const char *p, const char *end,
 	int64_t *out)
 {
 	int neg = 0;
@@ -160,7 +160,7 @@ struct reg_row_info {
 };
 
 /* one contact object slice [cs,ce): classify + collect */
-static void _reg_scan_contact(const char *cs, const char *ce,
+static void reg_scan_contact(const char *cs, const char *ce,
 	time_t now, int grace,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
@@ -197,10 +197,10 @@ static void _reg_scan_contact(const char *cs, const char *ce,
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, ce, &v)) { expires = v; have_exp = 1; }
+			if (json_parse_int64(vs, ce, &v)) { expires = v; have_exp = 1; }
 		} else if (nlen == 8 && memcmp(name, "last_mod", 8) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, ce, &v) && v > o->last_mod)
+			if (json_parse_int64(vs, ce, &v) && v > o->last_mod)
 				o->last_mod = v;
 			(void)lm;
 		} else if ((nlen == 2 && memcmp(name, "ua", 2) == 0) ||
@@ -306,7 +306,7 @@ static int cdbn_reg_row_scan(const char *json, int len, time_t now, int grace,
 		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
-		_reg_scan_contact(vs, p, now, grace,
+		reg_scan_contact(vs, p, now, grace,
 			ua_nee, ua_len, ct_nee, ct_len, o);
 	}
 	return 0;

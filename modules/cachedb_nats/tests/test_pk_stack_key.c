@@ -128,11 +128,11 @@ int main(void)
 		const char *json = "../cachedb_nats_json.c";
 		ASSERT(file_contains(json, "cdbn_pk_target_key"),
 			"json defines the stack-buffer PK key helper");
-		/* the PK branch now lives in the _query_pk_fast_path helper
+		/* the PK branch now lives in the query_pk_fast_path helper
 		 * extracted from nats_cache_query (the design notes decomposition) */
-		ASSERT(grep_in_function(json, "_query_pk_fast_path", "cdbn_pk_target_key") >= 1,
+		ASSERT(grep_in_function(json, "query_pk_fast_path", "cdbn_pk_target_key") >= 1,
 			"PK query path uses the stack-buffer key build");
-		ASSERT(grep_in_function(json, "_query_pk_fast_path", "pkg_malloc(plen + enc") == 0,
+		ASSERT(grep_in_function(json, "query_pk_fast_path", "pkg_malloc(plen + enc") == 0,
 			"PK query path no longer pkg_mallocs the target key");
 	}
 

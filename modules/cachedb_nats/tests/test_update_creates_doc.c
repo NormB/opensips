@@ -40,7 +40,7 @@
  * -> CAS-update at the create's revision) left an un-TTL'd seed revision at
  * the bottom of the key's history; on a history-keeping bucket the key then
  * ROLLED BACK to that immortal seed when the TTL'd head expired [RC-2, spec
- * §0 E1].  Now _update_fetch_or_seed returns the seed purely as the merge
+ * §0 E1].  Now update_fetch_or_seed returns the seed purely as the merge
  * base with rev==0 (JetStream sequences are 1-based, so 0 is unambiguous
  * "no prior message") and the single CAS write creates the FULL row with its
  * TTL.  The fetch decision skeleton below locks that contract:
@@ -62,7 +62,7 @@
 
 /* ─── carried copy of the helpers under test ──────────────────────── */
 
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -122,9 +122,9 @@ static char *cdbn_build_seed_doc(const char *field, int flen,
 	esc_val   = malloc((vlen > 0 ? vlen : 1) * 6 + 1);
 	if (!esc_field || !esc_val) { free(esc_field); free(esc_val); return NULL; }
 
-	esc_field_len = _json_escape(field, flen, esc_field, flen * 6 + 1);
+	esc_field_len = json_escape(field, flen, esc_field, flen * 6 + 1);
 	esc_val_len   = vlen > 0
-		? _json_escape(val, vlen, esc_val, vlen * 6 + 1)
+		? json_escape(val, vlen, esc_val, vlen * 6 + 1)
 		: 0;
 	if (esc_field_len < 0 || esc_val_len < 0) {
 		free(esc_field); free(esc_val); return NULL;
@@ -156,7 +156,7 @@ static char *cdbn_build_seed_doc(const char *field, int flen,
 
 static int g_fails;
 
-/* ─── D2 [HREV-2]: carried copy of the _update_fetch_or_seed decision ───
+/* ─── D2 [HREV-2]: carried copy of the update_fetch_or_seed decision ───
  * Models what the fetch step does per kvStore_Get outcome.  @wrote_seed
  * reports whether a standalone seed write was issued (the RC-2 bug). */
 enum fetch_kind { FETCH_NOT_FOUND, FETCH_MARKER, FETCH_LIVE };

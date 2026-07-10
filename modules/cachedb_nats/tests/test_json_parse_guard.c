@@ -26,7 +26,7 @@
  * the SIP worker into stack exhaustion and a crash.
  *
  * The fix is a pure, iterative pre-validation guard,
- * _json_parse_guard(data, len, max_depth, max_bytes), called at the two
+ * json_parse_guard(data, len, max_depth, max_bytes), called at the two
  * cachedb_nats query call sites (cachedb_nats_json.c) BEFORE the data is
  * handed to cdb_json_to_dict().  It rejects:
  *   - NULL / non-positive / oversized (> max_bytes) input,
@@ -61,18 +61,18 @@
 #define NATS_JSON_MAX_BYTES  (1 * 1024 * 1024)
 
 /* ─── synced copy of the production guard ─────────────────────────────
- * Keep in lock-step with cachedb_nats_json.c::_json_parse_guard().     */
+ * Keep in lock-step with cachedb_nats_json.c::json_parse_guard().     */
 
 #ifdef SIMULATE_PREFIX_BUG
 /* Models the pre-fix world: nothing pre-validates the broker data. */
-static int _json_parse_guard(const char *data, int data_len,
+static int json_parse_guard(const char *data, int data_len,
 		int max_depth, int max_bytes)
 {
 	(void)data; (void)data_len; (void)max_depth; (void)max_bytes;
 	return 0;
 }
 #else
-static int _json_parse_guard(const char *data, int data_len,
+static int json_parse_guard(const char *data, int data_len,
 		int max_depth, int max_bytes)
 {
 	int i, depth = 0, in_string = 0;
@@ -171,14 +171,14 @@ int main(void)
 	/* ── benign documents the guard must ACCEPT ───────────────────── */
 	{
 		const char *flat = "{\"aor\":\"sip:a@b\",\"expires\":\"60\"}";
-		got = _json_parse_guard(flat, (int)strlen(flat),
+		got = json_parse_guard(flat, (int)strlen(flat),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == 0, "flat usrloc-style object accepted");
 	}
 	{
 		/* Nesting right at the limit must still pass. */
 		char *atlimit = make_nested(NATS_JSON_MAX_DEPTH);
-		got = _json_parse_guard(atlimit, (int)strlen(atlimit),
+		got = json_parse_guard(atlimit, (int)strlen(atlimit),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == 0, "nesting exactly at max_depth accepted");
 		free(atlimit);
@@ -186,7 +186,7 @@ int main(void)
 	{
 		/* Braces *inside a string* must not count toward depth. */
 		const char *s = "{\"k\":\"[[[[[[[[[[[[[[[[[[[[[[[[ not real ]]]]\"}";
-		got = _json_parse_guard(s, (int)strlen(s),
+		got = json_parse_guard(s, (int)strlen(s),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == 0, "brackets inside a JSON string are not counted");
 	}
@@ -204,7 +204,7 @@ int main(void)
 			"(would exhaust the real stack)");
 
 		/* The guard must reject it BEFORE it reaches cJSON. */
-		got = _json_parse_guard(deep, (int)strlen(deep),
+		got = json_parse_guard(deep, (int)strlen(deep),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == -1, "deep nesting rejected by guard");
 		free(deep);
@@ -212,7 +212,7 @@ int main(void)
 	{
 		/* One past the limit must already be rejected. */
 		char *over = make_nested(NATS_JSON_MAX_DEPTH + 1);
-		got = _json_parse_guard(over, (int)strlen(over),
+		got = json_parse_guard(over, (int)strlen(over),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == -1, "nesting one past max_depth rejected");
 		free(over);
@@ -221,28 +221,28 @@ int main(void)
 	/* ── size cap ─────────────────────────────────────────────────── */
 	{
 		const char *s = "{\"a\":\"b\"}";
-		got = _json_parse_guard(s, (int)strlen(s), NATS_JSON_MAX_DEPTH, 4);
+		got = json_parse_guard(s, (int)strlen(s), NATS_JSON_MAX_DEPTH, 4);
 		CHECK(got == -1, "oversized document (> max_bytes) rejected");
 	}
 
 	/* ── embedded NUL ─────────────────────────────────────────────── */
 	{
 		const char buf[] = {'{','"','a','"',':','"','x','\0','y','"','}'};
-		got = _json_parse_guard(buf, (int)sizeof(buf),
+		got = json_parse_guard(buf, (int)sizeof(buf),
 				NATS_JSON_MAX_DEPTH, NATS_JSON_MAX_BYTES);
 		CHECK(got == -1, "embedded NUL rejected (no silent truncation)");
 	}
 
 	/* ── degenerate inputs handled without crashing ───────────────── */
 	{
-		got = _json_parse_guard(NULL, 5, NATS_JSON_MAX_DEPTH,
+		got = json_parse_guard(NULL, 5, NATS_JSON_MAX_DEPTH,
 				NATS_JSON_MAX_BYTES);
 		CHECK(got == -1, "NULL data rejected");
-		got = _json_parse_guard("{}", 0, NATS_JSON_MAX_DEPTH,
+		got = json_parse_guard("{}", 0, NATS_JSON_MAX_DEPTH,
 				NATS_JSON_MAX_BYTES);
 		CHECK(got == -1, "zero length rejected");
 		/* Unbalanced closers must not underflow depth or crash. */
-		got = _json_parse_guard("]]]]}", 5, NATS_JSON_MAX_DEPTH,
+		got = json_parse_guard("]]]]}", 5, NATS_JSON_MAX_DEPTH,
 				NATS_JSON_MAX_BYTES);
 		CHECK(got == 0, "unbalanced closers do not crash/underflow");
 	}

@@ -67,7 +67,7 @@ static int file_contains(const char *path, const char *needle)
 
 /* ─── carried copy of the helpers under test ──────────────────── */
 
-static int _map_char_safe(unsigned char c)
+static int map_char_safe(unsigned char c)
 {
 	if ((c >= '0' && c <= '9') ||
 	    (c >= 'A' && c <= 'Z') ||
@@ -92,7 +92,7 @@ static int nats_map_encode(const char *in, int in_len, char *out, int out_size)
 	if (in_len < 0) return -1;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
-		if (_map_char_safe(c)) {
+		if (map_char_safe(c)) {
 			if (pos + 1 >= out_size) return -1;
 			out[pos++] = (char)c;
 		} else {

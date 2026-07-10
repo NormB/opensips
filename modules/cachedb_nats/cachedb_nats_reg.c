@@ -104,7 +104,7 @@ int cdbn_reg_substr(const char *hay, int hlen, const char *nee, int nlen)
 }
 
 /* one key=value token; 0 ok, -1 reject */
-static int _reg_filter_kv(struct reg_filter *f, const char *k, int klen,
+static int reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	char num[24];
@@ -161,7 +161,7 @@ static int _reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 }
 
 /* [FMT-4/7] string-valued format keys, shared shape with the kvobs parser */
-static int _reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
+static int reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	if (klen == 6 && memcmp(k, "format", 6) == 0) {
@@ -205,14 +205,14 @@ int cdbn_reg_filter_parse(const char *s, int len, struct reg_filter *f)
 		if (eq == te || eq == tok)
 			return -1;
 		{
-			int r = _reg_filter_fmt_kv(f, tok, (int)(eq - tok),
+			int r = reg_filter_fmt_kv(f, tok, (int)(eq - tok),
 				eq + 1, (int)(te - eq - 1));
 			if (r < 0)
 				return -1;
 			if (r == 0)
 				continue;
 		}
-		if (_reg_filter_kv(f, tok, (int)(eq - tok),
+		if (reg_filter_kv(f, tok, (int)(eq - tok),
 				eq + 1, (int)(te - eq - 1)) < 0)
 			return -1;
 	}
@@ -229,7 +229,7 @@ void cdbn_reg_page(long total, long limit, long offset, long *start, long *count
 	*count = (offset + limit > total) ? total - offset : limit;
 }
 
-static int _aor_cmp(const struct reg_row_info *a, const struct reg_row_info *b)
+static int reg_aor_cmp(const struct reg_row_info *a, const struct reg_row_info *b)
 {
 	int n = a->aor_len < b->aor_len ? a->aor_len : b->aor_len;
 	int c = memcmp(a->aor, b->aor, n);
@@ -256,14 +256,14 @@ int cdbn_reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b,
 		break;
 	}
 	if (c == 0 && sort != REG_SORT_AOR)
-		return _aor_cmp(a, b);          /* tie-break: AoR, ALWAYS ascending */
+		return reg_aor_cmp(a, b);          /* tie-break: AoR, ALWAYS ascending */
 	if (sort == REG_SORT_AOR)
-		c = _aor_cmp(a, b);
+		c = reg_aor_cmp(a, b);
 	return desc ? -c : c;
 }
 
 /* one contact object slice [cs,ce): classify + collect */
-static void _reg_scan_contact(const char *cs, const char *ce,
+static void reg_scan_contact(const char *cs, const char *ce,
 	time_t now, int grace,
 	const char *ua_nee, int ua_len, const char *ct_nee, int ct_len,
 	struct reg_row_info *o)
@@ -401,7 +401,7 @@ int cdbn_reg_row_scan(const char *json, int len, time_t now, int grace,
 		p = cdbn_skip_json_value(p, c_ve);
 		if (!p)
 			return -1;
-		_reg_scan_contact(vs, p, now, grace,
+		reg_scan_contact(vs, p, now, grace,
 			ua_nee, ua_len, ct_nee, ct_len, o);
 	}
 	return 0;
@@ -435,7 +435,7 @@ struct _reg_enum_pass {
 /* Per-entry visitor: the same decision ladder the old Keys+Get loop
  * had, minus the per-key round trip.  The entry is owned by the
  * enumerator (destroyed after return). */
-static int _reg_enum_entry(kvEntry *e, void *arg)
+static int reg_enum_entry(kvEntry *e, void *arg)
 {
 	struct _reg_enum_pass *p = arg;
 	const char *key = nats_dl.kvEntry_Key(e);
@@ -470,7 +470,7 @@ static int _reg_enum_entry(kvEntry *e, void *arg)
 	return 0;
 }
 
-static int _reg_scan_bucket(const struct reg_filter *f, reg_row_cb cb,
+static int reg_scan_bucket(const struct reg_filter *f, reg_row_cb cb,
 	void *arg, struct reg_scan_totals *tot)
 {
 	kvStore *kv;
@@ -503,7 +503,7 @@ static int _reg_scan_bucket(const struct reg_filter *f, reg_row_cb cb,
 	 * is exactly what an operator must not pay for running
 	 * nats_reg_summary mid-incident on a large deployment. */
 	rc = nats_kv_enum_live_values(kv, NATS_KV_ENUM_NEXT_TIMEOUT_MS,
-			_reg_enum_entry, &p);
+			reg_enum_entry, &p);
 
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	tot->ms = (t1.tv_sec - t0.tv_sec) * 1000
@@ -528,7 +528,7 @@ struct reg_summary_ctx {
 	long dom_overflow_aors;
 };
 
-static int _reg_summary_cb(const struct reg_row_info *ri, void *arg)
+static int reg_summary_cb(const struct reg_row_info *ri, void *arg)
 {
 	struct reg_summary_ctx *c = arg;
 	const char *d = NULL;
@@ -560,7 +560,7 @@ static int _reg_summary_cb(const struct reg_row_info *ri, void *arg)
 }
 
 /* the summary response envelope: bucket + totals + scan stats.  0/-1. */
-static int _reg_summary_meta(mi_item_t *obj,
+static int reg_summary_meta(mi_item_t *obj,
 	const struct reg_scan_totals *tot, time_t now)
 {
 	if (add_mi_string(obj, MI_SSTR("bucket"), kv_bucket,
@@ -609,7 +609,7 @@ mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->want_domains = domains ? 1 : 0;
 
-	if (_reg_scan_bucket(NULL, _reg_summary_cb, ctx, &tot) < 0) {
+	if (reg_scan_bucket(NULL, reg_summary_cb, ctx, &tot) < 0) {
 		free(ctx);
 		return init_mi_error(503, MI_SSTR("NATS unavailable"));
 	}
@@ -617,7 +617,7 @@ mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (_reg_summary_meta(obj, &tot, now) < 0)
+	if (reg_summary_meta(obj, &tot, now) < 0)
 		goto oom;
 
 	if (fk != FMT_JSON || ctx->want_domains) {
@@ -695,7 +695,7 @@ struct reg_list_ctx {
 	int oom;
 };
 
-static int _reg_row_match(const struct reg_row_info *ri,
+static int reg_row_match(const struct reg_row_info *ri,
 	const struct reg_filter *f, time_t now)
 {
 	(void)now;
@@ -735,13 +735,13 @@ static int _reg_row_match(const struct reg_row_info *ri,
 	return 1;
 }
 
-static int _reg_list_cb(const struct reg_row_info *ri, void *arg)
+static int reg_list_cb(const struct reg_row_info *ri, void *arg)
 {
 	struct reg_list_ctx *c = arg;
 	struct reg_row_info *slot;
 	char *copy;
 
-	if (!_reg_row_match(ri, c->f, c->now))
+	if (!reg_row_match(ri, c->f, c->now))
 		return 0;
 	if (c->n >= REG_COLLECT_CAP) {
 		c->truncated = 1;
@@ -764,14 +764,14 @@ static int _reg_list_cb(const struct reg_row_info *ri, void *arg)
 }
 
 static int g_reg_sort, g_reg_desc;
-static int _reg_qcmp(const void *a, const void *b)
+static int reg_qcmp(const void *a, const void *b)
 {
 	return cdbn_reg_row_cmp((const struct reg_row_info *)a,
 	                    (const struct reg_row_info *)b,
 	                    g_reg_sort, g_reg_desc);
 }
 
-static void _reg_list_ctx_free(struct reg_list_ctx *c)
+static void reg_list_ctx_free(struct reg_list_ctx *c)
 {
 	long i;
 	for (i = 0; i < c->n; i++)
@@ -780,7 +780,7 @@ static void _reg_list_ctx_free(struct reg_list_ctx *c)
 }
 
 /* the list response envelope: match counts, page, scan stats.  0/-1. */
-static int _reg_list_meta(mi_item_t *obj, const struct reg_list_ctx *ctx,
+static int reg_list_meta(mi_item_t *obj, const struct reg_list_ctx *ctx,
 	const struct reg_scan_totals *tot, long start, long count)
 {
 	if (add_mi_number(obj, MI_SSTR("matched"), ctx->n) < 0 ||
@@ -821,9 +821,9 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	ctx.f = &f;
 	ctx.now = now;
 
-	if (_reg_scan_bucket(&f, _reg_list_cb, &ctx, &tot) < 0) {
+	if (reg_scan_bucket(&f, reg_list_cb, &ctx, &tot) < 0) {
 		int oom = ctx.oom;
-		_reg_list_ctx_free(&ctx);
+		reg_list_ctx_free(&ctx);
 		if (oom)
 			return init_mi_error(500, MI_SSTR("out of memory"));
 		return init_mi_error(503, MI_SSTR("NATS unavailable"));
@@ -832,14 +832,14 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 	g_reg_sort = f.sort;
 	g_reg_desc = f.desc;
 	if (ctx.n > 1)
-		qsort(ctx.rows, ctx.n, sizeof(*ctx.rows), _reg_qcmp);
+		qsort(ctx.rows, ctx.n, sizeof(*ctx.rows), reg_qcmp);
 
 	cdbn_reg_page(ctx.n, f.limit, f.offset, &start, &count);
 
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (_reg_list_meta(obj, &ctx, &tot, start, count) < 0)
+	if (reg_list_meta(obj, &ctx, &tot, start, count) < 0)
 		goto oom;
 
 	{
@@ -886,11 +886,11 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 		if (nats_emit_close(&em, obj) < 0)
 			goto oom;
 	}
-	_reg_list_ctx_free(&ctx);
+	reg_list_ctx_free(&ctx);
 	return resp;
 
 oom:
-	_reg_list_ctx_free(&ctx);
+	reg_list_ctx_free(&ctx);
 	if (resp)
 		free_mi_response(resp);
 	return init_mi_error(500, MI_SSTR("out of memory"));
@@ -898,7 +898,7 @@ oom:
 
 /* ---- nats_reg_show -------------------------------------------------- */
 
-static int _add_mi_cdb_val(mi_item_t *to, const str *name, const cdb_val_t *v)
+static int add_mi_cdb_val(mi_item_t *to, const str *name, const cdb_val_t *v)
 {
 	switch (v->type) {
 	case CDB_STR:
@@ -917,7 +917,7 @@ static int _add_mi_cdb_val(mi_item_t *to, const str *name, const cdb_val_t *v)
 
 /* the "expires" int of a contact dict; like the json scan, the LAST
  * occurrence wins.  0 found, -1 absent/non-int (caller fails closed). */
-static int _contact_dict_exp(const cdb_dict_t *ct, int64_t *exp)
+static int contact_dict_exp(const cdb_dict_t *ct, int64_t *exp)
 {
 	struct list_head *_;
 	cdb_pair_t *fld;
@@ -937,7 +937,7 @@ static int _contact_dict_exp(const cdb_dict_t *ct, int64_t *exp)
 	return have;
 }
 
-static const char *_reg_state_str(int64_t exp, time_t now, int grace)
+static const char *reg_state_str(int64_t exp, time_t now, int grace)
 {
 	int st = cdbn_reg_contact_state(exp, now, grace);
 	return st == REG_C_PERMANENT ? "permanent" :
@@ -946,7 +946,7 @@ static const char *_reg_state_str(int64_t exp, time_t now, int grace)
 
 /* [FMT] emit one named field of a contact dict into the table (string ->
  * fmt_str, ints -> fmt_int, absent/null/nested -> empty field). */
-static void _show_fmt_field(struct fmt_table *t, const cdb_dict_t *ct,
+static void show_fmt_field(struct fmt_table *t, const cdb_dict_t *ct,
 	const char *name, int nlen)
 {
 	struct list_head *_;
@@ -976,7 +976,7 @@ static void _show_fmt_field(struct fmt_table *t, const cdb_dict_t *ct,
 }
 
 /* the show response envelope: aor, key, KV entry meta, row meta.  0/-1. */
-static int _show_meta(mi_item_t *obj, const str *aor, const char *key,
+static int reg_show_meta(mi_item_t *obj, const str *aor, const char *key,
 	kvEntry *e, int64_t row_exp, int64_t schema)
 {
 	if (add_mi_string(obj, MI_SSTR("aor"), aor->s, aor->len) < 0 ||
@@ -993,16 +993,16 @@ static int _show_meta(mi_item_t *obj, const str *aor, const char *key,
 }
 
 /* [FMT] one fixed-16-column table record per contact */
-static void _show_contact_fmt(struct fmt_table *t, const str *aor,
+static void show_contact_fmt(struct fmt_table *t, const str *aor,
 	const cdb_pair_t *ct, time_t now)
 {
 	int64_t exp = -1;
 
 	fmt_str(t, aor->s, aor->len);
 	fmt_str(t, ct->key.name.s, ct->key.name.len);
-	_show_fmt_field(t, &ct->val.val.dict, "contact", 7);
-	if (_contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
-		const char *sn = _reg_state_str(exp, now, nats_reap_grace);
+	show_fmt_field(t, &ct->val.val.dict, "contact", 7);
+	if (contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
+		const char *sn = reg_state_str(exp, now, nats_reap_grace);
 		fmt_str(t, sn, (int)strlen(sn));
 		fmt_int(t, exp);
 		if (exp > 0)
@@ -1014,22 +1014,22 @@ static void _show_contact_fmt(struct fmt_table *t, const str *aor,
 		fmt_empty(t);
 		fmt_empty(t);
 	}
-	_show_fmt_field(t, &ct->val.val.dict, "q", 1);
-	_show_fmt_field(t, &ct->val.val.dict, "cseq", 4);
-	_show_fmt_field(t, &ct->val.val.dict, "callid", 6);
-	_show_fmt_field(t, &ct->val.val.dict, "ua", 2);
-	_show_fmt_field(t, &ct->val.val.dict, "sock", 4);
-	_show_fmt_field(t, &ct->val.val.dict, "received", 8);
-	_show_fmt_field(t, &ct->val.val.dict, "path", 4);
-	_show_fmt_field(t, &ct->val.val.dict, "flags", 5);
-	_show_fmt_field(t, &ct->val.val.dict, "cflags", 6);
-	_show_fmt_field(t, &ct->val.val.dict, "last_mod", 8);
+	show_fmt_field(t, &ct->val.val.dict, "q", 1);
+	show_fmt_field(t, &ct->val.val.dict, "cseq", 4);
+	show_fmt_field(t, &ct->val.val.dict, "callid", 6);
+	show_fmt_field(t, &ct->val.val.dict, "ua", 2);
+	show_fmt_field(t, &ct->val.val.dict, "sock", 4);
+	show_fmt_field(t, &ct->val.val.dict, "received", 8);
+	show_fmt_field(t, &ct->val.val.dict, "path", 4);
+	show_fmt_field(t, &ct->val.val.dict, "flags", 5);
+	show_fmt_field(t, &ct->val.val.dict, "cflags", 6);
+	show_fmt_field(t, &ct->val.val.dict, "last_mod", 8);
 	fmt_end_record(t);
 }
 
 /* json: one object per contact -- id + every scalar field in STORED order,
  * then the computed state / expires_in.  0 ok, -1 OOM. */
-static int _show_contact_mi(mi_item_t *arr, const cdb_pair_t *ct, time_t now)
+static int show_contact_mi(mi_item_t *arr, const cdb_pair_t *ct, time_t now)
 {
 	mi_item_t *it;
 	struct list_head *_;
@@ -1046,11 +1046,11 @@ static int _show_contact_mi(mi_item_t *arr, const cdb_pair_t *ct, time_t now)
 		fld = list_entry(_, cdb_pair_t, list);
 		if (fld->val.type == CDB_DICT)
 			continue;
-		if (_add_mi_cdb_val(it, &fld->key.name, &fld->val) < 0)
+		if (add_mi_cdb_val(it, &fld->key.name, &fld->val) < 0)
 			return -1;
 	}
-	if (_contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
-		const char *sn = _reg_state_str(exp, now, nats_reap_grace);
+	if (contact_dict_exp(&ct->val.val.dict, &exp) == 0) {
+		const char *sn = reg_state_str(exp, now, nats_reap_grace);
 		if (add_mi_string(it, MI_SSTR("state"),
 				(char *)sn, (int)strlen(sn)) < 0)
 			return -1;
@@ -1129,7 +1129,7 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 	resp = init_mi_result_object(&obj);
 	if (!resp)
 		goto oom;
-	if (_show_meta(obj, &aor, key, e, row_exp, schema) < 0)
+	if (reg_show_meta(obj, &aor, key, e, row_exp, schema) < 0)
 		goto oom;
 
 	if (fk != FMT_JSON) {
@@ -1159,8 +1159,8 @@ mi_response_t *mi_nats_reg_show(const mi_params_t *params,
 			if (ct->val.type != CDB_DICT)
 				continue;
 			if (fmt_active)
-				_show_contact_fmt(&ftab, &aor, ct, now);
-			else if (_show_contact_mi(arr, ct, now) < 0)
+				show_contact_fmt(&ftab, &aor, ct, now);
+			else if (show_contact_mi(arr, ct, now) < 0)
 				goto oom;
 		}
 	}

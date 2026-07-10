@@ -60,7 +60,7 @@ extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 /* ------------------------------------------------------------------ */
 
 /*
- * _json_escape() — RFC 8259 string escape.
+ * json_escape() — RFC 8259 string escape.
  *
  * Writes the JSON-escaped form of @in (without surrounding quotes)
  * into @out.  Returns the number of bytes written, or -1 if the
@@ -71,7 +71,7 @@ extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
  *
  * The worst-case expansion is 6 bytes per input byte ( ...).
  */
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -136,7 +136,7 @@ int cdbn_sink_init(json_sink_t *s, int initial)
 	return 0;
 }
 
-static int _sink_grow(json_sink_t *s, int need)
+static int sink_grow(json_sink_t *s, int need)
 {
 	int newcap;
 	char *nb;
@@ -157,7 +157,7 @@ static int _sink_grow(json_sink_t *s, int need)
 int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom || n <= 0) return s->oom ? -1 : 0;
-	if (_sink_grow(s, n + 1) < 0) return -1;
+	if (sink_grow(s, n + 1) < 0) return -1;
 	memcpy(s->buf + s->len, p, n);
 	s->len += n;
 	s->buf[s->len] = '\0';
@@ -169,19 +169,19 @@ int cdbn_sink_putc(json_sink_t *s, char c)
 	return cdbn_sink_write(s, &c, 1);
 }
 
-/* Compute exactly how many bytes _json_escape will emit for `n` input
+/* Compute exactly how many bytes json_escape will emit for `n` input
  * bytes.  This is a tight character-by-character scan but a single
  * pass over the input -- much cheaper than over-reserving 6*n bytes
  * per string and forcing the sink to amortise large growth steps on
  * a write that almost never escapes (typical SIP URIs / JSON values
  * escape < 1%).
  *
- * Matches the rules in _json_escape exactly:
+ * Matches the rules in json_escape exactly:
  *   '"' '\\' '\b' '\f' '\n' '\r' '\t'  -> 2 bytes each
  *   any other control char (< 0x20)    -> 6 bytes (\u00xx)
  *   anything else                      -> 1 byte
  */
-static int _json_escape_len(const char *in, int in_len)
+static int json_escape_len(const char *in, int in_len)
 {
 	int i;
 	long long out = 0;          /* int64 so the 6x worst case can't overflow */
@@ -214,20 +214,20 @@ int cdbn_sink_emit_string(json_sink_t *s, const char *p, int n)
 	 * Saves ~5x on worst-case reservation for typical inputs (no
 	 * escapes), which on a multi-MB doc with many string fields
 	 * eliminates a substantial fraction of grow / memcpy churn. */
-	esc_len = _json_escape_len(p, n);
+	esc_len = json_escape_len(p, n);
 	if (esc_len < 0) { s->oom = 1; return -1; }  /* bad length / overflow */
 	needed  = esc_len + 2; /* + 2 quotes */
-	if (_sink_grow(s, needed + 1) < 0) return -1;
+	if (sink_grow(s, needed + 1) < 0) return -1;
 	s->buf[s->len++] = '"';
 	if (esc_len > 0) {
-		/* _json_escape reserves one byte of out_sz for a trailing NUL
+		/* json_escape reserves one byte of out_sz for a trailing NUL
 		 * (and rejects an exact fit), so it needs esc_len + 1 to emit
 		 * esc_len escaped bytes.  Passing bare esc_len made it return
 		 * -1 for ANY non-empty string, tripping the sink's sticky oom
 		 * flag and truncating the output.  The sink already reserved
 		 * the byte (grow took needed + 1); the NUL is overwritten by
 		 * the closing quote below. */
-		int written = _json_escape(p, n, s->buf + s->len, esc_len + 1);
+		int written = json_escape(p, n, s->buf + s->len, esc_len + 1);
 		if (written < 0) { s->oom = 1; return -1; }
 		s->len += written;
 	}
@@ -296,7 +296,7 @@ char *cdbn_sink_take(json_sink_t *s, int *out_len)
  * remove from), and subkey-bearing sets emit "field":{ "subkey":val }.
  *
  * Returns 0 on success, -1 on OOM or unknown pair type. */
-static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
+static int sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 {
 	struct list_head *pos;
 	cdb_pair_t *pair;
@@ -343,7 +343,7 @@ static int _sink_emit_cdb_dict(json_sink_t *s, const cdb_dict_t *dict)
 			if (cdbn_sink_write(s, "null", 4) < 0) return -1;
 			break;
 		case CDB_DICT:
-			if (_sink_emit_cdb_dict(s, &pair->val.val.dict) < 0)
+			if (sink_emit_cdb_dict(s, &pair->val.val.dict) < 0)
 				return -1;
 			break;
 		default:
@@ -370,7 +370,7 @@ char *cdbn_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 {
 	json_sink_t s;
 	if (cdbn_sink_init(&s, 256) < 0) return NULL;
-	if (_sink_emit_cdb_dict(&s, dict) < 0) {
+	if (sink_emit_cdb_dict(&s, dict) < 0) {
 		pkg_free(s.buf);
 		return NULL;
 	}
@@ -378,7 +378,7 @@ char *cdbn_serialize_cdb_dict(const cdb_dict_t *dict, int *out_len)
 }
 
 
-static int _kv_char_safe(unsigned char c)
+static int sink_kv_char_safe(unsigned char c)
 {
 	if ((c >= '0' && c <= '9') ||
 	    (c >= 'A' && c <= 'Z') ||
@@ -431,7 +431,7 @@ char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 	if (!out) return NULL;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
-		if (c != '=' && _kv_char_safe(c)) {
+		if (c != '=' && sink_kv_char_safe(c)) {
 			out[w++] = (char)c;
 		} else {
 			out[w++] = '=';
@@ -477,7 +477,7 @@ char *cdbn_pk_target_key(const char *val, int val_len,
 	w = plen;
 	for (i = 0; i < val_len; i++) {
 		unsigned char c = (unsigned char)val[i];
-		if (c != '=' && _kv_char_safe(c)) {
+		if (c != '=' && sink_kv_char_safe(c)) {
 			buf[w++] = (char)c;
 		} else {
 			buf[w++] = '=';
@@ -516,9 +516,9 @@ char *cdbn_build_seed_doc(const char *field, int flen,
 		pkg_free(esc_field); pkg_free(esc_val);
 		return NULL;
 	}
-	esc_field_len = _json_escape(field, flen, esc_field, flen * 6 + 1);
+	esc_field_len = json_escape(field, flen, esc_field, flen * 6 + 1);
 	esc_val_len   = vlen > 0
-		? _json_escape(val, vlen, esc_val, vlen * 6 + 1)
+		? json_escape(val, vlen, esc_val, vlen * 6 + 1)
 		: 0;
 	if (esc_field_len < 0 || esc_val_len < 0) {
 		pkg_free(esc_field); pkg_free(esc_val);

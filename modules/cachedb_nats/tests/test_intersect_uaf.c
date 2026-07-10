@@ -20,7 +20,7 @@
  * Regression test for the use-after-free in nats_cache_query at
  * modules/cachedb_nats/cachedb_nats_json.c:1011-1035.
  *
- * The bug: _intersect_keys returns pointers aliased into argument @a.
+ * The bug: qry_intersect_keys returns pointers aliased into argument @a.
  * The caller frees @a's strings, then strdup's from the now-dangling
  * pointers in the result.  This file builds a faithful reproducer of
  * that exact pattern, runs both the buggy and fixed versions, and
@@ -42,9 +42,9 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-/* ─── exact copy of _intersect_keys from cachedb_nats_json.c:845 ─── */
+/* ─── exact copy of qry_intersect_keys from cachedb_nats_json.c:845 ─── */
 
-static int _intersect_keys(char **a, int a_count,
+static int qry_intersect_keys(char **a, int a_count,
 	char **b, int b_count,
 	char ***out_keys, int *out_count)
 {
@@ -92,7 +92,7 @@ static int run_buggy(void)
 		match_keys[k] = strdup(src_a[k]);
 	int match_count = a_count;
 
-	/* Step 2: simulate next iteration — _intersect_keys returns aliases
+	/* Step 2: simulate next iteration — qry_intersect_keys returns aliases
 	 * into match_keys.  Caller frees match_keys[k] BEFORE strdup'ing
 	 * from new_keys[k] (which aliases match_keys[k]). */
 	char **e_keys = malloc(sizeof(char *) * b_count);
@@ -101,7 +101,7 @@ static int run_buggy(void)
 
 	char **new_keys = NULL;
 	int new_count = 0;
-	if (_intersect_keys(match_keys, match_count, e_keys, b_count,
+	if (qry_intersect_keys(match_keys, match_count, e_keys, b_count,
 			&new_keys, &new_count) < 0) {
 		fprintf(stderr, "buggy: intersect alloc failed\n");
 		return -1;
@@ -149,7 +149,7 @@ static int run_fixed(void)
 
 	char **new_keys = NULL;
 	int new_count = 0;
-	if (_intersect_keys(match_keys, match_count, e_keys, b_count,
+	if (qry_intersect_keys(match_keys, match_count, e_keys, b_count,
 			&new_keys, &new_count) < 0) {
 		fprintf(stderr, "fixed: intersect alloc failed\n");
 		return -1;

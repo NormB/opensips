@@ -53,7 +53,7 @@
 #include "../../../lib/list.h"
 
 /* ─── carried copy of the production decision (rowmeta TU) ───────── */
-static int _contact_is_expired(int64_t expires, long now, int grace)
+static int contact_is_expired(int64_t expires, long now, int grace)
 {
 	return expires != 0 && (expires + (int64_t)grace) <= (int64_t)now;
 }
@@ -61,11 +61,11 @@ static int _omit_contact(int has_expires, int64_t expires, long now, int grace)
 {
 #ifdef READFILT_CURRENT
 	(void)has_expires; (void)expires; (void)now; (void)grace;
-	(void)_contact_is_expired; return 0;
+	(void)contact_is_expired; return 0;
 #else
 	if (!has_expires)
 		return 1;                  /* fail-closed: unparseable => expired */
-	return _contact_is_expired(expires, now, grace);
+	return contact_is_expired(expires, now, grace);
 #endif
 }
 

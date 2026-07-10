@@ -23,7 +23,7 @@
  * input value containing `"` would close the value early and let the
  * tail bytes inject arbitrary JSON.
  *
- * The fix introduces a static helper `_json_escape(in, in_len, out,
+ * The fix introduces a static helper `json_escape(in, in_len, out,
  * out_sz)` that writes the escaped form (without surrounding quotes)
  * of an input string and returns the number of bytes written, or -1
  * on output overflow.  The encoder follows RFC 8259 section 7:
@@ -43,7 +43,7 @@
 
 /* ─── copy of the helper under test ───────────────────────────── */
 
-static int _json_escape(const char *in, int in_len, char *out, int out_sz)
+static int json_escape(const char *in, int in_len, char *out, int out_sz)
 {
 	int i, w = 0;
 	if (out_sz <= 0) return -1;
@@ -118,7 +118,7 @@ static int looks_like_valid_json_string(const char *quoted, int qlen)
 static int g_fails;
 #define ESCAPED(in, expected, label) do { \
 	char buf[256]; \
-	int n = _json_escape((in), (int)strlen(in), buf, sizeof(buf)); \
+	int n = json_escape((in), (int)strlen(in), buf, sizeof(buf)); \
 	if (n < 0 || strcmp(buf, (expected)) != 0) { \
 		fprintf(stderr, "FAIL: %s\n  in:       \"%s\"\n  got:      \"%s\"\n  expected: \"%s\"\n", \
 			(label), (in), n >= 0 ? buf : "<overflow>", (expected)); \
@@ -175,7 +175,7 @@ int main(void)
 	/* overflow */
 	{
 		char buf[3];
-		int n = _json_escape("abcdef", 6, buf, sizeof(buf));
+		int n = json_escape("abcdef", 6, buf, sizeof(buf));
 		if (n != -1) {
 			fprintf(stderr, "FAIL: overflow not detected (n=%d)\n", n);
 			g_fails++;
@@ -190,8 +190,8 @@ int main(void)
 	{
 		const char in[] = {0x01, 0};
 		char b6[6], b7[7];
-		int n6 = _json_escape(in, 1, b6, sizeof(b6));   /* 6: NUL needs 7, too small */
-		int n7 = _json_escape(in, 1, b7, sizeof(b7));   /* 7: exact fit */
+		int n6 = json_escape(in, 1, b6, sizeof(b6));   /* 6: NUL needs 7, too small */
+		int n7 = json_escape(in, 1, b7, sizeof(b7));   /* 7: exact fit */
 		if (n6 != -1) {
 			fprintf(stderr, "FAIL: \\u escape did not reject at out_sz=6 (n=%d)\n", n6);
 			g_fails++;

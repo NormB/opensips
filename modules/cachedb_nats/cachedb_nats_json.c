@@ -60,14 +60,14 @@ extern int   nats_expired_linger;  /* [HREV-3] physical-retention window     */
 extern int   nats_max_value_size; /* defined in cachedb_nats.c ([REV-5] cap) */
 /* kv_bucket is declared in cachedb_nats_dbase.h (included above) */
 
-/* The index search helpers (_lookup, _intersect_keys, the retained-key
+/* The index search helpers (qry_lookup, qry_intersect_keys, the retained-key
  * snapshot walk) moved to the optional cachedb_nats_fts module (P1.2);
  * non-PK filters are served through the cdbn_fts binds. */
 
 /* PK fast path: single is_pk=1 EQ filter -> one kvStore_Get, no index.
  * Returns 0 on success (including not-found = empty result), -1 on
  * error.  See the rationale comment at the call site. */
-static int _query_pk_fast_path(nats_cachedb_con *ncon,
+static int query_pk_fast_path(nats_cachedb_con *ncon,
 	const cdb_filter_t *filter, cdb_res_t *res)
 {
 	kvEntry *entry = NULL;
@@ -170,7 +170,7 @@ static int _query_pk_fast_path(nats_cachedb_con *ncon,
 /* Fetch the matched documents from the KV and append parsed rows to
  * @res.  Per-row fetch/parse problems skip the row (the KV is the
  * truth); only allocation failure is fatal (-1). */
-static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
+static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 	int result_cnt, cdb_res_t *res)
 {
 	kvEntry *entry = NULL;
@@ -268,9 +268,9 @@ static int _query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
  * nats_cache_query() — cachedb query callback: multi-filter AND search.
  *
  * Iterates the linked list of cdb_filter_t filters.  For each filter
- * (field == value), looks up matching document keys via _lookup().  The
+ * (field == value), looks up matching document keys via qry_lookup().  The
  * first filter's key set is copied; subsequent filters are intersected
- * with the running result using _intersect_keys(), implementing AND
+ * with the running result using qry_intersect_keys(), implementing AND
  * semantics.  After all filters are applied, the matched documents are
  * fetched from the NATS KV store, parsed into cdb_row_t structs via
  * cdbn_safe_json_to_dict() (which guards then calls cdb_json_to_dict()), and
@@ -334,7 +334,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	 * enable_search_index modparam below). */
 	if (filter && !filter->next && filter->key.is_pk &&
 	    filter->val.is_str && filter->op == CDB_OP_EQ)
-		return _query_pk_fast_path(ncon, filter, res);
+		return query_pk_fast_path(ncon, filter, res);
 
 	if (!cdbn_fts_on) {
 		LM_ERR("query: non-PK filter rejected -- the search index "
@@ -357,7 +357,7 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	/* result cap applied inside the FTS module (fts_max_results) */
 	result_cnt = match_count;
 
-	if (_query_fetch_rows(ncon, match_keys, result_cnt, res) < 0) {
+	if (query_fetch_rows(ncon, match_keys, result_cnt, res) < 0) {
 		cdbn_fts.release_keyset(match_keys, match_count);
 		cdb_free_rows(res);
 		return -1;
@@ -389,7 +389,7 @@ typedef struct apply_op {
 	char *owned;           /* malloc'd serialized JSON for CDB_DICT */
 } apply_op_t;
 
-static void _free_apply_ops(apply_op_t *ops, int n)
+static void free_apply_ops(apply_op_t *ops, int n)
 {
 	int i;
 	for (i = 0; i < n; i++)
@@ -401,7 +401,7 @@ static void _free_apply_ops(apply_op_t *ops, int n)
  * Materializes any CDB_DICT subtree once via the new sink-based
  * cdbn_serialize_cdb_dict (Tier-1 #1).  Returns NULL on alloc / unknown
  * type. */
-static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
+static apply_op_t *classify_pairs(const cdb_dict_t *pairs, int *out_count)
 {
 	struct list_head *pos;
 	const cdb_pair_t *pair;
@@ -449,7 +449,7 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 			ops[i].owned = cdbn_serialize_cdb_dict(&pair->val.val.dict,
 				&slen);
 			if (!ops[i].owned) {
-				_free_apply_ops(ops, n);
+				free_apply_ops(ops, n);
 				return NULL;
 			}
 			ops[i].val_type = 'O';
@@ -461,7 +461,7 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 			LM_ERR("unknown cdb pair type %d for field '%.*s'\n",
 				pair->val.type, pair->key.name.len,
 				pair->key.name.s); /* not PII: field name only */
-			_free_apply_ops(ops, n);
+			free_apply_ops(ops, n);
 			return NULL;
 		}
 		i++;
@@ -472,7 +472,7 @@ static apply_op_t *_classify_pairs(const cdb_dict_t *pairs, int *out_count)
 
 /* Emit a classified op's value into the sink.  Used both for top-level
  * set emissions and for subkey-set emissions inside an inner object. */
-static int _sink_emit_op_value(json_sink_t *s, const apply_op_t *op)
+static int sink_emit_op_value(json_sink_t *s, const apply_op_t *op)
 {
 	switch (op->val_type) {
 	case 'S':
@@ -496,7 +496,7 @@ static int _sink_emit_op_value(json_sink_t *s, const apply_op_t *op)
  *
  * Returns the index of the dominant top-level op, or -1 if no
  * top-level op exists for this field. */
-static int _find_top_op(apply_op_t *ops, int n,
+static int find_top_op(apply_op_t *ops, int n,
 	const char *fname, int flen, int *subkey_count)
 {
 	int i, top_idx = -1, sk = 0;
@@ -516,7 +516,7 @@ static int _find_top_op(apply_op_t *ops, int n,
  * range [@vstart, @vend).  Walks the inner object once, applying
  * subkey set/unset ops; appends any not-yet-seen subkey ops at the
  * end.  Marks each consumed op in @ops. */
-/* Per-subkey body of _sink_merge_subkeys, invoked by the shared
+/* Per-subkey body of sink_merge_subkeys, invoked by the shared
  * iterator over the INNER object span [P2.5]. */
 struct merge_walk_ctx {
 	json_sink_t *s;
@@ -527,7 +527,7 @@ struct merge_walk_ctx {
 	int          first;
 };
 
-static int _merge_subkey_cb(const char *kfield, int kflen,
+static int merge_subkey_cb(const char *kfield, int kflen,
 	const char *kvstart, const char *kvend, void *ud)
 {
 	struct merge_walk_ctx *c = ud;
@@ -574,7 +574,7 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 			if (cdbn_sink_write(s, kvstart,
 					(int)(kvend - kvstart)) < 0)
 				return -1;
-		} else if (_sink_emit_op_value(s, &c->ops[op_idx]) < 0) {
+		} else if (sink_emit_op_value(s, &c->ops[op_idx]) < 0) {
 			return -1;
 		}
 	} else {
@@ -593,7 +593,7 @@ static int _merge_subkey_cb(const char *kfield, int kflen,
 	return 0;
 }
 
-static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
+static int sink_merge_subkeys(json_sink_t *s, const char *vstart,
 	const char *vend, apply_op_t *ops, int n,
 	const char *fname, int flen)
 {
@@ -609,7 +609,7 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 	ctx.flen = flen;
 	ctx.first = 1;
 	if (cdbn_json_foreach_top_field(vstart, (int)(vend - vstart),
-			_merge_subkey_cb, &ctx) < 0)
+			merge_subkey_cb, &ctx) < 0)
 		return -1;
 	first = ctx.first;
 
@@ -628,7 +628,7 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 		if (cdbn_sink_emit_string(s, q->subkey.s, q->subkey.len) < 0)
 			return -1;
 		if (cdbn_sink_putc(s, ':') < 0) return -1;
-		if (_sink_emit_op_value(s, &ops[i]) < 0) return -1;
+		if (sink_emit_op_value(s, &ops[i]) < 0) return -1;
 	}
 
 	if (cdbn_sink_putc(s, '}') < 0) return -1;
@@ -638,7 +638,7 @@ static int _sink_merge_subkeys(json_sink_t *s, const char *vstart,
 /* Single-pass apply: copy the input doc through to a fresh malloc'd
  * buffer, applying every cdb_pair_t in @pairs.  Returns NULL on
  * malformed input or any error.  Caller frees with pkg_free(). */
-/* Per-field body of _apply_pairs_one_pass, invoked by the shared
+/* Per-field body of apply_pairs_one_pass, invoked by the shared
  * top-level iterator [P2.5].  Routes each existing field through the
  * matching op (replace / drop / subkey-merge / verbatim copy). */
 struct apply_walk_ctx {
@@ -648,14 +648,14 @@ struct apply_walk_ctx {
 	int          first;
 };
 
-static int _apply_field_cb(const char *fname, int flen,
+static int apply_field_cb(const char *fname, int flen,
 	const char *vstart, const char *vend, void *ud)
 {
 	struct apply_walk_ctx *c = ud;
 	json_sink_t *s = c->s;
 	int sk_count = 0, top_idx, i;
 
-	top_idx = _find_top_op(c->ops, c->n_ops, fname, flen, &sk_count);
+	top_idx = find_top_op(c->ops, c->n_ops, fname, flen, &sk_count);
 
 	if (top_idx >= 0) {
 		c->ops[top_idx].consumed = 1;
@@ -666,7 +666,7 @@ static int _apply_field_cb(const char *fname, int flen,
 		/* fname is an already-escaped existing name — raw copy. */
 		if (cdbn_sink_emit_raw_string(s, fname, flen) < 0) return -1;
 		if (cdbn_sink_putc(s, ':') < 0) return -1;
-		if (_sink_emit_op_value(s, &c->ops[top_idx]) < 0) return -1;
+		if (sink_emit_op_value(s, &c->ops[top_idx]) < 0) return -1;
 		/* Mark any subkey ops on the same field as consumed —
 		 * the top-level set replaces the whole value. */
 		for (i = 0; i < c->n_ops; i++) {
@@ -683,7 +683,7 @@ static int _apply_field_cb(const char *fname, int flen,
 		/* fname is an already-escaped existing name — raw copy. */
 		if (cdbn_sink_emit_raw_string(s, fname, flen) < 0) return -1;
 		if (cdbn_sink_putc(s, ':') < 0) return -1;
-		if (_sink_merge_subkeys(s, vstart, vend,
+		if (sink_merge_subkeys(s, vstart, vend,
 				c->ops, c->n_ops, fname, flen) < 0) return -1;
 	} else {
 		if (!c->first && cdbn_sink_putc(s, ',') < 0) return -1;
@@ -697,7 +697,7 @@ static int _apply_field_cb(const char *fname, int flen,
 	return 0;
 }
 
-static char *_apply_pairs_one_pass(const char *json, int json_len,
+static char *apply_pairs_one_pass(const char *json, int json_len,
 	const cdb_dict_t *pairs, int *out_len)
 {
 	json_sink_t s;
@@ -710,7 +710,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 
 	if (!json || json_len <= 0 || !pairs) return NULL;
 
-	ops = _classify_pairs(pairs, &n_ops);
+	ops = classify_pairs(pairs, &n_ops);
 	if (!ops) return NULL;
 
 	if (cdbn_sink_init(&s, json_len + 256) < 0) goto out;
@@ -721,7 +721,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 	ctx.n_ops = n_ops;
 	ctx.first = 1;
 	if (cdbn_json_foreach_top_field(json, json_len,
-			_apply_field_cb, &ctx) < 0)
+			apply_field_cb, &ctx) < 0)
 		goto out;
 	first = ctx.first;
 
@@ -741,7 +741,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 			if (cdbn_sink_emit_string(&s, q->subkey.s, q->subkey.len) < 0)
 				goto out;
 			if (cdbn_sink_putc(&s, ':') < 0) goto out;
-			if (_sink_emit_op_value(&s, &ops[i]) < 0) goto out;
+			if (sink_emit_op_value(&s, &ops[i]) < 0) goto out;
 			if (cdbn_sink_putc(&s, '}') < 0) goto out;
 			/* Mark any other subkey-bearing ops on the same field
 			 * as consumed too — they would all have been gathered
@@ -770,7 +770,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 				}
 			}
 		} else {
-			if (_sink_emit_op_value(&s, &ops[i]) < 0) goto out;
+			if (sink_emit_op_value(&s, &ops[i]) < 0) goto out;
 		}
 	}
 
@@ -778,7 +778,7 @@ static char *_apply_pairs_one_pass(const char *json, int json_len,
 	rc = 0;
 
 out:
-	_free_apply_ops(ops, n_ops);
+	free_apply_ops(ops, n_ops);
 	if (rc != 0) {
 		pkg_free(s.buf);
 		return NULL;
@@ -792,7 +792,7 @@ out:
  * search index first (the stored key is already KV-safe); PK filters
  * and index misses build "<fts_json_prefix>" + encoded filter value.
  * Returns a pkg_malloc'd key, or NULL on error (logged). */
-static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
+static char *update_resolve_target_key(const cdb_filter_t *row_filter)
 {
 	char *target_key = NULL;
 
@@ -880,7 +880,7 @@ static char *_update_resolve_target_key(const cdb_filter_t *row_filter)
  * document (the seed itself on the create path) and *out_rev its
  * revision.  Returns 1 when the caller should retry the loop (seed
  * create lost a race), -1 on fatal error (logged; caller cleans up). */
-static int _update_fetch_or_seed(nats_cachedb_con *ncon,
+static int update_fetch_or_seed(nats_cachedb_con *ncon,
 	const cdb_filter_t *row_filter, const char *target_key,
 	char **out_json, int *out_len, uint64_t *out_rev)
 {
@@ -972,7 +972,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 
 	/* make a mutable copy of the JSON; this becomes the
 	 * "old doc" that's still indexed when the CAS lands.
-	 * We keep it across _apply_pairs_one_pass so we can
+	 * We keep it across apply_pairs_one_pass so we can
 	 * pass it to nats_json_index_remove_fields after
 	 * CAS success — that lets us remove only the
 	 * (field:value) entries this key was actually in,
@@ -992,12 +992,12 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
 	nats_dl.kvEntry_Destroy(entry);
 
 	/* Fail closed on an embedded NUL.  data_len is the authoritative
-	 * kvEntry_ValueLen, but the downstream merge (_update_apply_and_cas)
+	 * kvEntry_ValueLen, but the downstream merge (update_apply_and_cas)
 	 * measures the doc with strlen -- a doc carrying an embedded NUL would
 	 * be truncated at the NUL, merged, and CAS-written back as a
 	 * structurally-valid but SHORT document, silently dropping every
 	 * contact after the NUL.  The read/query path already rejects a raw NUL
-	 * via _json_parse_guard; mirror that here rather than laundering a
+	 * via json_parse_guard; mirror that here rather than laundering a
 	 * poison doc into a valid-looking truncated one. */
 	if ((int)strlen(json_buf) != data_len) {
 		LM_ERR("update: stored doc for key '%s' has an embedded NUL "
@@ -1018,7 +1018,7 @@ static int _update_fetch_or_seed(nats_cachedb_con *ncon,
  * converged (targeted remove from the OLD doc in @json_buf, add from
  * the new one).  Returns 1 on a CAS conflict the caller should retry,
  * -1 on fatal error.  @json_buf stays owned by the caller. */
-static int _update_apply_and_cas(nats_cachedb_con *ncon,
+static int update_apply_and_cas(nats_cachedb_con *ncon,
 	const char *target_key, const char *json_buf, int old_len,
 	const cdb_dict_t *pairs, uint64_t rev)
 {
@@ -1036,7 +1036,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
 	 * the input doc once, and writes the merged result into
 	 * one growable sink buffer.  We keep the input buffer
 	 * (json_buf) alive for the targeted index removal below. */
-	new_json = _apply_pairs_one_pass(json_buf, old_len, pairs, &new_len);
+	new_json = apply_pairs_one_pass(json_buf, old_len, pairs, &new_len);
 	if (!new_json) {
 		LM_ERR("failed to apply pairs in single pass\n");
 		return -1;
@@ -1134,7 +1134,7 @@ static int _update_apply_and_cas(nats_cachedb_con *ncon,
  * semantics; the single CAS write then CREATES the full row, carrying its
  * per-message TTL. Otherwise fetches the document from NATS KV. Applies
  * every field update from @pairs in a single pass via
- * _apply_pairs_one_pass(), and writes the modified JSON back using a
+ * apply_pairs_one_pass(), and writes the modified JSON back using a
  * compare-and-swap (CAS) loop to handle concurrent modifications. After
  * a successful CAS, the index is updated by removing and re-adding the
  * document.
@@ -1175,7 +1175,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 	}
 
 	/* The search index is required only for the non-PK lookup
-	 * branch in _update_resolve_target_key.  PK updates encode the
+	 * branch in update_resolve_target_key.  PK updates encode the
 	 * target_key directly from the filter and never touch g_idx, so
 	 * an uninitialised (or operator-disabled) index is fine for
 	 * them. */
@@ -1223,7 +1223,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
-	target_key = _update_resolve_target_key(row_filter);
+	target_key = update_resolve_target_key(row_filter);
 	if (!target_key)
 		return -1;
 
@@ -1235,7 +1235,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		nats_cas_backoff_sleep(attempt);
 		attempt++;
 
-		rc = _update_fetch_or_seed(ncon, row_filter, target_key,
+		rc = update_fetch_or_seed(ncon, row_filter, target_key,
 			&json_buf, &json_len, &rev);
 		if (rc < 0) {
 			pkg_free(target_key);
@@ -1246,7 +1246,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 			continue;
 		}
 
-		rc = _update_apply_and_cas(ncon, target_key, json_buf,
+		rc = update_apply_and_cas(ncon, target_key, json_buf,
 			json_len, pairs, rev);
 		pkg_free(json_buf);
 		json_buf = NULL;

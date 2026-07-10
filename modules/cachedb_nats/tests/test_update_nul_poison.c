@@ -19,16 +19,16 @@
  *
  * Regression: the usrloc update/merge CAS path (cachedb_nats_json.c) fetched a
  * stored doc via kvEntry_ValueString + kvEntry_ValueLen (data_len), copied
- * data_len bytes, but then _update_apply_and_cas recomputed the length with
+ * data_len bytes, but then update_apply_and_cas recomputed the length with
  * strlen(json_buf) -- discarding data_len.  A stored doc containing an embedded
  * NUL (a poison value from a hostile/foreign broker writer, or from the generic
  * *String set path) is truncated by strlen at the NUL: the single-pass merge
  * parses only the prefix, appends its own closing brace, and CAS-writes back a
  * structurally-valid but TRUNCATED document -- silently dropping every contact
  * after the NUL.  The read/query path already rejects a raw NUL via
- * _json_parse_guard; the update path did not.
+ * json_parse_guard; the update path did not.
  *
- * Fix: _update_fetch_or_seed fails closed when the fetched doc contains an
+ * Fix: update_fetch_or_seed fails closed when the fetched doc contains an
  * embedded NUL (strlen(json_buf) != data_len), so a poison doc is never merged
  * or laundered into a valid-looking short doc.
  *
@@ -113,7 +113,7 @@ int main(void)
 	{
 		const char *src = "../cachedb_nats_json.c";
 		ASSERT(file_contains(src, "strlen(json_buf) != data_len"),
-			"_update_fetch_or_seed fails closed on strlen(json_buf) != data_len");
+			"update_fetch_or_seed fails closed on strlen(json_buf) != data_len");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

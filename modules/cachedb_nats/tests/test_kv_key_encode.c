@@ -40,7 +40,7 @@
 
 /* ─── carried copy of the helpers under test ──────────────────── */
 
-static int _kv_char_safe(unsigned char c)
+static int sink_kv_char_safe(unsigned char c)
 {
 	if ((c >= '0' && c <= '9') ||
 	    (c >= 'A' && c <= 'Z') ||
@@ -66,7 +66,7 @@ static char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 	if (!out) return NULL;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
-		if (c != '=' && _kv_char_safe(c)) {
+		if (c != '=' && sink_kv_char_safe(c)) {
 			out[w++] = (char)c;
 		} else {
 			out[w++] = '=';
@@ -97,7 +97,7 @@ static int kv_key_valid(const char *s)
 {
 	while (*s) {
 		unsigned char c = (unsigned char)*s++;
-		if (!_kv_char_safe(c) && c != '=') return 0;
+		if (!sink_kv_char_safe(c) && c != '=') return 0;
 	}
 	return 1;
 }

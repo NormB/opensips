@@ -17,11 +17,11 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression: the KV watcher's _raise_kv_change_event (cachedb_nats_watch.c)
+ * Regression: the KV watcher's raise_kv_change_event (cachedb_nats_watch.c)
  * emitted the E_NATS_KV_CHANGE event with the RAW kvOperation.  A server-side
  * MaxAge/TTL expiry (and the module's own delete markers) surface via cnats
  * (<=3.12) as a kvOp_Put with an EMPTY value.  The in-SHM index correctly maps
- * that empty-value Put to a REMOVE (_watch_index_action), but the EVI event was
+ * that empty-value Put to a REMOVE (watch_index_action), but the EVI event was
  * raised as operation="put" -- so a presence-tracking script saw a phantom
  * "put" for a key that had actually vanished (index and EVI disagreeing on the
  * same event).
@@ -91,7 +91,7 @@ int main(void)
 		const char *src = "../cachedb_nats_watch.c";
 		ASSERT(file_contains(src, "eff_op") &&
 		       file_contains(src, "eff_op = kvOp_Delete"),
-			"_raise_kv_change_event remaps an empty-value Put to kvOp_Delete");
+			"raise_kv_change_event remaps an empty-value Put to kvOp_Delete");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

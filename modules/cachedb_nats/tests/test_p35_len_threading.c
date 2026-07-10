@@ -19,7 +19,7 @@
  *
  * [P3.5] (ptr,len) threading through the update compose path: every
  * builder stage already knows the length of the document it produced
- * (the growable sink tracks it), yet _update_apply_and_cas re-measured
+ * (the growable sink tracks it), yet update_apply_and_cas re-measured
  * the full document with strlen() ~6x per REGISTER -- kilobyte scans
  * for values already in hand:
  *
@@ -96,8 +96,8 @@ int main(void)
 	char *body;
 
 	/* the merge stage reports its length */
-	body = func_body(src, "static char *_apply_pairs_one_pass(");
-	ASSERT(body != NULL, "found _apply_pairs_one_pass");
+	body = func_body(src, "static char *apply_pairs_one_pass(");
+	ASSERT(body != NULL, "found apply_pairs_one_pass");
 	if (body) {
 		ASSERT(strstr(body, "out_len") != NULL ||
 		       count(body, "cdbn_sink_take(") == 0,
@@ -110,24 +110,24 @@ int main(void)
 		char line[512];
 		int has = 0;
 		while (f && fgets(line, sizeof(line), f)) {
-			if (strstr(line, "_apply_pairs_one_pass(const char *json,"))
+			if (strstr(line, "apply_pairs_one_pass(const char *json,"))
 				has |= 1;
 			if (has && strstr(line, "out_len")) { has = 2; break; }
 		}
 		if (f) fclose(f);
-		ASSERT(has == 2, "_apply_pairs_one_pass signature has out_len");
+		ASSERT(has == 2, "apply_pairs_one_pass signature has out_len");
 	}
 
 	/* the fetch stage reports the stored doc's length */
-	body = func_body(src, "static int _update_fetch_or_seed(");
-	ASSERT(body != NULL, "found _update_fetch_or_seed");
+	body = func_body(src, "static int update_fetch_or_seed(");
+	ASSERT(body != NULL, "found update_fetch_or_seed");
 	if (body) {
 		free(body);
 	}
 
 	/* the compose path itself: zero full-document strlen()s left */
-	body = func_body(src, "static int _update_apply_and_cas(");
-	ASSERT(body != NULL, "found _update_apply_and_cas");
+	body = func_body(src, "static int update_apply_and_cas(");
+	ASSERT(body != NULL, "found update_apply_and_cas");
 	if (body) {
 		ASSERT(count(body, "strlen(new_json)") == 0,
 			"no strlen(new_json) left in the compose path");

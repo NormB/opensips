@@ -92,7 +92,7 @@ static char *slurp_code(const char *path)
 }
 
 /* Count bare `name(` tokens: not preceded by an identifier char (so
- * pkg_free / shm_free / _scratch_free / test_shm_malloc don't match). */
+ * pkg_free / shm_free / scratch_free / test_shm_malloc don't match). */
 static int bare_calls(const char *code, const char *name)
 {
 	int c = 0;

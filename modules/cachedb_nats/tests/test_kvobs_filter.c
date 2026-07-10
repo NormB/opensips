@@ -60,7 +60,7 @@ struct kvobs_filter {
 
 /* ─── carried copy of the production parser (cachedb_nats_kvobs.c) ─── */
 
-static int _kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
+static int kvobs_filter_kv(struct kvobs_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
 	char num[24];
@@ -136,7 +136,7 @@ static int cdbn_kvobs_filter_parse(const char *s, int len, struct kvobs_filter *
 				;
 			if (eq == te || eq == tok)
 				return -1;
-			if (_kvobs_filter_kv(f, tok, (int)(eq - tok),
+			if (kvobs_filter_kv(f, tok, (int)(eq - tok),
 					eq + 1, (int)(te - eq - 1)) < 0)
 				return -1;
 		}

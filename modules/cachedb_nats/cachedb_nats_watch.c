@@ -114,8 +114,8 @@ static int             _num_patterns    = 0;
 event_id_t evi_kv_change_id = EVI_ERROR;
 
 /* ---- forward declarations ---- */
-static void  _watcher_loop(void);
-static void  _raise_kv_change_event(kvEntry *entry, kvOperation op);
+static void  watcher_loop(void);
+static void  raise_kv_change_event(kvEntry *entry, kvOperation op);
 
 /* ------------------------------------------------------------------ */
 /*  EVI event raising via IPC (thread-safe)                            */
@@ -144,13 +144,13 @@ struct kv_change_ipc_event {
 };
 
 /**
- * _kv_change_rpc_cb() -- IPC callback that raises the EVI event.
+ * kv_change_rpc_cb() -- IPC callback that raises the EVI event.
  *
  * Runs in a SIP worker's reactor context where pkg_malloc is safe.
  * Reconstructs the event parameters from the shm struct, raises the
  * EVI event, then frees the shm allocation.
  */
-static void _kv_change_rpc_cb(int sender, void *param)
+static void kv_change_rpc_cb(int sender, void *param)
 {
 	struct kv_change_ipc_event *ev = (struct kv_change_ipc_event *)param;
 	evi_params_t *params;
@@ -213,7 +213,7 @@ done:
 }
 
 /**
- * _raise_kv_change_event() -- Dispatch a KV change to the EVI subsystem.
+ * raise_kv_change_event() -- Dispatch a KV change to the EVI subsystem.
  *
  * Called from the watcher process.  Copies event data into shared memory
  * and dispatches an IPC RPC to a SIP worker for safe EVI event raising.
@@ -223,7 +223,7 @@ done:
  * @param entry  The kvEntry delivered by nats_dl.kvWatcher_Next().
  * @param op     The KV operation type (put, delete, or purge).
  */
-static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
+static void raise_kv_change_event(kvEntry *entry, kvOperation op)
 {
 	struct kv_change_ipc_event *ev;
 	const char *key;
@@ -248,7 +248,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 		if (!val) val_len = 0;
 		/* A server-side MaxAge/TTL expiry (and our own delete markers)
 		 * surface via cnats (<=3.12) as an empty-value Put.  The index
-		 * treats that as a REMOVE (_watch_index_action); raise it to EVI
+		 * treats that as a REMOVE (watch_index_action); raise it to EVI
 		 * subscribers as a delete too, so presence-tracking scripts see the
 		 * key vanish rather than a phantom "put" for a now-absent key. */
 		if (val_len == 0)
@@ -284,14 +284,14 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
 	/* Dispatch to a SIP worker -- atomic pipe write, pthread-safe */
 	LM_DBG("kv-change dispatch: key=%s op=%d val_len=%d\n",
 		key, (int)op, val_len);
-	if (ipc_dispatch_rpc(_kv_change_rpc_cb, ev) < 0) {
+	if (ipc_dispatch_rpc(kv_change_rpc_cb, ev) < 0) {
 		LM_ERR("ipc_dispatch_rpc failed for KV change event\n");
 		shm_free(ev);
 	}
 }
 
 /* ------------------------------------------------------------------ */
-/*  _watcher_loop() -- shared self-healing event loop                  */
+/*  watcher_loop() -- shared self-healing event loop                  */
 /* ------------------------------------------------------------------ */
 
 /*
@@ -309,7 +309,7 @@ static void _raise_kv_change_event(kvEntry *entry, kvOperation op)
  * what keeps the forward index from pointing at a vanished key once per-message
  * TTL is enabled.  Pure (carried-copy unit: tests/test_ttl_watch_marker.c). */
 enum watch_idx_action { WATCH_IDX_SKIP = 0, WATCH_IDX_ADD = 1, WATCH_IDX_REMOVE = 2 };
-static enum watch_idx_action _watch_index_action(int op, int val_len, char val0)
+static enum watch_idx_action watch_index_action(int op, int val_len, char val0)
 {
 	if (op == kvOp_Delete || op == kvOp_Purge)
 		return WATCH_IDX_REMOVE;
@@ -322,7 +322,7 @@ static enum watch_idx_action _watch_index_action(int op, int val_len, char val0)
 	return WATCH_IDX_SKIP;
 }
 
-static void _watcher_loop(void)
+static void watcher_loop(void)
 {
 	kvEntry        *entry = NULL;
 	natsStatus      s;
@@ -368,7 +368,7 @@ static void _watcher_loop(void)
 		 * index swap -- closing the (snapshot, subscribe) window that would
 		 * otherwise drop those mutations from the FTS index until the next
 		 * reconnect.  The overlap (a key present in both the snapshot and a
-		 * buffered update) is idempotent: _entry_add_key dedups on the
+		 * buffered update) is idempotent: entry_add_key dedups on the
 		 * interned key and the remove paths are membership-gated.
 		 *
 		 * Create into a local handle, then publish it atomically -- libnats
@@ -500,7 +500,7 @@ static void _watcher_loop(void)
 				int         val_len = (op == kvOp_Put) ?
 					nats_dl.kvEntry_ValueLen(entry) : 0;
 				enum watch_idx_action act =
-					_watch_index_action(op, val_len, val ? val[0] : 0);
+					watch_index_action(op, val_len, val ? val[0] : 0);
 
 				if (act == WATCH_IDX_ADD) {
 					/* Only index keys that match the JSON prefix.
@@ -553,7 +553,7 @@ static void _watcher_loop(void)
 			}
 
 			/* Raise EVI event for downstream script consumers */
-			_raise_kv_change_event(entry, op);
+			raise_kv_change_event(entry, op);
 
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
@@ -736,7 +736,7 @@ void nats_watcher_proc_main(int rank)
 
 	/* Run forever.  SIGTERM from main on shutdown will terminate the
 	 * process directly. */
-	_watcher_loop();
+	watcher_loop();
 
 	LM_INFO("NATS watcher proc exiting\n");
 }

@@ -1118,7 +1118,7 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
  * therefore always escaped, so an encoded component never contains a raw
  * '.' and decodes unambiguously.  Returns the encoded length (excl. NUL),
  * or -1 if the output buffer is too small. */
-static int _map_char_safe(unsigned char c)
+static int map_char_safe(unsigned char c)
 {
 	if ((c >= '0' && c <= '9') ||
 	    (c >= 'A' && c <= 'Z') ||
@@ -1140,7 +1140,7 @@ static int nats_map_encode(const char *in, int in_len, char *out, int out_size)
 		return -1;
 	for (i = 0; i < in_len; i++) {
 		unsigned char c = (unsigned char)in[i];
-		if (_map_char_safe(c)) {
+		if (map_char_safe(c)) {
 			if (pos + 1 >= out_size)
 				return -1;
 			out[pos++] = (char)c;
@@ -1158,7 +1158,7 @@ static int nats_map_encode(const char *in, int in_len, char *out, int out_size)
 	return pos;
 }
 
-static int _map_hexval(char c)
+static int map_hexval(char c)
 {
 	if (c >= '0' && c <= '9') return c - '0';
 	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -1180,8 +1180,8 @@ static int nats_map_decode(const char *in, int in_len, char *out, int out_size)
 			int hi, lo;
 			if (i + 2 >= in_len)
 				return -1;
-			hi = _map_hexval(in[i + 1]);
-			lo = _map_hexval(in[i + 2]);
+			hi = map_hexval(in[i + 1]);
+			lo = map_hexval(in[i + 2]);
 			if (hi < 0 || lo < 0)
 				return -1;
 			if (pos + 1 >= out_size)
@@ -1260,10 +1260,10 @@ static int build_map_key(char *buf, size_t buf_size,
 		subkey->s, subkey->len) < 0 ? -1 : 0;
 }
 
-/* _map_add_row() — fetch full_key's value and append a result row whose
+/* map_add_row() — fetch full_key's value and append a result row whose
  * single pair is (field -> value).  Skips silently on a get / alloc
  * failure.  Returns 1 if a row was added, 0 otherwise. */
-static int _map_add_row(cdb_res_t *res, kvStore *kv, const char *full_key,
+static int map_add_row(cdb_res_t *res, kvStore *kv, const char *full_key,
 		const char *field, int field_len)
 {
 	kvEntry *entry = NULL;
@@ -1393,7 +1393,7 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 				LM_WARN("map_get: undecodable key '%s' skipped\n", k);
 				continue;
 			}
-			_map_add_row(res, ncon->kv, k, field, flen);
+			map_add_row(res, ncon->kv, k, field, flen);
 		}
 		nats_dl.kvKeysList_Destroy(&keys);
 	} else if (s != NATS_NOT_FOUND) {

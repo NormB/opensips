@@ -22,7 +22,7 @@
  * (plus `schema_version`) as cachedb_nats-private top-level peers, WITHOUT
  * disturbing a non-usrloc document.
  *
- * Part A — _row_exp_min(exp[], n):
+ * Part A — row_exp_min(exp[], n):
  *   - 0 is the "permanent / never auto-expire" sentinel.  expires==0 means a
  *     permanent contact; if ANY contact is permanent the whole row is
  *     permanent => row_exp == 0  (§3.3 / GATE "any expires==0 => 0").
@@ -40,7 +40,7 @@
  *
  * RED/GREEN from one file (carried-copy convention, matches the Tier-1 suite):
  *   gcc -DROWEXP_CURRENT ... -> a naive int32 min, no permanent sentinel; this
- *                               clamps/mis-drives both _row_exp_min AND the
+ *                               clamps/mis-drives both row_exp_min AND the
  *                               row_exp emitted by cdbn_row_finalize_metadata
  *                               => RED.
  *   gcc ...                   -> the FIXED int64 sentinel-aware helper => GREEN.
@@ -61,7 +61,7 @@
 #ifdef ROWEXP_CURRENT
 /* CURRENT (naive): int32 accumulation (clamps post-2038, violates REV-34) and
  * no permanent sentinel (empty => INT32_MAX, and a negative beats a 0). */
-static int64_t _row_exp_min(const int64_t *exp, int n)
+static int64_t row_exp_min(const int64_t *exp, int n)
 {
 	int32_t m = INT32_MAX;
 	int i;
@@ -76,7 +76,7 @@ static int64_t _row_exp_min(const int64_t *exp, int n)
 #else
 /* FIXED: int64, 0 = permanent sentinel (any permanent contact => permanent
  * row), empty/NULL => 0, else the minimum (earliest) expiry. */
-static int64_t _row_exp_min(const int64_t *exp, int n)
+static int64_t row_exp_min(const int64_t *exp, int n)
 {
 	int64_t m = 0;
 	int i, seen = 0;
@@ -164,7 +164,7 @@ static int cdbn_sink_init(json_sink_t *s, int initial)
 	s->len = 0; s->cap = initial > 0 ? initial : 16; s->oom = 0;
 	return 0;
 }
-static int _sink_grow(json_sink_t *s, int need)
+static int sink_grow(json_sink_t *s, int need)
 {
 	int ncap = s->cap;
 	char *nb;
@@ -177,7 +177,7 @@ static int _sink_grow(json_sink_t *s, int need)
 static int cdbn_sink_write(json_sink_t *s, const char *p, int n)
 {
 	if (s->oom) return -1;
-	if (s->cap - s->len < n && _sink_grow(s, n) < 0) return -1;
+	if (s->cap - s->len < n && sink_grow(s, n) < 0) return -1;
 	memcpy(s->buf + s->len, p, n); s->len += n;
 	return 0;
 }
@@ -204,7 +204,7 @@ static char *cdbn_sink_take(json_sink_t *s, int *out_len)
 
 /* ─── carried copy: injector helpers (cachedb_nats_json.c) ───────── */
 
-static const char *_json_parse_int64(const char *p, const char *end, int64_t *out)
+static const char *json_parse_int64(const char *p, const char *end, int64_t *out)
 {
 	int neg = 0;
 	uint64_t mag = 0;
@@ -240,14 +240,14 @@ static int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *o
 		vs = p;
 		if (nlen == 7 && memcmp(name, "expires", 7) == 0) {
 			int64_t v;
-			if (_json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
+			if (json_parse_int64(vs, vend, &v)) { *out = v; return 0; }
 		}
 		p = cdbn_skip_json_value(p, vend);
 		if (!p) return -1;
 	}
 	return -1;
 }
-static int _row_collect_expiries(const char *vstart, const char *vend,
+static int row_collect_expiries(const char *vstart, const char *vend,
 	int64_t **out_arr, int *out_n)
 {
 	const char *p = cdbn_skip_ws(vstart, vend);
@@ -318,8 +318,8 @@ static char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len)
 		if (out_len) *out_len = len;
 		return copy;
 	}
-	if (_row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0) return NULL;
-	row_exp = _row_exp_min(exps, n_exp);
+	if (row_collect_expiries(c_vs, c_ve, &exps, &n_exp) < 0) return NULL;
+	row_exp = row_exp_min(exps, n_exp);
 	free(exps);
 	if (cdbn_sink_init(&s, len + 64) < 0) return NULL;
 	if (cdbn_sink_putc(&s, '{') < 0) goto fail;
@@ -365,7 +365,7 @@ static int fails = 0;
 	else printf("  ok:   %s\n", msg); } while (0)
 
 #define EXPECT(arr, want, msg) do { \
-	int64_t _g = _row_exp_min((arr), (int)(sizeof(arr)/sizeof((arr)[0]))); \
+	int64_t _g = row_exp_min((arr), (int)(sizeof(arr)/sizeof((arr)[0]))); \
 	if (_g != (want)) { printf("  FAIL: %s (got %lld want %lld)\n", msg, \
 		(long long)_g, (long long)(want)); fails++; } \
 	else printf("  ok:   %s\n", msg); } while (0)
@@ -409,9 +409,9 @@ int main(void)
 	{ int64_t a[] = {-5, 0, 100};     EXPECT(a, 0,   "permanent beats a past expiry => 0"); }
 
 	printf("[A] empty / NULL set => 0:\n");
-	CHECK(_row_exp_min(NULL, 0) == 0, "NULL,0 => 0");
-	CHECK(_row_exp_min(NULL, 5) == 0, "NULL,n => 0 (defensive)");
-	{ int64_t a[] = {7}; CHECK(_row_exp_min(a, 0) == 0, "n==0 => 0 (empty contact set)"); }
+	CHECK(row_exp_min(NULL, 0) == 0, "NULL,0 => 0");
+	CHECK(row_exp_min(NULL, 5) == 0, "NULL,n => 0 (defensive)");
+	{ int64_t a[] = {7}; CHECK(row_exp_min(a, 0) == 0, "n==0 => 0 (empty contact set)"); }
 
 	printf("[A][REV-34] int64: no int32 clamp (post-2038 epochs survive):\n");
 	{ int64_t a[] = {5000000000LL, 4000000000LL}; EXPECT(a, 4000000000LL, "min of >2038 epochs preserved"); }
