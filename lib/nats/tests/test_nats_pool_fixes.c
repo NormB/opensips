@@ -113,8 +113,8 @@ int main(void)
 	}
 
 	/* 3. GetConnectedUrl buffer init */
-	body = extract_func_body("../nats_pool.c", "_pool_reconnected_cb");
-	ASSERT(body != NULL, "found _pool_reconnected_cb body");
+	body = extract_func_body("../nats_pool.c", "pool_reconnected_cb");
+	ASSERT(body != NULL, "found pool_reconnected_cb body");
 	if (body) {
 		ASSERT(strstr(body, "url[0] = '\\0'") != NULL,
 			"reconnect cb inits url before GetConnectedUrl");

@@ -38,8 +38,8 @@
  *
  * However, the nats.c library internally creates its own I/O threads for
  * connection management.  The disconnect/reconnect callbacks
- * (_pool_disconnected_cb, _pool_reconnected_cb) and the JetStream async
- * publish ack handler (_js_pub_ack_handler) run on these nats.c-internal
+ * (pool_disconnected_cb, pool_reconnected_cb) and the JetStream async
+ * publish ack handler (pool_js_pub_ack_handler) run on these nats.c-internal
  * threads, NOT on an OpenSIPS process main thread.  LM_* and pkg_malloc
  * are forbidden there (per-process / main-thread-only state); atomic
  * ops, write(), nats.c APIs, and the shm_malloc + ipc_dispatch_rpc
@@ -269,7 +269,7 @@ int nats_pool_kv_op_timeout_ms = 1000;
  *
  * Thread safety: Called only during mod_init (single-threaded, pre-fork).
  */
-static int _append_server_urls(const char *url, int hard_overflow)
+static int pool_append_server_urls(const char *url, int hard_overflow)
 {
 	const char *p = url, *tok;
 	int len, i, added = 0;
@@ -346,7 +346,7 @@ static int parse_urls(const char *url)
 		return -1;
 	}
 
-	if (_append_server_urls(url, 1 /* hard overflow */) < 0)
+	if (pool_append_server_urls(url, 1 /* hard overflow */) < 0)
 		goto err_free_partial;
 
 	if (pool_cfg->server_cnt == 0) {
@@ -450,7 +450,7 @@ static void nats_pool_unsafe_log(const char *buf, size_t len)
  * @param nc       The NATS connection (provided by nats.c, unused).
  * @param closure  User closure (NULL, unused).
  */
-static void _pool_disconnected_cb(natsConnection *nc, void *closure)
+static void pool_disconnected_cb(natsConnection *nc, void *closure)
 {
 	/* safe: atomic op + raw write() — no OpenSIPS APIs */
 	atomic_store(&_connected, 0);
@@ -471,7 +471,7 @@ static void _pool_disconnected_cb(natsConnection *nc, void *closure)
  * @param nc       The NATS connection (used to query the new server URL).
  * @param closure  User closure (NULL, unused).
  */
-static void _pool_reconnected_cb(natsConnection *nc, void *closure)
+static void pool_reconnected_cb(natsConnection *nc, void *closure)
 {
 	char buf[300];
 	char url[256];
@@ -491,7 +491,7 @@ static void _pool_reconnected_cb(natsConnection *nc, void *closure)
 	len = snprintf(buf, sizeof(buf),
 		"NATS pool: reconnected to %s\n", redacted);
 	/* Clamp the snprintf return to the buffer before logging (see the
-	 * matching note in _js_pub_ack_handler): a long redacted URL would
+	 * matching note in pool_js_pub_ack_handler): a long redacted URL would
 	 * otherwise make write() over-read the stack buffer. */
 	if (len >= (int)sizeof(buf))
 		len = (int)sizeof(buf) - 1;
@@ -529,7 +529,7 @@ void nats_pool_set_pub_ack_cb(void (*cb)(int success))
 	_pub_ack_cb = cb;
 }
 
-static void _js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
+static void pool_js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
                                  jsPubAckErr *pae, void *closure)
 {
 	int success = (pae == NULL || pae->ErrText == NULL);
@@ -644,7 +644,7 @@ int nats_pool_register(const char *url, const char *module,
 		LM_INFO("NATS pool: additional registration by '%s'\n",
 			module ? module : "?");
 
-		added = _append_server_urls(url, 0 /* soft overflow */);
+		added = pool_append_server_urls(url, 0 /* soft overflow */);
 		if (added < 0)
 			return -1;
 		if (added > 0)
@@ -933,8 +933,8 @@ natsConnection *nats_pool_get(void)
 	 * 10 s ping with 2 missed pings detects the dead link in ~20 s. */
 	nats_dl.natsOptions_SetPingInterval(opts, (int64_t)NATS_POOL_PING_INTERVAL_MS);
 	nats_dl.natsOptions_SetMaxPingsOut(opts, NATS_POOL_MAX_PINGS_OUT);
-	nats_dl.natsOptions_SetDisconnectedCB(opts, _pool_disconnected_cb, NULL);
-	nats_dl.natsOptions_SetReconnectedCB(opts, _pool_reconnected_cb, NULL);
+	nats_dl.natsOptions_SetDisconnectedCB(opts, pool_disconnected_cb, NULL);
+	nats_dl.natsOptions_SetReconnectedCB(opts, pool_reconnected_cb, NULL);
 
 	/* Async first connect: with the broker unreachable at BOOT,
 	 * natsConnection_Connect() returns NATS_NOT_YET_CONNECTED
@@ -944,11 +944,11 @@ natsConnection *nats_pool_get(void)
 	 * synchronous retry loop below for the full max_reconnect budget
 	 * (~2 min) during child_init -- core timers stalled and SIP was
 	 * unresponsive (caught by test_boot_degraded_e2e.sh).  Reuse
-	 * _pool_reconnected_cb as the first-connect callback: it sets
+	 * pool_reconnected_cb as the first-connect callback: it sets
 	 * _connected, bumps the reconnect epoch and marks KV handles
 	 * stale -- exactly the post-connect bookkeeping needed here. */
 	nats_dl.natsOptions_SetRetryOnFailedConnect(opts, true,
-		_pool_reconnected_cb, NULL);
+		pool_reconnected_cb, NULL);
 
 	/* TLS configuration -- sourced from the tls_mgm "nats" client
 	 * domain (apply_tls_from_mgm).  Set up only when at least one
@@ -1046,7 +1046,7 @@ natsConnection *nats_pool_get(void)
 	{
 		char url[256];
 		char redacted[256];
-		url[0] = '\0';   /* defensive: see _pool_reconnected_cb */
+		url[0] = '\0';   /* defensive: see pool_reconnected_cb */
 		nats_dl.natsConnection_GetConnectedUrl(_nc, url, sizeof(url));
 		nats_redact_url(url, redacted, sizeof(redacted));
 		LM_INFO("NATS pool: connected to %s (%d server(s) configured)\n",
@@ -1065,7 +1065,7 @@ error:
  * Get the shared JetStream context for this worker process.
  *
  * Creates the jsCtx on first call using the shared connection.
- * The async publish ack handler (_js_pub_ack_handler) is registered
+ * The async publish ack handler (pool_js_pub_ack_handler) is registered
  * at creation time to handle JetStream publish acknowledgments.
  *
  * @return  jsCtx pointer on success, NULL on error (no connection,
@@ -1091,7 +1091,7 @@ jsCtx *nats_pool_get_js(void)
 	 * handler, MaxPending cap, StallWait, per-op Wait timeout) — see
 	 * nats_js_opts.h for the rationale on each knob. */
 	nats_dl.jsOptions_Init(&jsOpts);
-	nats_pool_js_opts_apply(&jsOpts, _js_pub_ack_handler,
+	nats_pool_js_opts_apply(&jsOpts, pool_js_pub_ack_handler,
 		nats_pool_kv_op_timeout_ms);
 
 	s = nats_dl.natsConnection_JetStream(&_js, _nc, &jsOpts);

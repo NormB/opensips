@@ -83,7 +83,7 @@ int main(void)
 			"natsOptions_SetRetryOnFailedConnect(opts, true,");
 		ASSERT(opt != NULL,
 			"pool enables retry-on-failed-connect");
-		ASSERT(opt && strstr(opt, "_pool_reconnected_cb"),
+		ASSERT(opt && strstr(opt, "pool_reconnected_cb"),
 			"first-connect callback is the reconnected cb "
 			"(sets _connected, bumps epoch, marks KV stale)");
 		ASSERT(strstr(t, "NATS_NOT_YET_CONNECTED") != NULL,

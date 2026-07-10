@@ -18,7 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Coverage for TODO #74: the pool server-URL parse/merge (the comma
- * tokenizer factored in P3-61 into _append_server_urls) had no unit test.
+ * tokenizer factored in P3-61 into pool_append_server_urls) had no unit test.
  * It tokenizes a comma-separated URL string, trims whitespace, skips URLs
  * already present (dedup), detects tls://, and either hard-errors or
  * warn-skips when it would exceed the server cap.
@@ -53,7 +53,7 @@ static int file_contains(const char *path, const char *needle)
 	return hit;
 }
 
-/* ---- carried model of _append_server_urls ------------------------- */
+/* ---- carried model of pool_append_server_urls ------------------------- */
 
 #define MAX_SERVERS 4
 struct cfg { char *servers[MAX_SERVERS]; int cnt; int use_tls; };
@@ -141,11 +141,11 @@ int main(void)
 	/* ---- production wiring -------------------------------------- */
 	{
 		const char *p = "../nats_pool.c";
-		ASSERT(file_contains(p, "_append_server_urls"),
+		ASSERT(file_contains(p, "pool_append_server_urls"),
 			"pool defines the shared tokenizer helper");
-		ASSERT(file_contains(p, "_append_server_urls(url, 1"),
+		ASSERT(file_contains(p, "pool_append_server_urls(url, 1"),
 			"initial parse uses hard overflow");
-		ASSERT(file_contains(p, "_append_server_urls(url, 0"),
+		ASSERT(file_contains(p, "pool_append_server_urls(url, 0"),
 			"merge path uses soft overflow");
 	}
 
