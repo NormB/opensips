@@ -71,6 +71,10 @@ test_reap_watch_enum: ../cachedb_nats_reap_enum.c ../cachedb_nats_reap_enum.h
 # (and the wiring assert slurps the expiry TU) -- depend on both.
 test_reap_first_jitter: ../cachedb_nats_expiry.h ../cachedb_nats_expiry.c
 
+# Behavioural against the REAL nats_str_to_buf inline (zero-capacity,
+# embedded-NUL, boundary contracts) -- rebuild when the header moves.
+test_str_to_buf_nul: ../../../lib/nats/nats_str.h
+
 # [P3.5] _sink_emit_int divide-loop: links the REAL ser TU and
 # characterizes every edge value (incl. INT64_MIN) against printf.
 test_sink_emit_int: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_ser.c -D_GNU_SOURCE

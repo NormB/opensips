@@ -50,6 +50,10 @@
  */
 static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 {
+	if (buf_size == 0) {
+		LM_ERR("zero-capacity buffer\n");
+		return -1;
+	}
 	if (s && s->len < 0) {
 		LM_ERR("negative string length (%d)\n", s->len);
 		return -1;

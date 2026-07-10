@@ -17,30 +17,46 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression: nats_str_to_buf (lib/nats/nats_str.h) is the shared str->C-string
- * chokepoint for the generic cachedb_nats write paths (nats_cache_set,
- * w_nats_kv_put, nats_cache_map_set).  It guarded negative and oversize lengths
- * but NOT an embedded NUL: it copied the NUL-bearing value and NUL-terminated,
- * and the downstream kvStore_PutString (a C-string API) then silently truncated
- * the stored value at the embedded NUL -- so set("a\0b") stored "a" and a later
- * get returned "a" (silent data loss).  The usrloc row path is unaffected (it
- * uses length-aware natsMsg_Create), and keys never legitimately contain NUL.
+ * Behavioural test of nats_str_to_buf (lib/nats/nats_str.h) -- the REAL
+ * inline, no carried copy -- the shared str->C-string chokepoint for the
+ * generic cachedb_nats write paths (nats_cache_set, w_nats_kv_put,
+ * nats_cache_map_set).
  *
- * Fix: nats_str_to_buf rejects a value containing an embedded NUL (memchr),
- * consistent with the module's fail-closed reject-at-write hygiene.
+ * Locked-in behaviour:
+ *   - a clean value copies verbatim, NUL-terminated;
+ *   - an embedded NUL is REJECTED (memchr guard): the buffer feeds
+ *     C-string NATS key APIs, which would silently truncate -- so
+ *     set("a\0b") would store "a" (silent data loss);
+ *   - a negative length is rejected (the (size_t) cast would otherwise
+ *     turn it into a huge bound and memcpy past the source);
+ *   - NULL/empty input yields "" -- but ONLY when the buffer can hold
+ *     it: buf_size == 0 must be rejected, NOT written through.  (The
+ *     original empty-input path wrote buf[0] before any capacity check,
+ *     a one-byte overflow on a zero-size buffer; ASan enforces the
+ *     no-write contract here.)
+ *   - boundary: buf_size == 1 still yields "" for empty input, and
+ *     rejects any non-empty value.
  *
- * Models the accept/reject decision:
- *   -DSIMULATE_NO_NUL_CHECK -> no NUL guard -> embedded-NUL value accepted
- *                              (and would truncate downstream) -> assertion FAILS.
- *   (default)               -> embedded NUL rejected -> ALL PASS.
- * plus a source-wiring assertion.
- *
- * Build: gcc -g -O0 -Wall -o test_str_to_buf_nul test_str_to_buf_nul.c
+ * Build: pattern rule (ASan) + CORE_DEFS; includes the production header.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../../../lib/nats/nats_str.h"
+
+/* ── core seams for dprint (LM_ERR in the inline) ──────────────── */
+static int test_log_level = 0;
+int *log_level = &test_log_level;
+char *log_prefix = "";
+int log_facility = 0;
+char ctime_buf[256];
+int dp_my_pid(void) { return 0; }
+void dprint(int level, int facility, const char *module, const char *func,
+	char *stderr_fmt, char *syslog_fmt, char *format, ...)
+{ (void)level; (void)facility; (void)module; (void)func;
+  (void)stderr_fmt; (void)syslog_fmt; (void)format; }
 
 static int g_fails;
 #define ASSERT(cond, msg) do { \
@@ -48,54 +64,72 @@ static int g_fails;
 	else         { fprintf(stderr, "  ok: %s\n", msg);            } \
 } while (0)
 
-static int file_contains(const char *path, const char *needle)
+static str mkstr(const char *s, int len)
 {
-	FILE *f = fopen(path, "r");
-	char line[4096];
-	int hit = 0;
-	if (!f) return 0;
-	while (fgets(line, sizeof(line), f))
-		if (strstr(line, needle)) { hit = 1; break; }
-	fclose(f);
-	return hit;
-}
-
-/* Model of nats_str_to_buf's accept/reject decision (s may contain embedded
- * NULs; len is the authoritative byte count). Returns 0 on success, -1 reject. */
-static int str_to_buf(const char *s, int len, char *buf, int bufsize)
-{
-	if (len < 0) return -1;
-	if (!s || len <= 0) { buf[0] = '\0'; return 0; }
-	if (len >= bufsize) return -1;
-#ifndef SIMULATE_NO_NUL_CHECK
-	if (memchr(s, '\0', (size_t)len)) return -1;   /* embedded NUL -> reject */
-#endif
-	memcpy(buf, s, len);
-	buf[len] = '\0';
-	return 0;
+	str r; r.s = (char *)s; r.len = len; return r;
 }
 
 int main(void)
 {
 	char buf[64];
+	str v;
 
-	ASSERT(str_to_buf("abc", 3, buf, sizeof(buf)) == 0 && strcmp(buf, "abc") == 0,
+	v = mkstr("abc", 3);
+	ASSERT(nats_str_to_buf(&v, buf, sizeof(buf)) == 0 && strcmp(buf, "abc") == 0,
 		"a clean value is accepted verbatim");
 
 	/* "a\0b" -- 3 bytes with an embedded NUL. */
-	ASSERT(str_to_buf("a\0b", 3, buf, sizeof(buf)) == -1,
+	v = mkstr("a\0b", 3);
+	ASSERT(nats_str_to_buf(&v, buf, sizeof(buf)) == -1,
 		"a value with an embedded NUL is REJECTED (not silently truncated)");
 
-	ASSERT(str_to_buf(NULL, 0, buf, sizeof(buf)) == 0 && buf[0] == '\0',
+	ASSERT(nats_str_to_buf(NULL, buf, sizeof(buf)) == 0 && buf[0] == '\0',
+		"a NULL str yields an empty string");
+	v = mkstr(NULL, 0);
+	ASSERT(nats_str_to_buf(&v, buf, sizeof(buf)) == 0 && buf[0] == '\0',
 		"a NULL/empty value yields an empty string");
-	ASSERT(str_to_buf("x", -1, buf, sizeof(buf)) == -1,
+	v = mkstr("x", -1);
+	ASSERT(nats_str_to_buf(&v, buf, sizeof(buf)) == -1,
 		"a negative length is rejected");
 
-	/* ---- production wiring ---------------------------------------- */
+	/* exact-fit boundary: len == buf_size - 1 accepted, len == buf_size
+	 * rejected */
 	{
-		const char *src = "../../../lib/nats/nats_str.h";
-		ASSERT(file_contains(src, "memchr(s->s, '\\0'"),
-			"nats_str_to_buf rejects an embedded NUL via memchr");
+		char small[4];
+		v = mkstr("abc", 3);
+		ASSERT(nats_str_to_buf(&v, small, sizeof(small)) == 0 &&
+			strcmp(small, "abc") == 0, "len == buf_size-1 fits exactly");
+		v = mkstr("abcd", 4);
+		ASSERT(nats_str_to_buf(&v, small, sizeof(small)) == -1,
+			"len == buf_size overflows and is rejected");
+	}
+
+	/* buf_size == 0: MUST be rejected without writing a byte.  The
+	 * destination is the very end of a heap block, so any write is a
+	 * heap-buffer-overflow under ASan. */
+	{
+		char *blk = malloc(8);
+		ASSERT(blk != NULL, "heap probe allocated");
+		ASSERT(nats_str_to_buf(NULL, blk + 8, 0) == -1,
+			"buf_size=0 with NULL input rejected, nothing written");
+		v = mkstr("", 0);
+		ASSERT(nats_str_to_buf(&v, blk + 8, 0) == -1,
+			"buf_size=0 with empty input rejected, nothing written");
+		v = mkstr("abc", 3);
+		ASSERT(nats_str_to_buf(&v, blk + 8, 0) == -1,
+			"buf_size=0 with a real value rejected, nothing written");
+		free(blk);
+	}
+
+	/* buf_size == 1: "" still representable, anything longer rejected. */
+	{
+		char one[1];
+		v = mkstr(NULL, 0);
+		ASSERT(nats_str_to_buf(&v, one, 1) == 0 && one[0] == '\0',
+			"buf_size=1 holds the empty result");
+		v = mkstr("a", 1);
+		ASSERT(nats_str_to_buf(&v, one, 1) == -1,
+			"buf_size=1 rejects a 1-byte value (no room for the NUL)");
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
