@@ -80,6 +80,7 @@
 #include "nats_pool.h"
 #include "nats_js_opts.h"
 #include "nats_redact.h"
+#include "nats_server_info.h"
 #include "nats_ca_dir.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
@@ -1554,24 +1555,12 @@ int nats_pool_is_connected(void)
 const char *nats_pool_get_server_info(void)
 {
 	static char _server_info_buf[512];
-	char raw[512];
 
-	if (!_nc)
-		return "not connected";
-
-	/* Init defensively: on a non-OK status GetConnectedUrl may leave the
-	 * buffer unterminated, and nats_redact_url() would then read
-	 * uninitialised stack. */
-	raw[0] = '\0';
-	if (nats_dl.natsConnection_GetConnectedUrl(_nc, raw,
-	    sizeof(raw)) != NATS_OK)
-		return "not connected";
-
-	/* Redact any user:pass@ credentials before returning — this value is
-	 * surfaced to MI clients (mi_nats_status) and must not leak the
-	 * broker password. */
-	nats_redact_url(raw, _server_info_buf, sizeof(_server_info_buf));
-	return _server_info_buf;
+	/* Fetch + redact policy lives in nats_server_info.h, behaviourally
+	 * locked by tests/test_server_info_redact.c. */
+	return nats_pool_server_info_build(_nc,
+		nats_dl.natsConnection_GetConnectedUrl,
+		_server_info_buf, sizeof(_server_info_buf));
 }
 
 /**

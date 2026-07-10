@@ -89,10 +89,11 @@ test_nats_pool_fixes: test_nats_pool_fixes.c
 test_unsafe_log_clamp: test_unsafe_log_clamp.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ test_unsafe_log_clamp.c
 
-# Source-pattern: nats_pool_get_server_info() redacts the URL before
-# returning it (it is exposed to MI clients).
-test_server_info_redact: test_server_info_redact.c
-	$(CC) $(CFLAGS) -o $@ test_server_info_redact.c
+# Behavioural (ASan): the MI server-info string policy
+# (nats_server_info.h) against the REAL nats_redact_url() — injected
+# URL getter, no broker; credentials must never reach MI clients.
+test_server_info_redact: test_server_info_redact.c ../nats_server_info.h ../nats_redact.o
+	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_server_info_redact.c ../nats_redact.o
 
 # Behavioural (ASan): the JetStream context options policy
 # (nats_js_opts.h) on a real cnats jsOptions — MaxPending cap, StallWait,
