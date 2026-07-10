@@ -58,9 +58,23 @@ typedef struct nats_rpc_ipc_msg {
 	uint32_t generation;     /* slot generation captured at send */
 } nats_rpc_ipc_msg_t;
 
-/* {slot_idx, generation} <-> the opaque ipc_send_rpc param.  Slot in
+/**
+ * {slot_idx, generation} <-> the opaque ipc_send_rpc param.  Slot in
  * the low word, generation in the high word; pack(0,0) is NULL and is
- * still a valid encoding (the receiver decodes, never sentinel-checks). */
+ * still a valid encoding (the receiver decodes, never sentinel-checks).
+ *
+ * @param slot_idx    Index into the nats_rpc_slot pool.
+ * @param generation  Slot claim generation captured at send time.
+ * @param param       (unpack) the packed pointer to decode; the two out
+ *                    pointers must be non-NULL and receive the fields.
+ * @return            (pack) the packed opaque pointer; unpack returns
+ *                    nothing.
+ *
+ * Pure inline bit-packing: no allocation, no locking; safe in any
+ * process or thread.  Producers are SIP workers (pack, before
+ * ipc_send_rpc); consumers are the consumer process's IPC handlers and
+ * the worker-side wake handler (unpack).
+ */
 static inline void *nats_rpc_ipc_pack(uint32_t slot_idx, uint32_t generation)
 {
 	return (void *)(uintptr_t)(((uint64_t)generation << 32)

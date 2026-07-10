@@ -96,8 +96,46 @@ void nats_consumer_process(int rank);
  * in-flight gauge) for the nats_stats MI command.  All return 0 before
  * the SHM control block is allocated.
  */
+
+/**
+ * Total inbound events dropped because the payload exceeded the
+ * per-message cap (NATS_EVENT_MAX_DATA).
+ *
+ * @return Monotonic counter; 0 before nats_consumer_register_events()
+ *         allocates the SHM control block (mod_init, pre-fork).
+ *         Nothing allocated; nothing for the caller to free.
+ *
+ * Locking: none; single relaxed atomic load from the shared SHM block.
+ * Context: any process or thread; in-tree consumer is the nats_stats
+ * MI handler (attendant/MI process).
+ */
 unsigned long nats_inbound_dropped_oversize(void);
+
+/**
+ * Total inbound events dropped because the in-flight cap
+ * (NATS_EVENT_MAX_INFLIGHT) was reached (backpressure shedding).
+ *
+ * @return Monotonic counter; 0 before the SHM control block exists.
+ *         Nothing allocated.
+ *
+ * Locking: none; single relaxed atomic load from the shared SHM block.
+ * Context: any process or thread; in-tree consumer is the nats_stats
+ * MI handler.
+ */
 unsigned long nats_inbound_dropped_backpressure(void);
+
+/**
+ * Live gauge of inbound events dispatched to SIP workers but not yet
+ * processed (incremented on the consumer process's cnats callback
+ * thread, decremented by the worker after raising the event).
+ *
+ * @return Current in-flight count (>= 0); 0 before the SHM control
+ *         block exists.  Nothing allocated.
+ *
+ * Locking: none; single relaxed atomic load from the shared SHM block.
+ * Context: any process or thread; in-tree consumer is the nats_stats
+ * MI handler.
+ */
 int nats_inbound_inflight(void);
 
 #endif /* EVENT_NATS_SUB_H */

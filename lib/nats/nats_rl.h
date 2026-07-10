@@ -44,12 +44,30 @@
 
 #include <time.h>
 
-/*
+/**
+ * One-per-interval log gate: decide whether this site may emit now.
+ *
  * Returns 1 when the caller may emit (and stamps *last = now),
  * 0 when the site is inside its quiet interval.  interval_s <= 0
  * disables limiting.  A clock that jumps backwards re-arms the gate
  * (re-stamping to the new now) instead of silencing the site until
  * wall time catches back up to the stale stamp.
+ *
+ * @param last       Per-site slot, caller-owned (typically a function-
+ *                   local static, so process-local).  Stamped to @now on
+ *                   an emitting pass; nothing is allocated, no one frees.
+ * @param now        Current wall time (the caller's time(NULL)).
+ * @param interval_s Quiet interval in seconds; <= 0 disables limiting
+ *                   (returns 1 without stamping *last).
+ *
+ * @return 1 = caller may emit (slot stamped), 0 = suppressed.
+ *
+ * Locking: none; plain non-atomic read/write of *last.  Not thread-safe
+ * by design (see the file comment): a racing pass costs one extra line.
+ *
+ * Context: any process or thread (SIP worker, cnats callback thread,
+ * MI handler, timer proc); slots are process-local, so each process
+ * gates independently.
  */
 static inline int nats_rl_pass(time_t *last, time_t now, int interval_s)
 {

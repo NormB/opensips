@@ -93,17 +93,35 @@ extern int   kv_ttl;
  * fail (due to concurrent writers), the operation returns -1. */
 #define NATS_CAS_RETRIES    3
 
-/* Reject keys NATS KV cannot represent as a subject token: control
- * chars, whitespace, wildcards ('*'/'>') and the ':' map separator.
- * Shared by the scalar dbase ops and the native/map/raw paths
- * (cachedb_nats_native.c).  Returns 0 if valid, -1 otherwise. */
+/**
+ * Reject keys NATS KV cannot represent as a subject token: control
+ * chars, whitespace, wildcards ('*'/'>') and the ':' map separator
+ * (the rules live in the shared lib/nats validator, P3-64).  Shared by
+ * the scalar dbase ops and the native/map/raw paths
+ * (cachedb_nats_native.c).
+ *
+ * @param s  the key (OpenSIPS str; NULL / empty rejected).
+ * @return 0 if the key is valid, -1 otherwise (logs an LM_ERR that
+ *         includes the key).
+ *
+ * Pure check on caller memory: no allocation, no locking.  Context:
+ * SIP workers, at the top of every cachedb/native KV op.
+ */
 int validate_kv_key(const str *s);
 
-/* Should a failed KV compare-and-swap write be retried?  Only an actual
+/**
+ * Should a failed KV compare-and-swap write be retried?  Only an actual
  * conflict (revision mismatch / key already exists) is retryable; a
  * timeout or connection error is transient/fatal and just wastes the
  * retry budget (re-attempting it on a degraded broker can stall a SIP
- * worker for the whole budget, ~100 s).  Returns 1 to retry, 0 to bail. */
+ * worker for the whole budget, ~100 s).
+ *
+ * @param s  the natsStatus from the failed CAS write.
+ * @return 1 to retry (NATS_ERR / NATS_MISMATCH etc. — a CAS conflict),
+ *         0 to bail (timeout / connection down).
+ *
+ * Pure classification: no allocation, no locking; any process context.
+ */
 static inline int nats_cas_should_retry(natsStatus s)
 {
 	switch (s) {

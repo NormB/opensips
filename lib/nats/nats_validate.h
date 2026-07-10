@@ -66,6 +66,21 @@ typedef enum {
 	NATS_VALIDATE_KV_KEY,
 } nats_validate_mode_t;
 
+/**
+ * Validate @s under the rules of @mode (see the mode table above).
+ *
+ * @param s    Bytes to validate (NOT required to be NUL-terminated);
+ *             NULL is rejected.
+ * @param len  Length of @s in bytes; <= 0 is rejected.
+ * @param mode One of nats_validate_mode_t.
+ *
+ * @return 0 if valid for @mode, -1 otherwise.
+ *
+ * Allocation: none.  Locking: none -- pure function on caller-provided
+ * memory (no cache by design; see the security note in nats_validate.c).
+ * Context: any process or thread (SIP worker, cnats callback thread,
+ * MI handler, mod_init).
+ */
 int nats_validate(const char *s, int len, nats_validate_mode_t mode);
 
 #endif /* NATS_VALIDATE_H */

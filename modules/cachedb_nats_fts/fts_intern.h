@@ -69,36 +69,70 @@
  * supported.
  */
 
-/* Initialise the global intern table in SHM.  Call once from mod_init
+/**
+ * Initialise the global intern table in SHM.  Call once from mod_init
  * pre-fork so every worker (and the dedicated watcher proc) maps the same
- * table.  @num_buckets sizes the bucket array (rounded up to a power of
- * two; <= 0 selects the default) -- pass the index_buckets modparam so the
- * intern chains scale with the deployment instead of being fixed at 1024.
- * Returns 0 on success, -1 on SHM exhaustion. */
+ * table.
+ *
+ * @param num_buckets Sizes the bucket array (rounded up to a power of
+ *                    two; <= 0 selects the default of 1024) -- pass the
+ *                    index_buckets modparam so the intern chains scale
+ *                    with the deployment.
+ *
+ * @return 0 on success (also when already initialised -- logged WARN,
+ *         no re-init), -1 on SHM exhaustion or lock-set init failure.
+ *
+ * Allocation: table struct, bucket array and lock set in SHM, owned by
+ * this module (freed by nats_intern_destroy()).
+ * Locking: none taken -- NOT thread-safe.
+ * Context: mod_init (pre-fork, single process) only.
+ */
 int  nats_intern_init(int num_buckets);
 
-/* Tear down the intern table.  Call once from mod_destroy.
- * Frees all entries and the table itself; safe to call when
- * init failed (no-op). */
+/**
+ * Tear down the intern table.  Frees all entries and the table itself;
+ * safe to call when init failed (no-op).
+ *
+ * @return none.
+ *
+ * Allocation: shm_free's every node, the bucket array, the lock set
+ * and the table struct.
+ * Locking: takes ALL shard locks (increasing shard order) around the
+ * bucket walk, then destroys the lock set.
+ * Context: mod_destroy only -- after it returns no interned pointer or
+ * intern call is valid in any process.
+ */
 void nats_intern_destroy(void);
 
-/* Look up a string in the intern table; insert and allocate it
+/**
+ * Look up a string in the intern table; insert and allocate it
  * if absent.  In either case the entry's refcount is bumped by
  * one and the SHM-resident NUL-terminated string pointer is
  * returned.  The caller MUST eventually balance every successful
  * acquire with a matching release.
  *
- * Returns NULL if SHM allocation fails on insert.  The caller
- * should treat NULL as a fatal-this-call error and propagate
- * upward (matching the prior shm_malloc-based code).
+ * @param s   Bytes to intern (need not be NUL-terminated); borrowed,
+ *            copied into the node on insert.
+ * @param len Length of @s in bytes; negative is rejected.
  *
- * Safe to call from any process that has mapped SHM.  The shard
- * lock is held only across the chain walk + node insert.  Hash
- * is FNV-1a over the byte sequence (len bytes; the input does
- * not need to be NUL-terminated). */
+ * @return SHM-resident NUL-terminated string owned by the intern table
+ *         (refcounted -- the caller frees NOTHING directly, it hands
+ *         the pointer back via nats_intern_release()); NULL if SHM
+ *         allocation fails on insert, if the table is uninitialised,
+ *         or on negative @len.  The caller should treat NULL as a
+ *         fatal-this-call error and propagate upward (matching the
+ *         prior shm_malloc-based code).
+ *
+ * Locking: the entry's shard lock (derived from the FNV-1a hash) is
+ * held only across the chain walk + node insert.
+ * Context: any process that has mapped SHM -- SIP workers, the
+ * dedicated watcher proc, and the rank-1 pthread alike (locks are
+ * gen_lock_set_t).
+ */
 char *nats_intern_acquire(const char *s, int len);
 
-/* Release a string previously obtained from nats_intern_acquire.
+/**
+ * Release a string previously obtained from nats_intern_acquire.
  * Decrements the refcount; when it reaches zero the entry is
  * removed from its bucket chain and shm_free'd.  Safe to call
  * with NULL (no-op).
@@ -106,26 +140,65 @@ char *nats_intern_acquire(const char *s, int len);
  * The pointer must be the exact value returned by acquire --
  * pointer-arithmetic on the inline string (e.g., passing
  * `p + 1` from a string offset) will fail because the
- * container_of conversion needs the original head pointer. */
+ * container_of conversion needs the original head pointer.
+ * A double-release (node no longer in its chain) is detected and
+ * degrades to a logged no-op rather than a double-free.
+ *
+ * @param p Pointer from nats_intern_acquire()/nats_intern_retain(),
+ *          or NULL.
+ *
+ * @return none.
+ *
+ * Locking: the entry's shard lock (cached hash, no re-hash) across the
+ * chain walk; the shm_free happens after the lock is dropped.
+ * Context: any process that has mapped SHM.
+ */
 void nats_intern_release(char *p);
 
-/* Bump the refcount of a pointer ALREADY obtained from acquire,
+/**
+ * Bump the refcount of a pointer ALREADY obtained from acquire,
  * without re-hashing by content.  Used to take an extra reference on
  * an interned key the caller already holds (e.g. snapshotting an index
  * entry's key set under the index lock before releasing it), so the
  * string stays alive after the lock is dropped.  Balanced by a later
- * nats_intern_release().  Returns p for call-site convenience; NULL-safe.
+ * nats_intern_release().
  *
- * Same pointer-arithmetic restriction as nats_intern_release(): p must be
- * the exact value returned by acquire. */
+ * @param p Pointer from a prior acquire (exact value -- same
+ *          pointer-arithmetic restriction as nats_intern_release()),
+ *          or NULL.
+ *
+ * @return @p unchanged, for call-site convenience (still owned by the
+ *         intern table); NULL-safe.
+ *
+ * Locking: the entry's shard lock around the refcount bump.
+ * Context: any process that has mapped SHM.
+ */
 char *nats_intern_retain(char *p);
 
-/* Diagnostic: number of unique entries currently held in the
- * table.  Used by structural tests; not on the hot path. */
+/**
+ * Diagnostic: number of unique entries currently held in the
+ * table.  Used by structural tests; not on the hot path.
+ *
+ * @return Live entry count, 0 if the table is uninitialised.
+ *
+ * Locking: none -- unlocked advisory read of the counter; the value
+ * may be stale under concurrent acquire/release.
+ * Context: any process that has mapped SHM.
+ */
 int  nats_intern_size(void);
 
-/* Diagnostic: current refcount of an interned pointer (0 if NULL/uninit).
- * Used by tests to assert refcount balance; not on the hot path. */
+/**
+ * Diagnostic: current refcount of an interned pointer.
+ * Used by tests to assert refcount balance; not on the hot path.
+ *
+ * @param p Pointer from a prior acquire (exact value), or NULL.
+ *
+ * @return The entry's refcount, 0 if @p is NULL or the table is
+ *         uninitialised.
+ *
+ * Locking: the entry's shard lock around the read.
+ * Context: any process that has mapped SHM.
+ */
 int  nats_intern_refcount(const char *p);
 
 #endif /* CACHEDB_NATS_INTERN_H */

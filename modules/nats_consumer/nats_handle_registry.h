@@ -264,29 +264,72 @@ typedef struct nats_handle {
 	struct nats_handle *next;
 } nats_handle_t;
 
-/* Initialize the registry with `bucket_count` buckets.
- * Call from mod_init (pre-fork).
- * Returns 0 on success, -1 on SHM exhaustion. */
+/**
+ * Initialize the registry with `bucket_count` buckets.
+ *
+ * @param bucket_count  Bucket count; <= 0 falls back to 256.
+ * @return              0 on success (idempotent: a second call warns
+ *                      and returns 0), -1 on SHM exhaustion or lock
+ *                      init failure (everything allocated so far is
+ *                      rolled back).
+ *
+ * Allocation: the registry, its bucket array and all rwlocks live in
+ * SHM, freed only by nats_registry_destroy().  Locking: none taken.
+ *
+ * Context: mod_init (main process, PRE-FORK) so every child inherits
+ * the same mapping.
+ */
 int nats_registry_init(int bucket_count);
 
-/* Tear down the registry.  Call from mod_destroy. */
+/**
+ * Tear down the registry: free every handle still bound or parked on
+ * the retire list (ignoring the retire bookkeeping -- mod_destroy is
+ * the last writer), the bucket array, all locks and the registry
+ * itself.  NULL-safe when never initialized.
+ *
+ * @return  nothing.
+ *
+ * Locking: takes the global, each bucket and the retire WRITE locks to
+ * flush in-flight readers, then destroys them.
+ *
+ * Context: mod_destroy only (no other process may touch the registry
+ * any more).
+ */
 void nats_registry_destroy(void);
 
-/* Transfer ownership of a handle into the registry.
- * On success: registry owns `h`, initializes `h->rlock`, sets created_at.
- * On failure: caller retains ownership and must free.
- * Returns:
+/**
+ * Transfer ownership of a handle into the registry.
+ *
+ * @param h  A caller-owned SHM handle (from nats_handle_parse()).
+ * @return
  *    0 on success
  *   -1 on duplicate id
  *   -2 on SHM exhaustion / internal error
- *   -3 on handle-count cap reached (NATS_REGISTRY_MAX_HANDLES) */
+ *   -3 on handle-count cap reached (NATS_REGISTRY_MAX_HANDLES)
+ *
+ * Ownership: on success the REGISTRY owns `h` (rlock initialized,
+ * created_at set, a recyclable index and an SHM ring assigned); it is
+ * eventually freed by the retire/reap lifecycle or registry destroy.
+ * On failure the CALLER retains ownership and must free it with
+ * nats_handle_free().
+ *
+ * Locking: takes the target bucket's WRITE lock for the duplicate
+ * check + ring create + insert; the index allocator is a lock-free
+ * CAS.
+ *
+ * Context: any process -- real callers are mod_init (pre-fork `bind`
+ * modparams), the startup-route script bind (SIP worker) and the MI
+ * bind handler.
+ */
 int nats_registry_bind(nats_handle_t *h);
 
-/* Remove a handle by id.
+/**
+ * Remove a handle by id (retire; the physical free is deferred).
  *
  * Lifecycle:
  *   1. unbind marks the handle retired and unlinks it from its bucket
- *      chain so subsequent lookups miss.
+ *      chain so subsequent lookups miss, then parks it on the retire
+ *      list.
  *   2. The consumer process observes `retire` on its next iteration,
  *      destroys the JetStream subscription + frees the process-local
  *      proc_sub_state_t, and sets `sub_torn_down`.
@@ -294,99 +337,222 @@ int nats_registry_bind(nats_handle_t *h);
  *      process) frees the handle once `pending_ops==0` AND
  *      `sub_torn_down==1`.
  *
- * Returns:
- *    0 on success (handle retired; actual free deferred to reap).
- *   -1 if not found. */
+ * @param id  Handle id; borrowed.
+ * @return    0 on success (handle retired; actual free deferred to
+ *            reap), -1 if not found.
+ *
+ * Allocation: none.  Locking: the bucket WRITE lock, dropped, then the
+ * retire WRITE lock (never nested -- see the lock-ordering note in
+ * nats_handle_registry.c).
+ *
+ * Context: any process; the real caller is the MI unbind handler.
+ */
 int nats_registry_unbind(const str *id);
 
-/* Weak lookup that returns retired handles.
+/**
+ * Weak lookup that also returns retired handles.
  *
- * Used by the consumer process to finalize cleanup after `retire=1`:
- * the handle is off its bucket chain so the normal nats_registry_lookup
- * cannot find it, but the consumer process needs to observe `retire`
- * and set `sub_torn_down` on the same handle object.  The returned
- * pointer is valid until nats_registry_reap() frees the handle, which
- * happens only after `sub_torn_down==1` AND `pending_ops==0`. */
+ * Checks the live bucket first, then falls back to the retire list --
+ * the path a finalizer needs after `retire=1`, when the handle is off
+ * its bucket chain but the same object must still be observed (e.g. to
+ * set `sub_torn_down`).
+ *
+ * @param id  Handle id; borrowed.
+ * @return    Borrowed pointer (never free it), or NULL if not found in
+ *            either place.  NO pending_ops reference is taken: the
+ *            pointer is only guaranteed until nats_registry_reap()
+ *            frees the handle (which requires sub_torn_down==1 AND
+ *            pending_ops==0).
+ *
+ * Locking: the bucket READ lock, then the retire READ lock (both
+ * dropped before returning).
+ *
+ * Context: safe from any process; intended for the consumer process's
+ * retire-finalization paths.
+ */
 nats_handle_t *nats_registry_lookup_weak(const str *id);
 
-/* Reaper for retired handles.
+/**
+ * Reaper for retired handles.
  *
- * Frees any handle whose retire=1, sub_torn_down=1, and pending_ops==0.
- * Intended to be called from the consumer process's main loop (cheap
- * enough to run every iteration: O(retired-handles) with a short list).
- * Safe to call from any process context but only the consumer process
- * ever sets sub_torn_down, so calling it from elsewhere is a no-op. */
+ * Frees (nats_handle_free: SHM strs + rlock + ring + handle, and the
+ * recycled index) any handle whose retire=1, sub_torn_down=1 and
+ * pending_ops==0.
+ *
+ * @return  nothing.
+ *
+ * Locking: the retire WRITE lock for the splice only; the frees run
+ * with no lock held so consumer iterations are not serialized.
+ *
+ * Context: intended for the consumer process's main loop (cheap enough
+ * to run every iteration: O(retired-handles) with a short list).  Safe
+ * to call from any process, but only the consumer process ever sets
+ * sub_torn_down, so calling it elsewhere is a no-op.
+ */
 void nats_registry_reap(void);
 
-/* Borrowed lookup.  Returns NULL if not found.
- * Caller must not free.  Handle content is stable until unbind.
+/**
+ * Borrowed lookup.
  *
- * WARNING: this drops the bucket lock before returning, so the handle can
- * be retired and reaped between the return and the caller's first
- * dereference / nats_handle_pending_inc().  Prefer nats_registry_lookup_ref()
- * on any path that will dereference the handle. */
+ * @param id  Handle id; borrowed.
+ * @return    Borrowed pointer (never free it; the registry owns the
+ *            handle), or NULL if not found.  Handle content is stable
+ *            until unbind.
+ *
+ * Locking: the bucket READ lock, dropped before returning.
+ *
+ * WARNING: because the lock is dropped, the handle can be retired and
+ * reaped between the return and the caller's first dereference /
+ * nats_handle_pending_inc().  Prefer nats_registry_lookup_ref() on any
+ * path that will dereference the handle.
+ *
+ * Context: any process.
+ */
 nats_handle_t *nats_registry_lookup(const str *id);
 
-/* Borrowed lookup that atomically takes a pending_ops reference while the
- * bucket read lock is still held.  Returns NULL if not found; otherwise
- * the returned handle is guaranteed not to be freed by the reaper until
- * the caller releases the reference with nats_handle_pending_dec().
+/**
+ * Borrowed lookup that atomically takes a pending_ops reference while
+ * the bucket read lock is still held.
+ *
+ * @param id  Handle id; borrowed.
+ * @return    Borrowed, PINNED pointer, or NULL if not found.  The
+ *            handle is guaranteed not to be freed by the reaper until
+ *            the caller releases the pin with
+ *            nats_handle_pending_dec() -- which the caller MUST do
+ *            exactly once.
  *
  * This closes the TOCTOU in lookup()+pending_inc(): retire() needs the
- * bucket WRITE lock to unlink a handle, so it cannot run while we hold the
- * read lock; once the reference is taken the reaper (which only frees at
- * pending_ops==0) cannot free the handle even after it is later retired.
- * The caller should still check h->retire and stop issuing new work on it,
- * but every dereference is safe until the matching pending_dec(). */
+ * bucket WRITE lock to unlink a handle, so it cannot run while we hold
+ * the read lock; once the reference is taken the reaper (which only
+ * frees at pending_ops==0) cannot free the handle even after it is
+ * later retired.  The caller should still check h->retire and stop
+ * issuing new work on it, but every dereference is safe until the
+ * matching pending_dec().
+ *
+ * Locking: the bucket READ lock, dropped before returning.
+ *
+ * Context: any process; this is the SIP-worker hot-path lookup (fetch
+ * / batch-fetch entry points).
+ */
 nats_handle_t *nats_registry_lookup_ref(const str *id);
 
-/* Snapshot count.  Non-blocking read (atomic). */
+/**
+ * Snapshot count of live (non-retired) handles.
+ *
+ * @return  The counter value; 0 when the registry is not initialized.
+ *
+ * Non-blocking atomic read; no locking.  Context: any process.
+ */
 int nats_registry_count(void);
 
-/* Iterate holding the global read lock.
- * `cb` returns 0 to continue, non-zero to stop early (value is returned
- * to the caller).
- * Must not call registry_bind/unbind from within cb -- deadlock. */
+/**
+ * Iterate every bound handle while HOLDING the global + per-bucket
+ * READ locks across each callback.
+ *
+ * @param cb    Callback; returns 0 to continue, non-zero to stop early
+ *              (that value is returned to the caller).  Handles passed
+ *              to cb are borrowed and only valid during the call.
+ * @param user  Opaque cookie forwarded to cb.
+ * @return      0 on a complete walk (or NULL cb / uninitialized
+ *              registry), else cb's early-stop value.
+ *
+ * cb MUST NOT call registry_bind/unbind (same-lock deadlock) and must
+ * not block -- the held read locks plus rwlock writer priority would
+ * stall every worker lookup.  Use nats_registry_foreach_unlocked() for
+ * slow callbacks.
+ *
+ * Context: any process; the real callers are the MI list/stats
+ * handlers.
+ */
 int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
                           void *user);
 
-/* [P3.4] Iterate WITHOUT holding registry locks during cb: the live
+/**
+ * [P3.4] Iterate WITHOUT holding registry locks during cb: the live
  * handles are snapshotted + pending_ops-pinned under the locks, the
  * locks drop, then cb runs per pinned handle (pin released after each
- * call; on early-stop the remaining pins are still released).  Unlike
- * nats_registry_foreach, cb MAY bind/unbind/reap.  A handle retired
- * after the snapshot is still visited on valid memory -- cb keeps its
- * own h->retire check.  Handles bound after the snapshot are picked up
- * on the caller's next pass.  For callbacks that block (network I/O):
- * the reconcile pass.  Falls back to the locked walk on snapshot-alloc
- * failure. */
+ * call; on early-stop the remaining pins are still released).
+ *
+ * @param cb    Callback; 0 to continue, non-zero to stop early (that
+ *              value is returned).  Unlike nats_registry_foreach, cb
+ *              MAY bind/unbind/reap and MAY block (network I/O) -- this
+ *              exists for the consumer's reconcile pass.  A handle
+ *              retired after the snapshot is still visited on valid
+ *              memory (cb keeps its own h->retire check); handles
+ *              bound after the snapshot are picked up on the caller's
+ *              next pass.
+ * @param user  Opaque cookie forwarded to cb.
+ * @return      0 on a complete walk, else cb's early-stop value.
+ *
+ * Allocation: a transient pkg_malloc'd snapshot array, freed before
+ * returning; falls back to the locked nats_registry_foreach() walk on
+ * snapshot-alloc failure.  Locking: global + bucket READ locks for
+ * the snapshot phase only.
+ *
+ * Context: any process; the real caller is the consumer process's
+ * per-tick reconcile pass.
+ */
 int nats_registry_foreach_unlocked(int (*cb)(nats_handle_t *h, void *user),
                                    void *user);
 
-/* Iterate the retire list (handles unbound but not yet reaped), calling
- * cb(h, user) for each; a non-zero return stops the walk and is returned.
- * Walks under the retire read lock, so cb must NOT bind/unbind/reap or
- * modify the list -- it may only inspect the handle or set atomic fields
- * on it.  Used by the consumer process to mark handles that were unbound
- * before they ever got a subscription as sub_torn_down, so the reaper can
- * free them (otherwise their ring leaks for the process lifetime). */
+/**
+ * Iterate the retire list (handles unbound but not yet reaped).
+ *
+ * @param cb    Callback, called per retired handle (borrowed pointer);
+ *              a non-zero return stops the walk and is returned.
+ * @param user  Opaque cookie forwarded to cb.
+ * @return      0 on a complete walk, else cb's early-stop value.
+ *
+ * Locking: walks under the retire READ lock, held across every cb --
+ * cb must NOT bind/unbind/reap or modify the list; it may only inspect
+ * the handle or set atomic fields on it (e.g. sub_torn_down).  No
+ * allocation.
+ *
+ * Context: any process; used by the consumer process to mark handles
+ * that were unbound before they ever got a subscription as
+ * sub_torn_down, so the reaper can free them (otherwise their ring
+ * leaks for the process lifetime).
+ */
 int nats_registry_foreach_retired(int (*cb)(nats_handle_t *h, void *user),
                                   void *user);
 
-/* Free a handle whose bind failed.  Frees all str buffers and the rlock
- * if initialized, then frees the handle itself.
- * Used by parse-then-fail paths where the caller still owns the handle. */
+/**
+ * Free a CALLER-OWNED handle (one whose bind failed or was never
+ * attempted).  Frees all SHM str buffers, the rlock if initialized,
+ * the SHM ring if created, then the handle itself.  NULL-safe.
+ *
+ * @param h  The handle; ownership is consumed.
+ * @return   nothing.
+ *
+ * Never call this on a registry-owned handle (bind rc == 0) -- those
+ * are freed by the retire/reap lifecycle or registry destroy.  The
+ * consumer-process subscription is NOT touched here (process-local
+ * pointer; its cleanup happens in the consumer process).
+ *
+ * Locking: none.  Context: any process on the parse-then-fail paths
+ * (script / MI / modparam bind), plus the registry's own teardown /
+ * reap internals.
+ */
 void nats_handle_free(nats_handle_t *h);
 
-/* pending_ops helpers.  Use these from any path that holds a borrowed
+/**
+ * pending_ops helpers.  Use these from any path that holds a borrowed
  * nats_handle_t * across a blocking call (e.g. the consumer process's
  * Fetch() on a subscription owned by handle h).  The retire/reap
  * lifecycle uses pending_ops==0 as one of the gating conditions for
  * the actual free.
  *
+ * @param h  The handle; NULL is tolerated (no-op / 0).
+ * @return   _inc / _dec: nothing; _get: the current pending_ops value.
+ *
+ * SEQ_CST atomics on the SHM handle -- no locking needed; safe from
+ * any process (SIP workers, consumer process, MI).  Every _inc MUST be
+ * balanced by exactly one _dec or the handle can never be reaped.
+ *
  * These operate on the handle directly (not by id) because callers
  * already have a pointer from a lookup; re-looking-up by id would
- * reintroduce the race these helpers are meant to close. */
+ * reintroduce the race these helpers are meant to close.
+ */
 static inline void nats_handle_pending_inc(struct nats_handle *h)
 {
 	if (h)

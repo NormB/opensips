@@ -37,13 +37,35 @@
  * from callers that only need the token helpers (e.g. unit tests). */
 struct sip_msg;
 
-/* Common result codes (returned to the script):
- *   1  success (ack enqueued)
- *  -1  no current message / state missing
- *  -2  IPC queue full / init failure (caller may retry) */
-
+/**
+ * Shared contract (every w_nats_* ack entry point below):
+ *
+ * @param msg  Current SIP message; unused (the ack target comes from the
+ *             per-worker current-message state, not from the SIP msg).
+ * @return  1  success -- the ack was enqueued to the consumer process.
+ *         -1  no current message (nothing fetched, or already finalized).
+ *         -2  consumer process not up, IPC pipe refused the send, or (for
+ *             nak_delay) SHM exhaustion; the message stays un-acked and
+ *             JetStream redelivers after ack_wait.
+ *
+ * Allocation: none on the hot path -- the 64-bit ack token travels packed
+ * in the opaque ipc_send_rpc param.  Exception: w_nats_nak_delay
+ * shm_malloc's a small nats_ack_nak_delay_t payload; the consumer-side
+ * handler frees it (the sender frees it itself if the send is refused).
+ *
+ * Locking: none.  Only per-worker static state (the current-message /
+ * batch buffers in nats_fetch.c) is consulted.
+ *
+ * Context: SIP worker script context (cmd_export, ALL_ROUTES).  On rc 1,
+ * ack / nak / nak_delay / term / ack_next clear the current-message state
+ * (and invalidate the selected batch slot) so a second call returns -1
+ * instead of double-acking; in_progress / ack_progress deliberately keep
+ * it, since the worker still intends to ack or nak later.
+ */
 int w_nats_ack  (struct sip_msg *msg);
 int w_nats_nak  (struct sip_msg *msg);
+/** @param delay_ms  Redelivery delay in ms; NULL or <= 0 means 0 (plain
+ *                   nak).  Otherwise identical to the shared contract. */
 int w_nats_nak_delay(struct sip_msg *msg, int *delay_ms);
 int w_nats_term (struct sip_msg *msg);
 int w_nats_in_progress(struct sip_msg *msg);
@@ -64,8 +86,17 @@ int w_nats_in_progress(struct sip_msg *msg);
 int w_nats_ack_next    (struct sip_msg *msg);
 int w_nats_ack_progress(struct sip_msg *msg);
 
-/* Pack / unpack ack-token helpers.  Exported for the consumer process
- * which decodes tokens back to (handle_idx, slot_idx, generation). */
+/**
+ * Pack / unpack ack-token helpers.  Exported for the consumer process
+ * which decodes tokens back to (handle_idx, slot_idx, generation).
+ *
+ * @param handle_idx / slot_idx / generation / tok  the token fields
+ *        (16 + 32 + 16 bits) and the packed 64-bit token.
+ * @return the packed token, resp. the extracted field.
+ *
+ * Pure inline functions on their arguments: no allocation, no locking;
+ * safe in any process or thread.
+ */
 
 static inline uint64_t nats_ack_token_pack(uint16_t handle_idx,
                                            uint32_t slot_idx,

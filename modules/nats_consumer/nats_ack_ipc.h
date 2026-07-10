@@ -72,9 +72,33 @@ typedef struct nats_ack_nak_delay {
 	uint32_t delay_ms;
 } nats_ack_nak_delay_t;
 
-/* The ipc_send_rpc handlers, one per action.  All run in the consumer
- * process; param is the raw token (cast via uintptr_t), except
- * on_nak_delay whose param is a nats_ack_nak_delay_t*. */
+/**
+ * The ipc_send_rpc handlers, one per ack verb.
+ *
+ * Shared contract:
+ *
+ * @param sender  process_no of the sending worker; ignored.
+ * @param param   The raw 64-bit ack token cast via uintptr_t -- except
+ *                on_nak_delay, whose param is a worker-shm_malloc'd
+ *                nats_ack_nak_delay_t * that THIS handler shm_free's
+ *                (NULL is tolerated).
+ * @return        nothing; a stale token (slot already released or
+ *                re-used, detected by the packed generation) is a silent
+ *                no-op.
+ *
+ * Effect: redeems the token from the process-local msg-ref table, calls
+ * the matching natsMsg_Ack / Nak / NakWithDelay / Term / InProgress /
+ * AckSync via nats_dl, bumps the per-handle SHM counters (relaxed
+ * atomics), and destroys the natsMsg -- except in_progress, which puts
+ * the still-live natsMsg back under the same token.  ack_next also flags
+ * the handle for an immediate pull refill on this tick.
+ *
+ * Locking: none -- these run single-threaded.
+ *
+ * Context: consumer process ONLY, invoked from its main loop's IPC pump
+ * (pump_worker_ipc -> ipc_handle_job); the only libnats-safe context for
+ * JetStream ack calls.  Never run on a cnats callback thread.
+ */
 void nats_ack_ipc_on_ack(int sender, void *param);
 void nats_ack_ipc_on_ack_next(int sender, void *param);
 void nats_ack_ipc_on_nak(int sender, void *param);
@@ -90,11 +114,33 @@ void nats_ack_ipc_on_in_progress(int sender, void *param);
 #ifndef NATS_ACK_SYNC_PER_TICK_MAX
 #define NATS_ACK_SYNC_PER_TICK_MAX 4
 #endif
+/**
+ * Reset the per-tick AckSync budget (see above).
+ *
+ * @return  nothing.
+ *
+ * Touches one process-local counter; no allocation, no locking.
+ * Context: consumer process main loop, once per iteration before the
+ * IPC drain.
+ */
 void nats_ack_ipc_tick_reset(void);
 
-/* SHM counters behind the ack_ipc_* MI stats (init/destroy from
- * mod_init / mod_destroy; count_sent from the worker send path;
- * depth = sent - drained, floored at 0). */
+/**
+ * SHM counters behind the ack_ipc_* MI stats.
+ *
+ * nats_ack_ipc_stats_init() shm_malloc's the counter block (freed by
+ * nats_ack_ipc_stats_destroy()); @return 0 on success, -1 on SHM
+ * exhaustion (all other functions then read as zero / no-op).
+ * Contexts: init from mod_init (main process, pre-fork), destroy from
+ * mod_destroy.
+ *
+ * nats_ack_ipc_count_sent(@ok): bump `sent` (@ok != 0) or `dropped`
+ * (@ok == 0); called from the SIP-worker ack send path.  No return.
+ *
+ * The _total() getters and _depth() (= sent - drained, floored at 0)
+ * are relaxed-atomic reads with no locking, callable from any process
+ * (in practice the MI handlers); they return 0 while uninitialised.
+ */
 int      nats_ack_ipc_stats_init(void);
 void     nats_ack_ipc_stats_destroy(void);
 void     nats_ack_ipc_count_sent(int ok);

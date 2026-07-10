@@ -202,60 +202,120 @@ typedef struct nats_rpc_slot {
 	_Atomic uint32_t generation;
 } nats_rpc_slot_t;
 
-/*
+/**
  * Module-init / module-destroy hooks.  Both are called from
- * nats_consumer.c::mod_init / mod_destroy.  init() allocates the
- * SHM slot array (in main, pre-fork) so every child inherits the
- * shared mapping.  destroy() frees the SHM.  init() returns 0 on
- * success, -1 on SHM allocation failure.
+ * nats_consumer.c::mod_init / mod_destroy.
+ *
+ * init():
+ * @return  0 on success (idempotent: a second call warns and returns
+ *          0), -1 on SHM allocation failure.
+ * Allocates the slot array with shm_malloc (sized from the clamped
+ * `async_rpc_slots` modparam) so every child inherits the shared
+ * mapping; freed only by destroy().  No locking.  Context: mod_init in
+ * the main process, PRE-FORK.
+ *
+ * destroy():
+ * @return  nothing; NULL-safe.
+ * shm_free's the slot array.  No locking.  Context: mod_destroy.
  */
 int  nats_rpc_slot_init(void);
 void nats_rpc_slot_destroy(void);
 
-/*
- * Claim a free slot.  Worker calls this from w_nats_request_async
- * after sanity-checking inputs.  Returns the slot pointer on
- * success, NULL if all slots are in use (the caller surfaces -5
- * to the script).  The returned slot is in state CLAIMED; the
- * caller fills out_* fields and then transitions to INFLIGHT via
- * nats_rpc_slot_publish().
+/**
+ * Claim a free slot (lock-free CAS scan from a rotating hint).
+ *
+ * @return  Pointer into the SHM slot pool on success, NULL if all
+ *          slots are in use (the caller surfaces -5 to the script).
+ *
+ * The returned slot is pool-owned SHM -- never freed by the caller;
+ * it is RETURNED to the pool via nats_rpc_slot_free() (or by the
+ * orphan reaper if the owner dies).  On success the slot is in state
+ * CLAIMED with its generation bumped, out_* and reply_* fields zeroed,
+ * claimed_at_us stamped and owner_proc reset to -1; the caller fills
+ * out_* and transitions to INFLIGHT via nats_rpc_slot_publish().
+ *
+ * No locking (atomic CAS on `state`).  Context: SIP worker, from
+ * w_nats_request_async after sanity-checking inputs.
  */
 nats_rpc_slot_t *nats_rpc_slot_claim(void);
 
-/*
- * Transition CLAIMED -> INFLIGHT.  Publishes the slot to the
- * consumer's view.  Returns 0 on success; -1 if the slot was not
- * in CLAIMED state (programmer error). */
+/**
+ * Transition CLAIMED -> INFLIGHT (release ordering), publishing the
+ * out_* fields to the consumer's view.
+ *
+ * @param s  The claimed slot; NULL returns -1.
+ * @return   0 on success; -1 if the slot was not in CLAIMED state
+ *           (programmer error, logged at ERR).
+ *
+ * No allocation, no locking (single atomic CAS).  Context: SIP worker,
+ * on its own claim, BEFORE the worker->consumer IPC send.
+ */
 int nats_rpc_slot_publish(nats_rpc_slot_t *s);
 
-/*
- * Worker resume: CAS INFLIGHT -> ABANDONED.  Only fires while the
- * slot is still INFLIGHT; a DELIVERING (claim pinned by consumer)
- * or DELIVERED slot is left untouched and its state returned.
- * Returns the observed state.  Idempotent on ABANDONED. */
+/**
+ * CAS INFLIGHT -> ABANDONED.  Only fires while the slot is still
+ * INFLIGHT; a DELIVERING (claim pinned by consumer) or DELIVERED slot
+ * is left untouched and its state returned.
+ *
+ * @param s  The slot; NULL returns -1.
+ * @return   The resulting state: NATS_RPC_SLOT_ABANDONED if the CAS
+ *           won (or the slot was already ABANDONED -- idempotent),
+ *           otherwise the observed live state (e.g. DELIVERED).
+ *
+ * No allocation, no locking (single atomic CAS).  Context: the
+ * claiming SIP worker's resume path (timeout / epoch-lost), AND the
+ * consumer process's fail-fast paths (connection lost, deaf inbox,
+ * publish failure) via slot_abandon_and_wake.
+ */
 int nats_rpc_slot_abandon(nats_rpc_slot_t *s);
 
-/*
- * Worker resume / cleanup: transition the CALLER'S claim -> FREE.
- * @gen is the generation captured at claim time: if it no longer
- * matches, the claim was orphan-reaped [P2.2] and possibly recycled
- * to a new caller, so the free is a NO-OP (a blind store here would
- * clobber the new claim).  Must be called exactly once per live
- * claim; the reaper covers claims whose owner died.
+/**
+ * Worker resume / cleanup: transition the CALLER'S claim -> FREE,
+ * returning the slot to the pool (the SHM itself is never freed here).
+ *
+ * @param s    The slot; NULL is a no-op.
+ * @param gen  The generation captured at claim time: if it no longer
+ *             matches, the claim was orphan-reaped [P2.2] and possibly
+ *             recycled to a new caller, so the free is a NO-OP (a
+ *             blind store would clobber the new claim).
+ * @return     nothing.
+ *
+ * Must be called exactly once per live claim; the reaper covers claims
+ * whose owner died.  No locking (generation check + state CAS).
+ * Context: the claiming SIP worker only (resume / error unwind).
  */
 void nats_rpc_slot_free(nats_rpc_slot_t *s, uint32_t gen);
 
-/*
- * Lookup by slot_idx.  Used by the consumer process's libnats
- * callback to find the slot from a reply-subject suffix.  Returns
- * NULL if the index is out of range OR the slot is currently FREE
- * (defensive against a late reply arriving after free). */
+/**
+ * Lookup by slot_idx.
+ *
+ * @param slot_idx  Index parsed from a reply-subject suffix or IPC
+ *                  entry.
+ * @return          Borrowed pointer into the SHM pool, or NULL if the
+ *                  index is out of range OR the slot is currently FREE
+ *                  (defensive against a late reply arriving after
+ *                  free).  Never free it; validity is governed by the
+ *                  slot's state + generation, which the caller must
+ *                  re-check.
+ *
+ * No locking (one acquire load).  Context: consumer process -- both
+ * its libnats reply callback thread (on_inbox_reply) and its main-loop
+ * IPC publish path.
+ */
 nats_rpc_slot_t *nats_rpc_slot_lookup(uint32_t slot_idx);
 
-/*
+/**
  * Is an outbound IPC publish entry tagged with @gen still the current
- * claim of slot @s?  True only when the slot is INFLIGHT *and* its
- * generation matches @gen.
+ * claim of slot @s?
+ *
+ * @param s    The slot (borrowed); NULL returns 0.
+ * @param gen  The generation captured when the IPC entry was enqueued.
+ * @return     1 only when the slot is INFLIGHT *and* its generation
+ *             matches @gen; else 0.
+ *
+ * Pure inline read (acquire load of state, relaxed load of
+ * generation); no allocation, no locking.  Context: consumer process,
+ * on the IPC drain path (publish_slot / nats_rpc_ipc_on_publish).
  *
  * The worker->consumer IPC entry carries (slot_idx, generation).  A
  * generation mismatch means the slot was freed and re-claimed since the
@@ -278,24 +338,59 @@ static inline int nats_rpc_slot_entry_is_current(const nats_rpc_slot_t *s,
 	return 1;
 }
 
-/* Advisory snapshots (atomic load of state counter; no lock). */
+/**
+ * Advisory in-flight count snapshot.
+ *
+ * @return  The current in-flight counter (relaxed atomic load; may
+ *          race with claims/frees -- a hint, not a guarantee).
+ *
+ * No allocation, no locking.  Callable from any process (MI stats,
+ * worker log lines).
+ */
 uint32_t nats_rpc_slot_inflight_count(void);
 
-/* [P2.2] Orphan reaper -- run from the consumer main loop.  Reclaims
- * any non-FREE, non-DELIVERING slot whose owner is provably gone:
- * past deadline_us + slack when the worker stamped a deadline, or
- * past the claim TTL for a CLAIMED slot that never published (death
- * between claim and publish).  Bumps the generation BEFORE the state
- * CAS so late replies / stale IPC entries are invalidated first;
- * repairs the inflight count.  Returns the number reaped. */
 #ifndef NATS_RPC_SLOT_REAP_SLACK_US
 #define NATS_RPC_SLOT_REAP_SLACK_US      (60LL * 1000000LL)   /* 60 s  */
 #endif
 #ifndef NATS_RPC_SLOT_REAP_CLAIM_TTL_US
 #define NATS_RPC_SLOT_REAP_CLAIM_TTL_US  (120LL * 1000000LL)  /* 120 s */
 #endif
+/**
+ * [P2.2] Orphan reaper.  Reclaims any non-FREE, non-DELIVERING slot
+ * whose owner is provably gone: past deadline_us + slack when the
+ * worker stamped a deadline, or past the claim TTL for a CLAIMED slot
+ * that never published (death between claim and publish).  Bumps the
+ * generation BEFORE the state CAS so late replies / stale IPC entries
+ * are invalidated first; repairs the inflight count.
+ *
+ * @param now_us  Current CLOCK_MONOTONIC time in microseconds
+ *                (system-wide, comparable across processes).
+ * @return        The number of slots reaped (0 when uninitialised).
+ *
+ * No allocation; lock-free (per-slot atomic CAS -- safe against
+ * concurrent workers and the cnats reply thread).  Context: consumer
+ * process main loop, on its periodic reap interval.
+ */
 int nats_rpc_slot_reap_orphans(long long now_us);
+
+/**
+ * Lifetime total of orphan-reaped slots (operator telemetry).
+ *
+ * @return  Relaxed atomic counter value.  No allocation, no locking;
+ *          callable from any process (MI stats).
+ */
 uint64_t nats_rpc_slot_orphans_reaped_total(void);
+
+/**
+ * The slot-pool size fixed at nats_rpc_slot_init() (the clamped
+ * `async_rpc_slots` value).
+ *
+ * @return  Total slot count; 0 before init / after destroy.
+ *
+ * Plain read of a value that is constant between init and destroy; no
+ * locking.  Callable from any process (workers size their wake
+ * registry from it; MI reports it).
+ */
 uint32_t nats_rpc_slot_total_count(void);
 
 #endif /* NATS_RPC_SLOT_H */

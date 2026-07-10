@@ -55,39 +55,120 @@
 #ifndef LIB_NATS_NATS_EPOCH_H
 #define LIB_NATS_NATS_EPOCH_H
 
+/**
+ * Current per-process reconnect epoch (mirror declaration; defined in
+ * nats_pool.c, where the canonical contract lives).  Bumped by the
+ * libnats reconnected callback on the cnats I/O thread.
+ *
+ * @return Monotonic per-process epoch counter (0 until the first
+ *         reconnect).  Nothing allocated.
+ *
+ * Locking: none; atomic_load of a process-local _Atomic.
+ * Context: any process or thread (SIP worker, cnats callback thread,
+ * MI handler, timer proc).
+ */
 int nats_pool_get_reconnect_epoch(void);
+
+/**
+ * Whether this process's pool connection is currently up (mirror
+ * declaration; defined in nats_pool.c, where the canonical contract
+ * lives).
+ *
+ * @return 1 connected, 0 disconnected.  Nothing allocated.
+ *
+ * Locking: none; atomic_load of a process-local _Atomic written by the
+ * cnats connection callbacks.
+ * Context: any process or thread.
+ */
 int nats_pool_is_connected(void);
 
 typedef struct nats_epoch {
 	int seen;
 } nats_epoch_t;
 
-/* Tag: the handle being tagged was just acquired from the live pool. */
+/**
+ * Tag: the handle being tagged was just acquired from the live pool.
+ *
+ * @param e Epoch tag to stamp; caller-owned, living wherever the caller
+ *          embedded it (pkg struct, SHM struct, static).  Plain int
+ *          store; nothing allocated.
+ *
+ * Locking: none; the store is not atomic.  A tag embedded in SHM that
+ * multiple processes touch needs the caller's own serialisation (e.g.
+ * the owning slot's lock).
+ * Context: any process or thread that may read the pool epoch.
+ */
 static inline void nats_epoch_save(nats_epoch_t *e)
 {
 	e->seen = nats_pool_get_reconnect_epoch();
 }
 
-/* Fast-path check: no reconnect since the tag was taken. */
+/**
+ * Fast-path check: no reconnect since the tag was taken.
+ *
+ * @param e Epoch tag stamped by nats_epoch_save()/nats_epoch_adopt();
+ *          caller-owned, read-only here.
+ *
+ * @return 1 = tag still current (handle usable), 0 = a reconnect
+ *         happened since the tag (re-acquire the handle).
+ *
+ * Locking: none; plain int read vs. an atomic pool read (same caveats
+ * as nats_epoch_save() for SHM-resident tags).
+ * Context: any process or thread.
+ */
 static inline int nats_epoch_current(const nats_epoch_t *e)
 {
 	return e->seen == nats_pool_get_reconnect_epoch();
 }
 
-/* Refresh protocol (see the file comment): snapshot BEFORE the
- * acquire, adopt only after success. */
+/**
+ * Refresh protocol, step 1 (see the file comment): snapshot the epoch
+ * BEFORE acquiring the new handle; adopt only after success.
+ *
+ * @return The epoch value to hand to nats_epoch_adopt() once the
+ *         acquire succeeds.  Nothing allocated.
+ *
+ * Locking: none; atomic pool read.
+ * Context: any process or thread.
+ */
 static inline int nats_epoch_snapshot(void)
 {
 	return nats_pool_get_reconnect_epoch();
 }
 
+/**
+ * Refresh protocol, step 2: adopt the pre-acquire snapshot into the tag
+ * AFTER the new handle was acquired successfully.  Never re-read the
+ * live epoch here -- that is the P0.1 trap the file comment describes.
+ *
+ * @param e        Epoch tag to stamp; caller-owned (see
+ *                 nats_epoch_save() for the SHM caveat).
+ * @param snapshot Value returned by nats_epoch_snapshot() taken before
+ *                 the acquire.
+ *
+ * Locking: none; plain int store.
+ * Context: any process or thread.
+ */
 static inline void nats_epoch_adopt(nats_epoch_t *e, int snapshot)
 {
 	e->seen = snapshot;
 }
 
-/* In-flight liveness: the broker was lost (reconnected since the tag,
- * or not connected right now). */
+/**
+ * In-flight liveness: the broker was lost (reconnected since the tag,
+ * or not connected right now).
+ *
+ * @param e Epoch tag taken when the in-flight work started; caller-
+ *          owned, read-only here.
+ *
+ * @return 1 = broker lost since the tag (reconnected OR currently
+ *         disconnected; abandon/retry the in-flight work), 0 = still
+ *         live.
+ *
+ * Locking: none; atomic pool reads + plain int read (see
+ * nats_epoch_save() for the SHM caveat).
+ * Context: any process or thread.
+ */
 static inline int nats_epoch_lost(const nats_epoch_t *e)
 {
 	return !nats_pool_is_connected() || !nats_epoch_current(e);

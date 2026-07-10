@@ -36,21 +36,35 @@
 #ifndef LIB_NATS_NATS_CA_DIR_H
 #define LIB_NATS_NATS_CA_DIR_H
 
-/*
+/**
  * Read every regular .pem file in @dir, concatenate the contents in
  * lexicographic filename order separated by '\n', return as a single
  * nul-terminated buffer the caller frees with libc free().
  *
- * Returns NULL on any failure (missing dir, no .pem files, OOM, read
- * error).  When @err is non-NULL, *err is filled with a brief
- * human-readable reason; the pointer is owned by the caller (use
- * free()) when non-NULL.  Pass NULL to discard.
- *
  * Filename filter: case-sensitive ".pem" suffix.  Non-regular files
  * (symlinks to directories, devices, etc.) are skipped silently.
  *
+ * @param dir Directory path to scan (NUL-terminated); NULL or empty
+ *            fails with *err set.
+ * @param err Optional out-param for a failure reason: on failure set to
+ *            a libc-malloc'd human-readable string owned by the caller
+ *            (free with libc free()) or to NULL if the message itself
+ *            could not be allocated.  Reset to NULL on entry.  Pass
+ *            NULL to discard.
+ *
+ * @return libc-malloc'd PEM concatenation owned by the caller (freed
+ *         with libc free(); handed to
+ *         natsOptions_SetCATrustedCertificates(), which copies it), or
+ *         NULL on any failure (missing dir, no .pem files, OOM, read
+ *         error).
+ *
+ * Locking: none taken.
  * Thread safety: not thread-safe -- holds an open DIR handle and
  * uses dirent's static buffer.  Callers serialise externally.
+ * Context: in-tree it runs from nats_pool's TLS option setup
+ * (apply_tls_from_mgm) while the calling process establishes its
+ * per-process connection; no OpenSIPS allocator or lock is used, so
+ * any process or serialised thread may call it.
  */
 char *nats_load_ca_directory(const char *dir, char **err);
 

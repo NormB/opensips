@@ -39,14 +39,27 @@
 #include "../../str.h"
 #include "../../dprint.h"
 
-/*
+/**
  * Copy an OpenSIPS str into a caller-provided fixed buffer, NUL-terminating.
  *
  * Guards a negative s->len: it is an int, and the (size_t) cast in the bounds
  * check below would turn a negative value into a huge positive one, silently
  * passing the check and causing a massive memcpy.  A NULL/empty str yields an
- * empty C string.  Returns 0 on success, -1 if the string does not fit or the
- * descriptor is corrupt.
+ * empty C string.  An embedded NUL is rejected (see the body comment: the
+ * result feeds C-string NATS key/subject APIs, which would truncate).
+ *
+ * @param s        Source str; NULL, NULL s->s or len == 0 yields "".
+ * @param buf      Destination buffer, caller-owned (stack/pkg/shm -- the
+ *                 caller's choice; nothing is allocated here).
+ * @param buf_size Capacity of @buf in bytes, including the NUL; 0 is
+ *                 rejected (even "" needs one byte).
+ *
+ * @return 0 on success (@buf NUL-terminated), -1 on a zero-capacity
+ *         buffer, negative length, overflow (s->len >= buf_size) or
+ *         embedded NUL; @buf is left untouched on -1.
+ *
+ * Locking: none.
+ * Context: any process or thread; logs via LM_ERR on rejection.
  */
 static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 {
@@ -83,11 +96,23 @@ static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 	return 0;
 }
 
-/*
+/**
  * Allocate (libc malloc) a NUL-terminated copy of an OpenSIPS str.  Returns
  * NULL on a NULL/empty input or OOM.  The caller frees the result with free().
  * libc malloc (not pkg/shm) so the copy is valid in non-OpenSIPS thread
  * contexts such as the nats_consumer process's borrowed-to-nats.c strings.
+ *
+ * @param s Source str; NULL, NULL s->s or len <= 0 returns NULL.
+ *
+ * @return libc-malloc'd NUL-terminated copy owned by the caller, who
+ *         frees it with libc free() (NOT pkg_free/shm_free); NULL on
+ *         empty input or OOM.  Bytes are copied verbatim: an embedded
+ *         NUL survives in memory but truncates any consumer that reads
+ *         the result as a C string.
+ *
+ * Locking: none.
+ * Context: any process or thread, including cnats callback threads
+ * (the reason for libc malloc over pkg).
  */
 static inline char *nats_str_to_cstr(const str *s)
 {

@@ -40,43 +40,84 @@
  * per-worker inbox-subscription async transport) was superseded by the
  * consumer-routed SHM-slot transport and deleted (P1.1). */
 
-/*
+/**
  * Mint a UUIDv7 correlation id (RFC 9562 §5.7) into the provided
- * buffer.  `cap` must be at least 37 (36 chars + NUL).  Returns
- * the written length (36) on success or 0 on truncation /
- * getrandom failure.
+ * buffer.
  *
- * Used by the sync and async nats_request start paths to populate
- * the per-worker `$nats_request_id` stash and the auto-staged
- * outbound header (modparam `request_id_header`, default
- * `X-Request-Id`).  Exposed for unit tests that want to validate
- * the version-7 nibble and variant bits without booting opensips.
+ * @param out  Caller-owned destination buffer; NUL-terminated on
+ *             success.  Nothing is allocated.
+ * @param cap  Size of @out; must be at least 37 (36 chars + NUL).
+ * @return     The written length (36) on success, 0 on truncation /
+ *             clock failure / getrandom failure (callers treat 0 as
+ *             "no correlation id available" and skip header staging).
+ *
+ * Pure function on caller memory (one CLOCK_REALTIME read + one
+ * getrandom of 10 bytes); no locking; safe in any process or thread.
+ * Production callers are the sync and async nats_request start paths
+ * (SIP worker); exposed for unit tests that validate the version-7
+ * nibble and variant bits without booting opensips.
  */
 int nats_rpc_async_uuidv7_mint(char *out, size_t cap);
 
-/* Per-worker stash setter / getter for the most recent outbound
- * request's UUIDv7.  `_set` is used by the start paths to record
- * the just-used id (and clears the user-supplied override flag);
- * `_get` is read by the $nats_request_id pvar getter.
+/**
+ * Per-worker stash setter / getter for the most recent outbound
+ * request's UUIDv7.
  *
- * The pointer returned by ..._get() is owned by the module; it is
- * valid until the next nats_request call on this worker.  Callers
- * that need the value to outlive that must copy. */
+ * _set:
+ * @param id   Bytes to stash; copied (caller keeps ownership).  NULL or
+ *             len <= 0 clears the stash; over-long input is truncated
+ *             to 63 bytes.  Also clears the user-supplied override flag
+ *             (recording a just-used id is NOT an override).
+ * @param len  Length of @id in bytes.
+ * @return     nothing.
+ *
+ * _get:
+ * @param out_len  Optional out: stashed length (may be NULL).
+ * @return         Pointer to the stash, or NULL when empty.  The
+ *                 pointer is a module-owned per-worker static buffer --
+ *                 do not free; valid until the next nats_request call
+ *                 (or _set) on this worker.  Copy to outlive that.
+ *
+ * Both operate on per-worker static storage: no allocation, no locking
+ * (SIP workers are single-threaded).  Context: SIP worker only -- the
+ * request start paths (_set) and the $nats_request_id pvar getter
+ * (_get), including resume routes after an async() yield.
+ */
 void        nats_rpc_async_request_id_set(const char *id, int len);
 const char *nats_rpc_async_request_id_get(int *out_len);
 
-/* Pvar-write entry point: the script has assigned to
- * $nats_request_id.  Stash the value with a consume-once flag so
- * the NEXT nats_request call uses it instead of minting a fresh
- * UUIDv7.  Returns 0 on success, -1 on validation failure
- * (length > 63 bytes, embedded CR/LF). */
+/**
+ * Pvar-write entry point: the script has assigned to $nats_request_id.
+ * Stash the value with a consume-once flag so the NEXT nats_request
+ * call uses it instead of minting a fresh UUIDv7.
+ *
+ * @param id   Value to stash; copied into the per-worker static buffer.
+ *             NULL / len <= 0 clears both the pending override and the
+ *             last-used stash, returning 0.
+ * @param len  Length of @id in bytes.
+ * @return     0 on success, -1 on validation failure (length > 63
+ *             bytes, or embedded CR/LF -- would inject pseudo-headers
+ *             into the NATS wire protocol).
+ *
+ * No allocation, no locking (per-worker static state).  Context: SIP
+ * worker script context, via pv_set_nats_request_id.
+ */
 int nats_rpc_async_request_id_user_set(const char *id, int len);
 
-/* Start-path consumer: if a user-supplied id is pending, copy
- * it to `out` (cap-sized) and clear the pending flag.  Returns
- * the length copied, or 0 if no override is pending.  Consume-
- * once -- subsequent calls revert to minting unless the script
- * re-assigns. */
+/**
+ * Start-path consumer: if a user-supplied id is pending, copy it to
+ * @out and clear the pending flag.  Consume-once -- subsequent calls
+ * revert to minting unless the script re-assigns.
+ *
+ * @param out  Caller-owned buffer; NUL-terminated on success.
+ * @param cap  Size of @out; must exceed the stashed length.
+ * @return     The length copied, or 0 when no override is pending (or
+ *             @out is NULL / too small -- the override then stays
+ *             pending).
+ *
+ * No allocation, no locking (per-worker static state).  Context: SIP
+ * worker only, from the sync / async nats_request start paths.
+ */
 int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
 

@@ -37,10 +37,25 @@
 
 #include <stdatomic.h>
 
-/* Process entry point.  Matches the `mod_proc` signature expected by
- * OpenSIPS' proc_export_t: it is called once per fork with the rank
- * assigned by the core.  Returns only on fatal error; the core treats
- * return-from-main as an exiting child and reaps the process. */
+/**
+ * Process entry point of the dedicated JetStream pull consumer process.
+ * Matches the `mod_proc` signature expected by OpenSIPS' proc_export_t.
+ *
+ * @param rank  Rank assigned by the core at fork time; logged only.
+ * @return      Never returns in normal operation (infinite main loop);
+ *              the core treats return-from-main as an exiting child and
+ *              reaps the process.
+ *
+ * Publishes its pt[] index to the SHM heartbeat block as its first act,
+ * then retries nats_pool_get() until a broker connection + jsCtx exist.
+ * All process-local allocations (proc_sub_state_t, msg-ref rows,
+ * libnats objects) are libc-heap and owned by this process for its
+ * lifetime.  Takes registry locks only transiently via the registry
+ * API; the fetch / ack / reap phases run single-threaded.
+ *
+ * Context: called ONCE by the OpenSIPS core in the freshly-forked
+ * consumer process (module_exports.procs).  Never call it elsewhere.
+ */
 void nats_consumer_proc_main(int rank);
 
 /* Module-global Fetch tuning (definitions in nats_consumer.c).  Read
@@ -76,10 +91,19 @@ typedef struct nats_consumer_heartbeat {
 
 extern nats_consumer_heartbeat_t *nats_consumer_hb;
 
-/* [P2.1] The consumer process's process-table index, published by the
+/**
+ * [P2.1] The consumer process's process-table index, published by the
  * proc itself as its first act.  Workers pass it to ipc_send_rpc for
- * the worker->consumer ack/RPC hops.  -1 while the proc is not (yet)
- * up -- senders fail fast with the usual capacity error. */
+ * the worker->consumer ack/RPC hops.
+ *
+ * @return  The consumer's pt[] index, or -1 while the proc is not (yet)
+ *          up or the heartbeat block was never allocated -- senders
+ *          fail fast with the usual capacity error.
+ *
+ * One acquire atomic load from the SHM heartbeat block; no allocation,
+ * no locking.  Callable from any process (SIP workers on every ack /
+ * async-RPC send, MI handlers).
+ */
 static inline int nats_consumer_proc_no(void)
 {
 	if (!nats_consumer_hb)
@@ -88,11 +112,27 @@ static inline int nats_consumer_proc_no(void)
 		memory_order_acquire);
 }
 
-/* Allocate the SHM heartbeat block (mod_init).  Returns 0 on success,
- * -1 on shared-memory allocation failure. */
+/**
+ * Allocate and zero the SHM heartbeat block (nats_consumer_hb), with
+ * consumer_proc_no seeded to -1 ("not up yet").
+ *
+ * @return  0 on success, -1 on shared-memory allocation failure.
+ *
+ * The block is shm_malloc'd and freed by nats_consumer_hb_destroy().
+ * No locking.  Context: mod_init (main process, pre-fork) ONLY, so all
+ * children inherit the same SHM pointer.
+ */
 int nats_consumer_hb_init(void);
 
-/* Free the SHM heartbeat block (mod_destroy). */
+/**
+ * Free the SHM heartbeat block; idempotent (NULL-safe).
+ *
+ * @return  nothing.
+ *
+ * shm_free's the block allocated by nats_consumer_hb_init() and NULLs
+ * the global.  No locking.  Context: mod_destroy (attendant, after the
+ * children are gone).
+ */
 void nats_consumer_hb_destroy(void);
 
 #endif /* NATS_CONSUMER_PROC_H */

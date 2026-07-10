@@ -89,12 +89,15 @@ typedef struct nats_dl_funcs {
  */
 extern nats_dl_funcs_t nats_dl;
 
-/*
+/**
  * nats_dl_load -- dlopen libnats and populate the table.
  *
- * @libnats_path  Explicit path or SONAME passed to dlopen().  If
+ * @param libnats_path Explicit path or SONAME passed to dlopen().  If
  *                non-NULL, no fallback is attempted -- if the
  *                explicit path fails, the function returns -1.
+ *                Not copied: on success with a non-NULL argument the
+ *                pointer is kept (returned by nats_dl_path()), so it
+ *                must outlive the load (string literals / modparams do).
  *                Pass NULL to use the default load order:
  *                  1. $NATS_DL_LIBNATS_PATH if set (env-var
  *                     override; on failure, falls back to step 2
@@ -109,9 +112,18 @@ extern nats_dl_funcs_t nats_dl;
  * select via $NATS_DL_LIBNATS_PATH or via standard ld.so
  * mechanisms (LD_LIBRARY_PATH, ldconfig priorities).
  *
- * Returns 0 on success (table populated, every entry non-NULL),
- * -1 on dlopen failure or missing required symbol.  Idempotent:
- * subsequent calls return 0 without re-loading.
+ * @return 0 on success (table populated, every entry non-NULL),
+ *         -1 on dlopen failure or missing required symbol (the table
+ *         is zeroed and the handle closed -- fail closed).  Idempotent:
+ *         subsequent calls return 0 without re-loading.
+ *
+ * Allocation: only the dlopen handle, owned by nats_dl.c and released
+ * by nats_dl_unload(); nothing for the caller to free.
+ *
+ * Locking: none -- NOT thread-safe against concurrent loads.
+ * Context: called once per process from nats_pool_register() on first
+ * registration, i.e. mod_init (pre-fork, single-threaded); do not call
+ * from worker/callback contexts.
  *
  * Caller MUST ensure nats_dl_load returns 0 before any nats_dl.*
  * call.  Calling through a NULL function pointer is undefined
@@ -119,15 +131,23 @@ extern nats_dl_funcs_t nats_dl;
  */
 int  nats_dl_load(const char *libnats_path);
 
-/*
+/**
  * nats_dl_unload -- dlclose libnats and zero the table.
  *
- * Called from nats_pool_destroy / mod_destroy paths.  Safe to call
- * when nothing has been loaded (no-op).
+ * Safe to call when nothing has been loaded (no-op).  After it
+ * returns, every nats_dl.* pointer is NULL -- no libnats call may
+ * follow in this process.
+ *
+ * @return none.
+ *
+ * Allocation: releases the dlopen handle owned by nats_dl.c.
+ * Locking: none -- NOT thread-safe against concurrent nats_dl use.
+ * Context: shutdown only -- nats_pool_destroy / mod_destroy paths,
+ * after all NATS threads and callbacks are gone.
  */
 void nats_dl_unload(void);
 
-/*
+/**
  * nats_dl_is_loaded -- true if dlopen has succeeded.
  *
  * Useful from secondary mod_init paths that need to lazy-load
@@ -135,13 +155,26 @@ void nats_dl_unload(void);
  *   if (!nats_dl_is_loaded()) {
  *       if (nats_dl_load(NULL) < 0) return -1;
  *   }
+ *
+ * @return 1 if the table is populated (load succeeded), 0 otherwise.
+ *
+ * Allocation: none.  Locking: none (plain pointer read; pair it with
+ * the single-threaded load/unload contexts above).
+ * Context: any process; intended for mod_init (pre-fork) probing.
  */
 int  nats_dl_is_loaded(void);
 
-/*
- * nats_dl_path -- the path/SONAME that dlopen succeeded with, or
- * NULL if not loaded.  Pointer is owned by nats_dl; do not free.
+/**
+ * nats_dl_path -- the path/SONAME that dlopen succeeded with.
+ *
  * Useful for diagnostic LM_INFO logs after init.
+ *
+ * @return Borrowed pointer owned by nats_dl (a string literal, the
+ *         env value, or the caller's original argument) -- do not
+ *         free; NULL if not loaded.  Valid until nats_dl_unload().
+ *
+ * Allocation: none.  Locking: none (plain pointer read).
+ * Context: any process after nats_dl_load() returned 0.
  */
 const char *nats_dl_path(void);
 

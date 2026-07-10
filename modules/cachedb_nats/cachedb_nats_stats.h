@@ -133,6 +133,19 @@ typedef struct _nats_cdb_stats {
 /* Pointer to the SHM array of NATS_CDB_STATS_MAX_PROCS slots. */
 extern nats_cdb_stats_t *nats_cdb_stats;
 
+/**
+ * This process's slot in the SHM stats table (indexed by process_no).
+ *
+ * @return pointer into the SHM array (shared memory owned by the
+ *         module — allocated in nats_cdb_stats_init(), freed only by
+ *         nats_cdb_stats_destroy(); callers never free it), or NULL
+ *         when stats are not yet initialized or process_no is out of
+ *         range.
+ *
+ * Locking: none — slot fields are C11 atomics and each process writes
+ * only its own cacheline-aligned slot.  Context: any OpenSIPS process
+ * whose process_no is valid (i.e. after nats_cdb_stats_init()).
+ */
 static inline nats_cdb_stats_t *nats_cdb_stats_slot(void)
 {
 	if (!nats_cdb_stats) return NULL;
@@ -141,25 +154,54 @@ static inline nats_cdb_stats_t *nats_cdb_stats_slot(void)
 	return &nats_cdb_stats[process_no];
 }
 
+/**
+ * Sum one counter field across every per-process slot (relaxed atomic
+ * loads; the result is a point-in-time approximation under concurrent
+ * writers, exact for single-writer gauges).
+ *
+ * @param field_offset  offsetof(nats_cdb_stats_t, <field>) — use the
+ *                      NATS_CDB_STATS_SUM() macro below.
+ * @return the sum, or 0 when stats are not initialized.
+ *
+ * Nothing allocated.  Locking: none.  Context: any process; in
+ * production the nats_cdb_stats MI handler (MI process).
+ */
 unsigned long nats_cdb_stats_sum(size_t field_offset);
 #define NATS_CDB_STATS_SUM(field) \
 	nats_cdb_stats_sum(offsetof(nats_cdb_stats_t, field))
 
-/*
- * Allocate and zero-initialize the stats structure in shared memory.
- * Call from mod_init (pre-fork). Returns 0 on success, -1 on SHM
- * allocation failure.
+/**
+ * Allocate and zero-initialize the per-process stats table in shared
+ * memory (shm_malloc, NATS_CDB_STATS_MAX_PROCS cacheline-aligned
+ * slots).
+ *
+ * @return 0 on success, -1 on SHM allocation failure (logged).
+ *
+ * Ownership: the SHM block is owned by the module and freed ONLY by
+ * nats_cdb_stats_destroy().  Locking: none.  Context: mod_init
+ * (pre-fork) ONLY — every child must inherit the pointer.
  */
 int nats_cdb_stats_init(void);
 
-/*
- * Free the SHM block. Call from mod_destroy.
+/**
+ * Free the SHM stats block and NULL the global pointer (idempotent).
+ *
+ * Locking: none — must run when no other process can still bump
+ * counters.  Context: mod_destroy (attendant process at shutdown).
  */
 void nats_cdb_stats_destroy(void);
 
-/*
- * MI handler: "nats_cdb_stats" — returns a JSON object with every counter.
- * Safe to call from the MI process.
+/**
+ * MI handler: "nats_cdb_stats" — returns a JSON object with every
+ * counter/gauge (cross-slot sums) plus the tbm_* canary block.
+ *
+ * @param params     unused.
+ * @param async_hdl  unused (synchronous handler).
+ * @return the MI response object — owned and freed by the MI framework
+ *         after sending; NULL on allocation failure.
+ *
+ * Reads SHM counters with relaxed atomics; no broker I/O.  Locking:
+ * none.  Context: the MI process handling the command.
  */
 mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	struct mi_handler *async_hdl);
@@ -203,7 +245,30 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 #define NATS_CAS_BACKOFF_BASE_US   50UL
 #define NATS_CAS_BACKOFF_CAP_US    5000UL
 
+/**
+ * Upper bound of the backoff window for a retry attempt (see the
+ * formula above; the shift count is clamped so huge attempts cannot
+ * overflow).
+ *
+ * @param attempt  1-based retry attempt; <= 0 returns 0.
+ * @return the window bound in microseconds (0..NATS_CAS_BACKOFF_CAP_US).
+ *
+ * Pure: no allocation, no locking; any process context.
+ */
 unsigned long nats_cas_backoff_max_us(int attempt);
+
+/**
+ * Sleep a full-jitter random interval in [0, max_us(attempt)] so
+ * concurrent CAS losers do not all retry at the same instant.
+ *
+ * @param attempt  1-based retry attempt; <= 0 returns immediately.
+ *
+ * BLOCKS the calling process (usleep, <= 5 ms per call).  Uses libc
+ * rand() (non-cryptographic, per-process state).  Nothing allocated;
+ * no locking.  Context: SIP worker CAS retry loops
+ * (cachedb_nats_dbase.c counters, cachedb_nats_json.c row updates);
+ * safe in any process, but never call it from cnats callback threads.
+ */
 void nats_cas_backoff_sleep(int attempt);
 
 #endif /* _CACHEDB_NATS_STATS_H_ */

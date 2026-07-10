@@ -57,27 +57,41 @@
  */
 typedef int (*nats_kv_enum_cb_f)(kvEntry *entry, void *arg);
 
-/*
- * nats_kv_enum_live_values() -- drain one full initial watch pass.
+/**
+ * Drain one full initial watch pass over a bucket's live keys.
  *
  * Shared live-value enumeration: one kvStore_WatchAll pass with
  * IgnoreDeletes and values riding along, replacing the O(bucket)
- * kvStore_Keys() + per-key kvStore_Get() round-trip pattern.  Users:
- * the reaper tick (cachedb_nats_expiry.c) and the registration MI
- * scan (cachedb_nats_reg.c).  (Named nats_reap_enum_bucket until the
+ * kvStore_Keys() + per-key kvStore_Get() round-trip pattern.  The end
+ * of the initial data set is signalled by libnats delivering a NULL
+ * entry from kvWatcher_Next(); the enumerator stops there -- live
+ * updates are never consumed.  (Named nats_reap_enum_bucket until the
  * MI scan was converted; the file keeps its original name.)
  *
- * @kv               bucket handle (from nats_pool_get_kv()).
- * @next_timeout_ms  per-entry wait budget handed to kvWatcher_Next();
- *                   must be > 0.  A broker stall longer than this ends
- *                   the pass with NATS_KV_ENUM_ENEXT (the next tick
- *                   simply rescans -- the reaper is idempotent).
- * @cb / @arg        per-entry visitor.
+ * @param kv               bucket handle (pool-owned, e.g. from
+ *                         nats_pool_get_kv(); borrowed, not released
+ *                         here).
+ * @param next_timeout_ms  per-entry wait budget handed to
+ *                         kvWatcher_Next(); must be > 0.  A broker
+ *                         stall longer than this ends the pass with
+ *                         NATS_KV_ENUM_ENEXT (the next tick simply
+ *                         rescans -- the reaper is idempotent).
+ * @param cb               per-entry visitor (see nats_kv_enum_cb_f:
+ *                         each entry is enumerator-owned and destroyed
+ *                         after the callback returns; < 0 aborts).
+ * @param arg              opaque cookie handed to @cb.
+ * @return the number of entries visited (>= 0), or one of the
+ *         NATS_KV_ENUM_E* codes above (< 0).  On EWATCH/ENEXT/EABORT
+ *         whatever @cb already visited stands.
  *
- * Returns the number of entries visited (>= 0), or one of the
- * NATS_KV_ENUM_E* codes above.  The end of the initial data set is
- * signalled by libnats delivering a NULL entry from kvWatcher_Next();
- * the enumerator stops there -- live updates are never consumed.
+ * Ownership: nothing is handed to the caller; the transient kvWatcher
+ * is stopped and destroyed internally on every path.  BLOCKS for the
+ * whole drain (O(bucket); up to @next_timeout_ms per entry).  Locking:
+ * none -- but the pool-owned @kv handle is process-local and
+ * single-threaded, so the caller must be that process's only NATS
+ * user.  Context: the dedicated reaper process (reaper pass) and the
+ * MI process (nats_reg_summary / nats_reg_list bucket scans); never
+ * cnats callback threads.
  */
 int nats_kv_enum_live_values(kvStore *kv, int64_t next_timeout_ms,
 		nats_kv_enum_cb_f cb, void *arg);

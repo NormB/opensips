@@ -51,25 +51,52 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/*
- * Build "<prefix>.<slot>.<gen>.<corr_id>" into out[0..out_sz).  The
- * corr_id is mandatory (the spoofing guard depends on it) and must be a
- * single clean NATS token: non-empty and free of '.', whitespace,
- * wildcards ('*'/'>') and control bytes.  Returns the written length
- * (excluding the NUL) on success, or -1 on overflow / bad arguments /
- * invalid corr_id.
+/**
+ * Build "<prefix>.<slot>.<gen>.<corr_id>" into out[0..out_sz).
+ *
+ * @param out          Destination buffer, caller-owned; NUL-terminated on
+ *                     success.  Nothing else is allocated or stored.
+ * @param out_sz       Size of @out in bytes; must be > 0.
+ * @param prefix       Reply-inbox prefix (may itself contain dots).
+ * @param slot         Slot index segment.
+ * @param gen          Claim-generation segment.
+ * @param corr_id      Per-call correlation id; MANDATORY (the spoofing
+ *                     guard depends on it) and must be a single clean
+ *                     NATS token: non-empty and free of '.', whitespace,
+ *                     wildcards ('*'/'>') and control bytes.
+ * @param corr_id_len  Length of @corr_id in bytes; must be > 0.
+ * @return             Written length (excluding the NUL) on success, or
+ *                     -1 on overflow / bad arguments / invalid corr_id.
+ *
+ * Pure function on caller-provided memory: no allocation beyond @out, no
+ * locking, no libnats / OpenSIPS dependencies.  Safe in any process or
+ * thread; the production caller is the consumer process's publish path.
  */
 int nats_rpc_subject_build(char *out, size_t out_sz,
                            const char *prefix, uint32_t slot, uint32_t gen,
                            const char *corr_id, int corr_id_len);
 
-/*
+/**
  * Parse the trailing ".<slot>.<gen>.<corr_id>" off a reply subject.  The
  * prefix itself contains dots and is NOT validated -- only the final
- * three dot-separated segments are read.  The corr_id is copied
- * NUL-terminated into corr_out[0..corr_sz).  Returns 0 with *slot, *gen
- * and corr_out populated on success, -1 on malformed input (including a
- * corr_id that does not fit corr_sz).
+ * three dot-separated segments are read.
+ *
+ * @param subject   Reply subject bytes (need not be NUL-terminated).
+ * @param len       Length of @subject in bytes; must be > 0.
+ * @param slot      Out: parsed slot index (clamped to INT32_MAX domain).
+ * @param gen       Out: parsed generation (full uint32 domain).
+ * @param corr_out  Out: corr_id copied NUL-terminated, caller-owned
+ *                  buffer; nothing is allocated.
+ * @param corr_sz   Size of @corr_out; must be > 0 and larger than the
+ *                  corr_id.
+ * @return          0 with *slot, *gen and corr_out populated on success;
+ *                  -1 on malformed input (missing segments, non-digit
+ *                  slot/gen, overflow, or a corr_id that does not fit
+ *                  corr_sz) -- outputs are unmodified in that case.
+ *
+ * Pure function on caller-provided memory: no allocation, no locking.
+ * Safe in any process or thread; the production caller is the consumer
+ * process's libnats reply callback (cnats callback thread).
  */
 int nats_rpc_subject_parse(const char *subject, int len,
                            uint32_t *slot, uint32_t *gen,

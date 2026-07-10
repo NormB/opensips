@@ -61,16 +61,43 @@ extern int kv_watch_count;
  */
 void nats_watcher_proc_main(int rank);
 
-/* [P3.3] Shared bring-up for the module's dedicated processes (KV
- * watcher + reaper): arms PR_SET_PDEATHSIG(SIGKILL), closes the
- * fork-vs-parent-death race via a getppid() re-check, and lazily opens
- * the per-process NATS connection.  @who tags the log lines.  Returns
- * 0 to proceed, -1 when the caller must exit. */
+/**
+ * [P3.3] Shared bring-up for the module's dedicated processes (KV
+ * watcher + reaper): arms PR_SET_PDEATHSIG(SIGKILL) so the kernel
+ * reaps the child if the OpenSIPS master dies, closes the
+ * fork-vs-parent-death race via a getppid() re-check, and lazily
+ * opens the per-process NATS connection (nats_pool_get() first-use
+ * init from the shared config mod_init seeded).
+ *
+ * @param who  short tag for the log lines ("watcher", "reaper");
+ *             borrowed for the call, not stored.
+ * @return 0 to proceed, -1 when the caller must exit (parent already
+ *         dead, or no NATS connection can be established).
+ *
+ * Nothing allocated for the caller.  Locking: none.  Context: the
+ * FIRST thing a dedicated-process main (nats_watcher_proc_main /
+ * nats_cdb_reaper_proc_main) runs after being forked by the core;
+ * never call it from SIP workers or the MI process.
+ */
 int nats_cdb_dedicated_proc_guard(const char *who);
 
-/* [P2.7] Periodic FTS index resync pass body.  [P3.3] Runs in the
- * dedicated reaper process (hosted next to the reaper pass -- see
- * nats_cdb_reaper_proc_main), no longer in the core timer process. */
+/**
+ * [P2.7] Periodic FTS index resync pass body: acquires a fresh KV
+ * handle from the per-process pool and rebuilds the SHM-backed JSON
+ * search index in full (cdbn_fts.rebuild).  Skips the tick silently
+ * when the broker is down (NULL KV handle); the next tick or the next
+ * reconnect retries.
+ *
+ * @param ticks  unused (signature kept from its register_timer era).
+ * @param param  unused.
+ *
+ * O(bucket) and blocking.  Nothing allocated for the caller; index
+ * memory is the SHM index owned by the module (freed in destroy()).
+ * Locking: takes no locks itself — cross-process index writes are
+ * serialized by the FTS index's internal per-shard locks.  Context:
+ * [P3.3] the dedicated reaper process (hosted next to the reaper pass,
+ * see nats_cdb_reaper_proc_main), no longer the core timer process.
+ */
 void nats_cdb_periodic_resync(unsigned int ticks, void *param);
 
 #endif /* CACHEDB_NATS_WATCH_H */
