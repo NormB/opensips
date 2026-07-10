@@ -277,7 +277,12 @@ static nats_idx_entry *get_or_create_entry_in(nats_search_idx *idx,
 	 * the entry itself is freed.  Trivial overhead. */
 	{
 		size_t entry_sz = sizeof(nats_idx_entry);
-		size_t fv_sz    = (size_t)fv_len + 1;
+		/* fv_sz rounded up to pointer alignment: keys[] is placed
+		 * directly after the fv bytes, and an unaligned char* store
+		 * there is UB (UBSan: "store to misaligned address"; found
+		 * by test_fts_key_len driving entry_add_key under UBSan). */
+		size_t fv_sz    = ((size_t)fv_len + 1 + sizeof(char *) - 1)
+		                  & ~(sizeof(char *) - 1);
 		size_t keys_sz  = sizeof(char *) * NATS_IDX_KEYS_INLINE;
 		size_t blob_sz  = entry_sz + fv_sz + keys_sz;
 		char  *blob     = shm_malloc(blob_sz);
