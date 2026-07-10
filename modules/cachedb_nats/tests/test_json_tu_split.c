@@ -97,6 +97,8 @@ int main(void)
 	/* --- rowmeta TU owns the usrloc row-metadata denormalization --- */
 	ASSERT(file_contains(RM, "char *cdbn_row_finalize_metadata"),
 		"rowmeta TU owns cdbn_row_finalize_metadata");
+	ASSERT(file_contains(RM, "char *cdbn_row_hygiene_finalize"),
+		"rowmeta TU owns the [P3.5] hygiene+finalize fold");
 	ASSERT(file_contains(RM, "static int64_t row_exp_min"),
 		"rowmeta TU owns row_exp_min");
 
@@ -140,9 +142,13 @@ int main(void)
 	 * still far under the query+update TU's 1600 and the index TU's 2100, so it
 	 * remains a real anti-monolith guard; if it approaches the cap again, split
 	 * read-side vs write-side transforms into two TUs. */
-	/* Cap 960 (raised from 900 for the P8 §5 eligibility out-params on
-	 * cdbn_row_finalize_metadata: row_exp / n_contacts / all_same). */
-	ASSERT(n_rm > 0 && n_rm < 960, "rowmeta TU under 960 lines");
+	/* Cap 1100 (960 -> 1100 for the [P3.5] fold: cdbn_row_hygiene_finalize
+	 * + the shared row_emit_rebuild walk + the incremental row_exp
+	 * accumulator; contacts_drop_subkeys was deduped INTO the shared walk
+	 * at the same time.  Previously raised 900 -> 960 for the P8 §5
+	 * eligibility out-params.)  Next growth: split read-side vs
+	 * write-side transforms into two TUs, per the note above. */
+	ASSERT(n_rm > 0 && n_rm < 1100, "rowmeta TU under 1100 lines");
 	/* Cap 1650 (raised from 1600 for the P8 R4 empty-value-marker re-create
 	 * branch in update_fetch_or_seed).  P8's TTL write/activation logic lives
 	 * in cachedb_nats_expiry.c, NOT here, to keep this TU bounded. */

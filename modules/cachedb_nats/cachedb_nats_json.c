@@ -1042,37 +1042,25 @@ static int update_apply_and_cas(nats_cachedb_con *ncon,
 		return -1;
 	}
 
-	/* P2.7 [REV-21] (SPEC §4.1 step 4): skew-safe write hygiene — drop a
-	 * contact THIS update set/unset whose own expires is already past
-	 * now + slack, before recomputing row_exp.  Untouched merged-in
-	 * contacts are never considered (no collateral delete).  The slack is
-	 * grace + linger [HREV-3]: a lingering contact must survive a
-	 * concurrent sibling's row rewrite. */
+	/* P2.7 [REV-21] skew-safe write hygiene + P2.1 [REV-34/REV-25] row_exp
+	 * recompute (SPEC §4.1 steps 3+4), folded into ONE walk / ONE
+	 * allocation [P3.5]: drop a contact THIS update set/unset whose own
+	 * expires is already past now + slack (untouched merged-in contacts
+	 * are never considered — no collateral delete; slack = grace + linger
+	 * [HREV-3]: a lingering contact must survive a concurrent sibling's
+	 * row rewrite), and recompute the cachedb_nats-private row_exp /
+	 * schema_version peers over the survivors.  A document with no
+	 * top-level "contacts" object (a non-usrloc consumer) passes through
+	 * byte-for-byte.  Byte-equivalence with the sequential pair is locked
+	 * by tests/test_row_fold_equiv.c. */
 	{
-		char *hygiened = cdbn_row_drop_expired_own(new_json,
+		char *finalized = cdbn_row_hygiene_finalize(new_json,
 			new_len, pairs, time(NULL),
-			nats_reap_grace + nats_expired_linger, &new_len);
-		if (!hygiened) {
-			LM_ERR("write hygiene failed for key '%s'\n", target_key);
-			pkg_free(new_json);
-			return -1;
-		}
-		pkg_free(new_json);
-		new_json = hygiened;
-	}
-
-	/* P2.1 [REV-34/REV-25] (SPEC §3.3/§4.1 step 3): recompute the
-	 * cachedb_nats-private row_exp / schema_version peers over the merged
-	 * contact set.  A document with no top-level "contacts" object (a
-	 * non-usrloc cachedb_nats consumer) is returned byte-for-byte
-	 * unchanged. */
-	{
-		char *finalized = cdbn_row_finalize_metadata(new_json,
-			new_len, &new_len,
+			nats_reap_grace + nats_expired_linger, &new_len,
 			&f_row_exp, &f_n_contacts, &f_all_same);
 		if (!finalized) {
-			LM_ERR("failed to finalize row metadata (row_exp) "
-				"for key '%s'\n", target_key);
+			LM_ERR("row hygiene+finalize failed for key '%s'\n",
+				target_key);
 			pkg_free(new_json);
 			return -1;
 		}

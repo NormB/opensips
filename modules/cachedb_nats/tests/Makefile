@@ -95,6 +95,12 @@ test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_index_partial_snapshot: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c ../cachedb_nats_json.h
 
+# [P3.5 fold] cdbn_row_hygiene_finalize must be byte-identical to the
+# sequential drop-expired -> finalize reference pair, on the REAL
+# rowmeta/ser/walk TUs; also prints the old-vs-fold micro-bench.
+test_row_fold_equiv: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_rowmeta.c ../cachedb_nats_json_ser.c ../cachedb_nats_json_walk.c
+test_row_fold_equiv: ../cachedb_nats_json_rowmeta.c ../cachedb_nats_json_ser.c ../cachedb_nats_json_walk.c ../cachedb_nats_json_internal.h
+
 # test_intersect_uaf and test_kvget_copy_pattern both deliberately
 # exercise a use-after-free on their "buggy" arm and assert that
 # AddressSanitizer trips.  TSan has no UAF detection, so the buggy

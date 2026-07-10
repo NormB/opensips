@@ -513,6 +513,31 @@ void cdbn_row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grac
 char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same);
 
+/**
+ * [P3.5 fold] Single-walk composition of cdbn_row_drop_expired_own()
+ * followed by cdbn_row_finalize_metadata(), byte-identical to running
+ * the pair sequentially (locked by tests/test_row_fold_equiv.c) but
+ * with ONE output allocation and no intermediate document: the drop
+ * filter, the row_exp/n/all_same accumulation (no expiry array), and
+ * the private-peer re-emission all happen in the same emit walk.  The
+ * update hot path calls this; the reaper (which has no drop set) keeps
+ * calling cdbn_row_finalize_metadata().
+ *
+ * Parameters and out-param semantics are the union of the two folded
+ * functions'; a document with no top-level "contacts" object follows
+ * the reference pair exactly (verbatim copy when nothing is due,
+ * rebuilt top level when a drop set exists).
+ *
+ * @return a fresh pkg-allocated document — the CALLER frees it with
+ *         pkg_free(); NULL on malformed input or pkg OOM.
+ *
+ * Locking: none.  Context: SIP worker update path, before the CAS
+ * write.
+ */
+char *cdbn_row_hygiene_finalize(const char *json, int len,
+	const cdb_dict_t *pairs, time_t now, int grace, int *out_len,
+	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same);
+
 /* Contact-object field parsers (rowmeta TU) shared with the reaper TU. */
 
 /**

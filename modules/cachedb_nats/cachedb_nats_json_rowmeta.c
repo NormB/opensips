@@ -644,9 +644,75 @@ static int pair_contact_expires(const cdb_pair_t *p, int64_t *out)
 	return -1;
 }
 
-/* Rewrite a "contacts" object slice [cvs,cve), dropping any subkey in @ids. */
+/* [P3.5] incremental row_exp / TTL-eligibility accumulator -- replaces the
+ * pkg expiry array when collection happens inside the emit walk.  Semantics
+ * mirror row_exp_min + the all_same scan: any expires==0 makes the row
+ * permanent; all_same compares every collected value (zeros included). */
+struct row_exp_acc {
+	int64_t min, first;
+	int     n, seen_zero, seen_min, mismatch;
+};
+
+static void row_exp_acc_add(struct row_exp_acc *a, int64_t e)
+{
+	if (a->n == 0)
+		a->first = e;
+	else if (e != a->first)
+		a->mismatch = 1;
+	if (e == 0)
+		a->seen_zero = 1;
+	else if (!a->seen_min || e < a->min) {
+		a->min = e;
+		a->seen_min = 1;
+	}
+	a->n++;
+}
+
+/* [P3.5] Collect-only arm of the fold: fold every contact's integer
+ * `expires` in [cvs,cve) into @acc without emitting -- used when the
+ * drop set is empty so the caller can copy the slice in ONE write. */
+static int acc_collect_expiries(const char *cvs, const char *cve,
+	struct row_exp_acc *acc)
+{
+	const char *p = cdbn_skip_ws(cvs, cve);
+
+	if (p >= cve || *p != '{')
+		return -1;
+	p++;
+	while (p < cve) {
+		const char *name, *vs;
+		int nlen;
+		int64_t e;
+
+		p = cdbn_skip_ws(p, cve);
+		if (p >= cve)
+			return -1;
+		if (*p == '}')
+			break;
+		if (*p == ',') { p++; continue; }
+		p = cdbn_parse_json_string(p, cve, &name, &nlen);
+		if (!p)
+			return -1;
+		p = cdbn_skip_ws(p, cve);
+		if (p >= cve || *p != ':')
+			return -1;
+		p++;
+		p = cdbn_skip_ws(p, cve);
+		vs = p;
+		p = cdbn_skip_json_value(p, cve);
+		if (!p)
+			return -1;
+		if (cdbn_contact_expires(vs, p, &e) == 0)
+			row_exp_acc_add(acc, e);
+	}
+	return 0;
+}
+
+/* Rewrite a "contacts" object slice [cvs,cve), dropping any subkey in @ids.
+ * When @acc is non-NULL, every SURVIVING contact's integer `expires` is
+ * folded into it (the [P3.5] single-walk row_exp collection). */
 static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
-	const char **ids, const int *id_lens, int n_ids)
+	const char **ids, const int *id_lens, int n_ids, struct row_exp_acc *acc)
 {
 	const char *p = cdbn_skip_ws(cvs, cve), *end = cve;
 	int first = 1;
@@ -674,6 +740,11 @@ static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 		for (i = 0; i < n_ids; i++)
 			if (nlen == id_lens[i] && memcmp(name, ids[i], nlen) == 0) { drop = 1; break; }
 		if (drop) continue;
+		if (acc) {
+			int64_t e;
+			if (cdbn_contact_expires(vs, p, &e) == 0)
+				row_exp_acc_add(acc, e);
+		}
 		if (!first && cdbn_sink_putc(s, ',') < 0) return -1;
 		first = 0;
 		if (cdbn_sink_emit_raw_string(s, name, nlen) < 0) return -1;
@@ -684,10 +755,18 @@ static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	return 0;
 }
 
-/* Copy @json through, dropping subkeys @ids from the top-level "contacts"
- * object.  Returns a fresh pkg doc (caller pkg_frees), or NULL on error/OOM. */
-static char *contacts_drop_subkeys(const char *json, int len,
-	const char **ids, const int *id_lens, int n_ids, int *out_len)
+/* [P3.5] Shared top-level rebuild walk.  Copies @json through, rewriting
+ * every top-level "contacts" object minus the @ids subkeys.  When @usrloc
+ * is set (the fold: document known to carry a "contacts" object), stale
+ * "row_exp"/"schema_version" peers are skipped and fresh ones are appended
+ * from @acc; @acc also receives every surviving contact's expires (reset
+ * per "contacts" occurrence -- last one wins, like the reference's
+ * find_contacts_cb).  With @usrloc unset (the standalone hygiene pass) the
+ * peers pass through untouched and nothing is appended.
+ * Returns a fresh pkg doc (caller pkg_frees), NULL on error/OOM. */
+static char *row_emit_rebuild(const char *json, int len,
+	const char **ids, const int *id_lens, int n_ids,
+	int usrloc, struct row_exp_acc *acc, int *out_len)
 {
 	const char *p, *end;
 	json_sink_t s;
@@ -697,7 +776,7 @@ static char *contacts_drop_subkeys(const char *json, int len,
 	end = json + len;
 	p = cdbn_skip_ws(json, end);
 	if (p >= end || *p != '{') return NULL;
-	if (cdbn_sink_init(&s, len + 16) < 0) return NULL;
+	if (cdbn_sink_init(&s, len + (usrloc ? 64 : 16)) < 0) return NULL;
 	if (cdbn_sink_putc(&s, '{') < 0) goto fail;
 	p++;
 	while (p < end) {
@@ -717,15 +796,40 @@ static char *contacts_drop_subkeys(const char *json, int len,
 		vs = p;
 		p = cdbn_skip_json_value(p, end);
 		if (!p) goto fail;
+		if (usrloc &&
+		    ((nlen == 7 && memcmp(name, "row_exp", 7) == 0) ||
+		     (nlen == 14 && memcmp(name, "schema_version", 14) == 0)))
+			continue;         /* stale private peer: re-emitted below */
 		if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
 		first = 0;
 		if (cdbn_sink_emit_raw_string(&s, name, nlen) < 0) goto fail;
 		if (cdbn_sink_putc(&s, ':') < 0) goto fail;
 		if (nlen == 8 && memcmp(name, "contacts", 8) == 0) {
-			if (emit_contacts_minus(&s, vs, p, ids, id_lens, n_ids) < 0) goto fail;
+			if (acc)
+				memset(acc, 0, sizeof(*acc));
+			if (n_ids == 0 && acc) {
+				/* nothing to drop: collect expiries, then copy the
+				 * slice in ONE write (per-contact re-emission
+				 * measurably loses to a bulk copy). */
+				if (acc_collect_expiries(vs, p, acc) < 0)
+					goto fail;
+				if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0)
+					goto fail;
+			} else if (emit_contacts_minus(&s, vs, p, ids, id_lens,
+					n_ids, acc) < 0)
+				goto fail;
 		} else {
 			if (cdbn_sink_write(&s, vs, (int)(p - vs)) < 0) goto fail;
 		}
+	}
+	if (usrloc) {
+		int64_t row_exp = acc->seen_zero ? 0 :
+			(acc->seen_min ? acc->min : 0);
+
+		if (!first && cdbn_sink_putc(&s, ',') < 0) goto fail;
+		if (cdbn_sink_write(&s, "\"row_exp\":", 10) < 0) goto fail;
+		if (cdbn_sink_emit_int(&s, row_exp) < 0) goto fail;
+		if (cdbn_sink_write(&s, ",\"schema_version\":1", 19) < 0) goto fail;
 	}
 	if (cdbn_sink_putc(&s, '}') < 0) goto fail;
 	return cdbn_sink_take(&s, out_len);
@@ -734,39 +838,46 @@ fail:
 	return NULL;
 }
 
-/* [REV-21] (SPEC §4.1 step 4): drop from the merged @json only those contacts
- * THIS update set/unset whose own `expires` is already past `now + S`.  The
- * drop set is built solely from @pairs (the touched subkeys), so an untouched
- * merged-in contact is never even considered — no collateral cross-node delete.
- * A pair's subkey equals the stored contact key (base64, escape-free).  Returns
- * a fresh pkg doc (caller pkg_frees): unchanged when nothing is due.  NULL on error. */
+/* [REV-21] Build the drop-id set: the contacts THIS update set whose own
+ * `expires` is already past now + grace.  Shared by the two-pass reference
+ * and the [P3.5] fold; capped at NATS_MAX_DROP_IDS (excess defers to the
+ * reaper).  Returns the id count. */
+static int build_drop_ids(const cdb_dict_t *pairs, time_t now, int grace,
+	const char **ids, int *id_lens)
+{
+	int n = 0;
+	struct list_head *pos;
+
+	if (!pairs)
+		return 0;
+	list_for_each(pos, pairs) {
+		cdb_pair_t *p = list_entry(pos, cdb_pair_t, list);
+		int64_t exp;
+
+		if (p->unset) continue;
+		if (p->key.name.len != 8 || memcmp(p->key.name.s, "contacts", 8) != 0)
+			continue;
+		if (p->subkey.len <= 0 || !p->subkey.s) continue;
+		if (pair_contact_expires(p, &exp) != 0) continue;
+		if (!contact_is_expired(exp, now, grace)) continue;
+		if (n < NATS_MAX_DROP_IDS) {
+			ids[n] = p->subkey.s;
+			id_lens[n] = p->subkey.len;
+			n++;
+		}
+	}
+	return n;
+}
+
 char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pairs,
 	time_t now, int grace, int *out_len)
 {
 	const char *ids[NATS_MAX_DROP_IDS];
 	int id_lens[NATS_MAX_DROP_IDS];
-	int n = 0;
-	struct list_head *pos;
+	int n;
 
 	if (!json || len <= 0) return NULL;
-	if (pairs) {
-		list_for_each(pos, pairs) {
-			cdb_pair_t *p = list_entry(pos, cdb_pair_t, list);
-			int64_t exp;
-
-			if (p->unset) continue;
-			if (p->key.name.len != 8 || memcmp(p->key.name.s, "contacts", 8) != 0)
-				continue;
-			if (p->subkey.len <= 0 || !p->subkey.s) continue;
-			if (pair_contact_expires(p, &exp) != 0) continue;
-			if (!contact_is_expired(exp, now, grace)) continue;
-			if (n < NATS_MAX_DROP_IDS) {
-				ids[n] = p->subkey.s;
-				id_lens[n] = p->subkey.len;
-				n++;
-			}
-		}
-	}
+	n = build_drop_ids(pairs, now, grace, ids, id_lens);
 	if (n == 0) {
 		char *copy = pkg_malloc(len + 1);
 		if (!copy) return NULL;
@@ -775,7 +886,67 @@ char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pai
 		if (out_len) *out_len = len;
 		return copy;
 	}
-	return contacts_drop_subkeys(json, len, ids, id_lens, n, out_len);
+	return row_emit_rebuild(json, len, ids, id_lens, n, 0, NULL, out_len);
+}
+
+/* [P3.5 fold] cdbn_row_drop_expired_own + cdbn_row_finalize_metadata as ONE
+ * emit walk / ONE allocation (contract + byte-equivalence proof:
+ * tests/test_row_fold_equiv.c; header contract in the internal header).
+ * The cheap pass-1 field scan only answers "is this a usrloc row?" so the
+ * non-usrloc verbatim/rebuild behaviour matches the reference pair exactly. */
+char *cdbn_row_hygiene_finalize(const char *json, int len,
+	const cdb_dict_t *pairs, time_t now, int grace, int *out_len,
+	int64_t *out_row_exp, int *out_n_contacts, int *out_all_same)
+{
+	const char *ids[NATS_MAX_DROP_IDS];
+	int id_lens[NATS_MAX_DROP_IDS];
+	int n_ids, have_contacts;
+	struct row_exp_acc acc;
+	char *out;
+
+	if (out_row_exp)     *out_row_exp = 0;
+	if (out_n_contacts)  *out_n_contacts = 0;
+	if (out_all_same)    *out_all_same = 0;
+
+	if (!json || len <= 0)
+		return NULL;
+
+	n_ids = build_drop_ids(pairs, now, grace, ids, id_lens);
+
+	/* Pass 1 (no allocation): usrloc row or not?  Decides verbatim-vs-
+	 * rebuild identically to the reference pair. */
+	{
+		struct find_contacts_ctx fc = { NULL, NULL };
+		if (cdbn_json_foreach_top_field(json, len,
+				find_contacts_cb, &fc) < 0)
+			return NULL;
+		have_contacts = (fc.vs != NULL);
+	}
+
+	if (!have_contacts && n_ids == 0) {
+		/* non-usrloc, nothing due: both reference passes copy through
+		 * byte-for-byte. */
+		char *copy = pkg_malloc(len + 1);
+		if (!copy)
+			return NULL;
+		memcpy(copy, json, len);
+		copy[len] = '\0';
+		if (out_len)
+			*out_len = len;
+		return copy;
+	}
+
+	memset(&acc, 0, sizeof(acc));
+	out = row_emit_rebuild(json, len, ids, id_lens, n_ids,
+		have_contacts, have_contacts ? &acc : NULL, out_len);
+	if (out && have_contacts) {
+		if (out_row_exp)
+			*out_row_exp = acc.seen_zero ? 0 :
+				(acc.seen_min ? acc.min : 0);
+		if (out_n_contacts) *out_n_contacts = acc.n;
+		if (out_all_same)   *out_all_same = (acc.n <= 1) ? 1 : !acc.mismatch;
+	}
+	return out;
 }
 
 /* ------------------------------------------------------------------ */
