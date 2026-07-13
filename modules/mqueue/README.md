@@ -55,7 +55,7 @@ The URL to connect to database for loading values
 *Default value is NULL (do not connect).*
 
 
-```c title="Set db_url parameter"
+```opensips title="Set db_url parameter"
 ...
 modparam("mqueue", "db_url", "mysql://opensips:opensipsrw@localhost/opensips")
 
@@ -120,7 +120,7 @@ The parameter can be set many times, each holding the
 		definition of one queue.
 
 
-```c title="Set mqueue parameter"
+```opensips title="Set mqueue parameter"
 ...
 modparam("mqueue", "mqueue", "name=myq;size=20;")
 modparam("mqueue", "mqueue", "name=myq;size=10000;addmode=2")
@@ -140,7 +140,7 @@ Add a new item (key, value) in the queue. If max size of queue is
 		exceeded, the oldest one is removed.
 
 
-```c title="mq_add usage"
+```opensips title="mq_add usage"
 ...
 mq_add("myq", "$rU", "call from $fU");
 ...
@@ -158,7 +158,7 @@ Return: true on success (1); false on failure (-1) or
 		no item fetched (-2).
 
 
-```c title="mq_fetch usage"
+```opensips title="mq_fetch usage"
 ...
 while(mq_fetch("myq"))
 {
@@ -175,7 +175,7 @@ Free the item fetched in pseudo-variables. It is optional,
 		a new fetch frees the previous values.
 
 
-```c title="mq_pv_free usage"
+```opensips title="mq_pv_free usage"
 ...
 mq_pv_free("myq");
 ...
@@ -192,7 +192,7 @@ If the mqueue is empty, the function returns -1. If the
 		mqueue is not found, the function returns -2.
 
 
-```c title="mq_size usage"
+```opensips title="mq_size usage"
 ...
 $var(q_size) = mq_size("queue");
 xlog("L_INFO", "Size of queue is: $var(q_size)\n");
@@ -218,7 +218,7 @@ Parameters:
 - name
 
 
-```c title="mqueue:get_size usage"
+```bash title="mqueue:get_size usage"
 ...
 opensips-cli -x mqueue:get_size xyz
 ...
@@ -242,7 +242,7 @@ Parameters:
 limit
 
 
-```c title="mqueue:fetch usage"
+```bash title="mqueue:fetch usage"
 ...
 opensips-cli -x mqueue:fetch xyz
 ...
@@ -261,7 +261,7 @@ Get the size for all memory queues.
 Parameters: none
 
 
-```c title="mqueue:get_sizes usage"
+```bash title="mqueue:get_sizes usage"
 ...
 opensips-cli -x mqueue:get_sizes
 ...

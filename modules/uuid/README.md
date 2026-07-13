@@ -58,7 +58,7 @@ An optional *version* parameter can be provided to
 			parameters.
 
 
-```c title="$uuid usage"
+```opensips title="$uuid usage"
 xlog("generated uuid: $uuid\n");
 xlog("generated uuid v7: $uuid(7)\n");
 				
@@ -76,7 +76,7 @@ Generates a new UUID.
 
 - *out_var* (var) - an output variable
 						to return the generated UUID.
-- *version* (string, optional) - UUID version
+- *version* (number, optional) - UUID version
 						number. The supported values are:
 						
 							

@@ -54,7 +54,7 @@ You can subscribe for an event either at startup (using the [subscribe_event()](
 
 In order to configure a RabbbitMQ server to be notified when a custom event is triggered, first you have to subscribe it to the event, using the [subscribe_event()](Script-CoreFunctions.md#subscribe_event) command:
 
-```c
+```opensips
 
     startup_route {
         subscribe_event("E_SCRIPT_CUSTOM_EVENT", "rabbitmq:127.0.0.1/opensips");
@@ -64,7 +64,7 @@ In order to configure a RabbbitMQ server to be notified when a custom event is t
 
 Then, in order to trigger the event from the script, call the [raise_event()](Script-CoreFunctions.md#raise_event) command when needed:
 
-```text
+```opensips
 
    ....
    raise_event("E_SCRIPT_CUSTOM_EVENT");     # raises an event without any parameters

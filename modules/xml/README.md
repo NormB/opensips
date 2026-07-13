@@ -97,7 +97,7 @@ IMPORTANT: In XML all characters in the content of the document are significant 
 Other script variables can be used as element names, attribute names and indexes in the path. Variables that will be used as indexes must contain integer values. Variables that will be used as element or attribute names should contain string values.
 
 
-```c title="Creating a document"
+```opensips title="Creating a document"
 ...
 $xml(my_doc) = "<doc></doc>";        # init object
 
@@ -130,7 +130,7 @@ $xml(my_doc) = NULL;                                  # clear the entire documen
 ```
 
 
-```c title="Inserting nodes with indentation"
+```opensips title="Inserting nodes with indentation"
 ...
 $xml(my_doc) = "<doc>\n</doc>";
 $xml(my_doc/doc) = "\t<list></list>\n";
@@ -150,7 +150,7 @@ $xml(my_doc/doc/list) = "\n\t\t<item></item>\n\t";
 ```
 
 
-```c title="Using script variables in path"
+```opensips title="Using script variables in path"
 ...
 # accessing the attribute of second item in list
 $var(my_list) = "list";

@@ -21,7 +21,7 @@ Configuring the network listeners, available transport protocols, forking (and n
 
 Example:
 
-```c
+```opensips
 
 disable_tcp = yes
 listen = udp:192.168.4.10:5060
@@ -41,7 +41,7 @@ In regards to the OpenSIPS modules,the modules that are to be loaded (no module 
 Once the modules are loaded, the parameters of the modules may be set using the **modparam** directive - to list of available parameters for each module, the type of parameter value (integer or string) can be found in the [documentation of the modules](Modules.md), the *Parameters* section.
 
 Examples:
-```c
+```opensips
 
 loadmodule "modules/mi_datagram/mi_datagram.so"
 modparam("mi_datagram", "socket_name", "udp:127.0.0.1:4343")
@@ -51,7 +51,7 @@ modparam("mi_datagram", "children_count", 3)
 
 or 
 
-```c
+```opensips
 
 mpath="/usr/local/opensips_proxy/lib/modules"
 loadmodule "mi_datagram.so"
@@ -103,7 +103,7 @@ All OpenSIPS [core](https://docs.opensips.org/manual/devel/script-corefunctions)
 
 * **any integer or string function parameter may also be passed using a "holder" variable**
 
-```text
+```opensips
 
 ds_select_dst(1, 1); 
 
@@ -111,7 +111,7 @@ ds_select_dst(1, 1);
 
 ... is equivalent to:
 
-```text
+```opensips
 
 $var(x) = 1;
 ds_select_dst($var(x), $var(x));
@@ -122,7 +122,7 @@ ds_select_dst($var(x), $var(x));
 
 * **any string function parameter can be passed as a format string**
 
-```text
+```opensips
 
 set_dlg_profile("caller", "$var(country_code)_$var(area)_$fU");
 
@@ -141,7 +141,7 @@ Literal **"$"** characters can be included in a format string using the **"$$"**
 
 * **input or output variables passed to functions must not be quoted**:
 
-```text
+```opensips
 
 ds_count(1, "a", $var(out_result));
 
@@ -151,12 +151,12 @@ ds_count(1, "a", $var(out_result));
 
 * **integers no longer need to be passed as double-quoted strings**:
 
-```text del={2-2}
+```opensips del={2-2}
 # this is deprecated
 ds_select_dst("1", "1");
 ```
 
-```text
+```opensips
 
 ds_select_dst(1, 1);
 
