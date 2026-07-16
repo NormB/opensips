@@ -55,8 +55,9 @@
 #define PCRE2_ERROR_NOMATCH PCRE_ERROR_NOMATCH
 #define PCRE2_UCHAR unsigned char
 #define PCRE2_SPTR char *
+#define PCRE2_INFO_SIZE PCRE_INFO_SIZE
 #define pcre2_pattern_info(subst_comp, flag, ret) \
-	pcre_fullinfo(subst_comp, NULL, PCRE_INFO_CAPTURECOUNT, ret);
+	pcre_fullinfo(subst_comp, NULL, flag, ret)
 #define pcre2_compile(pattern, _, flags, error, erroffset, ctx) \
 	pcre_compile(pattern, flags, error, erroffset, NULL)
 #define pcre2_code_free pcre_free
@@ -284,6 +285,7 @@ static int mod_init(void)
 			LM_ERR("no memory for num_pcres\n");
 			goto err;
 		}
+		*num_pcres = 0;
 
 		/* Load the pcres */
 		LM_NOTICE("loading pcres...\n");
@@ -569,19 +571,23 @@ static void free_shared_memory(void)
 			}
 		}
 		shm_free(pcres);
+		pcres = NULL;
 	}
 
 	if (num_pcres) {
 		shm_free(num_pcres);
+		num_pcres = NULL;
 	}
 
 	if (pcres_addr) {
 		shm_free(pcres_addr);
+		pcres_addr = NULL;
 	}
 
 	if (reload_lock) {
 		lock_destroy(reload_lock);
 		lock_dealloc(reload_lock);
+		reload_lock = NULL;
     }
 }
 
