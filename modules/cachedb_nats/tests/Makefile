@@ -26,9 +26,9 @@ EXTRA :=
 #     that don't need ASan, plus those wrapped by the CI TSan job).
 NOASAN := test_disconnected_fastfail \
           test_index_stale_recovery test_resync_modparams test_enable_search_index \
-          test_dedicated_watcher_proc test_intern_wiring test_entry_blob_combine \
+          test_dedicated_watcher_proc \
           test_watch_null_key_guard test_sink_emit_string test_allops_fastfail \
-          test_native_key_validation test_nats_request_rename test_intern_scaling \
+          test_native_key_validation test_nats_request_rename \
           test_cas_retry_policy test_resync_timer test_op_stats test_index_converge \
           test_watcher_leak_stat test_watcher_pkg_mem test_json_tu_split \
           test_query_res_init test_outparam_contracts test_ttl_write_invariant \
@@ -101,6 +101,21 @@ test_index_partial_snapshot: ../../cachedb_nats_fts/fts_index.c ../../cachedb_na
 test_fts_key_len: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_fts_key_len: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 
+# [P5.4] Behavioural intern-table contracts on the REAL fts_intern.c
+# (replaced this file's carried copy of the intern logic, which had
+# drifted, and the deleted source-pattern test_intern_scaling.c).
+test_intern_unit: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_intern.c
+test_intern_unit: ../../cachedb_nats_fts/fts_intern.c ../../cachedb_nats_fts/fts_intern.h
+
+# [P5.4] Behavioural index<->intern wiring and single-blob entry +
+# inline->external keys[] growth, both on the REAL FTS TUs (replaced
+# their file_contains source-pattern versions); ASan/LSan police the
+# blob layout and refcount balance.
+test_intern_wiring: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+test_intern_wiring: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+test_entry_blob_combine: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+test_entry_blob_combine: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
+
 # [P3.5 fold] cdbn_row_hygiene_finalize must be byte-identical to the
 # sequential drop-expired -> finalize reference pair, on the REAL
 # rowmeta/ser/walk TUs; also prints the old-vs-fold micro-bench.
@@ -117,7 +132,6 @@ TESTS_TSAN_SAFE = test_json_escape \
                   test_cas_backoff test_index_stale_recovery \
                   test_kv_key_encode test_resync_modparams \
                   test_enable_search_index test_dedicated_watcher_proc \
-                  test_intern_wiring test_intern_unit test_entry_blob_combine \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
                   test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts \
