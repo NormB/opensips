@@ -154,7 +154,8 @@ int main(void)
 	free(u);
 
 	u = exact_dup("nats://192.0.2.31:4222");
-	ASSERT(url_rewrite(u, 21, out, sizeof(out)) == 1 &&
+	ASSERT(url_rewrite(u, (int)strlen("nats://192.0.2.31:4222"),
+		out, sizeof(out)) == 1 &&
 		strcmp(out, "nats://192.0.2.31:4222") == 0,
 		"plain URL passes through");
 	free(u);
