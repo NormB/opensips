@@ -124,9 +124,23 @@ int main(void)
 		"PR_SET_PDEATHSIG, SIGKILL"),
 		"watcher arms PR_SET_PDEATHSIG with SIGKILL (uncatchable)");
 	ASSERT(file_contains("../cachedb_nats_watch.c",
-		"getppid() == 1"),
-		"watcher polls getppid in loop as belt-and-suspenders "
+		"nats_cdb_parent_gone()"),
+		"watcher polls the parent in loop as belt-and-suspenders "
 		"backstop for the rare case where PDEATHSIG didn't arm");
+
+	/* REGRESSION LOCK (2026-08-05). `getppid() == 1` is NOT a valid orphan
+	 * test: it is only meaningful when init is a DIFFERENT process from our
+	 * parent. Under Docker — every Saturn deployment — opensips main runs as
+	 * PID 1, so a freshly forked child's legitimate getppid() IS 1. The old
+	 * heuristic fired instantly at startup: the reaper logged "parent died
+	 * before we armed PR_SET_PDEATHSIG" and exited, and core:handle_sigs
+	 * tore the whole daemon down on the resulting SIGCHLD ("terminating due
+	 * to SIGCHLD") — a ~60s crash loop, exit status 0, no error logged.
+	 * nats_cdb_parent_gone() compares against the pid captured pre-fork in
+	 * mod_init, which is correct inside and outside a container. */
+	ASSERT(!file_contains("../cachedb_nats_watch.c", "getppid() == 1"),
+		"no bare getppid()==1 orphan test (false-fires when opensips "
+		"main is PID 1, i.e. in every container)");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

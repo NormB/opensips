@@ -21,6 +21,7 @@
 #ifndef CACHEDB_NATS_WATCH_H
 #define CACHEDB_NATS_WATCH_H
 
+#include <sys/types.h>  /* pid_t — nats_cdb_parent_pid */
 #include <nats/nats.h>
 
 /*
@@ -80,6 +81,33 @@ void nats_watcher_proc_main(int rank);
  * never call it from SIP workers or the MI process.
  */
 int nats_cdb_dedicated_proc_guard(const char *who);
+
+/**
+ * Expected parent pid of the dedicated processes, captured by mod_init()
+ * in the MAIN process before any fork.  Used by nats_cdb_parent_gone().
+ */
+extern pid_t nats_cdb_parent_pid;
+
+/**
+ * Orphan test for the dedicated processes (watcher / reaper).
+ *
+ * ⚠️ Do NOT use `getppid() == 1` for this. That is only a valid orphan
+ * test when init is a DIFFERENT process from our parent. Under Docker —
+ * i.e. every Saturn deployment — opensips main runs as PID 1, so a
+ * freshly forked child's legitimate getppid() IS 1. The old heuristic
+ * therefore fired instantly on startup: the reaper logged "parent died
+ * before we armed PR_SET_PDEATHSIG" and exited, and core:handle_sigs
+ * tore down the whole daemon on the resulting SIGCHLD ("terminating due
+ * to SIGCHLD") — a ~60s crash loop with exit status 0 and no error.
+ *
+ * Comparing against the pid captured pre-fork is correct both inside and
+ * outside a container.
+ *
+ * @return 1 when we have really been re-parented, 0 while the original
+ *         parent is still our parent (or the pid was never captured, in
+ *         which case we deliberately do NOT claim orphanhood).
+ */
+int nats_cdb_parent_gone(void);
 
 /**
  * [P2.7] Periodic FTS index resync pass body: acquires a fresh KV

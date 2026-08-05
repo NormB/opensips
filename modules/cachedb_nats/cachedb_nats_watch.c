@@ -422,8 +422,10 @@ static void watcher_loop(void)
 			 * to PID 1.  The NATS_TIMEOUT arm below also checks this, but a
 			 * broker delivering a steady update stream never times out -- so
 			 * poll here too, rate-limited (every 256 iterations) to keep
-			 * getppid() off the per-event hot path. */
-			if ((++orphan_poll & 0xFF) == 0 && getppid() == 1) {
+			 * getppid() off the per-event hot path.
+			 * NB: compare against the pre-fork pid, not 1 — opensips main
+			 * is PID 1 in a container, see nats_cdb_parent_gone(). */
+			if ((++orphan_poll & 0xFF) == 0 && nats_cdb_parent_gone()) {
 				LM_NOTICE("watcher: parent gone (reparented to init); "
 					"exiting\n");
 				atomic_store(&_watcher_running, 0);
@@ -465,8 +467,10 @@ static void watcher_loop(void)
 				 * version with the bug, prctl rejected, etc.),
 				 * the kernel re-parents us to PID 1.  Detect
 				 * that here and exit so we never become an
-				 * orphan watcher.  Cheap on every 500 ms tick. */
-				if (getppid() == 1) {
+				 * orphan watcher.  Cheap on every 500 ms tick.
+				 * NB: pre-fork pid, not 1 — main is PID 1 in a
+				 * container, see nats_cdb_parent_gone(). */
+				if (nats_cdb_parent_gone()) {
 					LM_NOTICE("watcher: parent gone "
 						"(reparented to init); exiting\n");
 					atomic_store(&_watcher_running, 0);
@@ -659,6 +663,21 @@ static void watcher_loop(void)
  * Returns 0 to proceed, -1 when the caller must exit (parent already
  * dead, or no NATS connection can be established).
  */
+/* Captured by cachedb_nats mod_init() in the MAIN process, before any fork.
+ * 0 until then, which nats_cdb_parent_gone() treats as "cannot tell". */
+pid_t nats_cdb_parent_pid;
+
+int nats_cdb_parent_gone(void)
+{
+	/* Never claim orphanhood we cannot prove: if mod_init did not run in
+	 * this process image (or ran after a fork), stay alive rather than
+	 * take the whole daemon down via SIGCHLD. */
+	if (nats_cdb_parent_pid == 0)
+		return 0;
+
+	return getppid() != nats_cdb_parent_pid;
+}
+
 int nats_cdb_dedicated_proc_guard(const char *who)
 {
 	if (prctl(PR_SET_PDEATHSIG, SIGKILL) == -1) {
@@ -669,12 +688,15 @@ int nats_cdb_dedicated_proc_guard(const char *who)
 
 	/* Race window: the parent could have died between our fork() and
 	 * the prctl() above.  prctl arms only future deaths, so we'd miss
-	 * an already-dead parent and run forever.  Re-check getppid: if
-	 * it's 1 we have already been re-parented to init -- exit now. */
-	if (getppid() == 1) {
+	 * an already-dead parent and run forever.  Re-check the parent --
+	 * against the pid captured pre-fork, NOT against 1: opensips main
+	 * is itself PID 1 under Docker, so `getppid()==1` is true for every
+	 * healthy child there.  See nats_cdb_parent_gone(). */
+	if (nats_cdb_parent_gone()) {
 		LM_NOTICE("%s proc: parent died before we armed "
-			"PR_SET_PDEATHSIG (re-parented to init); exiting\n",
-			who);
+			"PR_SET_PDEATHSIG (re-parented, ppid=%d, expected %d); "
+			"exiting\n", who, (int)getppid(),
+			(int)nats_cdb_parent_pid);
 		return -1;
 	}
 
