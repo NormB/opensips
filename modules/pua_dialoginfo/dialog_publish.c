@@ -264,7 +264,6 @@ static str* build_dialoginfo(str *callid, char *d_id, char *state,
 
     /*free the document */
 	xmlFreeDoc(doc);
-    xmlCleanupParser();
 
 	return body;
 

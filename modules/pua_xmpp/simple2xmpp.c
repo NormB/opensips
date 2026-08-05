@@ -490,7 +490,6 @@ done:
 	}
 
 	xmlBufferFree(buffer);
-	xmlCleanupParser();
 
 	if(sip_doc)
 		xmlFreeDoc(sip_doc);
@@ -507,7 +506,6 @@ error:
 		xmlFree(note);
 	if(buffer)
 		xmlBufferFree(buffer);
-	xmlCleanupParser();
 
 	return -1;
 
@@ -634,7 +632,6 @@ int winfo2xmpp(str* to_uri, str* body, str* id)
 	}
 
 	xmlFreeDoc(notify_doc);
-	xmlCleanupParser();
 	return 0;
 
 error:
@@ -647,7 +644,6 @@ error:
 		xmlFree(watcher);
 	if(buffer)
 		xmlBufferFree(buffer);
-	xmlCleanupParser();
 
 	return -1;
 }

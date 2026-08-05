@@ -350,7 +350,6 @@ int get_dialog_state(str body, int *dialog_state)
 	}
 	xmlFree(state);
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 
 	if(i == DLG_STATES_NO)
 	{
@@ -1608,7 +1607,6 @@ str* xml_dialog_gen_presence(str* pres_uri, int dlg_state)
 error:
 	if(pres_doc)
 		xmlFreeDoc(pres_doc);
-	xmlCleanupParser();
 
 	return dialog_body;
 }
@@ -1652,7 +1650,6 @@ str* xml_dialog2presence(str* pres_uri, str* body)
 	}
 	xmlFree(state);
 	xmlFreeDoc(dlg_doc);
-	xmlCleanupParser();
 
 	if(i == DLG_STATES_NO)
 	{
@@ -1748,7 +1745,6 @@ str* build_offline_presence(str* pres_uri)
 error:
 	if(pres_doc)
 		xmlFreeDoc(pres_doc);
-	xmlCleanupParser();
 
 	return body;
 }
