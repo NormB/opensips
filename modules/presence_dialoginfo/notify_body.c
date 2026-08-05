@@ -98,7 +98,6 @@ str* dlginfo_agg_nbody(str* pres_user, str* pres_domain, str** body_array, int n
 		LM_ERR("while aggregating body\n");
 	}
 
-	xmlCleanupParser();
 
 	if (n_body== NULL)
 		n_body = _build_empty_dialoginfo(pres_uri_char, NULL);
@@ -272,7 +271,6 @@ str* agregate_xmls(str* pres_user, str* pres_domain, str** body_array, int n, in
 	if(xml_array!=NULL)
 		pkg_free(xml_array);
 
-	xmlCleanupParser();
 
 	return body;
 
@@ -422,7 +420,6 @@ str* build_dialoginfo(str* pres_user, str* pres_domain)
 	LM_DBG("new_body:\n%.*s\n",body->len, body->s);
 	/*free the document */
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 	return body;
 error:
 	if(doc)
@@ -468,7 +465,6 @@ static str* _build_empty_dialoginfo(const char* pres_uri_char, str* extra_hdrs)
 		&nbody->len);
 
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 
 	return nbody;
 error:

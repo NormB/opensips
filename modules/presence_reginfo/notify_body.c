@@ -68,7 +68,6 @@ str *reginfo_agg_nbody(str *pres_user, str *pres_domain, str **body_array,
 		LM_ERR("while aggregating body\n");
 	}
 
-	xmlCleanupParser();
 
 	return n_body;
 }
@@ -204,7 +203,6 @@ str *aggregate_xmls(str *pres_user, str *pres_domain, str **body_array, int n)
 	if(xml_array)
 		pkg_free(xml_array);
 
-	xmlCleanupParser();
 
 	return body;
 

@@ -2434,7 +2434,6 @@ str* create_winfo_xml(watcher_t* watchers, char* version,
 
 	xmlFreeDoc(doc);
 
-	xmlCleanupParser();
 
     return body;
 

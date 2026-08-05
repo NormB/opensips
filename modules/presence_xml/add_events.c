@@ -71,12 +71,10 @@ int	xml_publ_handl(struct sip_msg* msg, int* sent_reply)
 		goto error;
 	}
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 	return 1;
 
 error:
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 	return -1;
 
 }
@@ -122,13 +120,11 @@ str* bla_set_version(subs_t* subs, str* body)
 
 	xmlFreeDoc(doc);
 
-	xmlCleanupParser();
 	return new_body;
 
 error:
 	if(doc)
 		xmlFreeDoc(doc);
-	xmlCleanupParser();
 	return 0;
 }
 

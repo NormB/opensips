@@ -264,7 +264,6 @@ str *build_reginfo_full(urecord_t *record, ucontact_t *contact, str aor[], unsig
 
 	/*free the document */
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 
 	return body;
 error:

@@ -690,7 +690,6 @@ int dialoginfo_process_body(struct publ_info* publ, str** fin_body,
 	if (*fin_body == NULL)
 		LM_DBG("NULL fin_body\n");
 
-	xmlCleanupParser();
 	return 1;
 
 	error:
@@ -698,7 +697,6 @@ int dialoginfo_process_body(struct publ_info* publ, str** fin_body,
 		xmlFreeDoc(doc);
 	if (body)
 		pkg_free(body);
-	xmlCleanupParser();
 	return -1;
 }
 

@@ -178,7 +178,6 @@ str* build_pidf(ucontact_t* c)
 
     /*free the document */
 	xmlFreeDoc(doc);
-    xmlCleanupParser();
 
 	return body;
 

@@ -126,14 +126,12 @@ void pres_Xmpp2Sip(char *msg, int type, void *param)
 	//		send_reply_message(pres_node);
 
 	xmlFreeDoc(doc);
-	xmlCleanupParser();
 	return ;
 
 error:
 
 	if(doc)
 		xmlFreeDoc(doc);
-	xmlCleanupParser();
 
 	return ;
 }
