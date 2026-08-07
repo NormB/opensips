@@ -17,6 +17,25 @@ If you want to see more complicated examples of how the API could be used,
 see sources of dbexample, usrloc or auth modules.
 
 
+2 Provisioning interface
+------------------------
+
+The provisioning interface is transport-neutral and is described by the
+framework XML parsed by the core.  The resulting framework is available to
+all transports through the PI framework API.  A transport registers a
+callback with db_pi_register_transport() and dispatches requests through
+db_pi_dispatch().  The callback receives the method and URL as str values,
+an opaque transport-owned request context, and a response body to fill.
+
+The core MI commands pi_list and pi_reload operate on the registered
+transport callbacks.  The framework parser, connector resolution, database
+connections, and provisioning command model are core-owned.  A transport only
+adapts its wire protocol to the framework request API and renders its own
+response format.  The HTTP implementation is provided by pi_http; other
+transports can reuse the same framework without registering duplicate
+connector metadata.
+
+
 1 Data types
 
 There are several new data types. All of them are defined in header file db.h,

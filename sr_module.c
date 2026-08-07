@@ -41,6 +41,7 @@
 #include "dprint.h"
 #include "error.h"
 #include "globals.h"
+#include "db/pi_framework.h"
 #include "mem/mem.h"
 #include "pt.h"
 #include "ut.h"
@@ -49,6 +50,7 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <string.h>
+#include <glob.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -63,7 +65,7 @@
 #include "libgen.h"
 
 struct sr_module* modules=0;
-int modload_check_rev=1;
+int in_tree_mode;
 
 #ifdef STATIC_EXEC
 	extern struct module_exports exec_exports;
@@ -99,6 +101,23 @@ struct mpath {
 	struct mpath *next;
 };
 static struct mpath *mpaths, *last_mpath;
+
+static void add_local_mpath(void)
+{
+	static int done;
+	glob_t files;
+
+	if (!in_tree_mode || done)
+		return;
+	done = 1;
+
+	if (glob("./modules/*/*.so", 0, NULL, &files) != 0)
+		return;
+	globfree(&files);
+
+	LM_INFO("using local './modules' directory as module path fallback\n");
+	add_mpath("./modules");
+}
 
 /* initializes statically built (compiled in) modules*/
 int register_builtin_modules(void)
@@ -244,7 +263,7 @@ static inline int version_control(const struct module_exports* exp, char *path)
 			core_scm_ver.type, exp->ver_info.scm.type, hint);
 		return 0;
 	}
-	if (modload_check_rev) {
+	if (!in_tree_mode) {
 		len = (strlen(core_scm_ver.rev) < strlen(exp->ver_info.scm.rev))?
 			strlen(core_scm_ver.rev): strlen(exp->ver_info.scm.rev);
 		if (strncmp(core_scm_ver.rev, exp->ver_info.scm.rev, len) != 0) {
@@ -455,6 +474,9 @@ int load_module(char* name)
 	/* if this is a static module, load it directly */
 	if (load_static_module(name) == 0)
 		return 0;
+
+	/* A development tree keeps built modules under ./modules/<name>/ */
+	add_local_mpath();
 
 	if (*name=='/' || mpaths==NULL) {
 		LM_DBG("loading module %s\n", name);
@@ -729,6 +751,8 @@ int init_child(int rank)
 	}
 
 	rc = init_mod_child(modules, rank, type, 0);
+	if (rc == 0)
+		rc = pi_framework_child_init();
 	ready_time = time(NULL);
 	ready_delay = ready_time - startup_time;
 
@@ -981,4 +1005,3 @@ int modules_validate_reload(void)
 
 	return ret;
 }
-

@@ -107,6 +107,7 @@
 #include "route.h"
 #include "bin_interface.h"
 #include "globals.h"
+#include "db/pi_framework.h"
 #include "mem/mem.h"
 #include "mem/shm_mem.h"
 #include "mem/rpm_mem.h"
@@ -223,9 +224,11 @@ static const struct main_script main_script[] = {
 	FN_HNDLR(resolv_blacklist_init, !=, 0, "resolver's blacklist"),
 	FN_HNDLR(init_dset, !=, 0, "SIP forking logic"),
 	FN_HNDLR(init_db_support, !=, 0, "SQL database support"),
+	FN_HNDLR(pi_framework_init, !=, 0, "PI framework"),
 	FN_HNDLR(init_cdb_support, !=, 0, "CacheDB support"),
 	FN_HNDLR(init_pvar_support, !=, 0, "pseudo-variable support"),
 	FN_HNDLR(init_modules, !=, 0, "modules"),
+	FN_HNDLR(pi_framework_init_db, !=, 0, "PI framework database"),
 	FN_HNDLR(init_auto_scaling, !=, 0, "auto-scaling support"),
 	FN_HNDLR(init_xlog, <, 0, "xlog"),
 	FN_HNDLR(register_route_timers, <, 0, "route_timers"),
@@ -520,7 +523,7 @@ int main(int argc, char** argv)
 					/* ignoring, parsed previously */
 					break;
 			case 'i':
-					modload_check_rev = 0;
+					in_tree_mode = 1;
 					break;
 			case 'b':
 					maxbuffer=strtol(optarg, &tmp, 10);
