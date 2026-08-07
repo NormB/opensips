@@ -828,6 +828,23 @@ Example of usage:
 
 ```
 
+### pi_framework
+
+The path to the XML provisioning framework used by the active PI transport.
+The framework describes the database URLs, tables and provisioning commands
+available through the provisioning interface.
+
+This parameter is required when using the `pi_http` module. The framework can
+be reloaded at runtime with the core `pi_reload` MI command, and its modules
+and commands can be inspected with `pi_list`.
+
+Example of usage:
+```opensips
+
+    pi_framework = "/usr/local/etc/opensips/pi_framework.xml"
+
+```
+
 ### poll_method
 
 The poll method used by the internal I/O reactor. By default, the best method for the current OS is selected.
@@ -1486,6 +1503,21 @@ Example of usage:
 ```opensips
 wdir = "/usr/local/opensips"
 wdir = /usr/opensips_wd
+```
+
+### worker_reactor_timeout
+
+The timeout, in milliseconds, used by the internal I/O reactor in OpenSIPS worker processes. This is relevant for the timeout of the async operations. If you use low timeout values in your script async operations or you want these timeouts to be really accurate, you should lower this reactor timeout (so it can check more often for the async timeout jobs). If your aync timouts are high and precision is not a key concern, you can keep the the default of 1 second setting.
+
+By `worker` processes we do understand processes handling SIP traffic or SIP operations - shortly this impacts the UDP, TCP and TIMER related processes.
+
+Default value is `1000` milliseconds. Values lower than `100` are rounded up to `100`; values higher than `1000` are rounded down to `1000`.
+
+Example of usage:
+```opensips
+
+    worker_reactor_timeout = 500
+
 ```
 
 ### xlog_buf_size

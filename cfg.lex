@@ -207,6 +207,7 @@ OPEN_FD_LIMIT		"open_files_limit"
 ENABLE_ASSERTS	enable_asserts
 ABORT_ON_ASSERT	abort_on_assert
 LOGLEVEL	log_level
+PI_FRAMEWORK	pi_framework
 LOGPREFIX	log_prefix
 LOGSTDOUT	log_stdout
 STDERROR_ENABLED	stderror_enabled
@@ -247,6 +248,7 @@ MEMLOG		"memlog"|"mem_log"
 MEMDUMP		"memdump"|"mem_dump"
 SHM_MEMLOG_SIZE			"shm_memlog_size"
 EXECMSGTHRESHOLD		"execmsgthreshold"|"exec_msg_threshold"
+WORKER_REACTOR_TIMEOUT	"workerreactortimeout"|"worker_reactor_timeout"
 EXECDNSTHRESHOLD		"execdnsthreshold"|"exec_dns_threshold"
 TCPTHRESHOLD			"tcpthreshold"|"tcp_threshold"
 EVENT_SHM_THRESHOLD		"event_shm_threshold"
@@ -420,6 +422,7 @@ SPACE		[ ]
 
 <INITIAL>{DEBUG_MODE}	{ count(); yylval.strval=yytext; return DEBUG_MODE; }
 <INITIAL>{UDP_WORKERS}	{ count(); yylval.strval=yytext; return UDP_WORKERS; }
+<INITIAL>{PI_FRAMEWORK}	{ count(); yylval.strval=yytext; return PI_FRAMEWORK; }
 <INITIAL>{CHROOT}	{ count(); yylval.strval=yytext; return CHROOT; }
 <INITIAL>{WDIR}	{ count(); yylval.strval=yytext; return WDIR; }
 <INITIAL>{DISABLE_CORE}		{	count(); yylval.strval=yytext;
@@ -480,6 +483,7 @@ SPACE		[ ]
 <INITIAL>{MEMDUMP}	{ count(); yylval.strval=yytext; return MEMDUMP; }
 <INITIAL>{SHM_MEMLOG_SIZE}	{ count(); yylval.strval=yytext; return SHM_MEMLOG_SIZE; }
 <INITIAL>{EXECMSGTHRESHOLD}	{ count(); yylval.strval=yytext; return EXECMSGTHRESHOLD; }
+<INITIAL>{WORKER_REACTOR_TIMEOUT}	{ count(); yylval.strval=yytext; return WORKER_REACTOR_TIMEOUT; }
 <INITIAL>{EXECDNSTHRESHOLD}	{ count(); yylval.strval=yytext; return EXECDNSTHRESHOLD; }
 <INITIAL>{TCPTHRESHOLD}	{ count(); yylval.strval=yytext; return TCPTHRESHOLD; }
 <INITIAL>{EVENT_SHM_THRESHOLD}	{ count(); yylval.strval=yytext; return EVENT_SHM_THRESHOLD; }

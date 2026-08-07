@@ -111,6 +111,7 @@
 #include "config.h"
 #include "mem/rpm_mem.h"
 #include "poll_types.h"
+#include "reactor_defs.h"
 
 #ifdef SHM_EXTRA_STATS
 #include "mem/module_info.h"
@@ -276,6 +277,7 @@ extern int cfg_parse_only_routes;
 %token EXIT
 %token RETURN
 %token LOG_TOK
+%token PI_FRAMEWORK
 %token ERROR
 %token ROUTE
 %token ROUTE_FAILURE
@@ -353,6 +355,7 @@ extern int cfg_parse_only_routes;
 %token MEMDUMP
 %token SHM_MEMLOG_SIZE
 %token EXECMSGTHRESHOLD
+%token WORKER_REACTOR_TIMEOUT
 %token EXECDNSTHRESHOLD
 %token TCPTHRESHOLD
 %token EVENT_SHM_THRESHOLD
@@ -956,6 +959,11 @@ assign_stm: LOGLEVEL EQUAL snumber { IFOR();
 			/* in debug mode, force logging to DEBUG level*/
 			*log_level = debug_mode?L_DBG:$3;
 			}
+		| PI_FRAMEWORK EQUAL STRING { IFOR();
+			pi_framework.s = $3;
+			pi_framework.len = strlen($3);
+			}
+		| PI_FRAMEWORK EQUAL error { yyerror("string value expected"); }
 		| LOGPREFIX EQUAL STRING { IFOR();
 			if (*$3) {
 				int len = strlen($3);
@@ -1253,6 +1261,8 @@ assign_stm: LOGLEVEL EQUAL snumber { IFOR();
 		| MEMDUMP EQUAL error { yyerror("int value expected"); }
 		| EXECMSGTHRESHOLD EQUAL NUMBER {  IFOR();execmsgthreshold=$3; }
 		| EXECMSGTHRESHOLD EQUAL error { yyerror("int value expected"); }
+		| WORKER_REACTOR_TIMEOUT EQUAL NUMBER { IFOR(); worker_reactor_timeout=$3; }
+		| WORKER_REACTOR_TIMEOUT EQUAL error { yyerror("int value expected"); }
 		| EXECDNSTHRESHOLD EQUAL NUMBER { IFOR(); execdnsthreshold=$3; }
 		| EXECDNSTHRESHOLD EQUAL error { yyerror("int value expected"); }
 		| TCPTHRESHOLD EQUAL NUMBER { IFOR(); tcpthreshold=$3; }

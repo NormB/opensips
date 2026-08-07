@@ -49,9 +49,7 @@
 /*!< Maximum number of connections */
 #define DEFAULT_TCP_MAX_CONNECTIONS 2048
 /*!< how often "tcp main" checks for timeout*/
-#define TCP_MAIN_SELECT_TIMEOUT 5
-/*!< the same as above but for children */
-#define TCP_CHILD_SELECT_TIMEOUT 2
+#define TCP_MAIN_SELECT_TIMEOUT 1000 /* ms */
 
 
 /*! \brief add a tcpconn to a list

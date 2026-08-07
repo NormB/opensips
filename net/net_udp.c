@@ -37,8 +37,6 @@
 #include "net_udp.h"
 
 
-#define UDP_SELECT_TIMEOUT  1
-
 /* if the UDP network layer is used or not by some protos */
 static int udp_disabled = 1;
 
@@ -442,7 +440,7 @@ static int fork_dynamic_udp_process(void *si_filter)
 		/* the child proc is done read&write) dealing with the status pipe */
 		clean_read_pipeend();
 
-		reactor_main_loop(UDP_SELECT_TIMEOUT, error, );
+		reactor_main_loop( worker_reactor_timeout, error, );
 		destroy_worker_reactor();
 error:
 		report_failure_status();
@@ -567,7 +565,7 @@ int udp_start_processes(int *chd_rank, int *startup_done)
 					 * \see receive_msg
 					 * \see main_loop
 					 */
-					reactor_main_loop(UDP_SELECT_TIMEOUT, error, );
+					reactor_main_loop( worker_reactor_timeout, error, );
 					destroy_worker_reactor();
 					exit(-1);
 				} else {

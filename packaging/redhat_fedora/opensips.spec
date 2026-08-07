@@ -37,7 +37,7 @@
 %global _with_wolfssl 1
 %endif
 
-%if 0%{?rhel} >= 10 || 0%{?fedora} > 41
+%if 0%{?rhel} > 10 || 0%{?fedora} > 41
 %global _with_wolfssl_stir_shaken 1
 %endif
 
@@ -58,7 +58,11 @@ BuildRequires:  bison
 BuildRequires:  flex
 BuildRequires:  subversion
 BuildRequires:  which
+%if 0%{?rhel} >= 10
+BuildRequires:  mariadb-devel
+%else
 BuildRequires:  mysql-devel
+%endif
 BuildRequires:  postgresql-devel
 BuildRequires:  autoconf
 BuildRequires:  automake
@@ -545,7 +549,11 @@ This package provides the MSRP protocol support for OpenSIPS.
 Summary:  MySQL database connectivity module for OpenSIPS
 Group:    System Environment/Daemons
 Requires: %{name} = %{version}-%{release}
+%if 0%{?rhel} >= 10
+Requires: mariadb-libs
+%else
 Requires: mysql-libs
+%endif
 
 %description  mysql-module
 OpenSIPS is a very fast and flexible SIP (RFC3261)
@@ -995,7 +1003,7 @@ This package provides the SIP to XMPP IM translator module for OpenSIPS.
 %setup -q -n %{name}-%{version}
 
 %build
-LOCALBASE=/usr NICER=0 CFLAGS="%{optflags}" LDFLAGS="%{?__global_ldflags}" %{?_with_python3:PYTHON=python3} %{?_with_db_oracle:ORAHOME="$ORACLE_HOME"} %{!?_with_wolfssl_stir_shaken:STIR_SHAKEN_OPENSSL=true} %{__make} all modules-readme %{?_smp_mflags} TLS=1 \
+LOCALBASE=/usr NICER=0 CFLAGS="%{optflags}" LDFLAGS="%{?__global_ldflags}" %{?_with_python3:PYTHON=python3} %{?_with_db_oracle:ORAHOME="$ORACLE_HOME"} %{!?_with_wolfssl_stir_shaken:STIR_SHAKEN_OPENSSL=true} %{__make} all %{?_smp_mflags} TLS=1 \
   exclude_modules="%EXCLUDE_MODULES" \
   cfg_target=%{_sysconfdir}/opensips/ \
   modules_prefix=%{buildroot}%{_prefix} \
@@ -1424,7 +1432,7 @@ fi
 %{_libdir}/opensips/modules/mi_http.so
 %doc docdir/README.mi_http
 %{_libdir}/opensips/modules/pi_http.so
-%{_datadir}/opensips/pi_http/*
+%{_datadir}/opensips/pi/*
 %doc docdir/README.pi_http
 
 %files identity-module

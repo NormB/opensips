@@ -7,7 +7,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-on: [push, pull_request]
+on:
+  push:
+    branches-ignore:
+      - coverity_scan
+    paths:
+      - '**/Makefile*'
+      - '**/*.c'
+      - '**/*.h'
+      - 'cfg.y'
+      - 'cfg.lex'
+      - 'scripts/**'
+  pull_request:
 jobs:
   Fuzzing:
     runs-on: ubuntu-latest

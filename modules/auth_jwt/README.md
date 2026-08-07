@@ -1,6 +1,6 @@
 ---
 title: "AUTH_JWT Module"
-description: "The module implements authentication over JSON Web Tokens. In some cases ( ie. WebRTC ) the user authenticates on another layer ( other than SIP ), so it makes no sense to double-authenticate it on the SIP layer. Thus, the SIP client will simply present the JWT auth token it received from the..."
+description: "The module implements authentication over JSON Web Tokens."
 ---
 
 ## Admin Guide
@@ -10,10 +10,10 @@ description: "The module implements authentication over JSON Web Tokens. In some
 
 
 The module implements authentication over JSON Web Tokens.
-		In some cases ( ie. WebRTC ) the user authenticates on another layer ( other than SIP ), so it makes no sense to double-authenticate it on the SIP layer.
-		Thus, the SIP client will simply present the JWT auth token it received from the server, and pass it on to OpenSIPS which will use that for authentication purposes.
+In some cases ( ie. WebRTC ) the user authenticates on another layer ( other than SIP ), so it makes no sense to double-authenticate it on the SIP layer.
+Thus, the SIP client will simply present the JWT auth token it received from the server, and pass it on to OpenSIPS which will use that for authentication purposes.
 
-		It relies on two DB tables, one containing JWT profiles ( a profile name and it's SIP username associated to it ) and one containing JWT secrets. Each secret has a corresponding profile, the KEY used for signing the JWT and two timestamps describing a validation interval. Multiple JWT secrets can point to the same JWT profile.
+It relies on two DB tables, one containing JWT profiles ( a profile name and it's SIP username associated to it ) and one containing JWT secrets. Each secret has a corresponding profile, the KEY used for signing the JWT and two timestamps describing a validation interval. Multiple JWT secrets can point to the same JWT profile.
 
 
 ### Dependencies
@@ -23,23 +23,23 @@ The module implements authentication over JSON Web Tokens.
 
 
 The module depends on the following modules (in the other words
-			the listed modules must be loaded before this module):
+the listed modules must be loaded before this module):
 
 
 - *database* -- Any database module
-				(currently mysql, postgres, dbtext) , in case the db_url parameter is set
+(currently mysql, postgres, dbtext) , in case the db_url parameter is set
 
 
 #### External Libraries or Applications
 
 
 The following libraries or applications must be installed
-			before running OpenSIPS with this module loaded:
+before running OpenSIPS with this module loaded:
 
 
 - *libjwt-dev*
 - *openssl-dev* or
-					*libssl-dev*
+*libssl-dev*
 
 
 ### Exported Parameters
@@ -63,10 +63,10 @@ modparam("auth_jwt", "db_mode", 0)
 
 
 This is URL of the database to be used. Value of the parameter depends
-		on the database module used. For example for mysql and postgres modules
-		this is something like mysql://username:password@host:port/database.
-		For dbtext module (which stores data in plaintext files) it is
-		directory in which the database resides.
+on the database module used. For example for mysql and postgres modules
+this is something like mysql://username:password@host:port/database.
+For dbtext module (which stores data in plaintext files) it is
+directory in which the database resides.
 
 
 *Default value is "mysql://opensipsro:opensipsro@localhost/opensips".*
@@ -221,9 +221,9 @@ modparam("auth_jwt", "tag_claim", "my_tag_claim")
 
 
 This parameter specifies credentials to be fetched from the JWT profiles table when
-		the authentication is performed. The loaded credentials will be stored
-		in AVPs. If the AVP name is not specificaly given, it will be used a
-		NAME AVP with the same name as the column name.
+the authentication is performed. The loaded credentials will be stored
+in AVPs. If the AVP name is not specifically given, it will be used a
+NAME AVP with the same name as the column name.
 
 
 Parameter syntax:
@@ -231,7 +231,7 @@ Parameter syntax:
 
 - *load_credentials = credential (';' credential)**
 - *credential = (avp_specification '=' column_name) |
-							(column_name)*
+(column_name)*
 - *avp_specification = '$avp(' + NAME + ')'*
 
 
@@ -264,8 +264,8 @@ Meaning of the parameters is as follows:
 
 - *jwt_token (string)* - The JWT token to perform auth on
 The string may contain pseudo variables.
-- *out_decoded_token (pvar)* - PVAR used to store the decoded JWT upon succesful auth
-- *out_sip_username (pvar)* - PVAR used to store the SIP username corresponding to the JWT profile, upon succesful auth
+- *out_decoded_token (pvar)* - PVAR used to store the decoded JWT upon successful auth
+- *out_sip_username (pvar)* - PVAR used to store the SIP username corresponding to the JWT profile, upon successful auth
 
 
 This function can be used from REQUEST_ROUTE.
@@ -277,7 +277,7 @@ if (!jwt_db_authorize("$avp(my_jwt_token)", $avp(decoded_token), $avp(sip_userna
 	send_reply(401,"Unauthorized");
 	exit;
 } else {
-	xlog("Succesful JWT auth - $avp(decoded_token) \n");
+	xlog("Successful JWT auth - $avp(decoded_token) \n");
 	if ($fU != $avp(sip_username)) {
 		send_reply(403,"Forbidden AUTH ID");
 		exit;
@@ -290,13 +290,13 @@ if (!jwt_db_authorize("$avp(my_jwt_token)", $avp(decoded_token), $avp(sip_userna
 #### jwt_script_authorize(jwt_token,key, out_decoded_token)
 
 
-The function will read the first param ( jwt_token ), decode it and then try to validate it against the provided key. If the JWT decoding is succesful, the out_decoded_token pvar will be populated.
-			Return codes are :
+The function will read the first param ( jwt_token ), decode it and then try to validate it against the provided key. If the JWT decoding is successful, the out_decoded_token pvar will be populated.
+Return codes are :
 
 
 - -2 : Failure in decoding the JWT ( out_decoded_token will not be populated )
 - -1 : Failure in validating the JWT ( out_decoded_token will be populated )
-- 1 : JWT succesfully validated with the key ( out_decoded_token will be populated )
+- 1 : JWT successfully validated with the key ( out_decoded_token will be populated )
 
 
 Meaning of the parameters is as follows:
@@ -317,7 +317,7 @@ if (!jwt_script_authorize("$avp(my_jwt_token)",$avp(pub_key), $avp(decoded_token
 	send_reply(401,"Unauthorized");
 	exit;
 } else {
-	xlog("Succesful JWT auth - $avp(decoded_token) \n");
+	xlog("Successful JWT auth - $avp(decoded_token) \n");
 }
 ...
 ```
@@ -326,12 +326,12 @@ if (!jwt_script_authorize("$avp(my_jwt_token)",$avp(pub_key), $avp(decoded_token
 #### extract_pub_key_from_cert(certificate,out_public_key)
 
 
-The function will read the first param ( certificate ), decode it and then try to extract the public key with the certificate. If the extraction is succesful, the out_public_key will be populated. Useful to be used in conjuction with the jwt_script_authorize function, since most providers make their certificates public, but the JWTs are signed with the actual public key embeded in the certificate.
-			Return codes are :
+The function will read the first param ( certificate ), decode it and then try to extract the public key with the certificate. If the extraction is successful, the out_public_key will be populated. Useful to be used in conjunction with the jwt_script_authorize function, since most providers make their certificates public, but the JWTs are signed with the actual public key embedded in the certificate.
+Return codes are :
 
 
 - -1 : Failure in extracting the pub key
-- 1 : out_public_key succesfully populated
+- 1 : out_public_key successfully populated
 
 
 Meaning of the parameters is as follows:
@@ -348,7 +348,7 @@ This function can be used from REQUEST_ROUTE.
 ```opensips title="extract_pub_key_from_cert usage"
 ...
 if (extract_pub_key_from_cert("$avp(my_certificate)",$avp(my_pub_key))) {
-    xlog("Succesfully extracted public key - $avp(my_pub_key) \n");
+    xlog("Successfully extracted public key - $avp(my_pub_key) \n");
 }
 ...
 ```
@@ -358,11 +358,11 @@ if (extract_pub_key_from_cert("$avp(my_certificate)",$avp(my_pub_key))) {
 
 
 The function reads a base64url-encoded RSA exponent (*e*) and modulus (*n*), then builds a PEM public key and stores it into *out_public_key*.
-			Return codes are :
+Return codes are :
 
 
 - -1 : Failure in extracting the pub key
-- 1 : out_public_key succesfully populated
+- 1 : out_public_key successfully populated
 
 
 Meaning of the parameters is as follows:
@@ -381,7 +381,7 @@ This function can be used from REQUEST_ROUTE.
 ```opensips title="extract_pub_key_from_exp_mod usage"
 ...
 if (extract_pub_key_from_exp_mod("$avp(my_exp)", "$avp(my_mod)", $avp(my_pub_key))) {
-    xlog("Succesfully extracted public key - $avp(my_pub_key) \n");
+    xlog("Successfully extracted public key - $avp(my_pub_key) \n");
 }
 ...
 ```

@@ -1,6 +1,6 @@
 ---
 title: "XML Module"
-description: "This module exposes a script variable that provides basic parsing and manipulation of XML documents or blocks of XML data. The variable provides ways to access entire XML elements, their text content or their attributes. You can modify the content and attributes as well as adding or removing node..."
+description: "This module exposes a script variable that provides basic parsing and manipulation of XML documents or blocks of XML data."
 ---
 
 ## Admin Guide
@@ -49,34 +49,24 @@ This module exports the *$xml(path)* variable.
 
 
 The xml variables will be available to the
-			process that created them from the moment they were
-			initialized. They will not reset per message or per
-			transaction. If you want to use them on a per message
-			basis you should initialize them each time.
+process that created them from the moment they were
+initialized. They will not reset per message or per
+transaction. If you want to use them on a per message
+basis you should initialize them each time.
 
 
 ##### Accessing the $xml(path) variable
 
 
-Accessing elements and attributes is based on the tree representation of the XML document thus a complete path from the root node is required. The in-memory equivalent of an XML document is an "XML object" which must be initilized with a well-formed block of XML data before use. In consequence, the path must start with the object name, followed by any number of nodes leading to the desired element.
+Accessing elements and attributes is based on the tree representation of the XML document thus a complete path from the root node is required. The in-memory equivalent of an XML document is an "XML object" which must be initialized with a well-formed block of XML data before use. In consequence, the path must start with the object name, followed by any number of nodes leading to the desired element.
 
 
 The grammar that describes the path is:
-
-
-path = name | name(identifier)+(acces)?
-
-
-identifier = element(index)?
-
-
-element = /string | /$var
-
-
-index = [integer] | [$var]
-
-
-access = .val | .attr/string | .attr/$var
+- path = name | name(identifier)+(access)?
+- identifier = element(index)?
+- element = /string | /$var
+- index = [integer] | [$var]
+- access = .val | .attr/string | .attr/$var
 
 
 In order to select between nodes with identical names on a certain level in the tree, an index can be provided, starting from 0.
@@ -85,13 +75,14 @@ In order to select between nodes with identical names on a certain level in the 
 The sequence of nodes in the path can be followed by *.val* in order to access the last node's text content or by *.attr/attr_name* in order to access it's attribute named *attr_name*. Otherwise the entire element (start-tag, end-tag, children elements and content) is accessed.
 
 
-Assiging NULL to the variable removes the entire element or it's text content or attribute acording to the access mode.
+Assigning NULL to the variable removes the entire element or it's text content or attribute according to the access mode.
 
 
-If you want to insert an element, you must assign a string value (containg a well-formed block of XML data that has a root node) to the parent node. Note that assigning a value directly to a node does not replace it with that value.
+If you want to insert an element, you must assign a string value (containing a well-formed block of XML data that has a root node) to the parent node. Note that assigning a value directly to a node does not replace it with that value.
 
 
-IMPORTANT: In XML all characters in the content of the document are significant including blanks and formatting line breaks. An element and it's content will be returned WITH all the whitespaces and newlines and when adding a new node under an existing one, if you want to insert it with indentation, you must include the needed characters in the assigned string.
+> [!IMPORTANT]
+> In XML all characters in the content of the document are significant including blanks and formatting line breaks. An element and it's content will be returned WITH all the whitespaces and newlines and when adding a new node under an existing one, if you want to insert it with indentation, you must include the needed characters in the assigned string.
 
 
 Other script variables can be used as element names, attribute names and indexes in the path. Variables that will be used as indexes must contain integer values. Variables that will be used as element or attribute names should contain string values.
@@ -143,7 +134,7 @@ $xml(my_doc/doc/list) = "\n\t\t<item></item>\n\t";
 #	</list>
 # </doc>
 #
-# without the explicit formating characters the document would be:
+# without the explicit formatting characters the document would be:
 # <doc><list><item></item></list></doc>
 ...
 				

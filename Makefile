@@ -88,14 +88,6 @@ static_defs=$(foreach mod, $(static_modules), \
 override extra_defs+=$(static_defs) $(EXTRA_DEFS)
 export extra_defs
 
-# If modules is supplied, only do those. If not, use all modules when
-# building documentation.
-ifeq ($(modules),)
-	doc_modules=$(all_modules)
-else
-	doc_modules=$(modules)
-endif
-
 # Take subset of all modules, excluding the exclude_modules and the
 # static_modules.  Only directories that ship a Makefile count as
 # modules: a plain $(wildcard modules/*) would also match regular
@@ -229,124 +221,11 @@ gen_misclibs:
 		$(MAKE) -C $$r ; \
 	done
 
-.PHONY: tool-docbook2pdf
-tool-docbook2pdf:
-	@if [ -z "$(DBXML2PDF)" ]; then \
-		echo "error: docbook2pdf not found"; exit 1; \
-	fi
-
-.PHONY: tool-lynx
-tool-lynx:
-	@if [ -z "$(DBHTML2TXT)" ]; then \
-		echo "error: lynx not found"; exit 1; \
-	fi
-
-.PHONY: tool-xsltproc
-tool-xsltproc:
-	@if [ -z "$(DBXML2HTML)" ]; then \
-		echo "error: xsltproc not found"; exit 1; \
-	fi
-	@if [ -z "$(DBHTMLXSL)" ]; then \
-		echo "error: docbook.xsl not found (docbook-xsl)"; exit 1; \
-	fi
-
 .PHONY: git-dir
 git-dir:
 	@if [ ! -r .git ]; then \
 		echo "error: Not a git repo! (.git dir not found)"; exit 1; \
 	fi
-
-.PHONY: modules-contrib
-modules-contrib: git-dir
-	@set -e; ./docs/build-contrib.sh $(modules)
-
-.PHONY: modules-readme
-modules-readme: tool-lynx tool-xsltproc
-	@set -e; \
-	for mod in $(doc_modules); do \
-		r=`basename $$mod`;\
-		echo "Reading directory $$mod for module $$r";\
-		if [ ! -d "$$mod/doc" ]; then \
-			continue; \
-		fi; \
-		cd "$$mod/doc"; \
-		if [ -f "$$r".xml ]; then \
-			echo "docbook xml to html: $$r.xml"; \
-			$(DBXML2HTML) -o $$r.html $(DBXML2HTMLPARAMS) $(DBHTMLXSL) \
-						$$r.xml; \
-			echo "docbook html to txt: $$r.html"; \
-			$(DBHTML2TXT) $(DBHTML2TXTPARAMS) $$r.html >$$r.txt; \
-			echo "docbook txt to readme: $$r.txt"; \
-			rm $$r.html; \
-			mv $$r.txt ../README; \
-			echo ""; \
-		fi; \
-		cd ../../..; \
-	done
-
-.PHONY: modules-docbook-txt
-modules-docbook-txt: tool-lynx tool-xsltproc
-	@set -e; \
-	for mod in $(doc_modules); do \
-		r=`basename $$mod`;\
-		echo "Reading directory $$mod for module $$r";\
-		if [ ! -d "$$mod/doc" ]; then \
-			continue; \
-		fi; \
-		cd "$$mod/doc"; \
-		if [ -f "$$r".xml ]; then \
-			echo ""; \
-			echo "docbook xml to html: $$r.xml"; \
-			$(DBXML2HTML) -o $$r.html $(DBXML2HTMLPARAMS) $(DBHTMLXSL) \
-						$$r.xml; \
-			echo "docbook html to txt: $$r.html"; \
-			$(DBHTML2TXT) $(DBHTML2TXTPARAMS) $$r.html >$$r.txt; \
-			rm $$r.html; \
-			echo ""; \
-		fi; \
-		cd ../../..; \
-	done
-
-.PHONY: modules-docbook-html
-modules-docbook-html: tool-xsltproc
-	@set -e; \
-	for mod in $(doc_modules); do \
-		r=`basename $$mod`;\
-		echo "Reading directory $$mod for module $$r";\
-		if [ ! -d "$$mod/doc" ]; then \
-			continue; \
-		fi; \
-		cd "$$mod/doc"; \
-		if [ -f "$$r".xml ]; then \
-			echo ""; \
-			echo "docbook xml to html: $$r.xml"; \
-			$(DBXML2HTML) -o $$r.html $(DBXML2HTMLPARAMS) $(DBHTMLXSL) \
-						$$r.xml; \
-			echo ""; \
-		fi; \
-		cd ../../..; \
-	done
-
-.PHONY: modules-docbook-pdf
-modules-docbook-pdf: tool-docbook2pdf
-	@set -e; \
-	for mod in $(doc_modules); do \
-		r=`basename $$mod`;\
-		echo "Reading directory $$mod for module $$r";\
-		if [ ! -d "$$mod/doc" ]; then \
-			continue; \
-		fi; \
-		cd "$$mod/doc"; \
-		if [ -f "$$r".xml ]; then \
-			echo ""; \
-			echo "docbook xml to pdf: $$r.xml"; \
-			$(DBXML2PDF) "$$r".xml; \
-		fi; \
-		cd ../../..; \
-	done
-
-.PHONY: modules-docbook
-modules-docbook: modules-docbook-txt modules-docbook-html modules-docbook-pdf
 
 .PHONY: dbschema-docbook-txt
 dbschema-docbook-txt: dbschema
@@ -479,13 +358,13 @@ sunpkg:
 .PHONY: install-app install-config-templates install-modules-all install
 # Install app only, excluding console, modules and module docs
 install-app: mk-install-dirs install-cfg install-bin \
-	install-app-doc install-man install-config-templates
+	install-app-doc install-man install-config-templates install-pi-framework
 
-# Install all module stuff (except modules-docbook?)
+# Install all module stuff
 install-modules-files: install-modules install-modules-doc
 install-modules-all: install-modules-files install-modules-dbschema
 
-# Install everything (except modules-docbook?)
+# Install everything
 install: install-app install-modules-all
 
 install-config-templates: $(data_prefix)/$(data_dir)
@@ -498,6 +377,17 @@ install-config-templates: $(data_prefix)/$(data_dir)
 		$(data_prefix)/$(data_dir)/examples/templates/README.md
 	sed -i -e "s#/usr/.*lib/$(NAME)/modules/#$(modules_target)#" \
 		$(data_prefix)/$(data_dir)/examples/templates/*.m4
+
+install-pi-framework: $(data_prefix)/$(data_dir)
+	mkdir -p $(data_prefix)/$(data_dir)/pi
+	for FILE in $(wildcard scripts/pi/*) ; do \
+		if [ -f $$FILE ] ; then \
+			$(INSTALL_TOUCH) $$FILE \
+				$(data_prefix)/$(data_dir)/pi/`basename "$$FILE"` ; \
+			$(INSTALL_CFG) $$FILE \
+				$(data_prefix)/$(data_dir)/pi/`basename "$$FILE"` ; \
+		fi ; \
+	done
 
 .PHONY: dbschema
 dbschema:
@@ -582,9 +472,9 @@ install-app-doc: $(doc_prefix)/$(doc_dir)
 install-modules-doc: $(doc_prefix)/$(doc_dir)
 	-@for r in $(modules_basenames) "" ; do \
 		if [ -n "$$r" ]; then \
-			if [ -f modules/"$$r"/README ]; then \
+			if [ -f modules/"$$r"/README.md ]; then \
 				$(INSTALL_TOUCH)  $(doc_prefix)/$(doc_dir)/README."$$r" ; \
-				$(INSTALL_DOC)  modules/"$$r"/README  \
+				$(INSTALL_DOC)  modules/"$$r"/README.md  \
 									$(doc_prefix)/$(doc_dir)/README."$$r" ; \
 			fi ; \
 		fi ; \
@@ -604,29 +494,6 @@ install-man: $(man_prefix)/$(man_dir)/man8 $(man_prefix)/$(man_dir)/man5
 			-e "s#/usr/share/doc/$(NAME)/#$(doc-target)#g" \
 			< $(NAME).cfg.5 >  $(man_prefix)/$(man_dir)/man5/$(NAME).cfg.5
 		chmod 644  $(man_prefix)/$(man_dir)/man5/$(NAME).cfg.5
-
-install-modules-docbook: $(doc_prefix)/$(doc_dir)
-	-@for r in $(modules_basenames) "" ; do \
-		if [ -n "$$r" ]; then \
-			if [ -d modules/"$$r"/doc ]; then \
-				if [ -f modules/"$$r"/doc/"$$r".txt ]; then \
-					$(INSTALL_TOUCH)  $(doc_prefix)/$(doc_dir)/"$$r".txt ; \
-					$(INSTALL_DOC)  modules/"$$r"/doc/"$$r".txt  \
-									$(doc_prefix)/$(doc_dir)/"$$r".txt ; \
-				fi ; \
-				if [ -f modules/"$$r"/doc/"$$r".html ]; then \
-					$(INSTALL_TOUCH)  $(doc_prefix)/$(doc_dir)/"$$r".html ; \
-					$(INSTALL_DOC)  modules/"$$r"/doc/"$$r".html  \
-									$(doc_prefix)/$(doc_dir)/"$$r".html ; \
-				fi ; \
-				if [ -f modules/"$$r"/doc/"$$r".pdf ]; then \
-					$(INSTALL_TOUCH)  $(doc_prefix)/$(doc_dir)/"$$r".pdf ; \
-					$(INSTALL_DOC)  modules/"$$r"/doc/"$$r".pdf  \
-									$(doc_prefix)/$(doc_dir)/"$$r".pdf ; \
-				fi ; \
-			fi ; \
-		fi ; \
-	done
 
 doxygen:
 	-@echo "Create Doxygen documentation"
