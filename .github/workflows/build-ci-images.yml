@@ -14,7 +14,9 @@ on:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/master'
+    # The images are pushed to ghcr.io/opensips, which forks cannot
+    # write to (the schedule fires there too) -- canonical repo only.
+    if: github.repository == 'OpenSIPS/opensips' && github.ref == 'refs/heads/master'
     name: Ubuntu ${{ matrix.os }} CI image
     runs-on: ubuntu-latest
     permissions:
