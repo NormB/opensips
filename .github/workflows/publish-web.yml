@@ -36,6 +36,9 @@ concurrency:
 jobs:
   changed-components:
     name: Find changed documentation components
+    # The dispatch job needs the OpenSIPS web GitHub App secrets, which
+    # only exist in the canonical repository -- skip on forks.
+    if: github.repository == 'OpenSIPS/opensips'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.components.outputs.matrix }}
