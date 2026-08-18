@@ -1450,7 +1450,7 @@ static int trace_b2b_transaction(struct sip_msg* msg, void *trans, void* param)
 	if(tmb.register_tmcb( NULL, t, TMCB_MSG_SENT_OUT,
 	trace_tm_out, info, unref_trace_info) <=0) {
 		LM_ERR("can't register TM SEND OUT callback\n");
-		trace_info_unref(info, 2);
+		trace_info_unref(info, 1);
 		return -1;
 	}
 
@@ -1513,7 +1513,7 @@ static int trace_transaction(struct sip_msg* msg, trace_info_p info, int reverse
 	if(tmb.register_tmcb( msg, 0, TMCB_MSG_SENT_OUT,
 	reverse_dir?trace_tm_out_rev:trace_tm_out, info, free_trace_info_tm) <=0) {
 		LM_ERR("can't register TM SEND OUT callback\n");
-		trace_info_unref(info, 2);
+		trace_info_unref(info, 1);
 		return -1;
 	}
 
@@ -3244,9 +3244,17 @@ static mi_response_t *sip_trace_mi_dyn(const mi_params_t *params,
 		uri = hep_id->name;
 	}
 	/* default tracing scope is dialog */
-	if (try_get_mi_string_param(params, "scope", &aux.s, &aux.len) < 0 ||
-			((traced_scope = st_parse_flags(&aux)) == 0))
+	if (try_get_mi_string_param(params, "scope", &aux.s, &aux.len) < 0)
 		traced_scope = TRACE_DIALOG;
+	else {
+		traced_scope = st_parse_flags(&aux);
+		if (traced_scope < 0) {
+			LM_ERR("invalid trace scope\n");
+			goto error;
+		}
+		if (traced_scope == 0)
+			traced_scope = TRACE_DIALOG;
+	}
 
 	/* default tracing scope is everything */
 	if (try_get_mi_string_param(params, "type", &aux.s, &aux.len) < 0 ||

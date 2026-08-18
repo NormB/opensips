@@ -92,7 +92,7 @@ to do with the module, you need to populate the appropriate DB records.
 
 
 The definition of the tables used by the dialplan module can be found
-at [dialplan table documentation](https://docs.opensips.org/manual/devel/install-dbschema/#table-dialplan)
+at [dialplan table documentation](../../docs/manual/Install-DBSchema.md#table-dialplan)
 
 
 #### What to place in table
@@ -210,8 +210,8 @@ running OpenSIPS with this module loaded:
 Specify a new dialplan partition (data source).  This parameter may
 be set multiple times.  Each partition may have a specific "db_url" and
 "table_name".  If not specified, these values will be inherited from
-[db url](#param_db_url), db_default_url or
-[table name](#param_table_name), respectively.  The name of
+[db url](#db_url-string), db_default_url or
+[table name](#table_name-string), respectively.  The name of
 the default partition is 'default'.
 
 
@@ -411,7 +411,7 @@ modparam("dialplan", "repl_exp_col", "column_name")
 The column name that indicates an additional time recurrence check 
 within the rule (column values are RFC 2445-compatible strings).  The
 value format is identical to the input of the
-[check_time_rec()](../cfgutils#func_check_time_rec)
+[check_time_rec()](../cfgutils/README.md#check_time_rectime_string-timestamp)
 function of the *cfgutils* module, including the
 optional use of logical operators linking multiple such strings into a
 larger expression.
@@ -689,7 +689,7 @@ In terms of reports/logs, the following events will be reported:
 
 
 For how to access and use the Status/Report information, please see
-[Status/Report Interface documentation](https://docs.opensips.org/manual/devel/interface-statusreport/).
+[Status/Report Interface](../../docs/manual/Interface-StatusReport.md).
 
 
 ### Installation

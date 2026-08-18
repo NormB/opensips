@@ -200,9 +200,13 @@ static int mod_init(void)
 	/*verify table versions */
 	if(db_check_table_version(&config_db_func, config_db_con,
 			&config_table, CONFIG_TABLE_VERSION) < 0) {
+		config_db_func.close(config_db_con);
+		config_db_con = NULL;
 		LM_ERR("error during table version check\n");
 		return -1;
 	}
+	config_db_func.close(config_db_con);
+	config_db_con = NULL;
 
 	config_lock = lock_alloc();
 	if (!config_lock || !lock_init(config_lock)) {
@@ -932,7 +936,7 @@ static mi_response_t *mi_config_flush(const mi_params_t *params,
 		e = hash_entry(*config_hash, name);
 		hash_lock(*config_hash, e);
 		config_val_p *_cv = (config_val_p *)hash_find(*config_hash, e, name);
-		if (*_cv && _cv)
+		if (_cv && *_cv)
 			config_val_flush_hash_it(&count, name, *_cv);
 		hash_unlock(*config_hash, e);
 	} else {

@@ -1746,7 +1746,10 @@ mod_init(void)
 
 	if (setid_avp_param) {
 		s.s = setid_avp_param; s.len = strlen(s.s);
-		pv_parse_spec(&s, &avp_spec);
+		if (pv_parse_spec(&s, &avp_spec) == NULL) {
+			LM_ERR("malformed AVP definition <%s>\n", setid_avp_param);
+			return -1;
+		}
 		if (avp_spec.type != PVT_AVP) {
 			LM_ERR("malformed or non AVP definition <%s>\n",
 					setid_avp_param);
@@ -3697,6 +3700,7 @@ static int start_async_send_rtpe_command(struct rtpe_node *node, bencode_item_t 
 		if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 			LM_ERR("can't connect to RTP proxy %s (%d:%s)\n",node->rn_url.s,errno,strerror(errno));
 			close(fd);
+			fd = -1;
 			goto badproxy;
 		}
 
@@ -3707,6 +3711,7 @@ static int start_async_send_rtpe_command(struct rtpe_node *node, bencode_item_t 
 			LM_ERR("can't send command to RTP proxy %s (%d:%s)\n",node->rn_url.s,
 			errno, strerror(errno));
 			close(fd);
+			fd = -1;
 			goto badproxy;
 		}
 		*out_fd = fd;
@@ -3747,6 +3752,7 @@ static int start_async_send_rtpe_command(struct rtpe_node *node, bencode_item_t 
 		if (connect(fd, &node->ai_addr.s, node->ai_addrlen) < 0) {
 			LM_ERR("can't connect to RTP proxy %s (%d:%s)\n",node->rn_url.s,errno,strerror(errno));
 			close(fd);
+			fd = -1;
 			goto badproxy;
 		}
 		do {
@@ -3770,7 +3776,7 @@ badproxy:
 	node->rn_disabled = 1;
 	node->rn_recheck_ticks = get_ticks() + rtpengine_disable_tout;
 error:
-	if (fd>0)
+	if (fd >= 0)
 		close(fd);
 
 	*out_fd = ASYNC_NO_IO;
