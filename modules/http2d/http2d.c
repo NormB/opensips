@@ -142,6 +142,7 @@ static int h2_send_response(struct sip_msg *msg, int *code,
 	if (!h2_response)
 		return -1;
 	r = *h2_response;
+	pthread_mutex_lock(&r->mutex);
 	r->code = -1;
 
 	if (*code < 100 || *code > 599) {
@@ -191,6 +192,15 @@ static int h2_send_response(struct sip_msg *msg, int *code,
 			if (it->type != cJSON_Object) {
 				LM_ERR("bad 'headers_json' value (must be a List of Objects, but "
 						"detected cJSON type %d as element)\n", it->type);
+				LM_ERR("first %d characters: %.*s ...\n",
+					headers_json->len > 20 ? 20 : headers_json->len,
+					headers_json->len > 20 ? 20 : headers_json->len, headers_json->s);
+				cJSON_Delete(hdrs);
+				goto error;
+			}
+
+			if (!it->child) {
+				LM_ERR("bad 'headers_json' value (empty header object; expected one name/value pair)\n");
 				LM_ERR("first %d characters: %.*s ...\n",
 					headers_json->len > 20 ? 20 : headers_json->len,
 					headers_json->len > 20 ? 20 : headers_json->len, headers_json->s);
@@ -291,13 +301,11 @@ static int h2_send_response(struct sip_msg *msg, int *code,
 	}
 
 	r->code = *code;
-	pthread_mutex_lock(&r->mutex);
 	pthread_cond_signal(&r->cond);
 	pthread_mutex_unlock(&r->mutex);
 	return 1;
 
 error:
-	pthread_mutex_lock(&r->mutex);
 	pthread_cond_signal(&r->cond);
 	pthread_mutex_unlock(&r->mutex);
 	return -1;

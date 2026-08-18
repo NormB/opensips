@@ -1,6 +1,6 @@
 ---
 title: "Event (based) Routing Module"
-description: "The Event (based) Routing module, or shortly the EBR module, provides a mechanism that allows different SIP processings (of messages in script) to communicate and synchronize between through OpenSIPS Events (see https://docs.opensips.org/manual/devel/interface-events/)."
+description: "The Event (based) Routing module, or shortly the EBR module, provides a mechanism that allows different SIP processings (of messages in script) to communicate and synchronize between through OpenSIPS Events."
 ---
 
 ## Admin Guide
@@ -12,7 +12,7 @@ description: "The Event (based) Routing module, or shortly the EBR module, provi
 The Event (based) Routing module, or shortly the EBR module, provides a 
 mechanism that allows different SIP processings (of messages in script) to
 communicate and synchronize between through OpenSIPS Events 
-(see https://docs.opensips.org/manual/devel/interface-events/).
+(see [Event Interface](../../docs/manual/Interface-Events.md)).
 
 
 This mechanism is based on the Subscribe-Notify concept. Any SIP processing
@@ -26,7 +26,7 @@ subscriber processing.
 Also, the Events are generated either internally by OpenSIPS (predefined 
 Events), either from the script level (custom Events). Please refer to the
 Event Interface documentation for more on how the Events are generated 
-(https://docs.opensips.org/manual/devel/interface-events/).
+([Event Interface](../../docs/manual/Interface-Events.md)).
 
 
 Depending on how the notification is handled by the subscribing processing,
@@ -53,7 +53,7 @@ With the help of the EBR support, more advanced routing scenarios are
 possible now, scenarios where you need to handle and put together different
 processing as type and time, like the handling of various calls with the 
 handling of registrations or with the DTMF extraction. For more, see
-the [Examples](#usage_examples) section.
+the [Examples](#usage-examples) section.
 
 
 ### Dependencies
@@ -149,7 +149,7 @@ route[reg_done] {
 #### wait_for_event(event,filter,timeout)
 
 
-Exactly as the async [afunc wait for event](#afunc_wait_for_event) function,
+Exactly as the async [afunc wait for event](#wait_for_eventeventfiltertimeout-1) function,
 but sync/blocking version. The script execution will block and wait
 until the event is delivered or the timeout hits
 

@@ -335,6 +335,7 @@ sec_agree_body_t *parse_sec_agree_body(str *body)
 			case '"':
 				state = SEC_AGREE_STATE_PARAM_VALUE_ENC;
 				s = p + 1;
+				break;
 			default:
 				state = SEC_AGREE_STATE_PARAM_VALUE;
 				s = p;
@@ -446,6 +447,7 @@ sec_agree_body_t *parse_sec_agree_body(str *body)
 		case SEC_AGREE_STATE_PARAM_VALUE:
 			value.s = s;
 			value.len = p - s;
+			/* fall through */
 		case SEC_AGREE_STATE_PARAM_VALUE_END:
 			if (value.len <= 0 || parse_sec_agree_parameter(sa, &name, &value) < 0) {
 				LM_ERR("invalid parameter %.*s value len\n", name.len, name.s);
