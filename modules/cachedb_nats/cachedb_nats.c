@@ -57,6 +57,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>  /* getpid() — nats_cdb_parent_pid capture in mod_init */
 
 #include "../../sr_module.h"
 #include "../../globals.h"
@@ -825,6 +826,13 @@ static int init_services(void)
 static int mod_init(void)
 {
 	LM_NOTICE("initializing module cachedb_nats ...\n");
+
+	/* Capture our pid while we are still the MAIN process, pre-fork: the
+	 * dedicated watcher/reaper processes compare getppid() against this to
+	 * detect real re-parenting. Must NOT be inferred as `getppid()==1`,
+	 * because opensips main IS PID 1 under Docker — see
+	 * nats_cdb_parent_gone() in cachedb_nats_watch.c. */
+	nats_cdb_parent_pid = getpid();
 
 	if (init_check_params() < 0 || init_pool() < 0 ||
 	    init_engine() < 0 || init_services() < 0)
