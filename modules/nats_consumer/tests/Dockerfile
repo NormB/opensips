@@ -16,9 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         bison \
         flex \
         pkg-config \
+        cmake \
+        wget \
         libssl-dev \
         libcurl4-openssl-dev \
-        libnats-dev \
         libpcre2-dev \
         libxml2-dev \
         libncurses-dev \
@@ -26,6 +27,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         netbase \
         git \
     && rm -rf /var/lib/apt/lists/*
+
+# trixie's libnats-dev (3.10) predates the per-key KV TTL surface
+# lib/nats requires (kvStore_CreateWithTTL etc.) -- build the same
+# pinned nats.c every CI leg uses.  Copied alone first so tree edits
+# don't invalidate this layer.
+COPY scripts/build/install_libnats.sh /tmp/install_libnats.sh
+RUN sh /tmp/install_libnats.sh
 
 WORKDIR /src
 COPY . /src
@@ -52,7 +60,6 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
         libcurl4 \
-        libnats3.10 \
         libpcre2-8-0 \
         libxml2 \
         ca-certificates \
@@ -62,12 +69,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# The pinned libnats built in the builder stage, not trixie's 3.10 --
+# lib/nats dlopens it at runtime and resolves the KV TTL symbols.
+COPY --from=builder /usr/local/lib/libnats.so*    /usr/local/lib/
 COPY --from=builder /usr/local/sbin/opensips      /usr/local/sbin/opensips
 COPY --from=builder /usr/local/lib64/opensips/    /usr/local/lib64/opensips/
 COPY modules/nats_consumer/tests/opensips.cfg   /etc/opensips/opensips.cfg
 COPY modules/nats_consumer/tests/run.sh         /usr/local/bin/run.sh
 
-RUN chmod +x /usr/local/bin/run.sh && \
+RUN ldconfig && \
+    chmod +x /usr/local/bin/run.sh && \
     mkdir -p /var/run/opensips /var/lib/opensips/nats_consumer
 
 EXPOSE 5060/udp
