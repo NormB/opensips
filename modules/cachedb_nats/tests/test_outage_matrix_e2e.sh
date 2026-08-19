@@ -90,7 +90,6 @@ modparam("cachedb_nats", "nats_url", "${PRIV_URL}")
 modparam("cachedb_nats", "cachedb_url", "nats:loc://127.0.0.1:${PORT}/")
 modparam("cachedb_nats", "kv_bucket", "${BUCKET}")
 modparam("cachedb_nats", "kv_replicas", 1)
-modparam("cachedb_nats", "enable_search_index", 1)
 modparam("cachedb_nats", "kv_watch", ">")
 # keep op timeouts small so even a non-fast-fail path can't stall long
 modparam("cachedb_nats", "kv_op_timeout_ms", 800)
