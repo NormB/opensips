@@ -45,12 +45,11 @@ services:
         condition: service_healthy
     environment:
       - NATS_URL=nats://nats:4222
-      # The runtime stage installs libnats3.10 but not libnats-dev, so
-      # the bare "libnats.so" SONAME the default search uses isn't on
-      # disk -- only the major-suffixed "libnats.so.3.10".  Point
-      # nats_dl_load() at that explicit SONAME so the dlopen succeeds
-      # without needing the dev package in the runtime image.
-      - NATS_DL_LIBNATS_PATH=libnats.so.3.10
+      # The runtime stage carries the pinned libnats build at
+      # /usr/local/lib (no distro package, no dev symlink in the ld
+      # cache).  An explicit path makes nats_dl_load()'s dlopen bypass
+      # the SONAME search entirely and stays valid across pin bumps.
+      - NATS_DL_LIBNATS_PATH=/usr/local/lib/libnats.so
     ports:
       - "15060:5060/udp"
     volumes:
