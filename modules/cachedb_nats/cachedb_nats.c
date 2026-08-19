@@ -564,7 +564,7 @@ static int init_check_params(void)
 	if (cdbn_kv_ttl_guard(kv_ttl) != 0) {
 		LM_ERR("cachedb_nats: kv_ttl=%d invalid -- a non-zero kv_ttl sets the "
 		       "KV bucket MaxAge, which overrides per-message TTL and would "
-		       "EXPIRE PERMANENT CONTACTS (expires==0). Set kv_ttl=0 [REV-7].\n",
+		       "EXPIRE PERMANENT CONTACTS (expires==0). Set kv_ttl=0.\n",
 		       kv_ttl);
 		return -1;
 	}
@@ -667,14 +667,13 @@ static int init_pool(void)
 				LM_ERR("cachedb_nats: connection URL '%s' is INSECURE "
 					"for a PII/lawful-intercept store and "
 					"require_secure_url=1 -- refusing to start. Use "
-					"tls:// with an authenticated account (SPEC \xc2\xa7""11 "
-					"[REV-24])\n", _redacted_url);
+					"tls:// with an authenticated account.\n", _redacted_url);
 				return -1;
 			}
 			LM_WARN("cachedb_nats: connection URL '%s' is INSECURE for a "
 				"PII/lawful-intercept store (subscriber IP, user-agent, "
 				"call-id, path) — use tls:// with an authenticated account "
-				"and one bucket per trust domain (SPEC \xc2\xa7""11 [REV-24])\n",
+				"and one bucket per trust domain.\n",
 				_redacted_url);
 		}
 
@@ -898,14 +897,14 @@ static int child_init(int rank)
 					"require_usrloc_safe_bucket=1 -- refusing to start "
 					"(it would SILENTLY EXPIRE permanent contacts). "
 					"Recreate the bucket with MaxAge=0 (kv_ttl=0) and "
-					"migrate [REV-25].\n",
+					"migrate.\n",
 					kv_bucket, (long long)maxage_ns);
 				return -1;
 			}
 			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
 				"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
 				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
-				"recreate it with MaxAge=0 (kv_ttl=0) and migrate [REV-25].\n",
+				"recreate it with MaxAge=0 (kv_ttl=0) and migrate.\n",
 				kv_bucket, (long long)maxage_ns);
 		}
 		/* Reaper-only expiry (P1.5): a history-keeping bucket is fine
