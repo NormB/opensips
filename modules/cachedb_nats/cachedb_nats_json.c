@@ -571,7 +571,7 @@ static int merge_subkey_cb(const char *kfield, int kflen,
 			/* [REV-8] stale cseq: keep the existing
 			 * higher-cseq value, discard the incoming one
 			 * (no rollback). */
-			LM_DBG("[REV-8] discarded stale-cseq write; "
+			LM_DBG("discarded stale-cseq write; "
 				"kept the existing higher-cseq contact\n");
 			if (cdbn_sink_write(s, kvstart,
 					(int)(kvend - kvstart)) < 0)
