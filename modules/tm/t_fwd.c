@@ -879,8 +879,11 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 	success_branch=0;
 	for (i=t->first_branch; i<t->nr_of_outgoings; i++) {
 		if ( BRANCH_BM_TST_IDX(added_branches, i) ) {
+			str sent_buffer = STR_NULL;
+			int observe_send;
 
 			uac = & TM_BRANCH( t, i);
+			observe_send = has_tran_tmcbs(t, TMCB_MSG_SENT_OUT);
 
 			if (uac->br_flags & tcp_no_new_conn_bflag)
 				tcp_no_new_conn = 1;
@@ -913,7 +916,8 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 					if (tcp_register_fail_cb(tm_tcp_chunk_fail,
 						(void *)(uintptr_t)tcp_chunk_fail_token, NULL) < 0)
 						LM_ERR("failed to register TCP chunk failure callback\n");
-					send_ret = SEND_BUFFER( &uac->request);
+					send_ret = SEND_BUFFER_CAPTURE(&uac->request,
+						observe_send ? &sent_buffer : NULL);
 					tcp_clear_fail_cb();
 
 					if (send_ret==0) {
@@ -952,11 +956,11 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 			set_kr(REQ_FWDED);
 
 			/* successfully sent out -> run callbacks */
-			if ( has_tran_tmcbs( t, TMCB_MSG_SENT_OUT) ) {
-				set_extra_tmcb_params( &uac->request.buffer,
-					&uac->request.dst);
+			if (observe_send) {
+				set_extra_tmcb_params(&sent_buffer, &uac->request.dst);
 				run_trans_callbacks( TMCB_MSG_SENT_OUT, t,
 					p_msg, 0, 0);
+				release_sent_buffer(&sent_buffer, uac->request.buffer.s);
 			}
 
 		}
