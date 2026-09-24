@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * (P10 follow-up): nats_json_index_add must increment num_documents only
+ * nats_json_index_add must increment num_documents only
  * for a GENUINELY-NEW doc-key, so the counter equals the true unique-key
  * cardinality.
  *
@@ -139,7 +139,7 @@ int main(void)
 	printf("a single live key removed by the watcher MUST reach 0:\n");
 	index_remove("usrloc.alice");
 	index_remove("usrloc.bob");
-	CHECK(num_documents == 0, "both removed => 0 (the P10 e2e's num_documents->0)");
+	CHECK(num_documents == 0, "both removed => 0 (num_documents back to 0)");
 	INVARIANT();
 
 	printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED",

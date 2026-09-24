@@ -96,7 +96,7 @@ extern int   kv_ttl;
 /**
  * Reject keys NATS KV cannot represent as a subject token: control
  * chars, whitespace, wildcards ('*'/'>') and the ':' map separator
- * (the rules live in the shared lib/nats validator, P3-64).  Shared by
+ * (the rules live in the shared lib/nats validator).  Shared by
  * the scalar dbase ops and the native/map/raw paths
  * (cachedb_nats_native.c).
  *

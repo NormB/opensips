@@ -264,7 +264,7 @@ static nats_idx_entry *get_or_create_entry_in(nats_search_idx *idx,
 	 *
 	 * Why this matters: the watcher's nats_json_index_add path was
 	 * spending half of opensips CPU on hp_shm_malloc -> sem_wait at
-	 * 100k AoRs (design-repo PERF_NOTES.md, "HP_MALLOC contention hypothesis").
+	 * 100k AoRs (profiled).
 	 * Cutting allocs from 3 to 1 per new entry gives the cold-fill
 	 * path 3x fewer bucket-lock acquires; the re-register hot path
 	 * was already cut to ~zero by the doc-key intern table.
@@ -1404,7 +1404,7 @@ int nats_json_index_remove(const char *key, int key_len)
 
 /* [a /]: observe the live
  * forward-index document count.  Lets a joint reaper⊕watcher e2e assert that
- * the in-SHM index entry — not merely the read-path view (P4) — is dropped when
+ * the in-SHM index entry — not merely the read-path view — is dropped when
  * the server TTL-expires a key.  NULL-safe: an uninitialized index returns -1
  * (distinct from an empty index, 0); never dereferences a NULL g_idx. */
 int nats_json_index_count(void)

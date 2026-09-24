@@ -29,27 +29,26 @@
  *
  *   - Standard cachedb operations (get/set/remove/add/sub/get_counter)
  *     mapped to KV put/get/delete/create/purge operations.
- *   - JSON full-text search via raw_query ("search:term") and the
- *     cachedb query/update/map_get/map_set/map_remove extensions.
+ *   - The cachedb query/update/map_get/map_set/map_remove extensions
+ *     (non-key query/update filters need the cachedb_nats_fts module).
  *   - Native script functions: nats_kv_* KV primitives and
  *     nats_kv_history() for key version history.  (Synchronous NATS
  *     request/reply from script is owned by the nats_consumer module.)
- *   - A self-healing KV watcher thread (cachedb_nats_watch.c) that
+ *   - A self-healing KV watcher process (cachedb_nats_watch.c) that
  *     keeps the JSON search index in sync with live KV mutations and
  *     raises E_NATS_KV_CHANGE EVI events.
  *
  * Connection management:
  *   mod_init() registers with the shared NATS connection pool (lib/nats/).
  *   child_init() obtains per-process connections, creates the KV bucket
- *   if needed, builds the initial search index, and starts the watcher
- *   thread on the first SIP worker.
+ *   if needed, and (rank 1 only, with cachedb_nats_fts loaded) builds
+ *   the initial search index.  The KV watcher and the reaper run in
+ *   their own dedicated processes (see nats_reaper_watcher_procs).
  *
  * Rank filtering:
- *   NATS initializes in SIP workers (UDP and TCP, rank >= 1) and the
- *   HTTPD/MI process (PROC_MODULE).  Attendant, timer, and TCP-main
- *   processes skip initialization.  The KV watcher thread spawns only
- *   on rank 1 (first SIP worker) to minimize JetStream consumer count;
- *   other workers receive live updates via the shared SHM index.
+ *   NATS initializes in SIP workers (UDP and TCP, rank >= 1), module
+ *   processes (PROC_MODULE) and the timer process; the attendant and
+ *   TCP-main processes skip it (lib/nats/nats_rank.c).
  *
  *   The admission rule is centralized in lib/nats/nats_pool_should_init().
  */
@@ -112,14 +111,14 @@ static struct cachedb_url *nats_cdb_urls = NULL;
 /* module parameters -- non-static, accessed from cachedb_nats_dbase.c */
 char *kv_bucket = "opensips";
 int kv_replicas = 3;
-/* history default 1: per-message TTL (native expiry) is only safe
- * on a bucket that keeps NO old revisions -- on a history-keeping bucket an
+/* history default 1: per-message TTL (native expiry, kv_ttl_below_marker)
+ * is only safe on a bucket that keeps NO old revisions -- on a history-keeping bucket an
  * expired key ROLLS BACK to an older revision instead of disappearing
  * (verified on nats-server 2.11.10).  Raise only for nats_kv_history()
  * consumers, accepting reaper-only (scan-based) expiry. */
 int kv_history = 1;
 int kv_ttl = 0;
-/* [ /] strict security mode: FAIL init instead of
+/* Strict security mode: FAIL init instead of
  * warning.  Both default 0 -- the warn-only default is dev/lab
  * ergonomics (the usual lab broker is plaintext, no auth) and generic
  * non-PII cachedb use, not compatibility; a usrloc production profile
@@ -194,7 +193,7 @@ int   nats_cas_retries = 10;
 /* Max tolerated inter-node clock skew S, in seconds.  Used as
  * the grace margin everywhere absolute `expires`/`row_exp` is compared with
  * node-local now: the write-side expiry hygiene, the read filter,
- * and the reaper (P9) all require `+S` slack so a node whose clock leads by S
+ * and the reaper all require `+S` slack so a node whose clock leads by S
  * never deletes/omits another node's still-live binding.  MUST be >= the
  * deployment's real maximum node skew. */
 int   nats_reap_grace = 5;
@@ -233,7 +232,7 @@ cdbn_fts_api_t cdbn_fts;
 int cdbn_fts_on = 0;
 
 /* The KV watcher always runs as a dedicated OpenSIPS child process
- * (proc_export_t, forked when enable_search_index=1 and at least one
+ * (proc_export_t, forked when at least one
  * kv_watch pattern is configured).  The former in-worker pthread mode
  * (dedicated_watcher_proc=0) was removed: a pthread inside the rank-1
  * SIP worker called nats_pool_get_kv() concurrently with the worker's
@@ -249,14 +248,10 @@ int cdbn_fts_on = 0;
  * values were hardcoded at the nats_pool_register() call site.  They
  * now match the documented behaviour.
  *
- * First-registrant-wins: when event_nats (or any other NATS module)
- * is loaded before cachedb_nats and has already called
- * nats_pool_register(), the pool's connection parameters are already
- * set and these values are ignored.  See lib/nats/README.md
- * "Registration contract" for the rule.  In practice that means:
- * load the NATS module whose connection settings should take effect
- * FIRST (typically event_nats), or load only cachedb_nats and these
- * settings own the pool.
+ * Registrations merge: every NATS module passes its values to
+ * nats_pool_register(), and for each reconnect parameter the larger
+ * explicit value wins, whatever the module load order.  See
+ * lib/nats/README.md "How the modules share a connection".
  *
  * Defaults match the previously-hardcoded values so a deployment
  * that doesn't touch the modparams sees exactly the same behaviour
@@ -467,8 +462,7 @@ static const dep_export_t deps = {
  * "NATS Watcher" -- the ONLY watcher mode, forked when at least one
  *   kv_watch pattern is set.  Single instance ("no" = 1): one watcher
  *   is enough; multiplying watchers does not parallelise the per-event
- *   cost (see the design-repo SCALING.md "Re-examining option 2
- *   (watcher)") and would just multiply broker delivery cost. */
+ *   cost and would just multiply broker delivery cost. */
 static const proc_export_t nats_reaper_procs[] = {
 	{ "NATS Reaper", 0, 0, nats_cdb_reaper_proc_main, 1, 0 },
 	{ 0, 0, 0, 0, 0, 0 }
@@ -773,8 +767,8 @@ static int init_services(void)
 
 	/* Reaper host: the reaper is the
 	 * SINGLE expiry mechanism, so a non-positive interval is
-	 * refused.  Index-independent (enumerates via kvStore_Keys), so it
-	 * runs regardless of enable_search_index. */
+	 * refused.  Index-independent (it enumerates the bucket itself), so it
+	 * runs whether or not cachedb_nats_fts is loaded. */
 	if (cdbn_reap_interval_guard(nats_reap_interval) < 0) {
 		LM_ERR("nats_reap_interval=%d disables the reaper, the only "
 			"expiry mechanism -- expired bindings would never be "
@@ -953,8 +947,8 @@ static int child_init(int rank)
 	}
 
 	/* Live index updates come from the dedicated watcher process
-	 * (exports.procs, attached in mod_init when enable_search_index=1
-	 * and kv_watch patterns exist).  The former rank-1 in-worker
+	 * (exports.procs, attached in mod_init when kv_watch patterns
+	 * exist).  The former rank-1 in-worker
 	 * watcher pthread was removed: it shared the SIP worker's
 	 * per-process connection pool from a second thread, racing the
 	 * pool's single-threaded KV-handle cache (use-after-free under

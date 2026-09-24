@@ -117,10 +117,10 @@ int main(void)
 
 	/* ---- documented budget --------------------------------------- */
 	{
-		char *s = slurp("../doc/nats_consumer_admin.xml");
+		char *s = slurp("../README.md");
 		ASSERT(strstr(s, "next guard tick") != NULL
 		    || strstr(s, "one poll tick") != NULL,
-			"admin doc states the sub-second cancellation budget");
+			"README states the sub-second cancellation budget");
 		free(s);
 	}
 

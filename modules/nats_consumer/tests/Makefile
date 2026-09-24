@@ -18,6 +18,7 @@ WAKEIPC_SRCS := test_rpc_wake_ipc.c $(SHIM) ../nats_rpc_wake.c
 UNLOCKED_SRCS := test_registry_foreach_unlocked.c $(SHIM) ../nats_handle_registry.c
 REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
 ADVPARSE_SRCS := test_parser_adversarial.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
+DOCBIND_SRCS  := test_doc_bind_examples.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
 SLOTLIFE_SRCS := test_rpc_slot_lifecycle.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
@@ -52,6 +53,9 @@ test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 
 test_parser: $(PARSER_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle_parse.h
 	$(CC) $(CFLAGS) -o $@ $(PARSER_SRCS) $(LDFLAGS)
+
+test_doc_bind_examples: $(DOCBIND_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle_parse.h ../README.md
+	$(CC) $(CFLAGS) -o $@ $(DOCBIND_SRCS) $(LDFLAGS)
 
 test_ring: $(RING_SRCS) test_shim.h ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(RING_SRCS) $(LDFLAGS)
@@ -107,7 +111,7 @@ test_rebuild_bias_stale: test_rebuild_bias_stale.c ../nats_consumer_proc_interna
 
 # Small hot-path policies: fetch resume params in pkg (worker-
 # local), request_id_header length cached at mod_init.  Source patterns.
-test_p36_alloc_policy: test_p36_alloc_policy.c
+test_alloc_policy: test_alloc_policy.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
 # Lock-free registry walk for the reconcile pass: handles are

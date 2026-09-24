@@ -20,10 +20,10 @@
  * Observability.
  *
  * The in-SHM forward index tracks live document keys in g_idx->num_documents
- * (an _Atomic int).  Until P10 there was NO way to OBSERVE that count, so a
+ * (an _Atomic int).  There used to be NO way to OBSERVE that count, so a
  * Tier-2 test could not assert "the index entry is gone" after a server-side
  * TTL expiry — it could only see the read-path filter omit the row, which is a
- * DIFFERENT subsystem (P4).  The joint reaper⊕watcher GATE requires proving the
+ * DIFFERENT subsystem (the read-path filter).  The joint reaper⊕watcher GATE requires proving the
  * index itself drops the entry.
  *
  * nats_json_index_count() exposes the live count, NULL-safe:

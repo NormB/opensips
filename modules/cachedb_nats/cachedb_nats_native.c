@@ -75,7 +75,7 @@
 #define NATS_MAP_SEP    '.'
 
 /* nats_str_to_buf() was consolidated into lib/nats/nats_str.h as
- * nats_str_to_buf() -- see P3-63. */
+ * nats_str_to_buf(). */
 
 /* The synchronous request/reply script function was removed:
  * the nats_consumer module's request/reply export is the single owner

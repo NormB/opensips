@@ -533,7 +533,7 @@ char *cdbn_reap_project_survivors(const char *json, int len, time_t now, int gra
 
 	if (n_survivors)
 		*n_survivors = 0;
-	if (out_row_exp)            /* P8: TTL eligibility of the projected survivors */
+	if (out_row_exp)            /* TTL eligibility of the projected survivors */
 		*out_row_exp = 0;
 	if (out_all_same)
 		*out_all_same = 0;
@@ -658,7 +658,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 	const char *key = nats_dl.kvEntry_Key(e);
 	const char *val;
 	int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
-	int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
+	int64_t p_row_exp = 0;            /* survivors' TTL eligibility */
 	uint64_t rev;
 	char *proj;
 
@@ -736,7 +736,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
  *
  * Independent of the search index: enumeration is ONE
  * value-carrying watch pass (nats_kv_enum_live_values), so the reaper works
- * with enable_search_index=0.  The watch pass replaced the previous
+ * without the cachedb_nats_fts module.  The watch pass replaced the previous
  * kvStore_Keys() + per-key kvStore_Get() sweep: that pattern issued
  * O(bucket) synchronous round trips per tick, and the 30k-AoR bench
  * (2026-07-07) measured it dragging REGISTER p99/max from ~1 ms to

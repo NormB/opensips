@@ -25,8 +25,8 @@
  * lookup returns nothing).
  *
  * cnats maps KV key K in bucket B to subject "$KV.<B>.<K>".  K is the already
- * P1-encoded, KV-safe row key (no NATS-reserved bytes), so the subject is a
- * pure concatenation; the escaping correctness is the P1 encoder's job (proven
+ * encoded, KV-safe row key (no NATS-reserved bytes), so the subject is a
+ * pure concatenation; the escaping correctness is the key encoder's job (proven
  * in test_kv_key_validate.c).  nats_kv_key_to_subject() centralizes it.
  *
  *   gcc -DSUBJ_CURRENT ... -> wrong prefix/separator => RED (subject mismatch).
