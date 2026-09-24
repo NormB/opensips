@@ -63,6 +63,7 @@
 #ifndef LIB_NATS_NATS_DL_H
 #define LIB_NATS_NATS_DL_H
 
+#include <stdint.h>
 #include <nats/nats.h>
 
 /*
@@ -177,5 +178,30 @@ int  nats_dl_is_loaded(void);
  * Context: any process after nats_dl_load() returned 0.
  */
 const char *nats_dl_path(void);
+
+/**
+ * nats_dl_version_compatible -- can code compiled against libnats headers
+ * @compiled run against a libnats reporting @runtime?  Both are
+ * NATS_VERSION_NUMBER-encoded ((major << 16) | (minor << 8) | patch).
+ *
+ * Structs cross the dlopen boundary by value and by caller-allocated
+ * pointer (e.g. kvWatchOptions grew from 40 to 56 bytes between 3.14 and
+ * 3.15, and kvWatchOptions_Init() clears the whole runtime-sized struct),
+ * so major.minor must match exactly; patch releases keep layouts.
+ *
+ * Returns 1 when compatible, 0 otherwise.
+ */
+int nats_dl_version_compatible(uint32_t compiled, uint32_t runtime);
+
+/**
+ * nats_dl_check_version -- ask a dlopen()ed libnats for its version
+ * (nats_GetVersionNumber) and refuse it unless it is compatible with the
+ * headers lib/nats was compiled against.  Logs the reason on refusal.
+ * @path is used in the log line only.
+ *
+ * Returns 0 when compatible, -1 otherwise (including a library that does
+ * not export nats_GetVersionNumber).
+ */
+int nats_dl_check_version(void *handle, const char *path);
 
 #endif  /* LIB_NATS_NATS_DL_H */
