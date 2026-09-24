@@ -23,6 +23,7 @@
 # Env knobs (defaults shown)
 #   DURATION_S=7200        -- run length, default 2 h
 #   SAMPLE_S=60            -- sampler period
+#   WARMUP_S=120           -- RSS baseline = first sample at least this far in
 #   PUB_RPS=100            -- nats_publish rate (msgs/sec into stress.>)
 #   REG_RPS=10             -- SIP REGISTER rate (per second)
 #   KV_RPS=50              -- KV put + get rate (operations/sec)
@@ -35,6 +36,7 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "${HERE}/stress_helpers.sh"
 TREE_ROOT="$(cd "${HERE}/../../.." && pwd)"
 
 OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
@@ -44,6 +46,7 @@ NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}"
 
 DURATION_S="${DURATION_S:-7200}"
 SAMPLE_S="${SAMPLE_S:-60}"
+WARMUP_S="${WARMUP_S:-120}"
 PUB_RPS="${PUB_RPS:-100}"
 REG_RPS="${REG_RPS:-10}"
 KV_RPS="${KV_RPS:-50}"
@@ -165,11 +168,13 @@ route {
     exit;
 }
 
-# Drain the stress stream via batch-mode fetch.
+# Drain the stress stream via batch-mode fetch -- the documented pattern:
+# batches x expires_ms (50 x 10 ms) stays inside the 1 s interval, so a
+# pass never overruns into the next tick under the steady publish load.
 timer_route[drain, 1] {
     \$var(b) = 0;
-    while (\$var(b) < 5000) {
-        nats_fetch_batch("${HANDLE}", "count=32;expires_ms=100");
+    while (\$var(b) < 50) {
+        nats_fetch_batch("${HANDLE}", "count=100;expires_ms=10");
         \$var(rc) = \$retcode;
         if (\$var(rc) <= 0) { break; }
         \$var(i) = 0;
@@ -266,8 +271,8 @@ write_sample() {
     kv_keys=$(nats --server "$NATS_URL" kv ls "$KV_BUCKET" --names 2>/dev/null \
         | wc -l)
 
-    log_errors=$(grep -cE "ERROR|CRITICAL|FATAL" "$LOG_FILE" 2>/dev/null)
-    log_warns=$(grep -c "WARN" "$LOG_FILE" 2>/dev/null)
+    log_errors=$(count_log_errors "$LOG_FILE")
+    log_warns=$(count_log_warns "$LOG_FILE")
     : "${log_errors:=0}"
     : "${log_warns:=0}"
 
@@ -438,38 +443,8 @@ fi
 
 # ---- 7. report -------------------------------------------------------
 
-awk -F, -v dur="$DURATION_S" -v csv="$SAMPLES_FILE" '
-    NR == 1 { next }
-    NR == 2 { rss0 = $3; pulls0 = $4; deliv0 = $5; acks0 = $6 }
-    {
-        if ($3 > rss_max) rss_max = $3
-        rss_last = $3; pulls_last = $4; deliv_last = $5; acks_last = $6
-        redeliv_last = $9; log_err_last = $12; log_warn_last = $13
-        n++
-    }
-    END {
-        rss_growth = (rss0 > 0) ? (rss_last - rss0) * 100.0 / rss0 : 0
-        deliv_delta = deliv_last - deliv0
-        ack_ratio = (deliv_delta > 0) ? (acks_last - acks0) * 1.0 / deliv_delta : 0
-        status = (rss_growth > 50) ? "WARN_RSS_GROWTH" : "ok"
-        printf "\n========================================\n"
-        printf "  stress_3way summary\n"
-        printf "  samples:                 %d\n", n
-        printf "  duration:                %ds\n", dur
-        printf "  rss kb (start->last):    %d -> %d (peak %d)\n", rss0, rss_last, rss_max
-        printf "  rss growth:              %.2f%%\n", rss_growth
-        printf "  pulls (delta):           %d\n", pulls_last - pulls0
-        printf "  msgs_delivered (delta):  %d\n", deliv_delta
-        printf "  acks (delta):            %d\n", acks_last - acks0
-        printf "  ack/delivered ratio:     %.4f\n", ack_ratio
-        printf "  redeliveries (last):     %d\n", redeliv_last
-        printf "  log errors (last):       %d\n", log_err_last
-        printf "  log warns (last):        %d\n", log_warn_last
-        printf "  status:                  %s\n", status
-        printf "  samples csv:             %s\n", csv
-        printf "========================================\n"
-    }
-' "$SAMPLES_FILE"
+awk -F, -v dur="$DURATION_S" -v csv="$SAMPLES_FILE" -v warmup="$WARMUP_S" \
+    -f "${HERE}/stress_summary.awk" "$SAMPLES_FILE"
 
 if [ -f "$PERF_SUMMARY" ]; then
     echo
