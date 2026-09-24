@@ -27,7 +27,7 @@ replies aggregated back to the caller. The other side
 in-dialog requests are forwarded to the caller as if only
 their stream had changed. When a call is terminated from 
 the client side, the module can have different behaviors,
-according to the [client bye mode](#client_bye_mode-string)
+according to the [client_bye_mode](#client_bye_mode-string)
 parameter.
 
 
@@ -117,6 +117,23 @@ modparam("b2b_sdp_demux", "client_bye_mode", "terminate")
 ...
 ```
 
+#### pending_wait_timeout (string)
+
+Maximum amount of time, in milliseconds, to busy wait for an ongoing SDP
+negotiation to finish before handling a new client-side operation. A value of
+`0` keeps the previous behavior, waiting indefinitely.
+
+When this timeout is exceeded, client-side re-INVITEs are rejected with `491
+Request Pending`. In `disable` BYE mode, the upstream re-INVITE is not sent if
+the pending negotiation does not finish before the timeout.
+
+*Default value is `0` - wait indefinitely.*
+
+```opensips title="Set pending_wait_timeout parameter"
+...
+modparam("b2b_sdp_demux", "pending_wait_timeout", 500)
+...
+```
 
 ### Exported Functions
 

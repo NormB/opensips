@@ -120,23 +120,23 @@ The mid_registrar module includes support for standards-based SIP Push
 Notifications, per
 [RFC 8599](https://tools.ietf.org/html/rfc8599).
 Support for the basic version of the draft can be enabled by switching
-[on enable](#on_enable-boolean) to *true*.  The
+[pn_enable](#pn_enable-boolean) to *true*.  The
 module also includes optional support for sending Push Notifications
 during long-lived dialogs ([see RFC section 6](https://tools.ietf.org/html/rfc8599#page-23)),
-through the [on enable purr](#on_enable_purr-boolean) switch.
+through the [pn_enable_purr](#pn_enable_purr-boolean) switch.
 
 
-Essential mechanics behind the Push Notification (ON) support:
+Essential mechanics behind the Push Notification (PN) support:
 
 
 - the ON support is fully compatible with the existing logic and
 enabling it does not impose any limitations, as the
-mid_registrar can simultaneously handle both SIP ON compliant
+mid_registrar can simultaneously handle both SIP PN compliant
 and standard SIP User Agents
 - OpenSIPS will raise a
 [E_UL_CONTACT_REFRESH](../usrloc/README.md#e_ul_contact_refresh)
 event any time a Push Notification needs to be sent to a
-ON-enabled contact.  The event includes the ON coordinates of
+PN-enabled contact.  The event includes the PN coordinates of
 the contact -- they may be found in the Contact URI ('uri'
 event parameter) and may be extracted using the {uri.param,name}
 transformation. From here onwards, it is up to the script
@@ -144,31 +144,31 @@ developer to trigger the Push Notification (e.g. possibly by
 sending an HTTP POST with the
 [rest_client](../rest_client/README.md) module), thus forcing
 a re-registration from the device.
-- REGISTER processing is unchanged -- ON-enabled UAs are saved
+- REGISTER processing is unchanged -- PN-enabled UAs are saved
 just as regular UAs, with the former ones additionally having
 the *4* bitflag set in the "Flags" field of
 any MI listing of contacts, for differentiation purposes
 - initial INVITE processing is barely changed, with the *mid_registrar_lookup()*
 function now additionally returning a value of
 **2** if the only
-found contacts were ON-enabled contacts, all which required a
+found contacts were PN-enabled contacts, all which required a
 Push Notification.  This means that PNs have been triggered for
 each of them and t_relay() is not required, since they are not
 reachable until they re-register!
 Using the event_routing module, OpenSIPS will transparently
 fork a new branch from the current INVITE on each
 re-registration from these contacts within the accepted
-[on refresh timeout](#on_refresh_timeout-integer)
+[pn_refresh_timeout](#pn_refresh_timeout-integer)
 - mid-dialog requests: In some cases (e.g. long-lived dialogs),
-a ON may be required before being able to route a mid-dialog
-request to a SIP UA.  The [afunc on process purr](#on_process_purrdomain)
-async function will take care of triggering the ON event and
+a PN may be required before being able to route a mid-dialog
+request to a SIP UA.  The [pn_process_purr()](#pn_process_purrdomain)
+async function will take care of triggering the PN event and
 resuming the script as soon as a re-registration from the
 concerned contact is received.
 
 
 For more information or examples, refer to the documentation of the
-"on_xxx" module parameters or the OpenSIPS blog posts around the
+"pn_xxx" module parameters or the OpenSIPS blog posts around the
 "SIP Push Notification" topic.
 
 
@@ -305,7 +305,7 @@ forwarded REGISTER requests and replace the original "hostname" and
 Additionally, in modes "0" and "1", each Contact will be assigned an
 unique identifier, which will be utilized in future contact-based
 lookup operations. This information will be included in each forwarded
-Contact URI. The [contact id insertion](#contact_id_insertion-integer) modparam
+Contact URI. The [contact_id_insertion](#contact_id_insertion-integer) modparam
 controls how this information is included.
 
 
@@ -322,7 +322,7 @@ The following modules must be loaded before this module:
 - *signaling*
 - *tm*
 - *event_routing*,
-if [on enable](#on_enable-boolean) is set to *true*.
+if [pn_enable](#pn_enable-boolean) is set to *true*.
 
 
 #### External Libraries or Applications
@@ -350,10 +350,10 @@ The following is true for **all** working modes:
 
 
 - when a REGISTER is received, the script writer must call
-*[mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*
+*[mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*
 - the mid-registrar will insert itself on the call flow of
 all registrations according to the
-*[contact id insertion](#contact_id_insertion-integer)*.
+*[contact_id_insertion](#contact_id_insertion-integer)*.
 - registrations forwarded by the mid-registrar will transparently
 result in a user location update only if the reply status code from
 the downstream registrar is 2xx.
@@ -368,30 +368,30 @@ Contact expirations are left unchanged.
 - *1 (Contact throttling mode)*
 Contact throttling is a first step in lowering registration traffic rates. This
 is possible through the use of the
-*[outgoing expires](#outgoing_expires-integer)* module
+*[outgoing_expires](#outgoing_expires-integer)* module
 parameter or the corresponding parameter to
-*[mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*,
+*[mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*,
 which allow the script writer to prolong the life of the registrations on the way
 to the main registrar.
 
 			In this mode, the
 			mid-registrar may alter Expires header field values or "expires" Contact
 			header field parameters found in the initial request when forwarding registrations, according to
-			*[outgoing expires](#outgoing_expires-integer)*
+			*[outgoing_expires](#outgoing_expires-integer)*
 - *2 (AOR throttling mode)*
 AOR throttling is a step beyond "Contact throttling", as the main registrar
 is only made aware of the network presence of AORs, rather than
 Contacts. This behaviour is also made possible through the
-*[outgoing expires](#outgoing_expires-integer)* module
+*[outgoing_expires](#outgoing_expires-integer)* module
 parameter or the corresponding parameter to
-*[mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*,
+*[mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*,
 which allow the script writer to prolong the life of the registrations on the way
 to the main registrar.
 In this mode, the mid-registrar will fully replace the Contact
 set of all forwarded registrations with a single Contact, advertising
 that the AOR is available to the main registrar. The expiration value
 for this Contact is given by 
-*[outgoing expires](#outgoing_expires-integer)*.
+*[outgoing_expires](#outgoing_expires-integer)*.
 
 
 Default value is **0** (contact mirroring mode)
@@ -534,7 +534,7 @@ modparam("mid_registrar", "received_param", "rcv")
 
 
 An AVP specification. This AVP is evaluated during
-*[mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*:
+*[mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*:
 if it holds a valid string, its content will be appended to
 *each* new Contact URI built by the mid-registrar,
 for the outgoing request.
@@ -557,8 +557,8 @@ $avp(extra_ct_params) = ";transport=tls";
 
 AVP to store specific additional information for each registration.
 This information is read from the AVP and stored (in memory, DB or both)
-at [mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag).  When the
-[mid registrar lookup](#mid_registrar_lookupdomain-flags-aor) or 'is_registered()' (registrar)
+at [mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag).  When the
+[mid_registrar_lookup()](#mid_registrar_lookupdomain-flags-aor) or 'is_registered()' (registrar)
 functions are called, the *attr_avp* will be
 populated with the value saved at [re]registration.
 
@@ -647,7 +647,7 @@ Sets the default *"q"* value for new contacts.
 Because OpenSIPS does not support floating point module parameters,
 the supplied *"q"* value must be multiplied by 1000.
 For example, if you want
-*[default q](#default_q-integer)*
+*[default_q](#default_q-integer)*
 to be 0.38, set this parameter to 380.
 
 
@@ -665,7 +665,7 @@ modparam("mid_registrar", "default_q", 380)
 Specifies the message flag to be used to control the
 module behaviour regarding TCP connections. If the flag is set for a
 REGISTER via TCP containing a TCP contact, the module, via the
-*[mid registrar save](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*
+*[mid_registrar_save()](#mid_registrar_savedomain-flags-aor-outgoing_expires-ownership_tag)*
 function, will set the lifetime of the TCP
 connection to the contact expire value. By doing this, the TCP
 connection will stay up as long as its contacts are valid.
@@ -849,7 +849,7 @@ modparam("
 
 The mid-registrar can generate 5xx replies to registrations in various
 situations. It could, for example, happen when the
-*[max contacts](#max_contacts-integer)* parameter
+*[max_contacts](#max_contacts-integer)* parameter
 is set and the processing of REGISTER request would exceed the limit.
 In this case, OpenSIPS would respond with "503 Service Unavailable".
 
@@ -896,12 +896,12 @@ modparam("mid_registrar", "gruu_secret", "my_secret")
 ```
 
 
-#### on_enable (boolean)
+#### pn_enable (boolean)
 
 
 Enable SIP Push Notification support ([RFC 8599](https://tools.ietf.org/html/rfc8599)).
 If enabled, Contact header field URIs which include all
-[on ct match params](#on_ct_match_params-string) will be matched against
+[pn_ct_match_params](#pn_ct_match_params-string) will be matched against
 existing bindings using only these parameters.  Otherwise,
 the module will attempt to match them as usual, using the current
 usrloc [matching_mode](../usrloc/README.md#matching_mode-integer).
@@ -910,14 +910,14 @@ usrloc [matching_mode](../usrloc/README.md#matching_mode-integer).
 *Default value is **false**.*
 
 
-```opensips title="Setting the on_enable parameter"
+```opensips title="Setting the pn_enable parameter"
 ...
-modparam("mid_registrar", "on_enable", true)
+modparam("mid_registrar", "pn_enable", true)
 ...
 ```
 
 
-#### on_providers (string)
+#### pn_providers (string)
 
 
 A list of supported Push Notification providers.  While only three
@@ -929,14 +929,14 @@ non-standard values may be specified as well.
 (not set).*
 
 
-```opensips title="Setting the on_providers parameter"
+```opensips title="Setting the pn_providers parameter"
 ...
-modparam("mid_registrar", "on_providers", "apns, fcm, webpush")
+modparam("mid_registrar", "pn_providers", "apns, fcm, webpush")
 ...
 ```
 
 
-#### on_ct_match_params (string)
+#### pn_ct_match_params (string)
 
 
 The minimally required list of RFC 8599 parameters (custom ones are
@@ -947,29 +947,29 @@ parameter is missing from a Contact header field URI, the module
 will fall back to performing regular contact matching.
 
 
-Note that if all above ON Contact URI parameters match an existing
+Note that if all above PN Contact URI parameters match an existing
 binding, the match is considered to be successful regardless if
 other parts of the SIP URI do not match (e.g. hostname, port,
 other URI parameters, etc.).
 
 
 After calling *mid_registrar_lookup()* or
-[afunc on process purr](#on_process_purrdomain), the above ON-related
+[pn_process_purr()](#pn_process_purrdomain), the above PN-related
 parameters will be automatically stripped from the resulting
 Request and Contact URI event parameter, respectively.
 
 
-*Default value is **"on-provider, on-prid, on-param"**.*
+*Default value is **"pn-provider, pn-prid, pn-param"**.*
 
 
-```opensips title="Setting the on_ct_match_params parameter"
+```opensips title="Setting the pn_ct_match_params parameter"
 ...
-modparam("mid_registrar", "on_ct_match_params", "on-provider, on-prid")
+modparam("mid_registrar", "pn_ct_match_params", "pn-provider, pn-prid")
 ...
 ```
 
 
-#### on_pnsreg_interval (integer)
+#### pn_pnsreg_interval (integer)
 
 
 For devices capable of waking up and refreshing their binding on
@@ -983,18 +983,18 @@ device should issue its binding refresh request.
 (seconds before expiry).*
 
 
-```opensips title="Setting the on_pnsreg_interval parameter"
+```opensips title="Setting the pn_pnsreg_interval parameter"
 ...
-modparam("mid_registrar", "on_pnsreg_interval", 140)
+modparam("mid_registrar", "pn_pnsreg_interval", 140)
 ...
 ```
 
 
-#### on_trigger_interval (integer)
+#### pn_trigger_interval (integer)
 
 
 If a binding refresh REGISTER request from a given SIP endpoint does
-not arrive within at least [on trigger interval](#on_trigger_interval-integer)
+not arrive within at least [pn_trigger_interval](#pn_trigger_interval-integer)
 seconds prior to expiration (e.g. because the device does not
 support *";+sip.pnsreg"* or because of other
 error conditions), the [E_UL_CONTACT_REFRESH](../usrloc/README.md#e_ul_contact_refresh)
@@ -1012,14 +1012,14 @@ order to cause the device to wake up and re-register.
 (seconds before expiry).*
 
 
-```opensips title="Setting the on_trigger_interval parameter"
+```opensips title="Setting the pn_trigger_interval parameter"
 ...
-modparam("mid_registrar", "on_trigger_interval", 130)
+modparam("mid_registrar", "pn_trigger_interval", 130)
 ...
 ```
 
 
-#### on_skip_on_interval (integer)
+#### pn_skip_pn_interval (integer)
 
 
 Following a successful (re)registration of a contact, this setting
@@ -1031,18 +1031,18 @@ assumed to be reachable, so any Push Notifications will be skipped.
 (always generate Push Notifications).*
 
 
-```opensips title="Setting the on_skip_on_interval parameter"
+```opensips title="Setting the pn_skip_pn_interval parameter"
 ...
-modparam("mid_registrar", "on_skip_on_interval", 10)
+modparam("mid_registrar", "pn_skip_pn_interval", 10)
 ...
 ```
 
 
-#### on_refresh_timeout (integer)
+#### pn_refresh_timeout (integer)
 
 
 This timeout starts counting following a *mid_registrar_lookup()* or a
-[afunc on process purr](#on_process_purrdomain) which
+[pn_process_purr()](#pn_process_purrdomain) which
 triggers a Push Notification.  The value represents the maximum
 allowed sum of the duration required for the Push Notification to
 be sent and the duration required for the corresponding
@@ -1065,14 +1065,14 @@ target device is actually reachable
 *Default value is **6** seconds.*
 
 
-```opensips title="Setting the on_refresh_timeout parameter"
+```opensips title="Setting the pn_refresh_timeout parameter"
 ...
-modparam("mid_registrar", "on_refresh_timeout", 10)
+modparam("mid_registrar", "pn_refresh_timeout", 10)
 ...
 ```
 
 
-#### on_enable_purr (boolean)
+#### pn_enable_purr (boolean)
 
 
 Enable the SIP Push Notification mechanism for long-lived dialogs.
@@ -1085,21 +1085,21 @@ registration (PURR - Proxy Unique Registration Reference).
 
 During dialog setup, each UA may include, in its Contact header,
 the PURR value returned by OpenSIPS during registration.  By
-including the PURR (e.g. ";on-purr=XXX"), an agent indicates that
-it expects to be first awoken by a ON before being able to receive
+including the PURR (e.g. ";pn-purr=XXX"), an agent indicates that
+it expects to be first awoken by a PN before being able to receive
 a mid-dialog request sent by the other party.
 
 
 When enabling this parameter, make sure to also add logic for
-[afunc on process purr](#on_process_purrdomain).
+[pn_process_purr()](#pn_process_purrdomain).
 
 
 *Default value is **false**.*
 
 
-```opensips title="Setting the on_enable_purr parameter"
+```opensips title="Setting the pn_enable_purr parameter"
 ...
-modparam("mid_registrar", "on_enable_purr", true)
+modparam("mid_registrar", "pn_enable_purr", true)
 ...
 ```
 
@@ -1128,7 +1128,7 @@ the current REGISTER request has been answered with 200 OK
 
 Depending on the current working
 *[mode](#mode-integer)* and
-*[contact id insertion](#contact_id_insertion-integer)*,
+*[contact_id_insertion](#contact_id_insertion-integer)*,
 the function may additionally perform
 the following series of transformations when relaying REGISTER requests:
 
@@ -1139,7 +1139,7 @@ the following series of transformations when relaying REGISTER requests:
 header field to the value of
 *outgoing_expires*, if given,
 otherwise the value given by the
-*[outgoing expires](#outgoing_expires-integer)*
+*[outgoing_expires](#outgoing_expires-integer)*
 module parameter.
 The same applies to any *";expires"*
 Contact URI parameter.
@@ -1150,14 +1150,14 @@ incoming REGISTER request with an OpenSIPS listening interface
 allow the module to match the reply contacts
 and also route calls. The name of this URI
 parameter is configurable via
-*[contact id param](#contact_id_param-string)*
+*[contact_id_param](#contact_id_param-string)*
 - in *"AOR throttling"* mode
 
   - change the value of the *Expires*
 header field to the value of
 *outgoing_expires*, if given,
 otherwise the value given by the
-*[outgoing expires](#outgoing_expires-integer)*
+*[outgoing_expires](#outgoing_expires-integer)*
 module parameter.
   - replace all *Contact* header
 fields of the request with a single *Contact* header field,
@@ -1234,7 +1234,7 @@ If not given, the AOR will be taken from the *To* header URI
 in Contact/AOR throttling modes, this is a custom value
 for the contact expiration interval of the outgoing REGISTER
 request, which overrides the default
-*[outgoing expires](#outgoing_expires-integer)* module parameter.
+*[outgoing_expires](#outgoing_expires-integer)* module parameter.
 - *ownership_tag* (string, optional) - a cluster-shared
 tag (see the clusterer module documentation for more details) which
 will be attached to each contact saved from the current request.
@@ -1311,7 +1311,7 @@ with additional branches for each contact being optionally
 created. (depending on the *flags* parameter)
 - in *"Contact throttling"* mode
 
-  - extract the *[contact id param](#contact_id_param-string)*
+  - extract the *[contact_id_param](#contact_id_param-string)*
 from the Request-URI, derive the actual SIP URI of the destination
 from it and set it as the new Request-URI of the INVITE
 (**$ru** variable).
@@ -1440,16 +1440,16 @@ This function can only be used from the request route.
 ### Exported Asynchronous Functions
 
 
-#### on_process_purr(domain)
+#### pn_process_purr(domain)
 
 
 Perform mid-dialog request processing, according to RFC 8599.  For
 such requests, search the R-URI and topmost Route header field URI for
-a *";on-purr"* parameter value that both matches the
+a *";pn-purr"* parameter value that both matches the
 OpenSIPS PURR format and corresponds to an usrloc registration. Once a
 usrloc contact is located, trigger an [E_UL_CONTACT_REFRESH](../usrloc/README.md#e_ul_contact_refresh)
 event and place the request on async hold for at most
-[on refresh timeout](#on_refresh_timeout-integer) seconds, until a matching
+[pn_refresh_timeout](#pn_refresh_timeout-integer) seconds, until a matching
 REGISTER request arrives.
 
 
@@ -1476,7 +1476,7 @@ offline contact)
 - **-1** - Internal Error
 
 
-```opensips title="async on_process_purr() usage"
+```opensips title="async pn_process_purr() usage"
 route {
 	...
 	if (has_totag()) {
@@ -1491,7 +1491,7 @@ route {
 		}
 
 		if (!is_method("ACK"))
-			async (on_process_purr("location"), resume_route);
+			async (pn_process_purr("location"), resume_route);
 
 		route(relay);
 		exit;
@@ -1500,7 +1500,7 @@ route {
 
 route [resume_route] {
 	$var(rc) = $rc;
-	xlog("on_process_purr() finished with $var(rc)\n");
+	xlog("pn_process_purr() finished with $var(rc)\n");
 
 	...
 }
