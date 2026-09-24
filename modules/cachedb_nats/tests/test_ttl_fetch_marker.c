@@ -17,13 +17,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P8 Stage 2 [R4 / TTL-SOLUTION-SPEC §2.2 TREV-2a]: update_fetch_or_seed()'s
+ * Stage 2: update_fetch_or_seed's
  * routing for an empty-value entry.  cnats 3.12 surfaces a server-side MaxAge
  * delete marker as kvStore_Get => NATS_OK with len 0 (NOT NATS_NOT_FOUND).  The
  * fetch path must NOT treat that as an error: it must re-create the AoR OVER the
  * marker -- seed an indexable base doc and CAS at the marker's revision (an
  * UPDATE), since a fresh Create (ExpectNoMessage) is rejected over a marker
- * [REV-27].  Otherwise the first re-REGISTER after any server-side expiry fails.
+ *.  Otherwise the first re-REGISTER after any server-side expiry fails.
  *
  *   gcc -DFETCH_CURRENT ... -> today: OK+len0 => ERROR (save fails over marker) => RED.
  *   gcc ...                 -> the FIXED routing (OK+len0+identity => UPDATE)   => GREEN.
@@ -51,7 +51,7 @@ static enum fr fetch_decide(enum gs status, int data_len, int has_identity)
 #ifdef FETCH_CURRENT
 	return FR_ERROR;                                   /* today: "empty document" */
 #else
-	/* [R4] empty value = MaxAge marker: re-create OVER it via CAS-update at the
+	/* empty value = MaxAge marker: re-create OVER it via CAS-update at the
 	 * marker's revision (needs the filter's string identity to seed). */
 	return has_identity ? FR_UPDATE : FR_ERROR;
 #endif
@@ -67,7 +67,7 @@ static void expect(const char *what, enum fr got, enum fr want)
 
 int main(void)
 {
-	printf("[R4] update_fetch_or_seed routing:\n");
+	printf("update_fetch_or_seed routing:\n");
 
 	expect("OK, live doc (len>0)",            fetch_decide(GS_OK, 120, 1), FR_UPDATE);
 	/* the load-bearing case: empty-value MaxAge marker */

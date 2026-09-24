@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P5.4] Behavioural (ASan, REAL TU): the doc-key intern table,
+ * Behavioural (ASan, REAL TU): the doc-key intern table,
  * exercised through the production fts_intern.c -- no carried copy
  * (the previous copy in this file had already drifted: it predated
  * the parameterised nats_intern_init(int) and the cached-hash

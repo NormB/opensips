@@ -17,14 +17,14 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * TTL-HISTORY-FIX-SPEC.md D1 [HREV-1] / RC-5: the per-message-TTL capability
+ *: the per-message-TTL capability
  * probe decision matrix.
  *
  * Pre-F3, nats_pool_kv_supports_ttl() reported SUPPORTED from AllowMsgTTL +
  * MaxAge==0 alone -- never looking at MaxMsgsPerSubject -- so the module used
  * per-message TTL on history-keeping buckets where a TTL'd head is removed
  * late (~LimitMarkerTTL) and the subject then rolls back to an older revision
- * (verified live on 2.11.10, spec §0 E1/E3).
+ *.
  *
  * The fixed split: the pool probe stays mechanical (AllowMsgTTL + MaxAge) but
  * REPORTS the stream's MaxMsgsPerSubject via an out-param; the module then
@@ -55,7 +55,7 @@ static int probe_report(int get_failed, int allow_ttl, int64_t maxage_ns,
 	if (out_mmps)
 		*out_mmps = mmps;
 	if (maxage_ns != 0)
-		return 0;                  /* [R7 pair] MaxAge overrides TTL */
+		return 0;                  /* MaxAge overrides TTL */
 	return allow_ttl ? 1 : 0;
 }
 
@@ -78,7 +78,7 @@ static int probe_final(int get_failed, int allow_ttl, int64_t maxage_ns,
 	return r;                          /* RC-5: history never consulted */
 #else
 	if (r == 1 && !_kv_ttl_history_ok(seen, allow_history))
-		return 0;                      /* HREV-1: history-keeping => refuse */
+		return 0;                      /*: history-keeping => refuse */
 	return r;
 #endif
 }
@@ -95,23 +95,23 @@ int main(void)
 	printf("== carried copy: FIXED composed probe ==\n");
 #endif
 
-	printf("[HREV-1] the one TTL-safe shape: AllowMsgTTL, MaxAge=0, MMPS=1:\n");
+	printf("the one TTL-safe shape: AllowMsgTTL, MaxAge=0, MMPS=1:\n");
 	CHECK(probe_final(0, 1, 0, 1, 0) == 1, "(ttl=1, maxage=0, mmps=1) => SUPPORTED");
 
-	printf("[HREV-1/RC-5] history-keeping streams are refused:\n");
+	printf("history-keeping streams are refused:\n");
 	CHECK(probe_final(0, 1, 0, 5, 0) == 0, "(ttl=1, maxage=0, mmps=5) => refused");
 	CHECK(probe_final(0, 1, 0, 2, 0) == 0, "(ttl=1, maxage=0, mmps=2) => refused");
 	CHECK(probe_final(0, 1, 0, 0, 0) == 0, "(ttl=1, maxage=0, mmps=0 'unlimited') => refused");
 
-	printf("[R7/REV-25] the pre-existing refusals still hold:\n");
+	printf("the pre-existing refusals still hold:\n");
 	CHECK(probe_final(0, 0, 0, 1, 0) == 0, "(no AllowMsgTTL) => refused");
 	CHECK(probe_final(0, 1, 7, 1, 0) == 0, "(MaxAge!=0) => refused, even at mmps=1");
 	CHECK(probe_final(0, 0, 7, 5, 0) == 0, "(everything wrong) => refused");
 
-	printf("[TREV-8] transient probe failure stays UNPROBED (retry later):\n");
+	printf("transient probe failure stays UNPROBED (retry later):\n");
 	CHECK(probe_final(1, 1, 0, 1, 0) == -1, "GetStreamInfo failed => -1");
 
-	printf("[D6] nats_ttl_allow_history=1 overrides ONLY the history rule:\n");
+	printf("nats_ttl_allow_history=1 overrides ONLY the history rule:\n");
 	CHECK(probe_final(0, 1, 0, 5, 1) == 1, "mmps=5 + override => SUPPORTED (operator's call)");
 	CHECK(probe_final(0, 1, 7, 5, 1) == 0, "override does NOT bypass the MaxAge refusal");
 	CHECK(probe_final(0, 0, 0, 5, 1) == 0, "override does NOT conjure AllowMsgTTL");

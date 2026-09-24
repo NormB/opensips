@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.4 / SPEC.md §3.1 [REV-15 / REV-30] (Option A): read `last_mod` as int64.
+ * / SPEC.md (Option A): read `last_mod` as int64.
  *
  * The shared converter cdb_json_to_dict (cachedb/cachedb_dict.c:556-559) turns
  * every cJSON_Number into CDB_INT32 via cJSON's `valueint`, which cJSON CLAMPS
@@ -26,7 +26,7 @@
  * — the round-trip is not byte-exact.  Option A: cachedb_nats re-parses
  * `last_mod` as int64 from the raw row JSON and overwrites the clamped value.
  *
- * [REV-30] Only `last_mod` gets the int64 guarantee; `expires` is CDB_INT32 at
+ * Only `last_mod` gets the int64 guarantee; `expires` is CDB_INT32 at
  * the usrloc boundary and re-clamps the instant usrloc consumes it, so its
  * Y2038 overflow is an accepted usrloc-wide limitation, not asserted here.
  *
@@ -38,7 +38,7 @@
  *                                (valueint -> INT_MAX) => RED for > INT32_MAX.
  *   gcc ...                   -> Option A int64 parse => GREEN.
  *
- * Rule 6 [PREV-19/REV-30]: the AUTHORITATIVE round-trip proof is the Tier-2
+ * Rule 6: the AUTHORITATIVE round-trip proof is the Tier-2
  * test_usrloc_roundtrip_int64_e2e.sh — it compares the bytes usrloc RECEIVES
  * (an MI/log dump of the parsed cdb_row_t after query()), NOT `nats kv get`
  * (which shows the raw stored int64 and would pass even while the read clamps).
@@ -190,7 +190,7 @@ int main(void)
 	printf("== carried copy: FIXED (Option A int64) ==\n");
 #endif
 
-	printf("[REV-15] values within int32 round-trip either way:\n");
+	printf("values within int32 round-trip either way:\n");
 	EXPECT("{\"cseq\":1,\"last_mod\":1000,\"ua\":\"x\"}", 1000LL, "small last_mod preserved");
 	EXPECT("{\"last_mod\":2147483647}", 2147483647LL, "INT32_MAX preserved (boundary)");
 	EXPECT("{\"last_mod\":0}", 0LL, "zero preserved");
@@ -198,12 +198,12 @@ int main(void)
 
 	/* The assertions below are CONSTANT (always the true int64) so the
 	 * int32-clamp arm genuinely FAILS them (RED). */
-	printf("[REV-15/30] > INT32_MAX must survive (RED under the shared clamp):\n");
+	printf("> INT32_MAX must survive (RED under the shared clamp):\n");
 	EXPECT("{\"last_mod\":2147483648}", 2147483648LL, "INT32_MAX+1 preserved");
 	EXPECT("{\"last_mod\":5000000000}", 5000000000LL, "5e9 (post-2038 ms epoch) preserved");
 	EXPECT("{\"last_mod\":-5000000000}", -5000000000LL, "-5e9 preserved");
 
-	printf("[REV-30] huge int64 last_mod preserved (RED under the shared clamp):\n");
+	printf("huge int64 last_mod preserved (RED under the shared clamp):\n");
 	EXPECT("{\"last_mod\":1099511627776}", 1099511627776LL, "2^40 preserved");
 	EXPECT("{\"last_mod\":9223372036854775807}", 9223372036854775807LL, "INT64_MAX preserved");
 

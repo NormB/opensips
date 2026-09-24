@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Registration-observability MI [OBS]: cdbn_reg_row_scan() -- one pass over a
+ * Registration-observability MI: cdbn_reg_row_scan -- one pass over a
  * stored usrloc row producing the per-AoR summary the MI commands (and the
  * reaper's piggybacked gauges) are built from:
  *
@@ -330,7 +330,7 @@ int main(void)
 	printf("== carried copy: FIXED row scan ==\n");
 #endif
 
-	printf("[OBS] typical mixed row: active + expired + permanent:\n");
+	printf("typical mixed row: active + expired + permanent:\n");
 	{
 		const char *doc =
 			"{\"aor\":\"alice@example.com\",\"aorhash\":7,\"contacts\":{"
@@ -354,7 +354,7 @@ int main(void)
 		CHECK(o.last_mod == 999999, "last_mod = max over contacts");
 	}
 
-	printf("[OBS] ua=/contact= substring hits over raw (escaped) values:\n");
+	printf("ua=/contact= substring hits over raw (escaped) values:\n");
 	{
 		const char *doc =
 			"{\"aor\":\"b@x\",\"contacts\":{"
@@ -374,7 +374,7 @@ int main(void)
 			"needles never match OTHER fields (no cross-field bleed)");
 	}
 
-	printf("[OBS] fail-closed classification:\n");
+	printf("fail-closed classification:\n");
 	{
 		const char *doc =
 			"{\"aor\":\"c@x\",\"contacts\":{"
@@ -391,7 +391,7 @@ int main(void)
 			"the one well-formed contact classifies normally");
 	}
 
-	printf("[OBS] boundary + big values:\n");
+	printf("boundary + big values:\n");
 	{
 		const char *doc =
 			"{\"aor\":\"d@x\",\"contacts\":{"
@@ -405,7 +405,7 @@ int main(void)
 		CHECK(o.soonest_exp == 5000000000LL, "post-2038 expiry survives (int64)");
 	}
 
-	printf("[OBS] empty / degenerate rows:\n");
+	printf("empty / degenerate rows:\n");
 	{
 		const char *doc = "{\"aor\":\"e@x\",\"contacts\":{}}";
 		CHECK(cdbn_reg_row_scan(doc, (int)strlen(doc), NOW, G,
@@ -431,7 +431,7 @@ int main(void)
 			NULL, 0, NULL, 0, &o) == -1, "non-JSON => -1");
 	}
 
-	printf("[OBS] backslash torture (keys and values):\n");
+	printf("backslash torture (keys and values):\n");
 	{
 		const char *doc =
 			"{\"aor\":\"g\\\\@x\",\"contacts\":{"

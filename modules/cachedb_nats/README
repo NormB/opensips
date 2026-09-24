@@ -435,7 +435,7 @@ modparam("cachedb_nats", "require_secure_url", 1)
    default this is detected once at startup and warned about
    loudly. With this set to 1 the module refuses to start instead
    -- recreate the bucket with MaxAge=0 (kv_ttl=0) and migrate,
-   per the migration guide [REV-25].
+   per the migration guide.
 
    Default value: 0 (warn only).
 
@@ -1206,7 +1206,7 @@ xlog("bucket info: $var(info)\n");
        Sustained non-zero values indicate cross-instance churn
        worth investigating.
 
-   [OBS] It also carries the contacts_pruned counter (individual
+ It also carries the contacts_pruned counter (individual
    expired bindings removed by the reaper's survivor-writes;
    rows_reaped counts whole rows) and the reap_last_* gauges —
    bucket-wide registration totals recorded by the reaper's

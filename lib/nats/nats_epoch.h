@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_epoch.h -- the epoch-tagged handle idiom [P2.8], in ONE place.
+ * nats_epoch.h -- the epoch-tagged handle idiom, in ONE place.
  *
  * The pool bumps a per-process reconnect epoch from the libnats
  * reconnect callback.  Any handle DERIVED from the connection (KV
@@ -29,7 +29,7 @@
  * header replaces the save/compare/refresh dance that used to be
  * re-implemented at every site.
  *
- * THE TRAP this header exists to encode (it was P0.1, a permanent
+ * THE TRAP this header exists to encode (it once caused a permanent
  * per-worker outage): on a REFRESH path, snapshot the epoch BEFORE
  * acquiring the new handle and adopt the snapshot only AFTER the
  * acquire succeeds.  Re-reading the epoch at adopt time can pair an
@@ -139,7 +139,7 @@ static inline int nats_epoch_snapshot(void)
 /**
  * Refresh protocol, step 2: adopt the pre-acquire snapshot into the tag
  * AFTER the new handle was acquired successfully.  Never re-read the
- * live epoch here -- that is the P0.1 trap the file comment describes.
+ * live epoch here -- that is the trap the file comment describes.
  *
  * @param e        Epoch tag to stamp; caller-owned (see
  *                 nats_epoch_save() for the SHM caveat).

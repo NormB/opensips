@@ -62,7 +62,7 @@ modparam("cachedb_nats", "cachedb_url",     "@@CACHEDB_URL@@")
 modparam("cachedb_nats", "kv_bucket",       "@@KV_BUCKET@@")
 modparam("cachedb_nats", "kv_replicas",     1)
 modparam("cachedb_nats", "kv_history",      1)
-# [HREV-3/D6] physical retention past logical expiry; 0 = reclaim ASAP.
+# physical retention past logical expiry; 0 = reclaim ASAP.
 modparam("cachedb_nats", "nats_expired_linger", @@EXPIRED_LINGER@@)
 # reaper cadence; TTL cases shrink it so reaper-only reclamation is testable.
 modparam("cachedb_nats", "nats_reap_interval",  @@REAP_INTERVAL@@)

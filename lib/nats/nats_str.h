@@ -84,7 +84,7 @@ static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 	 * NUL -- a truncated key reads/writes SOMEBODY ELSE'S entry.  Fail
 	 * closed (keys never legitimately carry a NUL).  VALUES no longer pass
 	 * through here: the set paths ride the length-aware kvStore_Put/
-	 * Create/Update [P3.6], which carry embedded NULs verbatim. */
+	 * Create/Update, which carry embedded NULs verbatim. */
 	if (memchr(s->s, '\0', s->len)) {
 		LM_ERR("string contains an embedded NUL (%d bytes) -- refusing "
 			"(the NATS C-string KV API would silently truncate it)\n",

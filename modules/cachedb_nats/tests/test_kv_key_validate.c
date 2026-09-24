@@ -17,15 +17,15 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P1 / SPEC.md [REV-9 + REV-23 + REV-33]: the usrloc row-key encoder must be
+ * / SPEC.md: the usrloc row-key encoder must be
  * injective, round-trippable, produce only NATS-KV-safe *and token-valid*
  * subjects, and the PK path must REJECT (not silently drop) AoRs that would
  * encode to an invalid subject.
  *
  * Guards beyond the existing test_kv_key_encode.c (=HH round-trip):
- *   1. [REV-23] backslash '\\' must be ESCAPED (was in the safe set -> violated
+ *   1. backslash '\\' must be ESCAPED (was in the safe set -> violated
  *      the project's mandatory backslash-adversarial rule).
- *   2. [REV-23] '.' and '/' stay literal (valid multi-token subjects; keeps
+ *   2. '.' and '/' stay literal (valid multi-token subjects; keeps
  *      `nats kv` greppability) BUT a key with an EMPTY subject token
  *      (leading '.', trailing '.', or '..') is REJECTED by cdbn_kv_key_validate()
  *      before any kvStore_* call -- else JetStream rejects it and the REGISTER
@@ -35,12 +35,12 @@
  *
  * RED/GREEN from one file:
  *   gcc -DKEYENC_CURRENT ... -> carries TODAY's helpers ('\\' safe, no validator)
- *                               => RED (the [REV-23] assertions fail).
+ *                               => RED (the assertions fail).
  *   gcc ...                   -> carries the FIXED helpers => GREEN.
  *
- * Carried-copy convention (matches the other Tier-1 tests). Rule 6 [PREV-4]:
+ * Carried-copy convention (matches the other Tier-1 tests). Rule 6:
  * the GREEN copy here mirrors cachedb_nats_json_ser.c; the AUTHORITATIVE
- * escape/validation proof is the Tier-2 key-poison e2e vs production [REV-20].
+ * escape/validation proof is the Tier-2 key-poison e2e vs production.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_kv_key_validate test_kv_key_validate.c
  */
@@ -91,7 +91,7 @@ char *cdbn_kv_encode_key(const char *in, int in_len, int *out_len)
 	return out;
 }
 
-/* [REV-23] Reject an encoded AoR key whose subject would have an empty token
+/* Reject an encoded AoR key whose subject would have an empty token
  * (NATS rejects leading/trailing/double '.') or that is empty. 0=ok, -1=reject. */
 static int cdbn_kv_key_validate(const char *enc, int len)
 {
@@ -162,18 +162,18 @@ int main(void)
 #else
 	printf("== carried copy: FIXED behavior ==\n");
 #endif
-	printf("[REV-23] backslash is escaped:\n");
+	printf("backslash is escaped:\n");
 	CHECK(enc_has("a\\b", "=5C"), "'\\\\' -> =5C (escaped, not literal)");
 	CHECK(!sink_kv_char_safe('\\'), "sink_kv_char_safe('\\\\') == 0");
 
-	printf("[REV-23] reserved/separator handling:\n");
+	printf("reserved/separator handling:\n");
 	CHECK(enc_has("a@b", "=40"), "'@' -> =40");
 	CHECK(enc_has("a=b", "=3D"), "'=' -> =3D (self-escape, injective)");
 	CHECK(enc_has("a*b", "=2A") && enc_has("a>b", "=3E") && enc_has("a b", "=20"),
 	      "'*','>',' ' escaped (no wildcard/space injection)");
 	CHECK(!enc_has("alice.example.com", "=2E"), "'.' stays literal (greppable multi-token)");
 
-	printf("[REV-23] PK-path token validation (reject empty tokens):\n");
+	printf("PK-path token validation (reject empty tokens):\n");
 	CHECK(validate_aor("sip:a..b@d") == -1,  "double-dot 'a..b' rejected");
 	CHECK(validate_aor(".alice@d")   == -1,  "leading-dot rejected");
 	CHECK(validate_aor("alice.")     == -1,  "trailing-dot rejected");
@@ -181,7 +181,7 @@ int main(void)
 	CHECK(validate_aor("alice@example.com") == 0, "normal AoR accepted");
 	CHECK(validate_aor("alice.smith@example.com") == 0, "dotted user/host accepted");
 
-	printf("[REV-9] injectivity + round-trip (incl. NUL/empty):\n");
+	printf("injectivity + round-trip (incl. NUL/empty):\n");
 	const char *corpus[] = { "alice@example.com", "a..b", ".x", "x.", "a=b",
 	                         "a/b\\c", "weird user", " unicode@domain", "" };
 	int n = sizeof(corpus)/sizeof(corpus[0]), k, j;

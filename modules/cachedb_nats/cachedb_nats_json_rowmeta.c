@@ -20,7 +20,7 @@
 
 /*
  * cachedb_nats_json_rowmeta.c — usrloc row-metadata denormalization for the
- * NATS-backed location service (SPEC.md §3.3 / §4.1).  This TU owns the
+ * NATS-backed location service.  This TU owns the
  * cachedb_nats-private, usrloc-row-shaped transforms that run over the MERGED
  * document on the update() path — recomputing the `row_exp` / `schema_version`
  * top-level peers from the merged contact set.  It is kept separate from the
@@ -41,10 +41,10 @@
 #include "cachedb_nats_json_internal.h"
 
 /* ------------------------------------------------------------------ */
-/*   P2.3 reject-at-write NUL hygiene (SPEC §3.1 / §4.1 step 0)        */
+/*   Reject-at-write NUL hygiene                                       */
 /* ------------------------------------------------------------------ */
 
-/* [REV-20] An OpenSIPS str is length-based, so a 0x00 byte is reachable in a
+/* An OpenSIPS str is length-based, so a 0x00 byte is reachable in a
  * contact field (ua/attr/...).  Such a value cannot round-trip: the reader is
  * cJSON_Parse + str.len = strlen(valuestring), so an interior NUL truncates
  * the value (silent corruption).  Returns 1 if @s carries a raw 0x00 OR the
@@ -73,7 +73,7 @@ static int field_has_nul(const char *s, int len)
 /* Recurse the incoming update dict (usrloc nests each contact's fields under
  * contacts.<id>, so a NUL can sit at any depth); return 1 if any CDB_STR field
  * value carries an embedded NUL.  Run before any merge / kvStore op so the save
- * can be refused with no partial row (SPEC §4.1 step 0 [REV-20]). */
+ * can be refused with no partial row. */
 int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
 {
 	struct list_head *pos;
@@ -103,7 +103,7 @@ int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.1 row_exp / schema_version denormalization (SPEC §3.3/§4.1)    */
+/*   Row_exp / schema_version denormalization                          */
 /* ------------------------------------------------------------------ */
 
 /* Parse a bare JSON integer (optional leading '-', then digits) in [p,end).
@@ -111,7 +111,7 @@ int cdbn_dict_has_nul_field(const cdb_dict_t *dict)
  * NULL if there is no integer at p, or it would overflow int64.  Leading
  * whitespace must already be skipped.  Fractions/exponents are rejected — a
  * usrloc `expires` is always an integer epoch; anything else is "not a number"
- * and the caller treats the contact as having no usable expiry. [REV-34] */
+ * and the caller treats the contact as having no usable expiry. */
 static const char *json_parse_int64(const char *p, const char *end,
 	int64_t *out)
 {
@@ -136,7 +136,7 @@ static const char *json_parse_int64(const char *p, const char *end,
 	return p;
 }
 
-/* row_exp denormalization (SPEC §3.3 [REV-34]): the earliest time the row
+/* row_exp denormalization: the earliest time the row
  * needs reaper attention.  0 is the "permanent / never auto-expire" sentinel
  * — if ANY contact is permanent (expires==0) the whole row is permanent.  An
  * empty/NULL set yields 0.  Otherwise the minimum (earliest) expiry.  int64
@@ -164,7 +164,7 @@ static int64_t row_exp_min(const int64_t *exp, int n)
  * slice [vstart,vend).  Sets *out and returns 0 on success; returns -1 if the
  * slice is not an object, or the field is absent / not an integer.  Shared by
  * the row_exp `expires` scan (write side) and the int64 `last_mod` post-patch
- * (read side, P2.4). */
+ * (read side). */
 int cdbn_contact_field_int64(const char *vstart, const char *vend,
 	const char *fname, int flen, int64_t *out)
 {
@@ -211,7 +211,7 @@ int cdbn_contact_field_int64(const char *vstart, const char *vend,
 
 /* row_exp's per-contact `expires` accessor (write side).  A contact with no
  * usable expiry contributes nothing to row_exp; fail-closed read handling of a
- * poison/absent expiry is P2.5 [REV-26]. */
+ * poison/absent expiry happens on the read path. */
 int cdbn_contact_expires(const char *vstart, const char *vend, int64_t *out)
 {
 	return cdbn_contact_field_int64(vstart, vend, "expires", 7, out);
@@ -270,7 +270,7 @@ static int row_collect_expiries(const char *vstart, const char *vend,
 }
 
 /* Recompute the cachedb_nats-private `row_exp` / `schema_version` top-level
- * peers over the merged contact set (SPEC §3.3/§4.1 step 3, [REV-34/REV-25]).
+ * peers over the merged contact set.
  *
  * Returns a fresh pkg_malloc'd document (caller pkg_frees):
  *   - usrloc row (has a top-level "contacts" object): every top-level field is
@@ -279,7 +279,7 @@ static int row_collect_expiries(const char *vstart, const char *vend,
  *   - non-usrloc document (no top-level "contacts"): returned byte-for-byte
  *     unchanged, so other cachedb_nats consumers are never disturbed.
  * Returns NULL on malformed input or OOM. */
-/* [P2.5] pass-1 helper: remember the span of the top-level "contacts"
+/* pass-1 helper: remember the span of the top-level "contacts"
  * object (last occurrence wins, matching the old scan). */
 struct find_contacts_ctx {
 	const char *vs, *ve;
@@ -297,7 +297,7 @@ static int find_contacts_cb(const char *name, int nlen,
 	return 0;
 }
 
-/* [P2.5] pass-2 helper: copy every top-level field through except the
+/* pass-2 helper: copy every top-level field through except the
  * private metadata peers (freshly recomputed by the caller). */
 struct copy_minus_meta_ctx {
 	json_sink_t *s;
@@ -342,7 +342,7 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	if (!json || len <= 0)
 		return NULL;
 
-	/* Pass 1: locate the top-level "contacts" object [P2.5]. */
+	/* Pass 1: locate the top-level "contacts" object. */
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
 		if (cdbn_json_foreach_top_field(json, len,
@@ -368,7 +368,7 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 		return NULL;
 	row_exp = row_exp_min(exps, n_exp);
 
-	/* P8 [§5]: per-message-TTL eligibility inputs.  A row gets a TTL only when
+	/*: per-message-TTL eligibility inputs.  A row gets a TTL only when
 	 * it is a single contact OR all contacts share one expiry (else a min-expiry
 	 * TTL would expire siblings early).  all_same is computed over the same
 	 * expiry array used for row_exp. */
@@ -413,7 +413,7 @@ fail:
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.4 int64 last_mod read seam (SPEC §3.1 Option A)               */
+/*   Int64 last_mod read seam                                         */
 /* ------------------------------------------------------------------ */
 
 /* Locate the raw JSON slice of the contact whose id == [id,id_len] within the
@@ -460,12 +460,12 @@ static int raw_find_contact(const char *c_vs, const char *c_ve,
 	return -1;
 }
 
-/* [REV-15/REV-30] (SPEC §3.1 Option A): the shared cdb_json_to_dict clamps every
+/*: the shared cdb_json_to_dict clamps every
  * JSON number to CDB_INT32 (cJSON valueint -> INT_MAX), silently narrowing a
  * `last_mod` (a usrloc CDB_INT64, read as i64) that exceeds INT32_MAX.  Re-parse
  * `last_mod` as int64 from the raw row JSON and overwrite each contact's
  * `last_mod` pair in @row_dict to CDB_INT64 with the true value.  Only last_mod
- * is widened — `expires` stays int32-bounded at the usrloc boundary [REV-30].
+ * is widened — `expires` stays int32-bounded at the usrloc boundary.
  * A no-op for a document without a top-level "contacts" object (non-usrloc row)
  * and for any contact whose last_mod is absent / non-integer (left untouched). */
 void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_dict)
@@ -477,7 +477,7 @@ void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_di
 	if (!json || len <= 0 || !row_dict)
 		return;
 
-	/* locate the raw top-level "contacts" object slice [P2.5] */
+	/* locate the raw top-level "contacts" object slice */
 	{
 		struct find_contacts_ctx fc = { NULL, NULL };
 		if (cdbn_json_foreach_top_field(json, len,
@@ -531,10 +531,10 @@ void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_di
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.5 fail-closed poison classification (SPEC §4.2 [REV-26])       */
+/*   Fail-closed poison classification                                 */
 /* ------------------------------------------------------------------ */
 
-/* Classify a stored KV value on read (SPEC §4.2):
+/* Classify a stored KV value on read:
  *   NATS_VAL_EMPTY  — zero-length / all-whitespace: a server-side delete
  *                     marker; treat the AoR as absent (no error).
  *   NATS_VAL_OBJECT — first non-whitespace byte is '{': parse it.
@@ -542,7 +542,7 @@ void cdbn_row_patch_last_mod_int64(const char *json, int len, cdb_dict_t *row_di
  *                     / array / garbage): a hard integrity error.  The current
  *                     `data[0]=='{'` gate masks this as an empty AoR — a silent
  *                     deregistration a stale node / co-writer / attacker could
- *                     plant — so [REV-26] alarms + counts instead. */
+ *                     plant — so alarms + counts instead. */
 int cdbn_value_classify(const char *data, int len)
 {
 	const char *p, *end;
@@ -559,7 +559,7 @@ int cdbn_value_classify(const char *data, int len)
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.6 strip cachedb_nats-private top-level peers (SPEC §4.2 step 3) */
+/*   Strip cachedb_nats-private top-level peers */
 /* ------------------------------------------------------------------ */
 
 /* True for the cachedb_nats-private top-level peers usrloc must never see. */
@@ -572,7 +572,7 @@ static int is_private_top_key(const char *name, int len)
 /* Free one removed pair completely (it is no longer in any dict, so
  * cdb_free_rows will not reach it).  row_exp/schema_version are normally
  * CDB_INT32, but a crafted-yet-valid object could carry them as a string or a
- * nested dict (P2.5 only gates the top-level value type), so free by type. */
+ * nested dict (the poison check only gates the top-level value type), so free by type. */
 static void free_one_pair(cdb_pair_t *p)
 {
 	switch (p->val.type) {
@@ -589,7 +589,7 @@ static void free_one_pair(cdb_pair_t *p)
 	pkg_free(p);
 }
 
-/* [REV-18/REV-35] (SPEC §4.2 step 3): the cdb_row_t handed to usrloc must be
+/*: the cdb_row_t handed to usrloc must be
  * exactly {contacts, aorhash}.  Strip the cachedb_nats-private top-level peers
  * (row_exp, schema_version) at row assembly — they are top-level peers, not
  * members of any contact subdict, so this is a top-level walk.  Safe against
@@ -610,15 +610,15 @@ void cdbn_row_strip_private_keys(cdb_dict_t *row_dict)
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.7 skew-safe write-side expiry hygiene (SPEC §4.1 step 4)       */
+/*   Skew-safe write-side expiry hygiene                               */
 /* ------------------------------------------------------------------ */
 
 /* Upper bound on touched-expired subkeys dropped in one update.  An update that
  * sets more than this many already-expired contacts (pathological) leaves the
- * excess for the reaper (§4.3A) — never a correctness loss, only deferred. */
+ * excess for the reaper — never a correctness loss, only deferred. */
 #define NATS_MAX_DROP_IDS 256
 
-/* [REV-1/REV-21] A contact is already-expired when its absolute `expires` plus
+/* A contact is already-expired when its absolute `expires` plus
  * the skew grace S has passed node-local `now`.  expires==0 is permanent. */
 static int contact_is_expired(int64_t expires, time_t now, int grace)
 {
@@ -644,7 +644,7 @@ static int pair_contact_expires(const cdb_pair_t *p, int64_t *out)
 	return -1;
 }
 
-/* [P3.5] incremental row_exp / TTL-eligibility accumulator -- replaces the
+/* incremental row_exp / TTL-eligibility accumulator -- replaces the
  * pkg expiry array when collection happens inside the emit walk.  Semantics
  * mirror row_exp_min + the all_same scan: any expires==0 makes the row
  * permanent; all_same compares every collected value (zeros included). */
@@ -668,7 +668,7 @@ static void row_exp_acc_add(struct row_exp_acc *a, int64_t e)
 	a->n++;
 }
 
-/* [P3.5] Collect-only arm of the fold: fold every contact's integer
+/* Collect-only arm of the fold: fold every contact's integer
  * `expires` in [cvs,cve) into @acc without emitting -- used when the
  * drop set is empty so the caller can copy the slice in ONE write. */
 static int acc_collect_expiries(const char *cvs, const char *cve,
@@ -710,7 +710,7 @@ static int acc_collect_expiries(const char *cvs, const char *cve,
 
 /* Rewrite a "contacts" object slice [cvs,cve), dropping any subkey in @ids.
  * When @acc is non-NULL, every SURVIVING contact's integer `expires` is
- * folded into it (the [P3.5] single-walk row_exp collection). */
+ * folded into it (the single-walk row_exp collection). */
 static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	const char **ids, const int *id_lens, int n_ids, struct row_exp_acc *acc)
 {
@@ -755,7 +755,7 @@ static int emit_contacts_minus(json_sink_t *s, const char *cvs, const char *cve,
 	return 0;
 }
 
-/* [P3.5] Shared top-level rebuild walk.  Copies @json through, rewriting
+/* Shared top-level rebuild walk.  Copies @json through, rewriting
  * every top-level "contacts" object minus the @ids subkeys.  When @usrloc
  * is set (the fold: document known to carry a "contacts" object), stale
  * "row_exp"/"schema_version" peers are skipped and fresh ones are appended
@@ -838,9 +838,9 @@ fail:
 	return NULL;
 }
 
-/* [REV-21] Build the drop-id set: the contacts THIS update set whose own
+/* Build the drop-id set: the contacts THIS update set whose own
  * `expires` is already past now + grace.  Shared by the two-pass reference
- * and the [P3.5] fold; capped at NATS_MAX_DROP_IDS (excess defers to the
+ * and the fold; capped at NATS_MAX_DROP_IDS (excess defers to the
  * reaper).  Returns the id count. */
 static int build_drop_ids(const cdb_dict_t *pairs, time_t now, int grace,
 	const char **ids, int *id_lens)
@@ -889,7 +889,7 @@ char *cdbn_row_drop_expired_own(const char *json, int len, const cdb_dict_t *pai
 	return row_emit_rebuild(json, len, ids, id_lens, n, 0, NULL, out_len);
 }
 
-/* [P3.5 fold] cdbn_row_drop_expired_own + cdbn_row_finalize_metadata as ONE
+/* cdbn_row_drop_expired_own + cdbn_row_finalize_metadata as ONE
  * emit walk / ONE allocation (contract + byte-equivalence proof:
  * tests/test_row_fold_equiv.c; header contract in the internal header).
  * The cheap pass-1 field scan only answers "is this a usrloc row?" so the
@@ -950,10 +950,10 @@ char *cdbn_row_hygiene_finalize(const char *json, int len,
 }
 
 /* ------------------------------------------------------------------ */
-/*   P2.2 same-subkey cseq merge ordering (SPEC §4.1 step 2 [REV-8])   */
+/*   Same-subkey cseq merge ordering                                   */
 /* ------------------------------------------------------------------ */
 
-/* [REV-8] On a same-contact-subkey collision in the merge, does the NEW value
+/* On a same-contact-subkey collision in the merge, does the NEW value
  * supersede the existing OLD one?  Higher `cseq` wins; a tie on cseq is broken
  * by higher `last_mod` (absent == 0); an exact duplicate is NOT superseding
  * (the stale write is discarded).  Engages ONLY when BOTH values carry a cseq
@@ -978,10 +978,10 @@ int cdbn_cseq_new_wins(const char *new_json, int new_len,
 }
 
 /* ------------------------------------------------------------------ */
-/*   P3 value-size / payload bound (SPEC §3.2/§4.1 [REV-5])            */
+/*   Value-size / payload bound                                        */
 /* ------------------------------------------------------------------ */
 
-/* [REV-5] Is a serialized KV value within the payload bound?  @max <= 0 means
+/* Is a serialized KV value within the payload bound?  @max <= 0 means
  * the guard is disabled (unbounded).  Checked on the FINAL merged row just
  * before the CAS write, so an over-limit save fails cleanly with the previous
  * revision untouched — never a silent truncation or a broker-side size error. */
@@ -993,7 +993,7 @@ int cdbn_value_size_ok(int len, int max)
 }
 
 /* ------------------------------------------------------------------ */
-/*   P4 read-side expiry filter (SPEC §4.2 [REV-3/1/26])              */
+/*   Read-side expiry filter                                          */
 /* ------------------------------------------------------------------ */
 
 /* Read an integer field @name from a parsed contact dict.  Returns 0 + *out
@@ -1015,7 +1015,7 @@ static int dict_int_field(const cdb_dict_t *d, const char *name, int len,
 	return -1;
 }
 
-/* [REV-3/1/26] (SPEC §4.2): omit expired contacts from a parsed read row before
+/*: omit expired contacts from a parsed read row before
  * usrloc sees them.  expires==0 is permanent (always kept); expires + grace <=
  * now is expired (omitted); an absent / non-integer expires is fail-closed
  * (treated expired, never served).  Pure read mutation of @row_dict — NO writes

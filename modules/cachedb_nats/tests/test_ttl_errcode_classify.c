@@ -17,13 +17,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P5 / TTL-SOLUTION-SPEC.md §2.2.1 [TREV-13]: js_PublishMsg outcome routing.
+ * /: js_PublishMsg outcome routing.
  *
  *   NATS_OK                              -> DONE (record ack->Sequence as rev)
  *   jerr 10071 (WrongLastSequence)       -> RETRY  (CAS conflict; re-read)
  *   jerr 10166 (MessageTTLDisabled)      -> LATCH_OFF (stream lacks AllowMsgTTL;
  *                                           fall back to plain CAS + reaper)
- *   jerr 10165 (MessageTTLInvalid)       -> ASSERT_BUG (the §2.3 guard failed)
+ *   jerr 10165 (MessageTTLInvalid)       -> ASSERT_BUG
  *   NATS_TIMEOUT / NATS_CONNECTION_CLOSED-> FAIL_SAVE (non-2xx; client retries)
  *
  * The natsStatus return is NATS_ERR for JS rejections, so jsErrCode is what
@@ -75,14 +75,14 @@ int main(void)
 	printf("== carried copy: FIXED classifier ==\n");
 #endif
 
-	printf("[TREV-13] outcome routing:\n");
+	printf("outcome routing:\n");
 	EQ(cdbn_ttl_classify(TTL_PUB_OK, 0), TTL_DONE, "NATS_OK => DONE");
 	EQ(cdbn_ttl_classify(TTL_PUB_JS_ERR, 10071), TTL_RETRY, "10071 WrongLastSeq => RETRY");
 	EQ(cdbn_ttl_classify(TTL_PUB_JS_ERR, 10166), TTL_LATCH_OFF, "10166 TTLDisabled => LATCH_OFF");
 	EQ(cdbn_ttl_classify(TTL_PUB_JS_ERR, 10165), TTL_ASSERT_BUG, "10165 TTLInvalid => ASSERT_BUG");
 	EQ(cdbn_ttl_classify(TTL_PUB_CONN_DOWN, 0), TTL_FAIL_SAVE, "TIMEOUT/CLOSED => FAIL_SAVE");
 
-	printf("[TREV-13] OK ignores any stale jerr; unknown JS error fails the save:\n");
+	printf("OK ignores any stale jerr; unknown JS error fails the save:\n");
 	EQ(cdbn_ttl_classify(TTL_PUB_OK, 10071), TTL_DONE, "OK + stale jerr => still DONE");
 	EQ(cdbn_ttl_classify(TTL_PUB_JS_ERR, 99999), TTL_FAIL_SAVE, "unknown JS error => FAIL_SAVE");
 	EQ(cdbn_ttl_classify(TTL_PUB_JS_ERR, 0), TTL_FAIL_SAVE, "JS error with no code => FAIL_SAVE");

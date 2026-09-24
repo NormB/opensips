@@ -39,7 +39,7 @@ EOF
 	exit 1
 fi
 
-# [P5.6] Reject staged ELF binaries.  Compiled test binaries carry no
+# Reject staged ELF binaries.  Compiled test binaries carry no
 # extension (test_foo), so name filters cannot catch them -- this is
 # the class of the committed-binary accident cleaned up in the P1 repo
 # hygiene pass.  Check the STAGED blob's magic bytes (not the worktree

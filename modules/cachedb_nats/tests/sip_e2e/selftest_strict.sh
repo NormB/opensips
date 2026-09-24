@@ -5,7 +5,7 @@
 # local exploration works anywhere.  Release-gate mode (STRICT=1) must
 # turn every such skip into a hard FAILURE: a missing dependency, or a
 # benchmark cell with zero successful trials, must not read as a green
-# pipeline.  (IMPROVEMENT Tier-2 / spec P5.2.)
+# pipeline.
 #
 # Cheap and broker-free: prerequisites are checked before any network
 # use, so pointing OPENSIPS_BIN at a nonexistent file exercises the

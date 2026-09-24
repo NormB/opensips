@@ -175,7 +175,7 @@ int main(void)
 
 		/* The in-worker pthread mode (and its nats_watch_stop
 		 * teardown) was removed with the dedicated_watcher_proc
-		 * modparam (P0.2); the loop's per-iteration teardown is the
+		 * modparam; the loop's per-iteration teardown is the
 		 * only claimant left — but it must still claim via
 		 * atomic_exchange (cnats callbacks run on library threads). */
 		exch = file_count(p, "atomic_exchange(&_watcher, NULL)");

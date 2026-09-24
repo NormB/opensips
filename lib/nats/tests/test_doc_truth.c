@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P4.1/P4.3/P4.7] lib/nats documentation truth-lock.  The README is
+ * lib/nats documentation truth-lock.  The README is
  * the subsystem's entry-point document and it TAUGHT WRONG BEHAVIOR:
  * a boxed claim that nats_consumer never registers with the pool (it
  * self-registers with a localhost fallback), "first registrant wins"
@@ -67,7 +67,7 @@ int main(void)
 	if (!readme || !pool)
 		return 1;
 
-	/* ── P4.1: the README no longer teaches wrong behavior ──────── */
+	/* ── the README no longer teaches wrong behavior ────────────── */
 	ASSERT(strstr(readme, "does NOT call nats_pool_register") == NULL,
 		"false standalone-consumer claim is gone");
 	ASSERT(strstr(readme, "first registrant wins") == NULL &&
@@ -87,14 +87,14 @@ int main(void)
 			"const char *module") != NULL,
 		"README shows the real nats_pool_register signature");
 
-	/* ── P4.7: the allocator & string policy lives in the README ── */
+	/* ── the allocator & string policy lives in the README ──────── */
 	ASSERT(strstr(readme, "Allocator policy") != NULL ||
 	       strstr(readme, "allocator policy") != NULL,
 		"README carries the allocator policy section");
 	ASSERT(strstr(readme, "ipc_dispatch_rpc") != NULL,
 		"policy names the foreign-thread handoff pattern");
 
-	/* ── P4.3: the pool doctrine sanctions shm + ipc from callbacks ── */
+	/* ── the pool doctrine sanctions shm + ipc from callbacks ──────── */
 	{
 		const char *doc = strstr(pool, "nats.c callbacks (run on nats.c");
 		ASSERT(doc != NULL, "found the callback doctrine block");
@@ -113,7 +113,7 @@ int main(void)
 		}
 	}
 
-	/* ── P4.3: the stale cross-process claims are gone ──────────── */
+	/* ── the stale cross-process claims are gone ────────────────── */
 	ASSERT(strstr(pool, "rewrite tls:// URLs to nats://") == NULL,
 		"pool_cfg comment no longer describes the removed URL rewrite");
 	ASSERT(strstr(pool, "the first child process") == NULL,

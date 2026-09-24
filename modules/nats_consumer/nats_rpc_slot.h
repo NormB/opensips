@@ -30,7 +30,7 @@
  *   context that already runs libnats safely) and hands off
  *   in-flight state between worker and consumer via SHM.
  *
- * Wake mechanism (IPC wake + worker-private guard timerfd) [P3.1]
+ * Wake mechanism (IPC wake + worker-private guard timerfd)
  *   OpenSIPS's reactor cannot register fork-inherited eventfds
  *   (see commit 8eae39a5b1).  Instead, each async call creates a
  *   fresh worker-private timerfd registered with the reactor, and
@@ -70,7 +70,7 @@
 #define NATS_RPC_SLOT_H
 
 #include <stdint.h>
-#include "../../lib/nats/nats_epoch.h"   /* epoch_at_start tag [P2.8] */
+#include "../../lib/nats/nats_epoch.h"   /* epoch_at_start tag */
 #include <stddef.h>
 #include <stdatomic.h>
 
@@ -168,7 +168,7 @@ typedef struct nats_rpc_slot {
 	uint32_t reply_to_len;
 	uint8_t  reply_has_reply_to;
 
-	/* [P2.2] Orphan-reaper age tracking.  claimed_at_us is stamped by
+	/* Orphan-reaper age tracking.  claimed_at_us is stamped by
 	 * claim(); deadline_us is 0 until the worker stores its per-call
 	 * deadline just before publish.  Both CLOCK_MONOTONIC (system-wide
 	 * on Linux, so the consumer process can compare).  Atomic because
@@ -177,7 +177,7 @@ typedef struct nats_rpc_slot {
 	_Atomic long long claimed_at_us;
 	_Atomic long long deadline_us;
 
-	/* [P3.1] process_no of the claiming worker: the destination for
+	/* process_no of the claiming worker: the destination for
 	 * the consumer's reply-delivered / abandoned IPC wake
 	 * (nats_rpc_wake_send).  Reset to -1 by claim(); stamped by the
 	 * worker just before publish, like deadline_us.  Atomic because
@@ -189,7 +189,7 @@ typedef struct nats_rpc_slot {
 	/* Snapshot of the pool reconnect-epoch at claim time.  The
 	 * worker resume compares against the current value to surface
 	 * -2 (connection lost) if a reconnect intervened. */
-	nats_epoch_t epoch_at_start;   /* [P2.8] lib/nats/nats_epoch.h */
+	nats_epoch_t epoch_at_start;   /* lib/nats/nats_epoch.h */
 
 	/* Per-claim generation, bumped on every FREE -> CLAIMED
 	 * transition.  Echoed in the reply-inbox subject (see
@@ -275,7 +275,7 @@ int nats_rpc_slot_abandon(nats_rpc_slot_t *s);
  *
  * @param s    The slot; NULL is a no-op.
  * @param gen  The generation captured at claim time: if it no longer
- *             matches, the claim was orphan-reaped [P2.2] and possibly
+ *             matches, the claim was orphan-reaped and possibly
  *             recycled to a new caller, so the free is a NO-OP (a
  *             blind store would clobber the new claim).
  * @return     nothing.
@@ -356,7 +356,7 @@ uint32_t nats_rpc_slot_inflight_count(void);
 #define NATS_RPC_SLOT_REAP_CLAIM_TTL_US  (120LL * 1000000LL)  /* 120 s */
 #endif
 /**
- * [P2.2] Orphan reaper.  Reclaims any non-FREE, non-DELIVERING slot
+ * Orphan reaper.  Reclaims any non-FREE, non-DELIVERING slot
  * whose owner is provably gone: past deadline_us + slack when the
  * worker stamped a deadline, or past the claim TTL for a CLAIMED slot
  * that never published (death between claim and publish).  Bumps the

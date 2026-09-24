@@ -109,7 +109,7 @@ int main(void)
 
 	/* (1) pkg memory for the patterns array (dedicated proc, the only
 	 * watcher mode — the rank-1 pthread path was removed with the
-	 * dedicated_watcher_proc modparam, P0.2). */
+	 * dedicated_watcher_proc modparam). */
 	ASSERT(file_contains(W, "pkg_malloc((kv_watch_count + 1) * sizeof(char *))"),
 		"nats_watcher_proc_main uses pkg_malloc for patterns");
 

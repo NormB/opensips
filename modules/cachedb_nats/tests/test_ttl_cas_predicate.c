@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P5 / TTL-SOLUTION-SPEC.md §2.2 [TREV-2 / TREV-2a / REV-27]: marker-aware CAS
+ * /: marker-aware CAS
  * predicate for the raw publish.
  *
  *   - kvStore_Get returns an ENTRY (any value_len, including a 0-length
@@ -26,10 +26,10 @@
  *   - kvStore_Get returns NOT_FOUND but the subject still has a head sequence
  *     (a DEL/PURGE marker that kvStore_Get filters out) -> ExpectLastSubjectSeq
  *     = head_seq, NOT ExpectNoMessage (the server rejects ExpectNoMessage over a
- *     marker -> 10071 lockout, [REV-27]).
+ *     marker -> 10071 lockout).
  *   - genuinely empty subject (NOT_FOUND, no head) -> ExpectNoMessage.
  *
- * [PREV-9] necessary but not sufficient: this tests predicate SELECTION given a
+ * necessary but not sufficient: this tests predicate SELECTION given a
  * fabricated entry/head; the authoritative "re-REGISTER after a real expiry
  * succeeds first-attempt" is the P8 e2e.
  *
@@ -73,19 +73,19 @@ int main(void)
 	printf("== carried copy: FIXED predicate ==\n");
 #endif
 
-	printf("[TREV-2] a non-empty entry => ExpectLastSubjectSeq=rev:\n");
+	printf("a non-empty entry => ExpectLastSubjectSeq=rev:\n");
 	CHECK(cdbn_ttl_cas_predicate(1, 50, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
 	      "non-empty entry => LAST_SEQ at rev 7");
 
-	printf("[TREV-2a] an EMPTY-value entry (marker) => LAST_SEQ, not NoMessage:\n");
+	printf("an EMPTY-value entry (marker) => LAST_SEQ, not NoMessage:\n");
 	CHECK(cdbn_ttl_cas_predicate(1, 0, 7, 0, &seq) == TTL_CAS_LAST_SEQ && seq == 7,
 	      "empty-value entry => LAST_SEQ at rev 7 (NOT ExpectNoMessage)");
 
-	printf("[REV-27] NOT_FOUND with a head marker => LAST_SEQ at head:\n");
+	printf("NOT_FOUND with a head marker => LAST_SEQ at head:\n");
 	CHECK(cdbn_ttl_cas_predicate(0, 0, 0, 9, &seq) == TTL_CAS_LAST_SEQ && seq == 9,
 	      "NOT_FOUND + head seq 9 => LAST_SEQ at 9 (not ExpectNoMessage)");
 
-	printf("[TREV-2a] genuinely empty subject => ExpectNoMessage:\n");
+	printf("genuinely empty subject => ExpectNoMessage:\n");
 	CHECK(cdbn_ttl_cas_predicate(0, 0, 0, 0, &seq) == TTL_CAS_NO_MESSAGE && seq == 0,
 	      "NOT_FOUND + no head => ExpectNoMessage, seq 0");
 

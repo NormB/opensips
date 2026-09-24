@@ -455,7 +455,7 @@ modparam("cachedb_nats", "require_secure_url", 1)
 		this set to <varname>1</varname> the module <emphasis>refuses to
 		start</emphasis> instead -- recreate the bucket with
 		<varname>MaxAge=0</varname> (<varname>kv_ttl=0</varname>) and
-		migrate, per the migration guide [REV-25].
+		migrate, per the migration guide.
 	</para>
 	<para>
 		<emphasis>Default value:</emphasis> <varname>0</varname>
@@ -1663,7 +1663,7 @@ xlog("bucket info: $var(info)\n");
 		</para></listitem>
 	</itemizedlist>
 	<para>
-		[OBS] It also carries the <varname>contacts_pruned</varname> counter
+ It also carries the <varname>contacts_pruned</varname> counter
 		(individual expired bindings removed by the reaper's survivor-writes;
 		<varname>rows_reaped</varname> counts whole rows) and the
 		<varname>reap_last_*</varname> gauges — bucket-wide registration

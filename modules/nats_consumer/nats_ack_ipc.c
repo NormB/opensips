@@ -20,7 +20,7 @@
 
 /*
  * nats_ack_ipc.c -- consumer-process side of the worker ack hop
- * [P2.1]: the ipc_send_rpc handlers (one per JetStream ack verb),
+ *: the ipc_send_rpc handlers (one per JetStream ack verb),
  * the apply switch they share, the ACK_NEXT refill hints, and the
  * SHM counters behind the ack_ipc_* MI stats.  Split out of
  * nats_consumer_proc.c (which keeps the main loop + fetch path).
@@ -42,7 +42,7 @@
 #include "nats_ack.h"
 #include "nats_consumer_proc_internal.h"
 
-/* ── worker ack hop [P2.1] ───────────────────────────────────── */
+/* ── worker ack hop ───────────────────────────────────── */
 
 /* SHM counters behind the ack_ipc_* MI stats.  The pipe has no
  * readable depth, so depth is derived: sent - drained (floored). */
@@ -133,7 +133,7 @@ int nats_ack_next_take(uint16_t handle_idx)
 	return 0;
 }
 
-/* [P3.6] AckSync budget per consumer tick.  Each natsMsg_AckSync is a
+/* AckSync budget per consumer tick.  Each natsMsg_AckSync is a
  * full broker round-trip executed serially inside the IPC drain; a
  * worker-side burst of nats_ack_next() used to head-of-line-block
  * every other queued ack AND the fetch sweep behind N x RTT.  The
@@ -252,7 +252,7 @@ static int apply_ack_action(uint64_t token, nats_ack_action_e action,
 	return 0;
 }
 
-/* The ipc_send_rpc handlers, one per ack verb [P2.1].  param is the
+/* The ipc_send_rpc handlers, one per ack verb.  param is the
  * raw 64-bit token, except nak_delay whose param is a SHM payload
  * this side frees. */
 static void ack_drained_bump(void)

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [SPEC §11 / REV-24, Tier-2] Strict security mode for usrloc
+ * Strict security mode for usrloc
  * deployments.  The default stays warn-only (dev/lab ergonomics: the
  * usual lab broker is plaintext, and generic cachedb users are not
  * PII stores), but a usrloc production profile must be able to fail

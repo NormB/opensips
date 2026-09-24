@@ -19,8 +19,8 @@
  */
 
 /*
- * cachedb_nats_kvobs.h — generic JetStream/KV introspection MI [KVOBS].
- * See cachedb_nats_kvobs.c for the command surface; the [OBS] design
+ * cachedb_nats_kvobs.h — generic JetStream/KV introspection MI.
+ * See cachedb_nats_kvobs.c for the command surface; the design
  * invariants (cachedb_nats_reg.h) apply: read-only, bind-never-create,
  * fail-loudly filters, hard-capped pagination.
  */
@@ -41,7 +41,7 @@ struct kvobs_filter {
 	int  detail;
 	long limit;
 	long offset;
-	int  format;                /* [FMT] enum fmt_kind, default FMT_JSON */
+	int  format;                /* enum fmt_kind, default FMT_JSON */
 	int  eol_lf;
 	int  header;
 };
@@ -49,8 +49,8 @@ struct kvobs_filter {
 /* pure helpers, unit-locked in tests/test_kvobs_filter.c */
 
 /**
- * Parse the [KVOBS] filter string (';'-separated key=value: bucket key
- * name kv detail limit offset header, plus the [FMT] format/eol keys).
+ * Parse the filter string (';'-separated key=value: bucket key
+ * name kv detail limit offset header, plus the format/eol keys).
  *
  * @param s    filter bytes (empty input yields pure defaults).
  * @param len  filter length.

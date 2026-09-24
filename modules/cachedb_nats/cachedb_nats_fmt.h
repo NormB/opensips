@@ -19,8 +19,8 @@
  */
 
 /*
- * cachedb_nats_fmt.h — the [FMT] table formatter behind format=csv/txt on
- * the [OBS]/[KVOBS] MI commands (MI-OUTPUT-FORMAT-SPEC.md).  Pure: no
+ * cachedb_nats_fmt.h — the table formatter behind format=csv/txt on
+ * the MI commands.  Pure: no
  * MI/NATS coupling; unit-locked in tests/test_fmt_table.c.
  *
  *   csv  RFC 4180 (CRLF, header record, quote-and-double escaping)
@@ -28,7 +28,7 @@
  *   eol=lf switches both to bare LF; header=0 drops the header record.
  *
  * The formatted table rides as ONE string in the response's `data` field
- * [FMT-3]; the json path never touches this TU.
+ *; the json path never touches this TU.
  *
  * Memory/locking/context (whole TU): the buffer is LIBC heap
  * (malloc/realloc/free) — NOT pkg/shm — so the finished blob can be
@@ -48,7 +48,7 @@ struct fmt_table {
 	char *buf;
 	int len, cap;
 	int kind;                   /* FMT_CSV / FMT_TXT only */
-	int eol_lf;                 /* 0 = CRLF [FMT-7], 1 = LF */
+	int eol_lf;                 /* 0 = CRLF, 1 = LF */
 	int col;                    /* current column within the record */
 	int oom;
 };
@@ -59,7 +59,7 @@ struct fmt_table {
  *
  * @param t       table state (caller-owned, typically stack).
  * @param kind    FMT_CSV or FMT_TXT.
- * @param eol_lf  0 = CRLF [FMT-7], 1 = LF.
+ * @param eol_lf  0 = CRLF, 1 = LF.
  * @param header  0 skips the header record.
  * @param cols    NUL-terminated column names (borrowed for the call).
  * @param ncols   column count.
@@ -135,7 +135,7 @@ char *fmt_take(struct fmt_table *t, int *out_len);
 void  fmt_free(struct fmt_table *t);
 
 /**
- * Map "json"/"csv"/"txt" to enum fmt_kind [FMT-4].
+ * Map "json"/"csv"/"txt" to enum fmt_kind.
  *
  * @param v  token bytes.   @param n  token length.
  * @return the enum value, or -1 for an unknown kind.
@@ -148,7 +148,7 @@ int cdbn_fmt_kind_parse(const char *v, int n);
  * Parse the positional format parameter:
  * "<fmt>[;eol=lf|crlf][;header=0|1]" — a bare leading kind is
  * shorthand; the "format=<fmt>" long form is accepted; unknown options
- * are refused [FMT-5].
+ * are refused.
  *
  * @param s       parameter bytes (empty input yields pure defaults).
  * @param len     parameter length.

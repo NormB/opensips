@@ -732,7 +732,7 @@ static void nats_rev_put(const char *key, int key_len,
 	lock_set_release(g_rev->locks, shard);
 }
 
-/* REV-26: is @key already in the reverse map (i.e. already indexed)?  Read-only
+/*: is @key already in the reverse map (i.e. already indexed)?  Read-only
  * membership test under the key's shard lock, mirroring nats_rev_put's lookup.
  * Used by nats_json_index_add to count a doc-key ONCE: a node indexes its own
  * write both inline and via the watcher echo, so an unconditional num_documents
@@ -1223,7 +1223,7 @@ int nats_json_index_add(const char *key, int key_len,
 	if (!g_idx || !key || key_len <= 0 || !json_str)
 		return -1;
 
-	/* REV-26: count this doc-key ONCE.  A node indexes its own write twice —
+	/*: count this doc-key ONCE.  A node indexes its own write twice —
 	 * inline here in the registration worker AND via the KV watcher echo of the
 	 * same Put — so an unconditional num_documents++ over-counts (the stat then
 	 * read ~2x the true cardinality until a fresh build).  Capture membership
@@ -1402,7 +1402,7 @@ int nats_json_index_remove(const char *key, int key_len)
 	return 0;
 }
 
-/* P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: observe the live
+/* [a /]: observe the live
  * forward-index document count.  Lets a joint reaper⊕watcher e2e assert that
  * the in-SHM index entry — not merely the read-path view (P4) — is dropped when
  * the server TTL-expires a key.  NULL-safe: an uninitialized index returns -1
@@ -1500,10 +1500,10 @@ int nats_json_index_remove_fields(const char *key, int key_len,
  *
  * Returns the number of documents re-indexed, or -1 on error.
  */
-/* [P3.6] Scratch allocator for the rebuild's two process-private
+/* Scratch allocator for the rebuild's two process-private
  * bucket arrays.  The rebuild runs on the MAIN thread of a dedicated
  * proc (the watcher process; the periodic resync host) -- the
- * in-worker watcher PTHREAD that once forced shm here is gone (P0.2),
+ * in-worker watcher PTHREAD that once forced shm here is gone,
  * so pkg is legal, skips a global-shm-lock round-trip per array, and
  * makes leaks visible to pkg stats.  pkg OOM falls back to shm
  * (availability over the optimisation); *in_shm records the owner so
@@ -1578,7 +1578,7 @@ int nats_json_index_rebuild(kvStore *kv, const char *prefix)
 	 * because no other thread can reach `shadow` -- we pass it
 	 * explicitly through index_add_into.
 	 *
-	 * [P3.6] These scratch arrays are process-private and this
+	 * These scratch arrays are process-private and this
 	 * function runs on the MAIN thread of a dedicated proc, so they
 	 * go through scratch_alloc (pkg preferred, shm fallback). */
 	memset(&shadow, 0, sizeof(shadow));

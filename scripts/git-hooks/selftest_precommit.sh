@@ -6,7 +6,7 @@
 #   2. staged ELF binaries -- the class of the committed-test-binary
 #      accident cleaned up in the P1 repo-hygiene pass (test_* binaries
 #      have no extension, so name filters cannot catch them; the hook
-#      checks the staged BLOB's magic bytes).                 [P5.6]
+#      checks the staged BLOB's magic bytes).
 # and must pass a normal text file.
 #
 # Self-contained: builds a scratch repo under mktemp, installs the hook,

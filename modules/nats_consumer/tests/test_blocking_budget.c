@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.2] The SIP-worker blocking budget, consumer side:
+ * The SIP-worker blocking budget, consumer side:
  *
  *   - the sync-fetch wait loop actually RE-CHECKS the connection it
  *     sliced its waits for (a worker no longer sits out the full
@@ -25,7 +25,7 @@
  *   - the DELIVERING resume path has a terminal bound: past
  *     deadline + NATS_RPC_DELIVERING_GRACE_US the worker stops
  *     polling and surfaces -2 -- WITHOUT freeing the slot under the
- *     consumer's pin (the [P2.2] orphan reaper reclaims it).
+ *     consumer's pin (the orphan reaper reclaims it).
  *
  * Source-pattern (both paths need a dying broker / dying delivery
  * thread to drive behaviorally; the outage e2e covers the fetch case).

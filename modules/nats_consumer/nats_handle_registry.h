@@ -468,7 +468,7 @@ int nats_registry_foreach(int (*cb)(nats_handle_t *h, void *user),
                           void *user);
 
 /**
- * [P3.4] Iterate WITHOUT holding registry locks during cb: the live
+ * Iterate WITHOUT holding registry locks during cb: the live
  * handles are snapshotted + pending_ops-pinned under the locks, the
  * locks drop, then cb runs per pinned handle (pin released after each
  * call; on early-stop the remaining pins are still released).

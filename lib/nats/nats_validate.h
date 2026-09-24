@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_validate.h — subject/key/name validators (P2.8 split out of
+ * nats_validate.h — subject/key/name validators (split out of
  * nats_pool.h; implementation in nats_validate.c).
  */
 

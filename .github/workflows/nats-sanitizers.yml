@@ -106,7 +106,7 @@ jobs:
           # which predates kvStore_WatchMulti / kvStore_WatchAll-with-opts
           # and several other symbols referenced by lib/nats/nats_dl_table.def.
           # install_libnats.sh builds the ONE pinned nats.c SHA every CI
-          # leg shares (P5.1); LIBNATS_TLS=ON for dev-env parity.  The
+          # leg shares; LIBNATS_TLS=ON for dev-env parity.  The
           # container runs as root, so SUDO stays empty.
           apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev libuv1-dev cmake wget \
@@ -157,7 +157,7 @@ jobs:
               LDFLAGS="-lpthread ${SAN_LDFLAGS}" \
               "${CHECK_TARGET}"
 
-  # Plain-compiler warning gate (P5.6): gcc + clang at -O2 with -Werror.
+  # Plain-compiler warning gate: gcc + clang at -O2 with -Werror.
   # -O2 matters -- flow-dependent warnings (-Wclobbered and friends) only
   # fire with optimization, and the sanitizer legs build -O0.  Runs the
   # check-tsan subset: that list is exactly "tests that do not REQUIRE a

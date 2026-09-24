@@ -48,7 +48,7 @@
 #include "../../cachedb/cachedb.h"
 #include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
 
-/* optional FTS module binds (P1.2 split; defined in cachedb_nats.c).
+/* optional FTS module binds (defined in cachedb_nats.c).
  * cdbn_fts_on == 0 -> hooks are NULL, PK-only operation. */
 extern cdbn_fts_api_t cdbn_fts;
 extern int cdbn_fts_on;
@@ -78,7 +78,7 @@ typedef struct _nats_cachedb_con {
                                          * allocated, freed on destroy).
                                          * Corresponds to the "database"
                                          * portion of the cachedb URL. */
-    nats_epoch_t kv_epoch;              /* [P2.8] epoch tag of the kv
+    nats_epoch_t kv_epoch;              /* epoch tag of the kv
                                          * handle (lib/nats/nats_epoch.h);
                                          * see nats_con_refresh_kv(). */
 } nats_cachedb_con;
@@ -104,7 +104,7 @@ typedef struct _nats_cachedb_con {
  */
 int nats_con_refresh_kv(nats_cachedb_con *ncon);
 
-/* [P3.7] One shared, rate-limited (30s/process) WARN for the module's
+/* One shared, rate-limited (30s/process) WARN for the module's
  * KV-op disconnect fast-fails; the per-call lines stay DBG.  @op names
  * the failing operation class for the log line. */
 void nats_cdb_disconnected_warn(const char *op);
@@ -167,7 +167,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires);
 int nats_cache_remove(cachedb_con *con, str *attr);
 
 /*
- * _remove() "unsupported" stub  [P11 / SPEC §1.2 REV-10].
+ * _remove "unsupported" stub.
  *
  * The cachedb_funcs._remove slot (delete a federation-metadata entry by named
  * key) is only exercised in CM_FEDERATION_CACHEDB metadata maintenance, which
