@@ -68,9 +68,19 @@ test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 # nats_dl.c — lib/nats/Makefile compiles it normally.
 # Cannot run under ASan: ASan and dlopen of libnats together produce
 # false-positive "leak" reports for libnats's internal allocator state.
-test_nats_dl: test_nats_dl.c ../nats_dl.c
+test_nats_dl: test_nats_dl.c ../nats_dl.c fake_libnats_ok.so fake_libnats_bump.so fake_libnats_nover.so
 	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
 		-o $@ test_nats_dl.c ../nats_dl.c -ldl
+
+# Stand-in libnats builds for the version-guard cases (see
+# fake_libnats_version.c).  Built against the same headers as the test.
+FAKE_LIBNATS_CC = $(CC) -shared -fPIC -I/usr/local/include -o $@ fake_libnats_version.c
+fake_libnats_ok.so: fake_libnats_version.c
+	$(FAKE_LIBNATS_CC)
+fake_libnats_bump.so: fake_libnats_version.c
+	$(FAKE_LIBNATS_CC) -DFAKE_BUMP_MINOR
+fake_libnats_nover.so: fake_libnats_version.c
+	$(FAKE_LIBNATS_CC) -DFAKE_NO_VERSION
 
 # nats_load_ca_directory: libc-only directory walker; no OpenSIPS
 # runtime needed.  ASan-clean.
@@ -159,4 +169,4 @@ test_kv_ttl_probe_matrix: test_kv_ttl_probe_matrix.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 
 clean:
-	rm -f $(TESTS) ../nats_redact.o ../nats_validate.o ../nats_rank.o
+	rm -f $(TESTS) fake_libnats_*.so ../nats_redact.o ../nats_validate.o ../nats_rank.o

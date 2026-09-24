@@ -9,14 +9,19 @@
 #     draining (if previously bound; otherwise we skip the publish)
 # After the run:
 #   - nats_consumer_list count should be bounded (<= 20).
-#   - opensips main process memory (RSS) should not grow unboundedly
-#     (<= 2x start).  We snapshot `ps -o rss=` at start and end.
+#   - opensips memory (summed RSS of all its processes) should not grow unboundedly
+#     (<= 2x start).  We snapshot the summed RSS of every opensips
+#     process (opensips_rss_total) at start and end.
 #   - MI must still respond (round-trip nats_consumer_list succeeds).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/lib.sh"
 
 ensure_stack
+# Start from a clean handle registry: the stack survives between runs and
+# stress_multi_worker leaves its "mw" handle bound, which would make the
+# bind below fail with 409 "duplicate id".
+restart_opensips_clean || exit 1
 
 DURATION="${DURATION:-900}"  # 15 minutes
 ensure_stream MW 'mw.>'
@@ -27,7 +32,7 @@ ensure_stream MW 'mw.>'
 nats_bind mw MW durable=mw filter=mw.job ack_wait=60s max_ack_pending=1024 >/dev/null
 
 snap_rss() {
-    ${COMPOSE} exec -T opensips sh -c 'ps -o rss= -p 1 | tr -d " "'
+    opensips_rss_total
 }
 
 # Count handles currently registered (before churn begins).  The

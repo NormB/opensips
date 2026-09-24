@@ -71,6 +71,12 @@ need() {
 [ -f "$TREE_ROOT/modules/cachedb_nats/cachedb_nats.so" ] || skip "cachedb_nats.so not built"
 [ -f "$TREE_ROOT/modules/tls_mgm/tls_mgm.so" ] || skip "tls_mgm.so not built (likely tls_mgm not in your build set)"
 [ -f "$TREE_ROOT/modules/tls_openssl/tls_openssl.so" ] || skip "tls_openssl.so not built"
+# A libnats built without TLS refuses tls:// URLs (no silent plaintext
+# downgrade), so every TLS check below would fail for an environmental
+# reason; skip with the reason instead.  CI treats any non-zero exit,
+# 77 included, as a failure, so this cannot hide a TLS regression there.
+. "$HERE/libnats_tls_probe.sh"
+tls_reason="$(libnats_tls_check)" || skip "$tls_reason"
 need openssl
 need nats-server
 need nc

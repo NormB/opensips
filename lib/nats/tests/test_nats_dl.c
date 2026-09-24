@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 /*
  * Stub the OpenSIPS log macros so this unit test can link without
@@ -185,6 +186,51 @@ int main(void)
 	            "is_loaded true after env-var-fallback load");
 	unsetenv("NATS_DL_LIBNATS_PATH");
 	nats_dl_unload();
+
+	/* Header/runtime version guard.  nats_dl passes struct layouts
+	 * across the dlopen boundary (e.g. kvWatchOptions grew from 40 to
+	 * 56 bytes in 3.15), so a libnats whose major.minor differs from
+	 * the headers opensips was compiled against must be refused
+	 * before any call writes a struct of the wrong size. */
+	ASSERT_EQ_INT(nats_dl_version_compatible(0x030F00, 0x030F00), 1,
+	              "same version is compatible");
+	ASSERT_EQ_INT(nats_dl_version_compatible(0x030F00, 0x030F07), 1,
+	              "patch-level difference is compatible");
+	ASSERT_EQ_INT(nats_dl_version_compatible(0x030E00, 0x030F00), 0,
+	              "newer minor at runtime (3.14 headers, 3.15 lib) is refused");
+	ASSERT_EQ_INT(nats_dl_version_compatible(0x030F00, 0x030E00), 0,
+	              "older minor at runtime is refused");
+	ASSERT_EQ_INT(nats_dl_version_compatible(0x030F00, 0x040F00), 0,
+	              "different major is refused");
+	{
+		void *h;
+
+		h = dlopen("./fake_libnats_ok.so", RTLD_NOW | RTLD_LOCAL);
+		ASSERT_NOT_NULL(h, "fake libnats (matching version) opens");
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_check_version(h, "fake_ok"), 0,
+			              "matching runtime version passes the guard");
+			dlclose(h);
+		}
+		h = dlopen("./fake_libnats_bump.so", RTLD_NOW | RTLD_LOCAL);
+		ASSERT_NOT_NULL(h, "fake libnats (next minor) opens");
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_check_version(h, "fake_bump"), -1,
+			              "next-minor runtime version is refused");
+			dlclose(h);
+		}
+		h = dlopen("./fake_libnats_nover.so", RTLD_NOW | RTLD_LOCAL);
+		ASSERT_NOT_NULL(h, "fake libnats (no version symbol) opens");
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_check_version(h, "fake_nover"), -1,
+			              "library without nats_GetVersionNumber is refused");
+			dlclose(h);
+		}
+		ASSERT_EQ_INT(nats_dl_load("./fake_libnats_bump.so"), -1,
+		              "nats_dl_load refuses a version-mismatched libnats");
+		ASSERT_TRUE(!nats_dl_is_loaded(),
+		            "is_loaded stays false after a version refusal");
+	}
 
 	fprintf(stderr, "==== %s (failures: %d) ====\n",
 	        g_fails == 0 ? "ALL PASS" : "SOME FAIL", g_fails);
