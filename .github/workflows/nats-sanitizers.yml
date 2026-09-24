@@ -120,6 +120,9 @@ jobs:
       - name: Lint — no raw KV row keys (AoRs) in log calls
         run: ./lib/nats/tests/lint_key_redaction.sh
 
+      - name: Lint — KV error logs carry the libnats detail
+        run: sh ./lib/nats/tests/lint_err_text.sh
+
       - name: Lint — no references to private planning material
         run: |
           sh ./lib/nats/tests/lint_private_refs.sh

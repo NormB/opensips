@@ -82,6 +82,7 @@
 #include "nats_redact.h"
 #include "nats_server_info.h"
 #include "nats_ca_dir.h"
+#include "nats_err.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
 /* This is a shared library (lib/nats), not a loadable module.
@@ -1320,12 +1321,11 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 			 * falls through to the plain error path, state stays
 			 * unprobed for the next attempt). */
 			LM_WARN("NATS pool: KV bucket '%s' create with "
-				"allow_msg_ttl_below_marker rejected (%s: %s); "
+				"allow_msg_ttl_below_marker rejected (%s); "
 				"retrying without it -- broker lacks the option, "
 				"per-key TTLs on history-keeping buckets stay "
 				"reaper-only\n",
-				bucket, nats_dl.natsStatus_GetText(s),
-				nats_dl.nats_GetLastError(NULL));
+				bucket, NATS_ERR_TEXT(s));
 			kvCfg.AllowMsgTTLBelowMarker = false;
 			kvCfg.LimitMarkerTTL = 0;
 			kv = NULL;
@@ -1339,7 +1339,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 #endif
 		if (s != NATS_OK) {
 			LM_ERR("NATS pool: KV bucket '%s' create failed: %s\n",
-				bucket, nats_dl.natsStatus_GetText(s));
+				bucket, NATS_ERR_TEXT(s));
 			return NULL;
 		}
 		LM_INFO("NATS pool: KV bucket '%s' created "

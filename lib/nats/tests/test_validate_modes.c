@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test for TODO #64: the four NATS subject/key/name validators
+ * Regression test: the four NATS subject/key/name validators
  * (publish subject, subscribe filter, stream/consumer name, KV key) were
  * consolidated into one lib/nats nats_validate(s, len, mode) with mode flags.
  * This locks in the per-mode rules so the consolidation can't drift:
@@ -25,7 +25,8 @@
  *   PUBLISH_SUBJECT  concrete: no wildcards, no leading/trailing/empty tokens
  *   FILTER_SUBJECT   dots + wildcards ('*','>') allowed
  *   STREAM_NAME      single token: no '.', '*', '>', '/', '\'
- *   KV_KEY           dots allowed; ':' reserved; no wildcards
+ *   KV_KEY           the nats.c key alphabet only: letters, digits and
+ *                    . _ - / \ =; no leading/trailing dot, no empty token
  * all reject NULL/empty/NUL/control/whitespace.
  *
  * Build:
@@ -89,12 +90,36 @@ int main(void)
 	V(-1, NATS_VALIDATE_STREAM_NAME, "a/b",         "name: slash rejected");
 	V(-1, NATS_VALIDATE_STREAM_NAME, "a\\b",        "name: backslash rejected");
 
-	/* KV_KEY — dots ok, ':' reserved, no wildcards */
-	V(0,  NATS_VALIDATE_KV_KEY, "user.1@host",  "kv: dots/@ ok");
+	/* KV_KEY — exactly the key alphabet nats.c accepts (kv.c validKey):
+	 * anything the module lets through must not fail later inside
+	 * kvStore_* with a bare "Invalid Argument". */
 	V(0,  NATS_VALIDATE_KV_KEY, "a/b=c",        "kv: slash/equals ok");
+	V(0,  NATS_VALIDATE_KV_KEY, "Az09._-/=\\x", "kv: full allowed alphabet ok");
+	V(0,  NATS_VALIDATE_KV_KEY, "k",            "kv: single char ok");
+	V(0,  NATS_VALIDATE_KV_KEY, "json_alice=40example.com", "kv: encoded usrloc key ok");
+	V(0,  NATS_VALIDATE_KV_KEY, "__cdbn_ttl_canary", "kv: canary key ok");
+	V(-1, NATS_VALIDATE_KV_KEY, "user.1@host",  "kv: '@' rejected (Call-ID/AoR char)");
+	V(-1, NATS_VALIDATE_KV_KEY, "+15551234",    "kv: '+' rejected (E.164)");
+	V(-1, NATS_VALIDATE_KV_KEY, "a~b",          "kv: '~' rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, "a%b",          "kv: '%' rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, "a\"b",        "kv: quote rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, "caf\xc3\xa9",  "kv: non-ASCII rejected");
 	V(-1, NATS_VALIDATE_KV_KEY, "a:b",          "kv: ':' rejected (map sep)");
 	V(-1, NATS_VALIDATE_KV_KEY, "a*",           "kv: wildcard rejected");
 	V(-1, NATS_VALIDATE_KV_KEY, "a>",           "kv: '>' rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, ".a",           "kv: leading dot rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, "a.",           "kv: trailing dot rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, ".",            "kv: lone dot rejected");
+	V(-1, NATS_VALIDATE_KV_KEY, "a..b",         "kv: empty token rejected");
+	{
+		static const char nul[] = { 'a', '\0', 'b' };
+		int got = nats_validate(nul, 3, NATS_VALIDATE_KV_KEY);
+		if (got != -1) {
+			fprintf(stderr, "FAIL: kv: embedded NUL want=-1 got=%d\n", got);
+			g_fails++;
+		} else
+			fprintf(stderr, "  ok: kv: embedded NUL rejected -> -1\n");
+	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

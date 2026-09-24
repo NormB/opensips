@@ -31,6 +31,7 @@ on:
       - 'modules/nats_consumer/**'
       - 'modules/tls_mgm/**'
       - 'modules/tls_openssl/**'
+      - 'scripts/build/install_libnats.sh'
       - '.github/workflows/nats-tls-backends.yml'
   pull_request:
     paths:
@@ -41,6 +42,7 @@ on:
       - 'modules/nats_consumer/**'
       - 'modules/tls_mgm/**'
       - 'modules/tls_openssl/**'
+      - 'scripts/build/install_libnats.sh'
       - '.github/workflows/nats-tls-backends.yml'
 
 jobs:
@@ -63,6 +65,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
+            autoconf automake libtool git \
             nats-server
           # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
@@ -88,5 +91,18 @@ jobs:
           # signed certs under a per-test workdir, boots opensips with
           # tls_mgm + cachedb_nats against it, and asserts handshake
           # completion plus negative scenarios (no tls_mgm loaded, no
-          # 'nats' client_domain, ca_dir directory path, verify_cert=0).
+          # 'nats' client_domain, ca_dir directory path, verify_cert=0,
+          # a broker certificate issued for another host).
           bash lib/nats/tests/test_tls_mgm_smoke.sh
+      - name: Build a wolfSSL-backed libnats (lib/nats/patches)
+        run: |
+          PREFIX="$RUNNER_TEMP/nats-wolfssl" \
+            sh lib/nats/patches/build_libnats_wolfssl.sh
+      - name: Run both tls_mgm smokes on the wolfSSL-backed libnats
+        run: |
+          set -e
+          lib=$(ls "$RUNNER_TEMP"/nats-wolfssl/libnats/lib/libnats.so.* \
+                | grep -E '\.so\.[0-9]+\.[0-9]+$' | head -1)
+          export NATS_DL_LIBNATS_PATH="$lib"
+          bash lib/nats/tests/test_tls_mgm_smoke.sh
+          bash modules/nats_consumer/tests/test_tls_mgm_consumer_smoke.sh

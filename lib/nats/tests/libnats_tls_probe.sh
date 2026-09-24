@@ -7,7 +7,8 @@
 #
 # The library checked is the one lib/nats/nats_dl.c will dlopen():
 # $NATS_DL_LIBNATS_PATH when set, otherwise the system libnats that
-# `ldconfig -p` resolves.  TLS-capable == dynamically links libssl.
+# `ldconfig -p` resolves.  TLS-capable == dynamically links libssl, or
+# libwolfssl for a libnats built with the patch in lib/nats/patches/.
 
 # libnats_path -> path of the libnats opensips will load ("" if none found)
 libnats_path() {
@@ -30,8 +31,8 @@ libnats_tls_check() {
         echo "libnats ${lib} does not exist"
         return 1
     fi
-    if ! ldd "${lib}" 2>/dev/null | grep -q libssl; then
-        echo "libnats at ${lib} was built without TLS (no libssl linkage); rebuild with -DNATS_BUILD_WITH_TLS=ON or point NATS_DL_LIBNATS_PATH at a TLS build"
+    if ! ldd "${lib}" 2>/dev/null | grep -Eq 'libssl|libwolfssl'; then
+        echo "libnats at ${lib} was built without TLS (no libssl or libwolfssl linkage); rebuild with -DNATS_BUILD_WITH_TLS=ON or point NATS_DL_LIBNATS_PATH at a TLS build"
         return 1
     fi
     return 0

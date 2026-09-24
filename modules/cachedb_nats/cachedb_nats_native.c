@@ -56,6 +56,7 @@
 #include "../../lib/nats/nats_rl.h"   /* rate-limited outage WARN */
 #include "cachedb_nats_expiry.h"
 #include "../../lib/nats/nats_str.h"
+#include "../../lib/nats/nats_err.h"   /* NATS_ERR_TEXT */
 #include "../../mi/mi.h"
 #include "../../mi/item.h"
 
@@ -144,7 +145,7 @@ int w_nats_kv_history(struct sip_msg *msg, str *key, pv_spec_t *result_var)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_History failed for '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -324,7 +325,7 @@ int w_nats_kv_get(struct sip_msg *msg, str *bucket, str *key,
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -472,7 +473,7 @@ int w_nats_kv_put(struct sip_msg *msg, str *bucket, str *key, str *value)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Put failed for '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -631,7 +632,7 @@ int w_nats_kv_delete(struct sip_msg *msg, str *bucket, str *key)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Delete failed for '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -697,7 +698,7 @@ int w_nats_kv_revision(struct sip_msg *msg, str *bucket, str *key,
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -888,7 +889,7 @@ static int raw_kv_keys(kvStore *kv, cdb_raw_entry ***reply,
 		return 0;
 	}
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_Keys failed: %s\n", nats_dl.natsStatus_GetText(s));
+		LM_ERR("kvStore_Keys failed: %s\n", NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -1006,7 +1007,7 @@ static int raw_kv_purge(kvStore *kv, const char *key)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Purge failed for key '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -1039,7 +1040,7 @@ static int raw_kv_bucket_info(kvStore *kv, cdb_raw_entry ***reply,
 
 	s = nats_dl.kvStore_Status(&sts, kv);
 	if (s != NATS_OK) {
-		LM_ERR("kvStore_Status failed: %s\n", nats_dl.natsStatus_GetText(s));
+		LM_ERR("kvStore_Status failed: %s\n", NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -1398,7 +1399,7 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		nats_dl.kvKeysList_Destroy(&keys);
 	} else if (s != NATS_NOT_FOUND) {
 		LM_ERR("map_get: KeysWithFilters failed: %s\n",
-			nats_dl.natsStatus_GetText(s));
+			NATS_ERR_TEXT(s));
 		return -1;
 	}
 
@@ -1505,7 +1506,7 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 			s = nats_dl.kvStore_PutString(&rev, ncon->kv, full_key, val_buf);
 			if (s != NATS_OK) {
 				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					full_key, nats_dl.natsStatus_GetText(s));
+					full_key, NATS_ERR_TEXT(s));
 				return -1;
 			}
 			LM_DBG("map_set: stored '%s' rev=%llu\n", full_key,
@@ -1542,7 +1543,7 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 			s = nats_dl.kvStore_PutString(&rev, ncon->kv, map_key, val_buf);
 			if (s != NATS_OK) {
 				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					map_key, nats_dl.natsStatus_GetText(s));
+					map_key, NATS_ERR_TEXT(s));
 				return -1;
 			}
 			LM_DBG("map_set: stored '%s' rev=%llu\n", map_key,
@@ -1600,7 +1601,7 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 		s = nats_dl.kvStore_Delete(ncon->kv, map_key);
 		if (s != NATS_OK && s != NATS_NOT_FOUND) {
 			LM_ERR("kvStore_Delete failed for '%s': %s\n",
-				map_key, nats_dl.natsStatus_GetText(s));
+				map_key, NATS_ERR_TEXT(s));
 			return -1;
 		}
 		LM_DBG("map_remove: deleted '%s'\n", map_key);
@@ -1637,12 +1638,12 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 				s = nats_dl.kvStore_Delete(ncon->kv, keys.Keys[i]);
 				if (s != NATS_OK && s != NATS_NOT_FOUND)
 					LM_WARN("map_remove: failed to delete '%s': %s\n",
-						keys.Keys[i], nats_dl.natsStatus_GetText(s));
+						keys.Keys[i], NATS_ERR_TEXT(s));
 			}
 			nats_dl.kvKeysList_Destroy(&keys);
 		} else if (s != NATS_NOT_FOUND) {
 			LM_ERR("map_remove: KeysWithFilters failed: %s\n",
-				nats_dl.natsStatus_GetText(s));
+				NATS_ERR_TEXT(s));
 		}
 	}
 

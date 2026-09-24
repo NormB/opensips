@@ -168,12 +168,17 @@ Switching to a different libnats build needs a restart.
 
 ### wolfSSL-backed libnats
 
-Upstream nats.c supports only OpenSSL. A wolfSSL port was proposed in
-[nats-io/nats.c#867](https://github.com/nats-io/nats.c/pull/867) and
-closed without merge. This tree carries a rebased version of that
-change in [patches/](patches/), with its provenance and build recipe.
-The patch targets nats.c v3.12.0 and does not apply to the 3.14+
-libnats the modules now require; see [Limitations](#limitations).
+Upstream nats.c supports only OpenSSL. This tree carries a patch that
+adds a wolfSSL backend, and a script that builds wolfSSL plus a patched
+libnats from the nats.c commit CI uses:
+
+```bash title="Build a wolfSSL-backed libnats"
+PREFIX=/opt/nats-wolfssl sh lib/nats/patches/build_libnats_wolfssl.sh
+```
+
+Then set `NATS_DL_LIBNATS_PATH` to the library it reports. CI runs both
+TLS smoke tests against this build. See [patches/](patches/) for what
+the patch changes and where it came from.
 
 
 ## How the modules share a connection
@@ -267,9 +272,10 @@ These apply to the whole family. Each module's README lists its own.
   is refused at load time. There is no fallback library.
 - **One libnats per process.** All connections in an OpenSIPS instance
   use the same library; switching builds needs a restart.
-- **wolfSSL on the NATS side is not currently usable.** The vendored
-  patch in [patches/](patches/) applies only to nats.c v3.12.0, which
-  is older than the minimum libnats. Use an OpenSSL-backed libnats.
+- **wolfSSL on the NATS side needs a patched libnats.** Upstream nats.c
+  has no wolfSSL backend; build one with the patch in
+  [patches/](patches/). It is tested against the nats.c commit CI pins
+  (it also applies to v3.14.0) and wolfSSL v5.9.1.
 - **No packages.** The OpenSIPS packaging does not include the NATS
   modules, and OpenSIPS does not ship libnats. Build from source.
 - **Builds skip the NATS modules** (with a `[skip]` build message) when
