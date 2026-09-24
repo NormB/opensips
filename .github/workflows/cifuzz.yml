@@ -28,6 +28,12 @@ on:
       - 'scripts/**'
 jobs:
   Fuzzing:
+    # CIFuzz builds the oss-fuzz "opensips" project, which fetches
+    # refs/pull/<N>/merge from OpenSIPS/opensips -- in a fork that is an
+    # unrelated upstream PR with the same number, so the job can only
+    # fail or test the wrong code.  Run it in the canonical repo only
+    # (which still covers fork PRs submitted upstream).
+    if: github.repository == 'OpenSIPS/opensips'
     runs-on: ubuntu-latest
     steps:
     - name: Build Fuzzers
