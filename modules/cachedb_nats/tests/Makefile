@@ -57,7 +57,7 @@ CORE_DEFS := -fPIC -DPIC \
              -DFAST_LOCK -DADAPTIVE_WAIT -DADAPTIVE_WAIT_LOOPS=1024 \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 
-# [P2.5] the shared top-level JSON field iterator: #includes the
+# the shared top-level JSON field iterator: #includes the
 # production walker TU, whose core includes need the full define set.
 test_json_foreach: EXTRA := $(CORE_DEFS)
 test_json_foreach: ../cachedb_nats_json_walk.c ../cachedb_nats_json_internal.h
@@ -75,39 +75,39 @@ test_reap_first_jitter: ../cachedb_nats_expiry.h ../cachedb_nats_expiry.c
 # embedded-NUL, boundary contracts) -- rebuild when the header moves.
 test_str_to_buf_nul: ../../../lib/nats/nats_str.h
 
-# [P3.5] _sink_emit_int divide-loop: links the REAL ser TU and
+# _sink_emit_int divide-loop: links the REAL ser TU and
 # characterizes every edge value (incl. INT64_MIN) against printf.
 test_sink_emit_int: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_ser.c -D_GNU_SOURCE
 test_sink_emit_int: ../cachedb_nats_json_ser.c ../cachedb_nats_json_internal.h
 
-# P0.1: kv_epoch must not latch on a failed refresh — links the real
+# Kv_epoch must not latch on a failed refresh — links the real
 # nats_con_refresh_kv() from ../cachedb_nats_dbase.c with a fake pool.
 test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c ../../../lib/nats/nats_redact.c
 test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
 
-# P0.4: kv_put/kv_update fast-fail must not leak the pkg value copy;
+# Kv_put/kv_update fast-fail must not leak the pkg value copy;
 # kv_get must fail when the pvar write fails.  Links ../cachedb_nats_native.c.
 test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c ../../../lib/nats/nats_redact.c
 test_kv_put_fastfail_leak: ../cachedb_nats_native.c ../cachedb_nats_native.h
 
-# P0.6: a KV snapshot stalling mid-stream must fail the index build/rebuild
+# A KV snapshot stalling mid-stream must fail the index build/rebuild
 # and keep the prior live index.  Links the real json_index + intern TUs.
 test_index_partial_snapshot: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_index_partial_snapshot: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c ../cachedb_nats_json.h
 
-# [P3.5 residue] FTS write-side entry points take (key, key_len): every
+# FTS write-side entry points take (key, key_len): every
 # key is an exactly-sized NON-NUL-terminated heap slice, so a surviving
 # strlen in the production TUs trips ASan.  Links the real FTS TUs.
 test_fts_key_len: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_fts_key_len: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 
-# [P5.4] Behavioural intern-table contracts on the REAL fts_intern.c
+# Behavioural intern-table contracts on the REAL fts_intern.c
 # (replaced this file's carried copy of the intern logic, which had
 # drifted, and the deleted source-pattern test_intern_scaling.c).
 test_intern_unit: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_intern.c
 test_intern_unit: ../../cachedb_nats_fts/fts_intern.c ../../cachedb_nats_fts/fts_intern.h
 
-# [P5.4] Behavioural index<->intern wiring and single-blob entry +
+# Behavioural index<->intern wiring and single-blob entry +
 # inline->external keys[] growth, both on the REAL FTS TUs (replaced
 # their file_contains source-pattern versions); ASan/LSan police the
 # blob layout and refcount balance.
@@ -116,7 +116,7 @@ test_intern_wiring: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/ft
 test_entry_blob_combine: EXTRA := $(CORE_DEFS) ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 test_entry_blob_combine: ../../cachedb_nats_fts/fts_index.c ../../cachedb_nats_fts/fts_intern.c ../cachedb_nats_json_walk.c
 
-# [P3.5 fold] cdbn_row_hygiene_finalize must be byte-identical to the
+# cdbn_row_hygiene_finalize must be byte-identical to the
 # sequential drop-expired -> finalize reference pair, on the REAL
 # rowmeta/ser/walk TUs; also prints the old-vs-fold micro-bench.
 test_row_fold_equiv: EXTRA := $(CORE_DEFS) ../cachedb_nats_json_rowmeta.c ../cachedb_nats_json_ser.c ../cachedb_nats_json_walk.c

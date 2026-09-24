@@ -17,20 +17,20 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.5 fold] Behavioural (ASan, REAL TUs): cdbn_row_hygiene_finalize()
+ * Behavioural (ASan, REAL TUs): cdbn_row_hygiene_finalize
  * — the single-walk fold of the update path's two passes — must be
  * BYTE-IDENTICAL to the sequential reference composition
  *     cdbn_row_finalize_metadata(cdbn_row_drop_expired_own(doc))
  * on every input, including the eligibility out-params (row_exp,
  * n_contacts, all_same), the non-usrloc byte-for-byte contract, and
- * every REV-21 / REV-34 edge (permanent sentinel, post-2038 int64,
+ * every edge (permanent sentinel, post-2038 int64,
  * negative expiry, untouched-expired no-collateral, unset pairs, the
  * NATS_MAX_DROP_IDS overflow deferral).
  *
  * The old pair stays in production (the reaper uses finalize alone), so
  * the reference is the real code, not a carried copy.  A relative
  * micro-bench (old pair vs fold, same binary) prints at the end as the
- * P3.5 profiling evidence; it asserts nothing.
+ * Profiling evidence; it asserts nothing.
  */
 
 #include <stdio.h>

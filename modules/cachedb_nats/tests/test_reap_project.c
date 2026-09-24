@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P9 / SPEC.md §4.3A [REV-1 / REV-16 / REV-3 / REV-26]: the reaper's survivor
+ * / SPEC.mdA: the reaper's survivor
  * projection.  Given a stored usrloc row JSON, drop every DUE contact and
  * recompute the row's expiry sentinel over the survivors, so the reaper can
  * CAS-write the survivor row (or, when nothing survives, learn it must instead
@@ -28,9 +28,9 @@
  *     - expires == 0           -> permanent, KEEP (never reaped);
  *     - expires + grace <= now -> DUE, drop  (grace = nats_reap_grace = S);
  *     - absent/unparseable     -> fail-closed DUE, drop (never keep a binding
- *                                 we cannot prove is live) [REV-26];
+ *                                 we cannot prove is live);
  *     - else                   -> live, KEEP.
- *   row_exp is recomputed over the SURVIVORS only (min, 0 = permanent) [REV-34];
+ *   row_exp is recomputed over the SURVIVORS only (min, 0 = permanent);
  *   a row with no top-level "contacts" is not a usrloc row -> returned unchanged
  *   with *n_survivors = -1 so the reaper skips it; a fully-due row returns valid
  *   JSON with an empty contacts {} and *n_survivors = 0 (caller CAS-deletes).
@@ -470,7 +470,7 @@ int main(void)
 	printf("== carried copy: FIXED reaper survivor projection ==\n");
 #endif
 
-	printf("[REV-1] partial prune: one expired + one live -> survivor kept, row_exp recomputed:\n");
+	printf("partial prune: one expired + one live -> survivor kept, row_exp recomputed:\n");
 	{ const char *d = "{\"contacts\":{\"a\":{\"expires\":900},\"b\":{\"expires\":5000}},\"aorhash\":7}";
 	o = cdbn_reap_project_survivors(d, (int)strlen(d), now, S, &n, NULL); }
 	CHECK(o != NULL, "projection returns a document");
@@ -481,7 +481,7 @@ int main(void)
 	CHECK(o && strstr(o, "\"aorhash\":7") != NULL, "other top-level fields preserved");
 	free(o);
 
-	printf("[REV-1] grace boundary is inclusive (expires+S == now => due):\n");
+	printf("grace boundary is inclusive (expires+S == now => due):\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":995}}}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":995}}}"), now, S, &n, NULL);
@@ -489,7 +489,7 @@ int main(void)
 	CHECK(o && strstr(o, "\"a\":") == NULL, "boundary contact dropped");
 	free(o);
 
-	printf("[REV-1] within-skew contact NOT due (expires+S > now):\n");
+	printf("within-skew contact NOT due (expires+S > now):\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":996}}}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":996}}}"), now, S, &n, NULL);
@@ -497,7 +497,7 @@ int main(void)
 	CHECK(o && _rowexp_of(o) == 996, "row_exp == 996");
 	free(o);
 
-	printf("[REV-26] fail-closed: a contact with NO/!int expires is DUE (dropped):\n");
+	printf("fail-closed: a contact with NO/!int expires is DUE (dropped):\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"callid\":\"x\"},\"b\":{\"expires\":5000}}}",
 		(int)strlen("{\"contacts\":{\"a\":{\"callid\":\"x\"},\"b\":{\"expires\":5000}}}"),
@@ -506,7 +506,7 @@ int main(void)
 	CHECK(o && strstr(o, "\"a\":") == NULL, "absent-expires contact dropped (fail-closed)");
 	free(o);
 
-	printf("[REV-1] permanent (expires==0) is NEVER reaped:\n");
+	printf("permanent (expires==0) is NEVER reaped:\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":0},\"b\":{\"expires\":900}}}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":0},\"b\":{\"expires\":900}}}"),
@@ -516,7 +516,7 @@ int main(void)
 	CHECK(o && _rowexp_of(o) == 0, "any permanent survivor => row_exp 0");
 	free(o);
 
-	printf("[REV-16] fully-due row => 0 survivors + empty contacts (caller CAS-deletes):\n");
+	printf("fully-due row => 0 survivors + empty contacts (caller CAS-deletes):\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":900},\"b\":{\"expires\":800}},\"aorhash\":7}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":900},\"b\":{\"expires\":800}},\"aorhash\":7}"),
@@ -526,7 +526,7 @@ int main(void)
 	CHECK(o && _rowexp_of(o) == 0, "row_exp 0 over empty survivor set");
 	free(o);
 
-	printf("[REV-1] nothing due => all kept, row_exp = min(survivors):\n");
+	printf("nothing due => all kept, row_exp = min(survivors):\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":5000},\"b\":{\"expires\":4000}}}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":5000},\"b\":{\"expires\":4000}}}"),
@@ -535,7 +535,7 @@ int main(void)
 	CHECK(o && _rowexp_of(o) == 4000, "row_exp == min(5000,4000) == 4000");
 	free(o);
 
-	printf("[REV-18] stale private peers replaced, exactly one each:\n");
+	printf("stale private peers replaced, exactly one each:\n");
 	o = cdbn_reap_project_survivors(
 		"{\"contacts\":{\"a\":{\"expires\":5000}},\"row_exp\":111,\"schema_version\":1}",
 		(int)strlen("{\"contacts\":{\"a\":{\"expires\":5000}},\"row_exp\":111,\"schema_version\":1}"),
@@ -545,13 +545,13 @@ int main(void)
 	CHECK(o && _count(o, "\"schema_version\"") == 1, "exactly one schema_version key");
 	free(o);
 
-	printf("[REV-18] non-usrloc doc (no contacts) untouched, n_survivors = -1:\n");
+	printf("non-usrloc doc (no contacts) untouched, n_survivors = -1:\n");
 	o = cdbn_reap_project_survivors("{\"foo\":1}", (int)strlen("{\"foo\":1}"), now, S, &n, NULL);
 	CHECK(o && n == -1, "no contacts => n_survivors -1 (reaper skips)");
 	CHECK(o && strcmp(o, "{\"foo\":1}") == 0, "doc returned byte-for-byte");
 	free(o);
 
-	printf("[REV-1/25] reaper due-gate over the stored row_exp:\n");
+	printf("reaper due-gate over the stored row_exp:\n");
 	CHECK(cdbn_reap_row_due_json("{\"row_exp\":900}", 15, now, S) == 1, "row_exp 900 +5<=1000 => due (1)");
 	CHECK(cdbn_reap_row_due_json("{\"row_exp\":996}", 15, now, S) == 0, "row_exp 996 +5>1000 => not due (0)");
 	CHECK(cdbn_reap_row_due_json("{\"row_exp\":0}", 13, now, S) == 0, "row_exp 0 (permanent) => never due (0)");

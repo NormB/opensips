@@ -19,11 +19,11 @@
  *
  * Native per-key TTL row writes, gated on the kv_ttl_below_marker probe.
  *
- * P1.5a deleted the TTL-carrying write path because (a) TTLs were lost on
+ * Deleted the TTL-carrying write path because (a) TTLs were lost on
  * plain updates (nats-io #1994/#6959), (b) history-keeping buckets rolled
  * back to older revisions on expiry, and (c) the capability latch needed
  * its own probe layer.  All three are now solved: every row write goes
- * through the single CAS helper and re-asserts the TTL (§2.0), the fork
+ * through the single CAS helper and re-asserts the TTL, the fork
  * nats-server honors below-marker TTLs on History>1 buckets, and the
  * kv_ttl_below_marker modparam probe answers "is that server here?".
  * This test locks the resurrection:

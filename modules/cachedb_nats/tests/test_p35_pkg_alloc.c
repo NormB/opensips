@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.5] Hot-path allocator policy: the JSON compose/serialize/rowmeta
+ * Hot-path allocator policy: the JSON compose/serialize/rowmeta
  * TUs ran on raw libc malloc/free.  Every context that touches them is
  * a single-threaded OpenSIPS process (SIP worker main thread, the
  * dedicated watcher/reaper procs), so pkg is legal -- and unlike libc,

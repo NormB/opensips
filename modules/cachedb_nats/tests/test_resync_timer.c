@@ -58,7 +58,7 @@ static int grep_in_function(const char *path, const char *fn, const char *needle
 
 int main(void)
 {
-	const char *src = "../cachedb_nats_watch.c";   /* [P2.7] body moved */
+	const char *src = "../cachedb_nats_watch.c";   /* body moved */
 
 	ASSERT(grep_in_function(src, "nats_cdb_periodic_resync",
 		"nats_pool_is_connected") == 0,

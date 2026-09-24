@@ -83,7 +83,7 @@ modparam("cachedb_nats", "kv_bucket", "${BUCKET}")
 modparam("cachedb_nats", "kv_replicas", 1)
 
 loadmodule "nats_consumer.so"
-# Owner decision 3: declarative bind — the handle exists from boot,
+# Declarative bind — the handle exists from boot,
 # no MI round-trip needed (and proves the modparam path end-to-end).
 modparam("nats_consumer", "bind",
     "id=ib;stream=${STREAM};durable=ibd;filter=x8.in.test;ack_wait=30s")
@@ -141,7 +141,7 @@ wait_for_log "evi_publish_event: Registered event <E_NATS_KV_CHANGE"   3  || fai
 sleep 0.5
 
 # The consumer handle is bound declaratively via the `bind` modparam
-# (owner decision 3); assert the boot log recorded it.
+# at boot; assert the boot log recorded it.
 wait_for_log "bound handle id=ib" 3 || fail "declarative bind not seen in log"
 
 # Inject a JetStream message that the consumer should pick up.
@@ -183,7 +183,7 @@ echo "    external subscriber caught: ${sub_count} message(s)"
 reg_count=$(grep -c "nats_pool_register: NATS pool: registered by" "${OPS_LOG}" || echo 0)
 [ "${reg_count}" = "1" ] || fail "expected exactly 1 pool registrant, saw ${reg_count}"
 
-# P0.3 single-owner MI: with all three modules co-loaded, the JS
+# Single-owner MI: with all three modules co-loaded, the JS
 # observability commands must be registered exactly once (cachedb_nats
 # owns them) and must respond over MI; the log must show no duplicate
 # MI registration.

@@ -19,7 +19,7 @@
  */
 
 /*
- * cachedb_nats_reg.c — registration observability [OBS]: the operator's view
+ * cachedb_nats_reg.c — registration observability: the operator's view
  * into the KV-stored registrations (see cachedb_nats_reg.h for the design
  * invariants).  The pure decision logic here is unit-locked by
  * tests/test_reg_filter.c, test_reg_sort_page.c and test_reg_row_scan.c;
@@ -47,7 +47,7 @@
 #include "cachedb_nats_reap_enum.h"
 
 extern char *fts_json_prefix;            /* cachedb_nats.c                   */
-extern int   fts_json_prefix_len;        /* [P3.6] cached at mod_init        */
+extern int   fts_json_prefix_len;        /* cached at mod_init               */
 extern int   nats_reap_grace;
 /* kv_bucket / kv_replicas / kv_history / kv_ttl come from cachedb_nats_dbase.h */
 
@@ -160,7 +160,7 @@ static int reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 #undef CPY
 }
 
-/* [FMT-4/7] string-valued format keys, shared shape with the kvobs parser */
+/* string-valued format keys, shared shape with the kvobs parser */
 static int reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
@@ -621,7 +621,7 @@ mi_response_t *mi_nats_reg_summary(const mi_params_t *params,
 		goto oom;
 
 	if (fk != FMT_JSON || ctx->want_domains) {
-		/* [P2.4] ONE walk: table = totals record + per-domain records;
+		/* ONE walk: table = totals record + per-domain records;
 		 * json = just the domains array (totals live at top level, the
 		 * `scope` cell and the empty expired/permanent trailers are
 		 * table-structural) */
@@ -843,7 +843,7 @@ mi_response_t *mi_nats_reg_list(const mi_params_t *params,
 		goto oom;
 
 	{
-		/* [P2.4] ONE walk; json rows land in the `aors` array, table
+		/* ONE walk; json rows land in the `aors` array, table
 		 * rows in the format/data blob */
 		static const char *COLS[] = {"aor", "contacts", "active", "expired",
 			"permanent", "expires_next", "expires_in", "last_mod"};
@@ -944,7 +944,7 @@ static const char *reg_state_str(int64_t exp, time_t now, int grace)
 	       st == REG_C_ACTIVE ? "active" : "expired";
 }
 
-/* [FMT] emit one named field of a contact dict into the table (string ->
+/* emit one named field of a contact dict into the table (string ->
  * fmt_str, ints -> fmt_int, absent/null/nested -> empty field). */
 static void show_fmt_field(struct fmt_table *t, const cdb_dict_t *ct,
 	const char *name, int nlen)
@@ -992,7 +992,7 @@ static int reg_show_meta(mi_item_t *obj, const str *aor, const char *key,
 	return 0;
 }
 
-/* [FMT] one fixed-16-column table record per contact */
+/* one fixed-16-column table record per contact */
 static void show_contact_fmt(struct fmt_table *t, const str *aor,
 	const cdb_pair_t *ct, time_t now)
 {

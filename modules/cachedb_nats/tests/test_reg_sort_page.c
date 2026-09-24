@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Registration-observability MI [OBS]: nats_reg_list ordering + pagination.
+ * Registration-observability MI: nats_reg_list ordering + pagination.
  *
  *   sort=aor       lexicographic on the decoded AoR (the stable default)
  *   sort=expiry    soonest non-permanent expiry first; rows with NO
@@ -151,7 +151,7 @@ int main(void)
 		{"b@x", 3, 1, 900, 70}, \
 	}
 
-	printf("[OBS] sort=aor (default) is lexicographic:\n");
+	printf("sort=aor (default) is lexicographic:\n");
 	{ struct reg_row_sum r[] = ROWS;
 	  CHECK(strcmp(order(r, 4, REG_SORT_AOR, 0, buf), "a@x,b@x,c@x,d@x") == 0,
 	        "aor asc"); }
@@ -159,7 +159,7 @@ int main(void)
 	  CHECK(strcmp(order(r, 4, REG_SORT_AOR, 1, buf), "d@x,c@x,b@x,a@x") == 0,
 	        "aor desc"); }
 
-	printf("[OBS] sort=expiry: what dies next first; permanent-only LAST:\n");
+	printf("sort=expiry: what dies next first; permanent-only LAST:\n");
 	{ struct reg_row_sum r[] = ROWS;
 	  CHECK(strcmp(order(r, 4, REG_SORT_EXPIRY, 0, buf), "c@x,d@x,b@x,a@x") == 0,
 	        "expiry asc (c/d tie -> AoR asc; permanent-only a@x last)"); }
@@ -167,7 +167,7 @@ int main(void)
 	  CHECK(strcmp(order(r, 4, REG_SORT_EXPIRY, 1, buf), "a@x,b@x,c@x,d@x") == 0,
 	        "expiry desc reverses the key but ties stay AoR-asc (deterministic)"); }
 
-	printf("[OBS] sort=contacts / sort=last_mod:\n");
+	printf("sort=contacts / sort=last_mod:\n");
 	{ struct reg_row_sum r[] = ROWS;
 	  CHECK(strcmp(order(r, 4, REG_SORT_CONTACTS, 0, buf), "b@x,d@x,c@x,a@x") == 0,
 	        "contacts asc (b/d tie at 1 -> AoR asc)"); }
@@ -175,7 +175,7 @@ int main(void)
 	  CHECK(strcmp(order(r, 4, REG_SORT_LAST_MOD, 1, buf), "d@x,b@x,c@x,a@x") == 0,
 	        "last_mod desc (most recently modified first)"); }
 
-	printf("[OBS] pagination window clamps:\n");
+	printf("pagination window clamps:\n");
 	{
 		long s, c;
 		cdbn_reg_page(10, 4, 0, &s, &c);

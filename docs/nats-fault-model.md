@@ -21,9 +21,9 @@ subscription-rebuild paths).
 |---|-------|--------------|----------|
 | 1 | **Down at boot** | Broker unreachable while every process runs `child_init` | Async first connect: `natsConnection_Connect` returns `NATS_NOT_YET_CONNECTED` immediately (`SetRetryOnFailedConnect`); the process continues **degraded** and cnats dials in the background. `_pool_reconnected_cb` doubles as the first-connect callback (sets `_connected`, bumps the reconnect epoch, marks KV handles stale). Boot completes in seconds; no SIP outage window. |
 | 2 | **Crash mid-operation** | TCP dies while a fetch/publish/RPC is in flight | Bounded by the per-op timeout; the next op hits class 3. `NATS_CONNECTION_CLOSED` from a Fetch marks the sub dirty for rebuild. |
-| 3 | **Down at op time** | Pool already disconnected when an op starts | Fast-fail everywhere — see §2. No op may block a SIP/timer/event process for a JetStream timeout while the broker is known-dead. |
+| 3 | **Down at op time** | Pool already disconnected when an op starts | Fast-fail everywhere — see No op may block a SIP/timer/event process for a JetStream timeout while the broker is known-dead. |
 | 4 | **Restart during traffic** | Broker comes back (same or fresh state) | Reconnect epoch bump → KV handles refreshed (`nats_con_refresh_kv`), consumer subscriptions destroyed + rebuilt (durable resumes past `last_stream_seq`), KV watcher re-watches, async-RPC inbox re-subscribed. No process restart needed. |
-| 5 | **Deleted server-side** | Stream/consumer/bucket removed while bound | Ephemeral consumers recreate automatically (`NATS_NOT_FOUND` → dirty → rebuild). Durable on a **deleted stream** wedges by design — see §5. |
+| 5 | **Deleted server-side** | Stream/consumer/bucket removed while bound | Ephemeral consumers recreate automatically (`NATS_NOT_FOUND` → dirty → rebuild). Durable on a **deleted stream** wedges by design — see |
 
 ## 2. Fast-fail return codes (class 3)
 
@@ -71,7 +71,7 @@ TCP, no clean close).
 | 2 crash mid-op | `sip_e2e/cases/040_broker_bounce.sh` | `test_outage_rpc_fetch_e2e.sh` | `event_nats/tests/test_publish_during_disconnect.sh` |
 | 3 down at op | `test_outage_matrix_e2e.sh` (9 ops, whole failing phase < 12 s) | `test_outage_rpc_fetch_e2e.sh` (fetch −2, request −3) + `test_request_fastfail.c` | publish fast-fail in the same tests |
 | 4 restart | `test_outage_matrix_e2e.sh` phase 3 + **watcher resume** check; sip_e2e 040 post-bounce REGISTER | `test_outage_rpc_fetch_e2e.sh` phase 3 (durable resumes); compose `test_reconnect.sh` | `test_publish_during_disconnect.sh` recovery beats |
-| 5 deleted server-side | — (see §5) | compose `test_ephemeral.sh` (ephemeral GC only) | — |
+| 5 deleted server-side | — | compose `test_ephemeral.sh` (ephemeral GC only) | — |
 | out-param contracts | `test_query_res_init.c`, `test_outparam_contracts.c` | — | — |
 
 Higher tiers: `sip_e2e/run.sh` (11 usrloc cases, 40 checks, two-instance),

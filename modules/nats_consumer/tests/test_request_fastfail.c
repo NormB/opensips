@@ -130,7 +130,7 @@ int main(void)
 		free(body);
 	}
 
-	/* --- [P3.7] outage logging policy on the fast-fail sites ---
+	/* --- outage logging policy on the fast-fail sites ---
 	 * A broker outage used to WARN once PER REQUEST from every SIP
 	 * worker (log flood at exactly the moment the box is unhappy).
 	 * Policy: rate-limited WARN (nats_rl_pass gate) + DBG per call. */

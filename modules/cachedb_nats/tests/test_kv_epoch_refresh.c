@@ -154,7 +154,7 @@ int main(void)
 	/* 1. steady state: same epoch, valid handle — no pool traffic */
 	memset(&con, 0, sizeof(con));
 	con.kv = H1;
-	con.kv_epoch.seen = 5;   /* [P2.8] epoch tag struct */
+	con.kv_epoch.seen = 5;   /* epoch tag struct */
 	fake_epoch = 5;
 	fake_connected = 1;
 	get_kv_calls = 0;

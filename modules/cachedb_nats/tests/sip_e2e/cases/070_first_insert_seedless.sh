@@ -1,4 +1,4 @@
-# 070 — [HREV-2/RC-2] seedless first insert: a cold REGISTER lands as exactly
+# 070 — seedless first insert: a cold REGISTER lands as exactly
 # ONE revision (the full row, TTL attached), never the old two-step
 # seed-write + CAS-update whose un-TTL'd seed revision resurrected when the
 # TTL'd head expired.

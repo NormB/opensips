@@ -1,4 +1,4 @@
-# 090 — [OBS] registration observability MI: nats_reg_summary / _list /
+# 090 — registration observability MI: nats_reg_summary / _list /
 # _show + the reaper-pass gauges in nats_cdb_stats.  usrloc's own ul_dump is
 # empty by design in full-sharing-cachedb mode, so these commands are the
 # operator's only SIP-level view of the bucket.
@@ -106,7 +106,7 @@ printf '%s' "$out" | grep -q "no such registration"
 check "show unknown AoR: 404, not an empty object" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 
-# ── [FMT] selectable output formats ──
+# ── selectable output formats ──
 out=$(mi nats_reg_list "state=all;sort=aor;format=csv")
 data=$(mi_data "$out")
 first=$(printf '%s' "$data" | head -1 | tr -d '\r')

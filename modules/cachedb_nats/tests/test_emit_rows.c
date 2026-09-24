@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * MAINTAINABILITY-PERF-SPEC.md P2.4: the row emitter behind the [OBS]/[KVOBS]
+ * The row emitter behind the/
  * MI handlers.  One walk per handler; the backend decides whether a row
  * becomes a JSON-MI object or a csv/txt table record.  This test locks the
  * TABLE backend and the dispatch surface by driving the PRODUCTION TUs
@@ -64,7 +64,7 @@ int main(void)
 	static const char *C3[] = {"aor", "contacts", "last_mod"};
 	static const char *C2[] = {"scope", "domain"};
 
-	printf("[P2.4] csv walk: header, str/i64/absent, quoting through the emitter:\n");
+	printf("csv walk: header, str/i64/absent, quoting through the emitter:\n");
 	CHECK(nats_emit_open_fmt(&e, FMT_CSV, 0, 1, C3, 3) == 0 && e.table == 1,
 	      "open_fmt(csv) selects the table backend");
 	CHECK(nats_emit_rec(&e) == 0, "rec() begins a record");
@@ -80,7 +80,7 @@ int main(void)
 	BLOB_IS(&e, "aor,contacts,last_mod\r\na@x,2,\r\n\"b,c\",1,7\r\n",
 		"absent = empty cell; comma-field quoted; CRLF records");
 
-	printf("[P2.4] lit = table-structural cell:\n");
+	printf("lit = table-structural cell:\n");
 	nats_emit_open_fmt(&e, FMT_CSV, 0, 1, C2, 2);
 	nats_emit_rec(&e);
 	nats_emit_lit(&e, "total", 5);
@@ -89,7 +89,7 @@ int main(void)
 	BLOB_IS(&e, "scope,domain\r\ntotal,\r\n",
 		"lit() lands in the table (json backend would drop it)");
 
-	printf("[P2.4] txt sanitization + eol=lf through the emitter:\n");
+	printf("txt sanitization + eol=lf through the emitter:\n");
 	nats_emit_open_fmt(&e, FMT_TXT, 1, 1, C3, 3);
 	nats_emit_rec(&e);
 	nats_emit_str(&e, "aor", 3, "tab\there", 8);    /* TAB -> space */
@@ -99,7 +99,7 @@ int main(void)
 	BLOB_IS(&e, "# aor\tcontacts\tlast_mod\ntab here\t0\tcr lf \n",
 		"txt: '# ' header, TAB/CR/LF in values become spaces, bare-LF eol");
 
-	printf("[P2.4] adversarial values, header=0:\n");
+	printf("adversarial values, header=0:\n");
 	nats_emit_open_fmt(&e, FMT_CSV, 0, 0, C3, 3);
 	nats_emit_rec(&e);
 	nats_emit_str(&e, "aor", 3, "say \"hi\"", 8);   /* quotes doubled  */
@@ -115,7 +115,7 @@ int main(void)
 		"\"evil\r\nrow\",-9223372036854775808,9223372036854775807\r\n",
 		"quote-doubling, backslash NOT special, empty value, i64 bounds");
 
-	printf("[P2.4] empty table + take/abort hygiene:\n");
+	printf("empty table + take/abort hygiene:\n");
 	nats_emit_open_fmt(&e, FMT_CSV, 0, 0, C3, 3);
 	BLOB_IS(&e, "", "no records + header=0 -> empty (non-NULL) blob");
 	nats_emit_open_fmt(&e, FMT_TXT, 0, 1, C2, 2);

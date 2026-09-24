@@ -66,7 +66,7 @@ jobs:
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
             nats-server
-          # One pinned nats.c SHA across every CI leg (P5.1); the pin
+          # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
           # NATS-over-TLS.
           SUDO=sudo LIBNATS_TLS=ON sh scripts/build/install_libnats.sh

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * MAINTAINABILITY-PERF-SPEC.md P2.5: the ONE top-level JSON field
+ * The ONE top-level JSON field
  * iterator behind the row-mutation paths.  The hand-rolled
  * cdbn_skip_ws/cdbn_parse_json_string/cdbn_skip_json_value walk skeleton used to
  * be copy-pasted through apply_pairs_one_pass /
@@ -104,22 +104,22 @@ int main(void)
 {
 	struct rec r;
 
-	printf("[P2.5] plain object: every field once, raw value spans:\n");
+	printf("plain object: every field once, raw value spans:\n");
 	CHECK(walk("{\"a\":1,\"b\":\"x\",\"c\":null}", &r) == 0 &&
 	      strcmp(r.buf, "a=1;b=\"x\";c=null;") == 0,
 		"scalar fields visited in order with exact spans");
 
-	printf("[P2.5] nested values are ONE span:\n");
+	printf("nested values are ONE span:\n");
 	CHECK(walk("{\"o\":{\"i\":{\"j\":[1,2]}},\"z\":9}", &r) == 0 &&
 	      strcmp(r.buf, "o={\"i\":{\"j\":[1,2]}};z=9;") == 0,
 		"nested object handed through as a single raw span");
 
-	printf("[P2.5] adversarial strings:\n");
+	printf("adversarial strings:\n");
 	CHECK(walk("{\"k\\\"ey\":\"br{ce,}\",\"b\\\\\":\"\"}", &r) == 0 &&
 	      strcmp(r.buf, "k\\\"ey=\"br{ce,}\";b\\\\=\"\";") == 0,
 		"escaped quote in name; braces/commas inside value strings");
 
-	printf("[P2.5] whitespace + empty object:\n");
+	printf("whitespace + empty object:\n");
 	CHECK(walk("  { \"a\" :  1 , \"b\" : 2 }  ", &r) == 0 && r.visited == 2,
 		"whitespace everywhere still walks both fields");
 	CHECK(walk("{}", &r) == 0 && r.visited == 0,
@@ -127,14 +127,14 @@ int main(void)
 	CHECK(walk("   { }  ", &r) == 0 && r.visited == 0,
 		"empty object with whitespace");
 
-	printf("[P2.5] cb abort stops the walk:\n");
+	printf("cb abort stops the walk:\n");
 	memset(&r, 0, sizeof(r));
 	r.abort_after = 2;
 	CHECK(cdbn_json_foreach_top_field("{\"a\":1,\"b\":2,\"c\":3}", 21,
 			rec_cb, &r) == -1 && r.visited == 2,
 		"abort after 2 fields: walk stops, -1 surfaced");
 
-	printf("[P2.5] malformed inputs surface -1:\n");
+	printf("malformed inputs surface -1:\n");
 	CHECK(walk("[1,2]", &r) == -1, "not an object");
 	CHECK(walk("{\"a\":1", &r) == -1, "unterminated object");
 	CHECK(walk("{\"a\" 1}", &r) == -1, "missing colon");

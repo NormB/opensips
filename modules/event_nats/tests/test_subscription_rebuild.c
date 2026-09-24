@@ -114,7 +114,7 @@ int main(void)
 {
 	const char *src = "../event_nats_sub.c";
 
-	/* [P2.8] the epoch idiom moved behind lib/nats/nats_epoch.h; the
+	/* the epoch idiom moved behind lib/nats/nats_epoch.h; the
 	 * loop tags its sub set and re-checks via the wrapper. */
 	ASSERT(grep_count(src, "nats_epoch_save") >= 1 &&
 	       grep_count(src, "nats_epoch_current") >= 1,

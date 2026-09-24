@@ -209,6 +209,6 @@ listed in each Makefile's `TESTS_TSAN_SAFE` and excluded from the
   [REVIEW.md](REVIEW.md) for the per-finding write-up, test tally,
   and items left for human review.
 - 2026-07 — six-dimension maintainability/perf review; the P0–P3
-  phases of `MAINTAINABILITY-PERF-SPEC.md` (design repo) landed
+  phases of `` (design repo) landed
   through this tree.  This document was rewritten against the code in
   P4.1 and is truth-locked by `tests/test_doc_truth.c`.

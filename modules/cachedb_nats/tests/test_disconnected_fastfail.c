@@ -93,7 +93,7 @@ int main(void)
 {
 	int n;
 
-	/* (cachedb_nats's request/reply function was removed in P0.3 —
+	/* (cachedb_nats's request/reply function was removed —
 	 * nats_consumer owns nats_request and has its own fast-fail test,
 	 * test_request_fastfail.) */
 

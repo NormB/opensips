@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P5 / TTL-SOLUTION-SPEC.md §2.5: delete / purge expressed as a publish.
+ * /: delete / purge expressed as a publish.
  *
  * A KV delete is a publish carrying the operation header — verified against
  * nats.go jetstream/kv.go: header name "KV-Operation", value "DEL" (tombstone,
@@ -60,12 +60,12 @@ int main(void)
 	printf("== carried copy: FIXED byte-exact headers ==\n");
 #endif
 
-	printf("[§2.5] KV-Operation header name + values are byte-exact:\n");
+	printf;
 	CHECK(strcmp(NATS_KV_OP_HDR, "KV-Operation") == 0, "header name == 'KV-Operation'");
 	CHECK(strcmp(cdbn_ttl_delete_op(0), "DEL") == 0, "delete op == 'DEL' (tombstone)");
 	CHECK(strcmp(cdbn_ttl_delete_op(1), "PURGE") == 0, "purge op == 'PURGE' (drop history)");
 
-	printf("[§2.5] case-exact (a wrong case is silently ignored by the server):\n");
+	printf("case-exact (a wrong case is silently ignored by the server):\n");
 	CHECK(strcmp(cdbn_ttl_delete_op(0), "del") != 0, "not lowercase 'del'");
 	CHECK(strcmp(cdbn_ttl_delete_op(0), "DELETE") != 0, "not 'DELETE'");
 	CHECK(strcmp(cdbn_ttl_delete_op(1), "purge") != 0, "not lowercase 'purge'");

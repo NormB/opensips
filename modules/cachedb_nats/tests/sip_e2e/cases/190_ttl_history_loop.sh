@@ -1,6 +1,6 @@
-# 190 — [TREV-11 §8.3(f) / REV-27] register/expire/re-register loop on ONE
+# 190 — register/expire/re-register loop on ONE
 # AoR: every cycle the key physically expires (the reaper CAS-deletes it --
-# reaper-only expiry, P1.5), and the next REGISTER must create over
+# reaper-only expiry), and the next REGISTER must create over
 # whatever the delete left behind first-attempt -- no lockout, no lost
 # value, and the bucket returns to empty after the final expiry.
 case_begin "190_ttl_history_loop"

@@ -167,7 +167,7 @@ cleanup:
 /* The read-only observability handlers were removed: cachedb_nats
  * owns the stream list/info MI commands (richer variants with
  * filter/pagination/format support), and defining the same global
- * handler symbols in two co-loaded modules was an ODR hazard (P0.3).
+ * handler symbols in two co-loaded modules was an ODR hazard.
  * Only the mutating admin handlers remain here. */
 
 /* ── nats_stream_create ─────────────────────────────────────── */

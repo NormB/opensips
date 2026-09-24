@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P8 / TTL-SOLUTION-SPEC.md §2.1 [TREV-5]: one key→subject mapping, three
+ * /: one key→subject mapping, three
  * consumers.  Once we hand-build the JetStream subject for a raw publish, we own
  * the key→subject mapping — and it MUST be byte-identical to what the read path
  * (kvStore_Get) and the watcher derive, or a raw-published value lands on a
@@ -72,19 +72,19 @@ int main(void)
 	printf("== carried copy: FIXED byte-exact subject ==\n");
 #endif
 
-	printf("[TREV-5] subject == \"$KV.<bucket>.<key>\" byte-exact:\n");
+	printf("subject == \"$KV.<bucket>.<key>\" byte-exact:\n");
 	CHECK(strcmp(subj("location", "usrloc.alice=40d"), "$KV.location.usrloc.alice=40d") == 0,
 	      "location / usrloc.alice=40d");
 	CHECK(strcmp(subj("opensips", "k1"), "$KV.opensips.k1") == 0, "opensips / k1");
 	CHECK(strncmp(subj("location", "x"), "$KV.", 4) == 0, "always begins '$KV.'");
 
-	printf("[TREV-5] already-P1-encoded keys (=HH escapes) pass through verbatim:\n");
+	printf("already-P1-encoded keys (=HH escapes) pass through verbatim:\n");
 	CHECK(strcmp(subj("location", "usrloc.a=5Cb=40d"), "$KV.location.usrloc.a=5Cb=40d") == 0,
 	      "escaped key (=5C backslash, =40 at) verbatim in subject");
 	CHECK(strcmp(subj("location", "usrloc.alice.example.com"), "$KV.location.usrloc.alice.example.com") == 0,
 	      "dotted (multi-token) key verbatim");
 
-	printf("[TREV-5] buffer-too-small fails cleanly (no overflow):\n");
+	printf("buffer-too-small fails cleanly (no overflow):\n");
 	{ char small[8]; CHECK(nats_kv_key_to_subject("location", "averylongkey", small, sizeof small) == -1,
 	      "too-small buffer => -1 (not truncated/overflowed)"); }
 	{ char tight[20]; int n = nats_kv_key_to_subject("b", "k", tight, sizeof tight);

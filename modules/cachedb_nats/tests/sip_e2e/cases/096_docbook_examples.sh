@@ -1,4 +1,4 @@
-# 096 — [DOCX] the docbook's MI examples, validated 100%.
+# 096 — the docbook's MI examples, validated 100%.
 #
 # Contract: EVERY `## opensips-cli -x mi ...` invocation in
 # doc/cachedb_nats_admin.xml is extracted MECHANICALLY and executed against

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Policy test [P3.6]: nats_json_index_rebuild() runs on a dedicated-proc main thread
+ * Policy test: nats_json_index_rebuild runs on a dedicated-proc main thread
  * (cachedb_nats_watch.c calls it for the post-reconnect / periodic resync).
  * pkg memory is per-process and NOT thread-safe, so its transient scratch
  * arrays (the shadow bucket array and the old-bucket snapshot) MUST be
@@ -90,11 +90,11 @@ int main(void)
 	ASSERT(body != NULL, "found nats_json_index_rebuild body");
 	if (!body) { fprintf(stderr, "\n=== FAILS=%d ===\n", g_fails); return 1; }
 
-	/* [P3.6] The scratch arrays (shadow buckets + old-buckets
+	/* The scratch arrays (shadow buckets + old-buckets
 	 * snapshot) are process-private and the rebuild runs on the MAIN
 	 * thread of a dedicated proc (the watcher process; the periodic
-	 * resync host [P3.3]) -- the in-worker watcher PTHREAD that once
-	 * made pkg unsafe here is long gone (P0.2), so pkg is legal,
+	 * resync host) -- the in-worker watcher PTHREAD that once
+	 * made pkg unsafe here is long gone, so pkg is legal,
 	 * skips two global-shm-lock round-trips per rebuild, and makes
 	 * leaks visible to pkg stats.  pkg OOM falls back to shm
 	 * (availability over the optimisation): both allocators must

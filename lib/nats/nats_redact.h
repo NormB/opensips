@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_redact.h — URL credential redaction for log lines (P2.8 split
+ * nats_redact.h — URL credential redaction for log lines (split
  * out of nats_pool.h; implementation in nats_redact.c).
  */
 

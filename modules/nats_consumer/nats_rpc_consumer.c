@@ -41,7 +41,7 @@
 #include "nats_rpc_slot.h"
 #include "nats_rpc_subject.h" /* reply-subject build/parse + generation */
 #include "nats_rpc_ipc.h"
-#include "nats_rpc_wake.h" /* [P3.1] IPC-wake the claiming worker */
+#include "nats_rpc_wake.h" /* IPC-wake the claiming worker */
 #include "nats_ring.h"     /* NATS_RING_*_MAX */
 #include "nats_rpc.h"      /* nats_rpc_hdr_deserialize_to_msg */
 
@@ -76,7 +76,7 @@ static int  g_inbox_prefix_len;
  * We only touch the SHM slot (via the slot_idx parsed from the
  * reply subject suffix): copy the reply payload into the slot,
  * transition state INFLIGHT -> DELIVERED with release ordering,
- * then [P3.1] IPC-wake the claiming worker so its resume runs at
+ * then IPC-wake the claiming worker so its resume runs at
  * wire latency instead of on the next guard tick (calling
  * ipc_send_rpc from a libnats thread follows the established
  * event_nats pattern).  A lost wake is covered by the worker's
@@ -231,7 +231,7 @@ static void on_inbox_reply(natsConnection *nc, natsSubscription *sub,
 	 * pinned, so a plain release store is correct and race-free -- the
 	 * worker consumes this reply for exactly the claim it was minted for.
 	 *
-	 * [P3.1] Read the wake destination while still pinned (the worker
+	 * Read the wake destination while still pinned (the worker
 	 * cannot free/re-claim a DELIVERING slot, so owner_proc is stably
 	 * ours here), then signal it AFTER the release store.  A refused
 	 * send just means the worker resumes on its guard tick. */
@@ -315,7 +315,7 @@ int nats_rpc_consumer_inbox_ready(void)
 	return g_inbox_sub != NULL;
 }
 
-/* ── worker->consumer IPC hop [P2.1] ─────────────────────────── */
+/* ── worker->consumer IPC hop ─────────────────────────── */
 
 /* SHM counters behind the rpc_ipc_* MI stats.  The pipe itself has no
  * readable depth, so depth is derived: sent - drained. */
@@ -384,7 +384,7 @@ uint32_t nats_rpc_ipc_depth(void)
 
 /*
  * Consumer-side fail-fast: CAS INFLIGHT -> ABANDONED and, when the CAS
- * wins, [P3.1] IPC-wake the claiming worker so it surfaces the failure
+ * wins, IPC-wake the claiming worker so it surfaces the failure
  * immediately instead of waiting out its guard tick.  The CAS (rather
  * than a blind store) matters: the worker may have already timed out,
  * freed the slot, and another caller re-claimed it -- a blind store
@@ -522,11 +522,11 @@ static void publish_slot(uint32_t slot_idx, uint32_t generation,
 	}
 	/* Slot stays INFLIGHT; the reply (matching reply_subject)
 	 * will land in on_inbox_reply, transition the slot to
-	 * DELIVERED and [P3.1] IPC-wake the claiming worker. */
+	 * DELIVERED and IPC-wake the claiming worker. */
 }
 
 /* The ipc_send_rpc handler for one worker->consumer publish request
- * [P2.1].  Runs in the consumer process when the main loop pumps its
+ *.  Runs in the consumer process when the main loop pumps its
  * IPC fd (gated on a live connection, so nc is normally set; a
  * connection lost between the gate and this call abandons the slot
  * fail-fast, exactly like a failed PublishMsg). */

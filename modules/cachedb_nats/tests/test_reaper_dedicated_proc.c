@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.3] The reaper's O(bucket) pass (kvStore_Keys + per-key Get + CAS)
+ * The reaper's O(bucket) pass (kvStore_Keys + per-key Get + CAS)
  * and the periodic index resync must NOT run in the shared OpenSIPS
  * timer process: at scale a single pass stalls usrloc/tm/dialog timers
  * system-wide for its full duration.  Both jobs now run in a dedicated

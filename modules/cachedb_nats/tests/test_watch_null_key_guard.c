@@ -115,7 +115,7 @@ int main(void)
 
 	/* Both call sites (EVI dispatch + index update; the third lived in
 	 * the dead non-EVI fallback arm removed with the always-true
-	 * HAVE_EVI guards, P1.4) must be present and guarded.  (If a
+	 * HAVE_EVI guards) must be present and guarded.  (If a
 	 * future refactor adds another, this asserts it is guarded too.) */
 	ASSERT(total >= 2, "both kvEntry_Key(entry) call sites present");
 	ASSERT(guarded == total,

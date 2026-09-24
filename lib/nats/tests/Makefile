@@ -7,7 +7,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-# Auto-discovered [P5.3]: every test_*.c is a test with its own main().
+# Auto-discovered: every test_*.c is a test with its own main.
 TESTS := $(sort $(patsubst %.c,%,$(wildcard test_*.c)))
 
 # All lib/nats unit tests are TSan-safe (no race exercises).
@@ -17,7 +17,7 @@ all: $(TESTS)
 
 # Lib TUs some tests link against, built HERE with the same
 # CFLAGS/ASAN as the tests -- sanitizer and -Werror legs get matching
-# instrumentation, and the suite works from a clean tree.  [P5.3]
+# instrumentation, and the suite works from a clean tree.
 ../%.o: ../%.c
 	$(CC) $(CFLAGS) $(ASAN) -fPIC -I../../.. -c $< -o $@
 
@@ -45,15 +45,15 @@ test_pool_merge: test_pool_merge.c
 test_nats_rank: test_nats_rank.c ../nats_rank.o
 	$(CC) $(CFLAGS) $(ASAN) -I../../.. -o $@ test_nats_rank.c ../nats_rank.o
 
-# [P3.7] header-only one-per-interval log gate (outage logging policy).
+# header-only one-per-interval log gate (outage logging policy).
 test_rl: test_rl.c ../nats_rl.h
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_rl.c
 
-# [P4.1/P4.3/P4.7] README + pool-doctrine truth-lock (source patterns).
+# README + pool-doctrine truth-lock (source patterns).
 test_doc_truth: test_doc_truth.c ../README.md ../nats_pool.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ test_doc_truth.c
 
-# [P4.5] drain-timeout merge decision (header inline) + setter WARN lock.
+# drain-timeout merge decision (header inline) + setter WARN lock.
 test_drain_merge: test_drain_merge.c ../nats_pool.h
 	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_drain_merge.c
 
@@ -164,7 +164,7 @@ check-tsan: $(TESTS_TSAN_SAFE)
 test_async_first_connect: test_async_first_connect.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-# [HREV-1] composed per-message-TTL probe decision matrix (carried copies).
+# composed per-message-TTL probe decision matrix (carried copies).
 test_kv_ttl_probe_matrix: test_kv_ttl_probe_matrix.c
 	$(CC) $(CFLAGS) $(ASAN) -o $@ $<
 

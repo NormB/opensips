@@ -1,7 +1,7 @@
-# 085 — [REV-6/F6] multi-contact row with UNIFORM expiry: the all_same
+# 085 — multi-contact row with UNIFORM expiry: the all_same
 # eligibility arm.  Two contacts sharing one absolute expiry are safe under a
 # single row TTL (nothing live gets tombstoned), so the write MUST carry
-# no Nats-TTL (reaper-only, P1.5); the reaper reclaims the whole row
+# no Nats-TTL (reaper-only expiry); the reaper reclaims the whole row
 # (this runs on the default 30 s reaper; native TTL beats its first tick).
 case_begin "085_multi_contact_same_expiry"
 

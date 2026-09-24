@@ -464,7 +464,7 @@ route[got_reply] {
    36-byte snprintf. Measured at roughly 200 ns on aarch64; below
    the noise floor of the libnats round-trip.
 
-   UUIDv7 layout. RFC 9562 §5.7 lexicographically-sortable Type-7
+   UUIDv7 layout. RFC 9562 lexicographically-sortable Type-7
    UUID: 48-bit unix milliseconds, 4-bit version (7), 12 random
    bits, 2 variant bits (10b), 62 random bits. Globally unique
    across instances and time; grep-able as one string from

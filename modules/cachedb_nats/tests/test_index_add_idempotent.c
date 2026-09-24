@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * REV-26 (P10 follow-up): nats_json_index_add must increment num_documents only
+ * (P10 follow-up): nats_json_index_add must increment num_documents only
  * for a GENUINELY-NEW doc-key, so the counter equals the true unique-key
  * cardinality.
  *
@@ -90,7 +90,7 @@ static void index_add(const char *key)
 #else
 	int was_present = rev_contains(key);   /* check BEFORE the put */
 	rev_put(key);
-	if (!was_present)                      /* REV-26: only a genuinely-new key counts */
+	if (!was_present)                      /*: only a genuinely-new key counts */
 		num_documents += 1;
 #endif
 }
@@ -111,10 +111,10 @@ int main(void)
 #ifdef COUNTER_UNCONDITIONAL
 	printf("== carried copy: COUNTER_UNCONDITIONAL (+1 every add = today's bug) ==\n");
 #else
-	printf("== carried copy: REV-26 membership-gated increment ==\n");
+	printf("== carried copy: membership-gated increment ==\n");
 #endif
 
-	printf("[REV-26] a node's own write is indexed twice (inline + watcher echo) => count ONCE:\n");
+	printf("a node's own write is indexed twice (inline + watcher echo) => count ONCE:\n");
 	index_add("usrloc.alice");                      /* inline write */
 	CHECK(num_documents == 1, "first add of alice => 1");
 	index_add("usrloc.alice");                      /* watcher echo of the SAME Put */
@@ -123,20 +123,20 @@ int main(void)
 	CHECK(num_documents == 1, "third re-add of alice => STILL 1");
 	INVARIANT();
 
-	printf("[REV-26] distinct keys each count once:\n");
+	printf("distinct keys each count once:\n");
 	index_add("usrloc.bob");
 	index_add("usrloc.bob");                        /* bob's echo */
 	CHECK(num_documents == 2, "alice + bob (each echoed) => 2");
 	INVARIANT();
 
-	printf("[REV-26] a re-REGISTER UPDATE (remove_fields then add) nets zero:\n");
+	printf("a re-REGISTER UPDATE (remove_fields then add) nets zero:\n");
 	index_remove("usrloc.alice");                   /* remove_fields(-1) */
 	index_add("usrloc.alice");                      /* add(+1) over the same key */
 	index_add("usrloc.alice");                      /* its echo */
 	CHECK(num_documents == 2, "update alice => still 2 (no drift)");
 	INVARIANT();
 
-	printf("[REV-26] a single live key removed by the watcher MUST reach 0:\n");
+	printf("a single live key removed by the watcher MUST reach 0:\n");
 	index_remove("usrloc.alice");
 	index_remove("usrloc.bob");
 	CHECK(num_documents == 0, "both removed => 0 (the P10 e2e's num_documents->0)");

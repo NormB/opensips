@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P10 / TTL-SOLUTION-SPEC §4 [TREV-2a], SPEC §12 [REV-26] observability.
+ * Observability.
  *
  * The in-SHM forward index tracks live document keys in g_idx->num_documents
  * (an _Atomic int).  Until P10 there was NO way to OBSERVE that count, so a
@@ -77,14 +77,14 @@ int main(void)
 	printf("== carried copy: FIXED index-count accessor ==\n");
 #endif
 
-	printf("[REV-26] uninitialized index MUST be NULL-safe (no deref/crash):\n");
+	printf("uninitialized index MUST be NULL-safe (no deref/crash):\n");
 	g_idx = NULL;
 	CHECK(nats_json_index_count() == -1, "g_idx==NULL => -1 (not initialized)");
 
 	struct nats_json_index idx = { 0 };
 	g_idx = &idx;
 
-	printf("[TREV-2a] the accessor MUST track the live document count:\n");
+	printf("the accessor MUST track the live document count:\n");
 	idx_set(0);
 	CHECK(nats_json_index_count() == 0, "empty index => 0 (distinct from -1)");
 	idx_add();
@@ -92,13 +92,13 @@ int main(void)
 	idx_set(0); idx_add(); idx_add(); idx_add();
 	CHECK(nats_json_index_count() == 3, "three adds => 3");
 
-	printf("[TREV-2a] a marker-driven removal MUST be observable as a decrement:\n");
+	printf("a marker-driven removal MUST be observable as a decrement:\n");
 	idx_set(1);
 	CHECK(nats_json_index_count() == 1, "one live row baseline => 1");
 	idx_sub();                                  /* watcher drops the entry */
 	CHECK(nats_json_index_count() == 0, "after the watcher removes it => 0 (index entry GONE)");
 
-	printf("[REV-26] scale: no truncation of a large count:\n");
+	printf("scale: no truncation of a large count:\n");
 	idx_set(1000000);
 	CHECK(nats_json_index_count() == 1000000, "1,000,000 docs => exact");
 

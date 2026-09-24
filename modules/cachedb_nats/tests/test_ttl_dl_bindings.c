@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P6 / TTL-SOLUTION-SPEC.md §2.4 [REV-11 / TREV-4 / PREV-10]: the two new
+ * /: the two new
  * libnats bindings the raw-publish path needs must be reachable THROUGH the
  * module's dlopen table — not just via a -lnats-linked spike.
  *
@@ -68,7 +68,7 @@ int main(void)
 {
 	printf("== P6 libnats bindings: js_PublishMsg (Phase A dropped js_UpdateStream) ==\n");
 
-	printf("[TREV-4] Part A: nats_dl_table.def lists the NATS_DL_FN entries:\n");
+	printf("Part A: nats_dl_table.def lists the NATS_DL_FN entries:\n");
 	{
 		int a = def_has("NATS_DL_FN(js_PublishMsg)");
 		/* Phase A: per-key TTL is enabled at bucket creation via
@@ -86,7 +86,7 @@ int main(void)
 		}
 	}
 
-	printf("[PREV-10] Part B: both symbols resolve through the dlopen path:\n");
+	printf("Part B: both symbols resolve through the dlopen path:\n");
 	{
 		void *h = dlopen("libnats.so", RTLD_NOW | RTLD_GLOBAL);
 		if (!h) h = dlopen("libnats.so.3", RTLD_NOW | RTLD_GLOBAL);
