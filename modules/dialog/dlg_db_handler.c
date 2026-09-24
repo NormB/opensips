@@ -1340,10 +1340,8 @@ str* write_dialog_vars( struct dlg_cell *dlg)
 	if (o.len!=p-o.s) {
 		LM_CRIT("BUG - buffer overflow allocated %d, written %d\n",
 			o.len,(int)(p-o.s));
-		lock_stop_read(dlg->vals_lock);
 		return NULL;
 	}
-	lock_stop_read(dlg->vals_lock);
 	LM_DBG("var string is <%.*s>(%d)\n", l,o.s,l);
 
 	return &o;
