@@ -17,17 +17,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.5 / SPEC.md §4.2 [REV-26]: fail-closed on a poison stored value.
+ * / SPEC.md: fail-closed on a poison stored value.
  *
  * On read, the current code gates on `data && data_len > 0 && data[0] == '{'`
  * and treats EVERYTHING else as "no row" — so a non-empty value that is not a
  * JSON object (null / a bare string / a number / an array / garbage planted by
  * an old node, a co-writer, or an attacker) silently empties the AoR, i.e. a
- * silent deregistration.  [REV-26] makes that a hard integrity error: alarm +
+ * silent deregistration. makes that a hard integrity error: alarm +
  * `poison_values_rejected`, NOT a masked empty result.
  *
  * An EMPTY value (zero-length / all-whitespace) is a *legitimate* server-side
- * delete marker (TTL-SOLUTION §2.2/§4) and stays "absent", not poison.
+ * delete marker and stays "absent", not poison.
  *
  * cdbn_value_classify(data,len) is the pure leaf:
  *   EMPTY  -> absent (delete marker)        -> res.count stays 0, no error
@@ -94,18 +94,18 @@ int main(void)
 	printf("== carried copy: FIXED classifier ==\n");
 #endif
 
-	printf("[REV-26] empty value == delete marker (absent, NOT poison):\n");
+	printf("empty value == delete marker (absent, NOT poison):\n");
 	EXPECT(NULL, 0, VAL_EMPTY, "NULL => EMPTY");
 	EXPECTS("", VAL_EMPTY, "zero-length => EMPTY");
 	EXPECTS("   ", VAL_EMPTY, "all-whitespace => EMPTY (marker)");
 	EXPECTS("\t\n", VAL_EMPTY, "ws-only => EMPTY");
 
-	printf("[REV-26] a JSON object parses normally:\n");
+	printf("a JSON object parses normally:\n");
 	EXPECTS("{}", VAL_OBJECT, "empty object => OBJECT");
 	EXPECTS("{\"contacts\":{\"c1\":{\"expires\":9}}}", VAL_OBJECT, "real row => OBJECT");
 	EXPECTS("  {\"x\":1}", VAL_OBJECT, "object with leading ws => OBJECT");
 
-	printf("[REV-26] a non-empty non-object is POISON (hard error, not empty):\n");
+	printf("a non-empty non-object is POISON (hard error, not empty):\n");
 	EXPECTS("null", VAL_POISON, "null => POISON");
 	EXPECTS("\"a string\"", VAL_POISON, "bare string => POISON");
 	EXPECTS("42", VAL_POISON, "bare number => POISON");

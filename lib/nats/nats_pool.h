@@ -61,7 +61,7 @@
 #ifndef NATS_POOL_H
 #define NATS_POOL_H
 
-#include "nats_epoch.h"   /* epoch idiom + the two liveness accessors [P2.8] */
+#include "nats_epoch.h"   /* epoch idiom + the two liveness accessors */
 
 #include <nats/nats.h>
 
@@ -240,11 +240,11 @@ void nats_pool_unregister(void);
  *                Reads volatile/atomic state.
  *
  * Declared in nats_epoch.h (included below) so SHM-struct headers can
- * embed the epoch tag without the full pool surface [P2.8].
+ * embed the epoch tag without the full pool surface.
  */
 
 /*
- * P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
+ * Read the bound bucket's backing-stream MaxAge (ns) into *out_ns.
  * Used at child_init to detect a PRE-EXISTING bucket that already carries a
  * non-zero MaxAge (which would silently expire permanent contacts).  Returns
  * 0 on success (*out_ns set), -1 if the stream info is unavailable.
@@ -252,14 +252,14 @@ void nats_pool_unregister(void);
 int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns);
 
 /*
- * [HREV-1/D1.4]: read the bound bucket's backing-stream MaxMsgsPerSubject
+ *: read the bound bucket's backing-stream MaxMsgsPerSubject
  * (the KV history depth) into *out_mmps, for startup surfacing of a
  * PRE-EXISTING history-keeping bucket.  0 on success, -1 if unavailable.
  */
 int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps);
 
 /*
- * [TTL-BELOW-MARKER] kv_ttl_below_marker support request + probe result.
+ * kv_ttl_below_marker support request + probe result.
  *
  * nats_pool_kv_request_ttl_below_marker(): called at module init (from the
  * kv_ttl_below_marker modparam) BEFORE the first nats_pool_get_kv().  The
@@ -281,7 +281,7 @@ void nats_pool_kv_request_ttl_below_marker(int marker_ttl_secs);
 int nats_pool_kv_ttl_below_marker_state(void);
 
 /*
- * [TTL-BELOW-MARKER] behavioral downgrade: broker truth beats config
+ * behavioral downgrade: broker truth beats config
  * truth.  Called by the module when its short-TTL canary key survived
  * past its deadline on a bucket the probe had latched SUPPORTED --
  * latches UNSUPPORTED so TTL-carrying writes stop and expiry falls back
@@ -328,7 +328,7 @@ const char *nats_pool_get_server_info(void);
  *
  * Thread safety: Safe to call from any thread (atomic read).
  *
- * Declared in nats_epoch.h (included below) [P2.8].
+ * Declared in nats_epoch.h (included below).
  */
 
 /*
@@ -378,7 +378,7 @@ int nats_pool_should_init(int rank);
  */
 extern int nats_pool_drain_timeout_ms;
 
-/* [P4.5] Merge decision for the shared drain timeout, pure and
+/* Merge decision for the shared drain timeout, pure and
  * header-inline so the contract is unit-testable (tests/
  * test_drain_merge.c).  The FIRST explicit modparam value replaces
  * the built-in default outright -- an operator's choice out-ranks the

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P11c / SPEC.md §11 [REV-24]: the registration bucket is a PII / LI-relevant
+ * / SPEC.md: the registration bucket is a PII / LI-relevant
  * store (subscriber IP, UA, call-id, path).  Transport + auth are MANDATORY:
  * cachedb_nats MUST emit a startup LM_WARN when cachedb_url is plaintext
  * nats:// and/or carries no credentials, naming the data classification.
@@ -71,19 +71,19 @@ int main(void)
 	printf("== carried copy: FIXED url classifier ==\n");
 #endif
 
-	printf("[REV-24] insecure URLs MUST warn:\n");
+	printf("insecure URLs MUST warn:\n");
 	CHECK(nats_url_insecure("nats://host:4222") == 1, "plaintext + no creds => WARN");
 	CHECK(nats_url_insecure("nats://user:pass@host:4222") == 1, "plaintext WITH creds => still WARN (no TLS)");
 	CHECK(nats_url_insecure("tls://host:4222") == 1, "TLS but NO creds => WARN");
 	CHECK(nats_url_insecure("192.0.2.31:4222") == 1, "no scheme => WARN (malformed)");
 	CHECK(nats_url_insecure(NULL) == 1, "NULL url => WARN");
 
-	printf("[REV-24] only TLS + credentials is clean (no warn):\n");
+	printf("only TLS + credentials is clean (no warn):\n");
 	CHECK(nats_url_insecure("tls://user:pass@host:4222") == 0, "tls + user:pass => no WARN");
 	CHECK(nats_url_insecure("tls://user@host:4222") == 0, "tls + user@ (creds present) => no WARN");
 	CHECK(nats_url_insecure("tls://u:p@host:4222/path") == 0, "tls + creds + path => no WARN");
 
-	printf("[REV-24] adversarial: '@' in the path is NOT a credential:\n");
+	printf("adversarial: '@' in the path is NOT a credential:\n");
 	CHECK(nats_url_insecure("tls://host:4222/a@b") == 1, "'@' only in path => no creds => WARN");
 	CHECK(nats_url_insecure("nats://host/u:p@x") == 1, "plaintext, '@' in path => WARN");
 

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Generic KV/stream introspection MI [KVOBS]: the filter language shared by
+ * Generic KV/stream introspection MI: the filter language shared by
  * nats_stream_list and nats_kv_keys.  Same shape as the nats_reg_list
  * language (';'-separated key=value, unknown keys refused, limit hard-capped
  * at 200 for the MI datagram), different key set:
@@ -53,7 +53,7 @@ struct kvobs_filter {
 	int  detail;
 	long limit;
 	long offset;
-	int  format;                /* [FMT] 0=json 1=csv 2=txt */
+	int  format;                /* 0=json 1=csv 2=txt */
 	int  eol_lf;
 	int  header;
 };
@@ -177,7 +177,7 @@ int main(void)
 	printf("== carried copy: FIXED parser ==\n");
 #endif
 
-	printf("[KVOBS] defaults and happy path:\n");
+	printf("defaults and happy path:\n");
 	CHECK(cdbn_kvobs_filter_parse("", 0, &f) == 0 && f.limit == KVOBS_LIMIT_DEFAULT &&
 	      f.offset == 0 && !f.kv_only && !f.detail && !f.bucket[0],
 	      "empty filter => defaults");
@@ -196,7 +196,7 @@ int main(void)
 		      "stream_list filter round-trips");
 	}
 
-	printf("[KVOBS] fail loudly on bad input:\n");
+	printf("fail loudly on bad input:\n");
 	CHECK(cdbn_kvobs_filter_parse("wat=1", 5, &f) == -1, "unknown key => refused");
 	CHECK(cdbn_kvobs_filter_parse("kv=2", 4, &f) == -1, "kv flag not 0/1 => refused");
 	CHECK(cdbn_kvobs_filter_parse("detail=yes", 10, &f) == -1, "non-numeric flag => refused");
@@ -212,7 +212,7 @@ int main(void)
 		      "oversize bucket name refused, never truncated");
 	}
 
-	printf("[FMT] output-format keys:\n");
+	printf("output-format keys:\n");
 	{
 		const char *q = "key=json_*;format=csv;eol=lf;header=0";
 		CHECK(cdbn_kvobs_filter_parse(q, (int)strlen(q), &f) == 0 &&
@@ -225,7 +225,7 @@ int main(void)
 	CHECK(cdbn_kvobs_filter_parse("", 0, &f) == 0 && f.format == 0 && f.header == 1,
 	      "defaults: json + header on");
 
-	printf("[KVOBS] KV bucket name derived from the backing-stream name:\n");
+	printf("KV bucket name derived from the backing-stream name:\n");
 	{
 		const char *b; int bl;
 		CHECK(cdbn_kvobs_bucket_of_stream("KV_opensips", 11, &b, &bl) == 0 &&

@@ -19,7 +19,7 @@
  */
 
 /*
- * cachedb_nats_reg.h — registration observability [OBS].
+ * cachedb_nats_reg.h — registration observability.
  *
  * In usrloc full-sharing-cachedb mode the in-memory urecord is freed after
  * every flush, so usrloc's own MI (ul_dump & friends) is empty BY DESIGN and
@@ -33,14 +33,14 @@
  * plus reaper-piggybacked gauges in nats_cdb_stats (the reaper already Gets
  * every key each pass — recording totals there costs nothing extra on the
  * broker and gives monitoring a registration time series every
- * nats_reap_interval seconds) [D-OBS-2].
+ * nats_reap_interval seconds).
  *
  * Design invariants:
- *   [D-OBS-1] the bucket is the source of truth: MI scans on demand
+ * the bucket is the source of truth: MI scans on demand
  *             (kvStore_Keys + Get, the reaper's index-independent pattern);
  *             per-instance incremental gauges cannot represent a shared
  *             multi-writer bucket.
- *   [D-OBS-4] "active" == "would be served": expires==0 or expires+grace>now,
+ * "active" == "would be served": expires==0 or expires+grace>now,
  *             identical to the read filter; linger NEVER affects it.
  */
 
@@ -75,9 +75,9 @@ struct reg_filter {
 	int  desc;
 	long limit;                 /* default 50, clamped to REG_LIMIT_CAP */
 	long offset;
-	int  format;                /* [FMT] enum fmt_kind, default FMT_JSON */
-	int  eol_lf;                /* [FMT-7] 0=CRLF 1=LF */
-	int  header;                /* [FMT-5] header record on/off (default 1) */
+	int  format;                /* enum fmt_kind, default FMT_JSON */
+	int  eol_lf;                /* 0=CRLF 1=LF */
+	int  header;                /* header record on/off (default 1) */
 };
 
 /* One-pass summary of a stored usrloc row (slices point into the doc). */
@@ -93,13 +93,13 @@ struct reg_row_info {
  *
  * All of these are pure functions on caller-provided memory: no
  * allocation, no logging, no locking, no broker I/O.  Callable from any
- * process context; in production they run in the MI process (the [OBS]
+ * process context; in production they run in the MI process (the
  * handlers below) and cdbn_reg_row_scan additionally in the dedicated
  * reaper process (pass gauges) — cdbn_reg_page is also reused by the
- * [KVOBS] handlers. */
+ * stream/KV introspection handlers (cachedb_nats_kvobs.c). */
 
 /**
- * Classify one contact's expiry per [D-OBS-4].
+ * Classify one contact's expiry per.
  *
  * @param expires  the contact's absolute expiry (0 = permanent).
  * @param now      node-local current time.
@@ -140,7 +140,7 @@ int  cdbn_reg_substr(const char *hay, int hlen, const char *nee, int nlen);
 /**
  * Parse the nats_reg_list filter string (';'-separated key=value:
  * aor domain ua contact state sort desc limit offset expiring_within
- * min_contacts header, plus the [FMT-4/7] format/eol keys).
+ * min_contacts header, plus the format/eol keys).
  *
  * @param s    filter bytes (empty input yields pure defaults).
  * @param len  filter length.
@@ -186,7 +186,7 @@ int  cdbn_reg_row_cmp(const struct reg_row_info *a, const struct reg_row_info *b
  * @param json    stored row bytes (need not be NUL-terminated).
  * @param len     row length.
  * @param now     node-local current time.
- * @param grace   visibility grace (nats_reap_grace) [D-OBS-4].
+ * @param grace   visibility grace (nats_reap_grace).
  * @param ua_nee/ua_len  optional `ua` substring needle (NULL/0 = off).
  * @param ct_nee/ct_len  optional `contact` substring needle.
  * @param out     [out] filled summary.  out->aor is a BORROWED slice

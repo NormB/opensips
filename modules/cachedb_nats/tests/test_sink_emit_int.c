@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.5] cdbn_sink_emit_int(): the per-field snprintf("%lld") parsed a
+ * cdbn_sink_emit_int: the per-field snprintf("%lld") parsed a
  * format string for every integer emitted into a row document (expires,
  * cseq, last_mod, q, methods, row_exp ... a dozen per REGISTER); it is
  * now a plain divide-loop.  This is a characterization test against the

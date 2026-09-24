@@ -22,7 +22,7 @@
  * cachedb_nats_json.h — the JSON document layer's public API (query /
  * update entry points and the reaper's row projections).  The FTS
  * index declarations moved to the optional cachedb_nats_fts module
- * (P1.2 split — see cachedb_nats_fts/fts_index.h).
+ * (see cachedb_nats_fts/fts_index.h).
  */
 
 #ifndef CACHEDB_NATS_JSON_H
@@ -70,7 +70,7 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
                       const cdb_dict_t *pairs);
 
 
-/* P9 reaper (SPEC §4.3A) — pure, broker-less per-row decisions, defined in the
+/* Reaper — pure, broker-less per-row decisions, defined in the
  * rowmeta TU; exposed here so the reaper timer host in cachedb_nats.c can drive
  * them over each stored row before any CAS write/delete.
  *   cdbn_reap_project_survivors(): drop DUE contacts, recompute row_exp, return a

@@ -17,11 +17,11 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P11b / IMPLEMENTATION-PLAN P11b [REV-25], SPEC §5.3 [REV-7]: migration policy
+ * Migration policy
  * for a PRE-EXISTING bucket whose backing stream already carries a non-zero
  * MaxAge.
  *
- * The P7 guard `cdbn_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
+ * The guard `cdbn_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
  * `kv_ttl` MODPARAM — it stops THIS module from CREATING a MaxAge bucket.  It
  * does NOT cover the migration case: on first deploy against an EXISTING bucket
  * created by an older deployment (or another tool), the bound stream may already
@@ -75,10 +75,10 @@ int main(void)
 	printf("== carried copy: FIXED legacy-MaxAge policy ==\n");
 #endif
 
-	printf("[REV-7/REV-25] MaxAge==0 is the ONLY safe config -> no warn:\n");
+	printf("MaxAge==0 is the ONLY safe config -> no warn:\n");
 	CHECK(cdbn_kv_legacy_bucket_maxage_warn(0) == 0, "MaxAge=0 => clean (no warn)");
 
-	printf("[REV-7/REV-25] any non-zero MaxAge would expire permanent contacts -> WARN:\n");
+	printf("any non-zero MaxAge would expire permanent contacts -> WARN:\n");
 	CHECK(cdbn_kv_legacy_bucket_maxage_warn(30LL * NATS_NS_PER_S) == 1, "MaxAge=30s => WARN");
 	CHECK(cdbn_kv_legacy_bucket_maxage_warn(1) == 1, "MaxAge=1ns (sub-second) => WARN");
 	CHECK(cdbn_kv_legacy_bucket_maxage_warn(86400LL * NATS_NS_PER_S) == 1, "MaxAge=1d => WARN");

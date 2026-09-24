@@ -108,7 +108,7 @@ int main(void)
 		ASSERT(file_contains(h, "nats_inbound_dropped_oversize"),
 			"nats_consumer.h declares the inbound getters");
 
-		/* [P3.7] silent drops are not silent: both drop branches emit
+		/* silent drops are not silent: both drop branches emit
 		 * a rate-limited warning.  The delivery callback runs on a
 		 * libnats thread where dprint is off-limits (same rule as the
 		 * pool callbacks), so the warning rides the raw-write path,

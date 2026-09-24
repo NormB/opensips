@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P8 [R1 / TTL-SOLUTION-SPEC.md §4 TREV-2a]: watcher index action for a watched
+ *: watcher index action for a watched
  * KV entry.  cnats 3.12 surfaces a server-side MaxAge TTL-expiry as an
  * EMPTY-VALUE kvOp_Put (NOT a Delete/Purge op).  The watcher's index maintenance
  * must treat that empty-value Put as a REMOVAL -- otherwise, the moment
@@ -50,7 +50,7 @@ static enum watch_idx_action watch_index_action(int op, int val_len, char val0)
 	if (op == kvOp_Put) {
 #ifndef WATCH_CURRENT
 		if (val_len <= 0)
-			return WATCH_IDX_REMOVE;   /* [R1] empty-value Put = MaxAge tombstone */
+			return WATCH_IDX_REMOVE;   /* empty-value Put = MaxAge tombstone */
 #endif
 		if (val_len > 0 && val0 == '{')
 			return WATCH_IDX_ADD;      /* JSON doc; prefix checked at call site */
@@ -68,7 +68,7 @@ static void expect(const char *what, enum watch_idx_action got, enum watch_idx_a
 
 int main(void)
 {
-	printf("[R1] watcher index action over KV entry ops:\n");
+	printf("watcher index action over KV entry ops:\n");
 
 	/* the load-bearing case: an empty-value Put is a server MaxAge tombstone */
 	expect("Put, empty value (MaxAge marker)", watch_index_action(kvOp_Put, 0, 0), WATCH_IDX_REMOVE);

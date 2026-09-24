@@ -18,7 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * Coverage for TODO #74: the pool server-URL parse/merge (the comma
- * tokenizer factored in P3-61 into pool_append_server_urls) had no unit test.
+ * tokenizer factored into pool_append_server_urls) had no unit test.
  * It tokenizes a comma-separated URL string, trims whitespace, skips URLs
  * already present (dedup), detects tls://, and either hard-errors or
  * warn-skips when it would exceed the server cap.

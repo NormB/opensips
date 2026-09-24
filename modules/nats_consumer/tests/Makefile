@@ -18,6 +18,7 @@ WAKEIPC_SRCS := test_rpc_wake_ipc.c $(SHIM) ../nats_rpc_wake.c
 UNLOCKED_SRCS := test_registry_foreach_unlocked.c $(SHIM) ../nats_handle_registry.c
 REPLYPIN_SRCS := test_rpc_reply_pin.c $(SHIM) ../nats_rpc_slot.c
 ADVPARSE_SRCS := test_parser_adversarial.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
+DOCBIND_SRCS  := test_doc_bind_examples.c $(SHIM) ../nats_handle_parse.c ../nats_handle_registry.c
 SLOTLIFE_SRCS := test_rpc_slot_lifecycle.c $(SHIM) ../nats_rpc_slot.c
 INBOXAUTH_SRCS := test_rpc_inbox_auth.c $(SHIM) ../nats_rpc_subject.c ../nats_rpc_slot.c
 LOOKUPREF_SRCS := test_registry_lookup_ref.c $(SHIM) ../nats_handle_registry.c
@@ -29,7 +30,7 @@ RINGORDER_SRCS := test_registry_ring_alloc_order.c $(SHIM) ../nats_handle_regist
 # pins -fsanitize=address in its own rule (it is
 # specifically asserting an ASan trip on a bad slurp), so it cannot
 # be linked under ThreadSanitizer.  The rest of the suite is race-safe.
-# Auto-discovered [P5.3]: every test_*.c here is a test with its own
+# Auto-discovered: every test_*.c here is a test with its own
 # main(); test_shim.c is the shared seam TU, not a test.  Adding a test
 # = drop in test_foo.c (a custom rule/vars only when the link line
 # differs from the generic fallback at the bottom).  The old hand lists
@@ -52,6 +53,9 @@ test_registry: $(REG_SRCS) test_shim.h ../nats_handle_registry.h
 
 test_parser: $(PARSER_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle_parse.h
 	$(CC) $(CFLAGS) -o $@ $(PARSER_SRCS) $(LDFLAGS)
+
+test_doc_bind_examples: $(DOCBIND_SRCS) test_shim.h ../nats_handle_registry.h ../nats_handle_parse.h ../README.md
+	$(CC) $(CFLAGS) -o $@ $(DOCBIND_SRCS) $(LDFLAGS)
 
 test_ring: $(RING_SRCS) test_shim.h ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(RING_SRCS) $(LDFLAGS)
@@ -87,12 +91,12 @@ test_rpc_subject: $(SUBJECT_SRCS) test_shim.h ../nats_rpc_subject.h ../nats_rpc_
 test_rpc_ipc_generation: $(IPCGEN_SRCS) test_shim.h ../nats_rpc_slot.h ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(IPCGEN_SRCS) $(LDFLAGS)
 
-# [P2.1] The packed core-IPC param: {slot_idx, generation} <-> void*
+# The packed core-IPC param: {slot_idx, generation} <-> void*
 # roundtrip, field isolation, NULL-encoding.  Pure header logic.
 test_rpc_ipc_pack: test_rpc_ipc_pack.c ../nats_rpc_ipc.h
 	$(CC) $(CFLAGS) -fsanitize=address -o $@ test_rpc_ipc_pack.c $(LDFLAGS)
 
-# [P3.1] Reply wake over core IPC: the per-worker wake registry + the
+# Reply wake over core IPC: the per-worker wake registry + the
 # on_wake handler (pokes the registered guard timerfd on a matching
 # generation, silent no-op otherwise) + the consumer-side send helper
 # (recorded ipc_send_rpc seam lives in the test).
@@ -105,12 +109,12 @@ test_rpc_wake_ipc: $(WAKEIPC_SRCS) test_shim.h ../nats_rpc_wake.h ../nats_rpc_ip
 test_rebuild_bias_stale: test_rebuild_bias_stale.c ../nats_consumer_proc_internal.h
 	$(CC) -g -O0 -Wall $(CORE_DEFS) -I/usr/local/include -o $@ $<
 
-# [P3.6] Small hot-path policies: fetch resume params in pkg (worker-
+# Small hot-path policies: fetch resume params in pkg (worker-
 # local), request_id_header length cached at mod_init.  Source patterns.
-test_p36_alloc_policy: test_p36_alloc_policy.c
+test_alloc_policy: test_alloc_policy.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# [P3.4] Lock-free registry walk for the reconcile pass: handles are
+# Lock-free registry walk for the reconcile pass: handles are
 # snapshotted+pinned (pending_ops) under the locks, visited with NO
 # locks held (cb may unbind/reap -- deadlock under the locked foreach).
 # ASan on: a reap freeing a still-pinned handle is a UAF this test
@@ -128,7 +132,7 @@ test_parser_adversarial: $(ADVPARSE_SRCS) test_shim.h ../nats_handle_parse.h ../
 test_rpc_slot_lifecycle: $(SLOTLIFE_SRCS) test_shim.h ../nats_rpc_slot.h
 	$(CC) $(CFLAGS) -DNATS_RPC_SLOT_COUNT=1 -o $@ $(SLOTLIFE_SRCS) $(LDFLAGS)
 
-# [P2.2] Orphan reaper: dead-worker slots reclaimed after deadline+slack
+# Orphan reaper: dead-worker slots reclaimed after deadline+slack
 # (or claim-TTL pre-publish); DELIVERING pinned; generation-guarded free.
 SLOTREAP_SRCS := test_rpc_slot_reaper.c $(SHIM) ../nats_rpc_slot.c
 test_rpc_slot_reaper: $(SLOTREAP_SRCS) test_shim.h ../nats_rpc_slot.h
@@ -152,12 +156,12 @@ test_registry_lookup_ref: $(LOOKUPREF_SRCS) test_shim.h ../nats_handle_registry.
 test_registry_index_recycle: $(IDXRECYCLE_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(IDXRECYCLE_SRCS) $(LDFLAGS)
 
-# Owner decision 3: declarative `bind` modparam replaces file
+# The declarative `bind` modparam replaces file
 # persistence (nats_persist deleted).
 test_bind_modparam: test_bind_modparam.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# P0.7: bind must validate (duplicate/id/index-cap) BEFORE allocating the
+# Bind must validate (duplicate/id/index-cap) BEFORE allocating the
 # per-handle SHM ring — a rejected MI bind must not churn a giant alloc.
 test_registry_ring_alloc_order: $(RINGORDER_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(RINGORDER_SRCS) $(LDFLAGS)
@@ -168,7 +172,7 @@ RETIREDNOSUB_SRCS := test_retired_no_sub_reap.c $(SHIM) ../nats_handle_registry.
 test_retired_no_sub_reap: $(RETIREDNOSUB_SRCS) test_shim.h ../nats_handle_registry.h
 	$(CC) $(CFLAGS) -o $@ $(RETIREDNOSUB_SRCS) $(LDFLAGS)
 
-# P0.8: the orphan-retired pass must purge the msg-ref row a failed first
+# The orphan-retired pass must purge the msg-ref row a failed first
 # subscribe presized.  Links the REAL production TUs (no TEST_SHIM); the
 # core seams (dprint, pkg/shm allocators, pool, IPC fds) are stubbed in
 # the test itself, so CORE_DEFS mirrors the module build's flag set.
@@ -187,7 +191,7 @@ ORPHANPURGE_SRCS := test_orphan_msg_ref_purge.c ../nats_consumer_proc.c \
 test_orphan_msg_ref_purge: $(ORPHANPURGE_SRCS) ../nats_consumer_proc_internal.h
 	$(CC) -Wall -g -O0 -fsanitize=address $(CORE_DEFS) -o $@ $(ORPHANPURGE_SRCS) $(LDFLAGS)
 
-# [P2.1] Worker acks over core IPC: drives the production ack handlers
+# Worker acks over core IPC: drives the production ack handlers
 # (../nats_consumer_proc.c) against a recording nats_dl table -- per-verb
 # JetStream routing, in_progress re-stash, ACK_NEXT refill hint,
 # nak_delay SHM payload lifecycle, stale-token no-op, stats.
@@ -203,7 +207,7 @@ test_ack_ipc_actions: $(ACKIPC_SRCS) ../nats_consumer_proc_internal.h ../nats_ac
 test_sub_identity_match: test_sub_identity_match.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# Structural (NATS_TODO #60): nats_consumer_proc.c is split into
+# Structural: nats_consumer_proc.c is split into
 # msg-ref / sub-config / proc-loop TUs with an internal header.
 test_proc_tu_split: test_proc_tu_split.c
 	$(CC) -g -O0 -Wall -o $@ $<
@@ -213,7 +217,7 @@ test_proc_tu_split: test_proc_tu_split.c
 test_request_fastfail: test_request_fastfail.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
-# [P3.2] blocking-budget source-pattern: fetch bail + DELIVERING bound.
+# blocking-budget source-pattern: fetch bail + DELIVERING bound.
 test_blocking_budget: test_blocking_budget.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
@@ -330,7 +334,7 @@ PUSHSPIN_SRCS := test_ring_push_bounded_spin.c $(SHIM)
 test_ring_push_bounded_spin: $(PUSHSPIN_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
 	$(CC) $(CFLAGS) -o $@ $(PUSHSPIN_SRCS) $(LDFLAGS)
 
-# [P2.2] Ring force-unwedge: dead-popper slot recovery (threshold compiled
+# Ring force-unwedge: dead-popper slot recovery (threshold compiled
 # to 50ms), late-release regression guard, torn-copy ownership check.
 UNWEDGE_SRCS := test_ring_force_unwedge.c $(SHIM)
 test_ring_force_unwedge: $(UNWEDGE_SRCS) test_shim.h ../nats_ring.c ../nats_ring.h
@@ -379,7 +383,7 @@ test_orphan_ttl_ackwait: test_orphan_ttl_ackwait.c
 	$(CC) -g -O0 -Wall -o $@ $<
 
 
-# Generic fallback [P5.3]: a self-contained test needs no explicit
+# Generic fallback: a self-contained test needs no explicit
 # rule (explicit rules above always win for the tests that have one).
 test_%: test_%.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)

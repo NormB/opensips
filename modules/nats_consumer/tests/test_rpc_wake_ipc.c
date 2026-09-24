@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.1] Async-RPC reply wake over core IPC: the consumer process
+ * Async-RPC reply wake over core IPC: the consumer process
  * signals the claiming worker on DELIVERED via
  * ipc_send_rpc(owner_proc, nats_rpc_async_on_wake, pack(slot_idx, gen))
  * and the worker-side handler pokes the per-call guard timerfd to fire

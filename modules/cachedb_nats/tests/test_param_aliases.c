@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P4.5] Operator-facing naming convergence.  The same knob carried a
+ * Operator-facing naming convergence.  The same knob carried a
  * different name in each sibling module -- `reconnect_wait` here and
  * in event_nats vs `reconnect_wait_ms` in nats_consumer;
  * `nats_drain_timeout_ms` (event_nats) vs `cdb_drain_timeout_ms`

@@ -10,7 +10,7 @@
 : "${MI_PORT_A:=8889}"
 : "${MI_PORT_B:=8890}"
 
-# ── shared core (result aggregation + bounded pollers) [P5.5] ────
+# ── shared core (result aggregation + bounded pollers) ────
 # HERE is the sip_e2e dir (set by run.sh before sourcing us).
 . "${HERE}/../../../../lib/nats/tests/e2e_harness.sh"
 
@@ -26,11 +26,11 @@ kv_clear() {
     # transparently re-resolves on the next op (we exercise this in the
     # broker_bounce case so we know it works).
     # kvctl (not the nats CLI) so the recreated bucket keeps the module's
-    # shape: history=1 [HREV-1] + AllowMsgTTL via LimitMarkerTTL.
+    # shape: history=1 + AllowMsgTTL via LimitMarkerTTL.
     : "${KVCTL:?run.sh must export KVCTL}"
     "$KVCTL" rm "$NATS_URL" "$KV_BUCKET" >/dev/null 2>&1 || true
     "$KVCTL" mk "$NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 >/dev/null 2>&1 || true
-    # Settle bounded [P5.5]: the recreated bucket must be listable and
+    # Settle bounded: the recreated bucket must be listable and
     # empty before the case proceeds (replaces the blind post-clear
     # sleeps the cases used to carry).
     wait_for 5 kv_bucket_empty
@@ -199,7 +199,7 @@ wait_kv_gone() {
     return 1
 }
 
-# SIP-level visibility probe [HREV-3]: MESSAGE runs lookup("location") in
+# SIP-level visibility probe: MESSAGE runs lookup("location") in
 # the cfg -- 202 = live binding, 404 = none.  Prints "202", "404" or "none".
 # Hand-rolled over nc: this host's sipsak segfaults in MESSAGE mode, and the
 # raw datagram keeps the probe deterministic (reply arrives on the same
@@ -221,7 +221,7 @@ probe_binding() {
     fi
 }
 
-# [FMT] extract the raw .result.data blob from an MI JSON reply (csv/txt
+# extract the raw.result.data blob from an MI JSON reply (csv/txt
 # formats ride as ONE string field; JSON escaping preserves CR/LF exactly).
 mi_data() {
     printf '%s' "$1" | python3 -c '
@@ -234,9 +234,9 @@ except Exception:
 '
 }
 
-# [DOCX] raw REGISTER over nc: full control of the To-domain (AoR),
+# raw REGISTER over nc: full control of the To-domain (AoR),
 # Contact URI, Expires and User-Agent -- sipsak can't set an arbitrary To
-# domain (it would try to resolve it), and the docbook examples use
+# domain (it would try to resolve it), and the README examples use
 # realistic AoRs like alice@example.com with device UAs.  rc 0 on 200 OK.
 raw_register() {
     # raw_register <user> <domain> <contact_uri> <expires> <ua> [sip_port]
@@ -254,7 +254,7 @@ raw_register() {
     grep -q "SIP/2.0 200" "$out"
 }
 
-# [DOCX] MI call with NAMED params (JSON-RPC params object), the same shape
+# MI call with NAMED params (JSON-RPC params object), the same shape
 # opensips-cli sends for key=value arguments.  mi_named <port> <method>
 # [k=v ...]; values are sent as strings (MI coerces int params).
 mi_named() {
@@ -296,7 +296,7 @@ register_one() {
 # Contact URI (distinct port) -- usrloc keys contacts by their URI, so this
 # lands as a second binding on the same row.  Multi-contact rows with
 # DIFFERING expiries are the TTL-ineligible path (a min-derived row TTL
-# would tombstone the still-live contacts), served by the reaper [REV-6/F6].
+# would tombstone the still-live contacts), served by the reaper.
 register_contact() {
     # register_contact <user> <contact_port> <expires> [sip_port]
     local user=$1; local cport=$2; local expires=$3; local port=${4:-$SIP_PORT_A}

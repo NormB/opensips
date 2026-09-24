@@ -109,14 +109,14 @@ int nats_max_reconnect = 60;
 static const param_export_t mod_params[] = {
 	{"nats_url",            STR_PARAM, &nats_url},
 	{"jetstream",           INT_PARAM, &nats_jetstream},
-	/* [P4.5] canonical _ms name first; the unsuffixed spelling stays
+	/* canonical _ms name first; the unsuffixed spelling stays
 	 * as an alias (the value was always milliseconds). */
 	{"reconnect_wait_ms",   INT_PARAM, &nats_reconnect_wait},
 	{"reconnect_wait",      INT_PARAM, &nats_reconnect_wait},
 	{"max_reconnect",       INT_PARAM, &nats_max_reconnect},
 	/* Tunable shutdown drain timeout, ms (ONE pool value shared with
 	 * cachedb_nats; see nats_pool_drain_timeout_decide for the merge
-	 * contract).  [P4.5] canonical name first; the old nats_ spelling
+	 * contract). canonical name first; the old nats_ spelling
 	 * stays as an alias. */
 	{"drain_timeout_ms",      INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
@@ -167,7 +167,7 @@ static const mi_export_t mi_cmds[] = {
 	/* The read-only JS observability commands (nats_stream_list,
 	 * nats_stream_info) are owned by cachedb_nats (richer variants:
 	 * filter/pagination/format support) -- registering them here too
-	 * made whichever module loaded first silently win (P0.3).  This
+	 * made whichever module loaded first silently win.  This
 	 * module keeps only the MUTATING JetStream admin commands below. */
 	{ "nats_stream_create", 0, 0, 0, {
 		{mi_nats_stream_create, {"name", "subjects", 0}},

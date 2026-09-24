@@ -1,7 +1,7 @@
-# 095 — [KVOBS] generic stream/KV introspection MI: nats_stream_list /
+# 095 — generic stream/KV introspection MI: nats_stream_list /
 # nats_stream_info / nats_kv_keys.  Where 090 answers usrloc questions, these
 # answer the layer below — any stream, any bucket — and nats_stream_info is
-# the operator's direct check of the HREV-1 TTL preconditions (allow_msg_ttl,
+# the operator's direct check of the TTL preconditions (allow_msg_ttl,
 # max_msgs_per_subject=1, marker TTL) on the live bucket.
 case_begin "095_mi_kv_stream_observability"
 
@@ -19,7 +19,7 @@ check "stream_info: resolves the KV backing stream + derives the bucket" \
     $(printf '%s' "$out" | grep -q "\"kv_bucket\": *\"${KV_BUCKET}\"" && echo ok || echo fail) \
     "out=$(printf '%s' "$out" | head -c 200)"
 printf '%s' "$out" | grep -q '"allow_msg_ttl": *true'
-check "stream_info: shows allow_msg_ttl=true (the HREV-1 precondition)" \
+check "stream_info: shows allow_msg_ttl=true (the precondition)" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 check "stream_info: max_msgs_per_subject=1 + 30s marker TTL visible" \
     $([ "$(mifield "$out" max_msgs_per_subject)" = 1 ] && \
@@ -84,7 +84,7 @@ printf '%s' "$out" | grep -q "no such bucket"
 check "kv_keys: unknown bucket 404s (BOUND, never created)" \
     $([ "$?" = 0 ] && echo ok || echo fail)
 
-# ── [FMT] formats on the generic commands ──
+# ── formats on the generic commands ──
 out=$(mi nats_stream_info "KV_${KV_BUCKET}" "txt;eol=lf")
 data=$(mi_data "$out")
 printf '%s' "$data" | grep -q $'^allow_msg_ttl\t1$'

@@ -24,7 +24,7 @@
  * nats_consumer module's route-restricted export of the same name.  A
  * first fix renamed cachedb's export to "nats_cdb_request", but that
  * left a duplicate implementation and a duplicate GLOBAL SYMBOL
- * (w_nats_request) defined in two modules designed to co-load.  P0.3
+ * (w_nats_request) defined in two modules designed to co-load.  The fix
  * removed cachedb_nats's copy entirely: nats_consumer's nats_request
  * is strictly more capable (headers + async) and is the single owner.
  *

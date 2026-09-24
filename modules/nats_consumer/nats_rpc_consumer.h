@@ -94,7 +94,7 @@ int nats_rpc_consumer_inbox_ready(void);
 #include <stdint.h>
 
 /**
- * [P2.1] The ipc_send_rpc handler for one worker->consumer publish
+ * The ipc_send_rpc handler for one worker->consumer publish
  * request.  Workers send it with
  *   ipc_send_rpc(nats_consumer_proc_no(), nats_rpc_ipc_on_publish,
  *                nats_rpc_ipc_pack(slot_idx, generation));

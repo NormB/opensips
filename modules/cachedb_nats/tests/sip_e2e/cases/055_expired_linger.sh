@@ -1,4 +1,4 @@
-# 055 — [HREV-3/D6] nats_expired_linger: an expired registration stops being
+# 055 — nats_expired_linger: an expired registration stops being
 # SERVED at expires+grace exactly as with linger=0, but its record stays
 # PHYSICALLY readable in the bucket for ~linger more seconds; a re-REGISTER
 # during the window cleanly overwrites (CAS at the lingering revision, no
@@ -40,7 +40,7 @@ check "re-registered binding served again (MESSAGE -> 202)" \
     $([ "$vis" = 202 ] && echo ok || echo fail) "vis=$vis"
 
 # ttl055's TTL = expires(3) + grace(5) + linger(30) = 38 s from REGISTER;
-# Reaper-only (P1.5): reclamation lands on the first reaper pass AFTER
+# Reaper-only: reclamation lands on the first reaper pass AFTER
 # exp(3)+grace(5)+linger(30)=38 s -- worst case +REAP_INTERVAL(30)+scan.
 # ~13 s have elapsed; poll the remaining ~25 s + interval + slack.
 wait_kv_gone "ttl055@127.0.0.1" 75

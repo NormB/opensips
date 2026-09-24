@@ -73,7 +73,7 @@ LD_LIBRARY_PATH="${OPENSIPS_LIB_NATS}:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
     "$OPENSIPS_BIN" -F -f "$BOUNCE_CFG" -m 64 -M 4 \
     > "$WORKDIR/opensips_bounce.log" 2>&1 &
 BOUNCE_OPENSIPS_PID=$!
-# Bounded [P5.5]: the ad-hoc instance is up once its SIP+MI UDP
+# Bounded: the ad-hoc instance is up once its SIP+MI UDP
 # sockets listen (same condition run.sh's start_opensips polls).
 bounce_ports_up() {
     ss -lnu 2>/dev/null | grep -q "127.0.0.1:${BOUNCE_SIP_PORT}" && \
@@ -99,7 +99,7 @@ check "pre-bounce REGISTER ok" \
 # Kill the broker mid-flight
 kill "$BOUNCE_NATS_PID" 2>/dev/null
 wait "$BOUNCE_NATS_PID" 2>/dev/null
-# Bounded [P5.5]: the broker is down once its TCP listener is gone.
+# Bounded: the broker is down once its TCP listener is gone.
 bounce_broker_gone() {
     ! ss -lnt 2>/dev/null | grep -q ":${BOUNCE_NATS_PORT} "
 }
@@ -130,7 +130,7 @@ done
 
 # nats.c reconnect logic re-establishes the connection; the pool logs
 # the KV-cache clear on that transition.  Poll it, bounded, instead of
-# a blind sleep (the log line is [P5.5]'s observable condition here).
+# a blind sleep (the log line is's observable condition here).
 wait_for_log 15 "KV cache cleared after reconnect" || true
 
 # Post-bounce REGISTER should succeed

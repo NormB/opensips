@@ -48,7 +48,7 @@
  * mechanism so workers and the consumer process share one view.
  *
  * There is no per-slot fd: the consumer publishes a reply by writing
- * reply_* and storing the slot state DELIVERED, then [P3.1] IPC-wakes
+ * reply_* and storing the slot state DELIVERED, then IPC-wakes
  * the claiming worker (slot->owner_proc), whose handler pokes the
  * call's private guard timerfd; the coarse guard tick backstops a
  * lost wake (see nats_rpc_slot.h / nats_rpc_wake.h).
@@ -127,7 +127,7 @@ void nats_rpc_slot_destroy(void)
 }
 
 /* CLOCK_MONOTONIC microseconds (system-wide, comparable across
- * processes) for the [P2.2] orphan-reaper age stamps. */
+ * processes) for the orphan-reaper age stamps. */
 static long long slot_now_us(void)
 {
 	struct timespec ts;
@@ -182,12 +182,12 @@ nats_rpc_slot_t *nats_rpc_slot_claim(void)
 			s->reply_headers_truncated = 0;
 			s->reply_to_len           = 0;
 			s->reply_has_reply_to     = 0;
-			/* [P2.2] age tracking for the orphan reaper */
+			/* age tracking for the orphan reaper */
 			atomic_store_explicit(&s->claimed_at_us,
 				slot_now_us(), memory_order_relaxed);
 			atomic_store_explicit(&s->deadline_us, 0,
 				memory_order_relaxed);
-			/* [P3.1] no wake owner until the worker stamps
+			/* no wake owner until the worker stamps
 			 * its process_no just before publish */
 			atomic_store_explicit(&s->owner_proc, -1,
 				memory_order_relaxed);
@@ -235,7 +235,7 @@ void nats_rpc_slot_free(nats_rpc_slot_t *s, uint32_t gen)
 	int st;
 
 	if (!s) return;
-	/* [P2.2] Generation guard: if the claim was orphan-reaped (and
+	/* Generation guard: if the claim was orphan-reaped (and
 	 * possibly recycled to a new caller) a blind store would clobber
 	 * the new claim.  A mismatch means the reaper already returned
 	 * the slot to the pool -- nothing left to do. */
@@ -255,7 +255,7 @@ void nats_rpc_slot_free(nats_rpc_slot_t *s, uint32_t gen)
 			memory_order_relaxed);
 }
 
-/* ── orphan reaper [P2.2] ────────────────────────────────────── */
+/* ── orphan reaper ────────────────────────────────────── */
 
 static _Atomic uint64_t g_slot_orphans_reaped;
 

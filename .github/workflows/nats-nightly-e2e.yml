@@ -1,4 +1,4 @@
-# Nightly NATS integration tier (MAINTAINABILITY-PERF-SPEC P5.2).
+# Nightly NATS integration tier.
 #
 # Gate placement: the cachedb_nats sip_e2e suite and bench_matrix need
 # the internal >=2.11 JetStream cluster (LAN-only) and run there with
@@ -10,7 +10,7 @@
 # actually ran.
 #
 # libnats comes from scripts/build/install_libnats.sh (single pinned
-# SHA across all CI legs, P5.1).
+# SHA across all CI legs).
 
 name: NATS Nightly e2e
 

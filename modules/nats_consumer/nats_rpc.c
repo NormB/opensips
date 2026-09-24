@@ -80,7 +80,7 @@
 #include "../../pvar.h"
 #include "../../sr_module.h"
 #include "../../lib/nats/nats_pool.h"
-#include "../../lib/nats/nats_rl.h"  /* [P3.7] rate-limited outage WARN */
+#include "../../lib/nats/nats_rl.h"  /* rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 
 #include "nats_fetch.h"
@@ -93,7 +93,7 @@
  * paths can read the current value at request time.  Empty /
  * NULL disables auto-staging. */
 extern char *nats_request_id_header;
-extern int   nats_request_id_header_len;   /* [P3.6] cached at mod_init */
+extern int   nats_request_id_header_len;   /* cached at mod_init */
 
 /* ── shared helpers ──────────────────────────────────────────── */
 
@@ -933,7 +933,7 @@ int w_nats_request(struct sip_msg *msg, str *subject, str *payload,
 	 * restriction -- for the full timeout_ms.  Mirror w_nats_fetch's
 	 * disconnected fast-fail instead. */
 	if (!nats_pool_is_connected()) {
-		/* [P3.7] rate-limited WARN + per-call DBG: during an outage
+		/* rate-limited WARN + per-call DBG: during an outage
 		 * this fires per request per worker -- the old per-call WARN
 		 * flooded the log at exactly the moment the box was unhappy. */
 		static time_t rl_disc;

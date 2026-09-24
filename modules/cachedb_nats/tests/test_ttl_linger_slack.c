@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * TTL-HISTORY-FIX-SPEC.md D3 [HREV-3]: nats_expired_linger slack composition.
+ *: nats_expired_linger slack composition.
  *
  * Linger is an operator retention policy: how long a row is PHYSICALLY kept
  * past its logical expiry (expires + grace).  It is added to every physical-
@@ -30,7 +30,7 @@
  *   - linger=0 reproduces today's values exactly (pure default-compat);
  *   - linger=30 shifts the physical TTL by +30 s;
  *   - an already-expired row with linger=30 gets a 1..30 s TTL, never a
- *     TTL-less write (composes with the HREV-3 floor);
+ *     TTL-less write (composes with the floor);
  *   - the reaper due-gate with slack=grace+linger is NOT due during the
  *     linger window and IS due after it (else the reaper defeats linger);
  *   - boundary: exp + grace + linger == now.
@@ -55,7 +55,7 @@ int64_t cdbn_ttl_seconds(int64_t row_exp, int64_t now, int slack)
 {
 	return row_exp - now + (int64_t)slack;
 }
-/* HREV-3 floor variant (see test_ttl_compute_boundary.c) */
+/* floor variant (see test_ttl_compute_boundary.c) */
 static __attribute__((unused))
 int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds)
 {
@@ -80,9 +80,9 @@ static int _slack(int grace, int linger)
 {
 #ifdef LINGER_CURRENT
 	(void)linger;
-	return grace;                     /* pre-HREV-3: linger not plumbed */
+	return grace;                     /* pre-: linger not plumbed */
 #else
-	return grace + linger;            /* HREV-3: physical-reclamation slack */
+	return grace + linger;            /*: physical-reclamation slack */
 #endif
 }
 /* reaper path: is the row due for physical reclamation? */
@@ -114,28 +114,28 @@ int main(void)
 	const int64_t EXPIRES = 1000;
 	const int G = 5;
 
-	printf("[HREV-3] linger=0 is byte-identical to today's behavior:\n");
+	printf("linger=0 is byte-identical to today's behavior:\n");
 	CHECK(reap_due(EXPIRES, 1006, G, 0) == 1, "due at exp+grace+1, linger 0");
 	CHECK(reap_due(EXPIRES, 1004, G, 0) == 0, "not due before exp+grace, linger 0");
 
-	printf("[HREV-3] linger extends PHYSICAL retention by exactly linger:\n");
+	printf("linger extends PHYSICAL retention by exactly linger:\n");
 	CHECK(reap_due(EXPIRES, 1006, G, 30) == 0, "reaper NOT due during linger window");
 	CHECK(reap_due(EXPIRES, 1034, G, 30) == 0, "still lingering at exp+grace+29");
 	CHECK(reap_due(EXPIRES, 1035, G, 30) == 1, "due exactly at exp+grace+linger");
 	CHECK(reap_due(EXPIRES, 1100, G, 30) == 1, "due after the linger window");
 
-	printf("[HREV-3] (native-TTL write arms removed in P1.5; reaper arms below)\n");
+	printf("(native-TTL write arms removed; reaper arms below)\n");
 	/* now is 10s past expiry; linger 30 => 25s of linger remain (+grace) */
 	/* now is way past expiry+grace+linger => floored to the 1s minimum */
 
-	printf("[HREV-3] boundary: exp + grace + linger == now (reaper due-gate):\n");
+	printf("boundary: exp + grace + linger == now (reaper due-gate):\n");
 	CHECK(reap_due(EXPIRES, EXPIRES + G + 30, G, 30) == 1, "reaper due at the exact boundary");
 
-	printf("[HREV-3] permanent rows (row_exp==0) are never due, any linger:\n");
+	printf("permanent rows (row_exp==0) are never due, any linger:\n");
 	CHECK(reap_due(0, 999999, G, 0) == 0, "permanent, linger 0: never due");
 	CHECK(reap_due(0, 999999, G, 30) == 0, "permanent, linger 30: never due");
 
-	printf("[HREV-3] visibility is UNAFFECTED by linger (read filter stays grace-only):\n");
+	printf("visibility is UNAFFECTED by linger (read filter stays grace-only):\n");
 	CHECK(contact_visible(EXPIRES, 1004, G) == 1, "visible before exp+grace");
 	CHECK(contact_visible(EXPIRES, 1005, G) == 0, "hidden at exp+grace ...");
 	CHECK(reap_due(EXPIRES, 1005, G, 30) == 0,

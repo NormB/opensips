@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.6] Config constants are strlen()'d once, at mod_init -- not per
+ * Config constants are strlen'd once, at mod_init -- not per
  * REGISTER.  fts_json_prefix was measured on every usrloc read, write
  * and watch event (kilobyte-scale traffic multiplies the waste);
  * fts_json_prefix_len is computed by mod_init next to the modparam

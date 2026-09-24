@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P5.4] Behavioural (ASan, REAL TUs): the index<->intern wiring,
+ * Behavioural (ASan, REAL TUs): the index<->intern wiring,
  * exercised through the production fts_index.c + fts_intern.c
  * (replaces the file_contains() source-pattern version of this
  * test).  The optimisation this locks: the doc key is interned ONCE

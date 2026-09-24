@@ -338,7 +338,7 @@ enum {
 
 #define FAIL(_err) do { *err = (_err); goto fail; } while (0)
 
-/* ── key table + per-pair dispatch (P2.3) ─────────────────────────
+/* ── key table + per-pair dispatch ─────────────────────────
  *
  * One row per config key: dup-flag, value kind and (for scalars) the
  * target field offset + inclusive range.  Three keys with semantics a
@@ -406,7 +406,7 @@ static const kv_ent_t kv_table[] = {
 	  0, 0, NULL, ERR_BAD_ACK, NULL },
 	{ "ack_wait",        F_ACK_WAIT,     K_DUR_MS,  HOFF(ack_wait_ms),
 	  0, 0, NULL, ERR_BAD_DURATION, NULL },
-	/* P2.3: negative counts are config errors now (they used to parse
+	/* Negative counts are config errors now (they used to parse
 	 * and silently behave as "unset"). */
 	{ "max_deliver",     F_MAX_DELIVER,  K_INT,     HOFF(max_deliver),
 	  0, INT_MAX, NULL, ERR_BAD_INT, ERR_NEG_COUNT },
@@ -534,8 +534,8 @@ static int parse_one_pair(nats_handle_t *h, struct parse_st *st,
 			break;
 	if (!e->name) {
 		/* Unknown key: a config error.  (The forward-compat
-		 * extra_json stash was deleted with the persistence layer,
-		 * owner decision 3 -- nothing consumes extras any more, so
+		 * extra_json stash was deleted with the persistence layer
+		 * -- nothing consumes extras any more, so
 		 * silently accepting typos would only hide
 		 * misconfiguration.) */
 		*err = ERR_UNKNOWN_KEY;

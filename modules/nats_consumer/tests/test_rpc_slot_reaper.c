@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P2.2] RPC-slot orphan reaper.  A worker that dies mid-RPC leaks its
+ * RPC-slot orphan reaper.  A worker that dies mid-RPC leaks its
  * slot forever (the only path back to FREE was the worker's own
  * timerfd resume); the shared pool exhausts and every async
  * nats_request system-wide fails -5 until restart.  The reaper --

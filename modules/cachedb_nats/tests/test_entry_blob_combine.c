@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P5.4] Behavioural (ASan+LSan, REAL TUs): the single-allocation
+ * Behavioural (ASan+LSan, REAL TUs): the single-allocation
  * index-entry blob and its inline->external keys[] growth, exercised
  * through the production fts_index.c (replaces the file_contains()
  * source-pattern version of this test).

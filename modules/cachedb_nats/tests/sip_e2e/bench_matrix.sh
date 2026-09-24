@@ -67,8 +67,8 @@ RPS=1000
 WORKERS=16
 TIMEOUT_MS=1000
 INDEX_BUCKETS_DEFAULT=4096
-# Scale-specific bucket count overrides for the index path.  Per
-# SCALING.md: 4096 ≤ 20k AoRs, 16384 at 100k.  At 30k we still use
+# Scale-specific bucket count overrides for the index path, per the
+# cachedb_nats_fts README: 4096 ≤ 20k AoRs, 16384 at 100k.  At 30k we still use
 # 16384 because the chain-walk hypothesis was empirically rejected
 # (no measurable improvement from 4k → 16k buckets at 30k); we set
 # it for parity with the 100k mode anyway.

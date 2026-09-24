@@ -1,8 +1,8 @@
-# 060 — history-keeping bucket under reaper-only expiry (P1.5): on a
+# 060 — history-keeping bucket under reaper-only expiry: on a
 # PRE-EXISTING bucket that keeps old revisions (MaxMsgsPerSubject=3) the
 # reaper must reclaim an expired row cleanly — CAS-prune then delete, with
 # NO revision rollback resurrecting an older doc (the failure mode that
-# made the deleted native-TTL path unsafe on history buckets, spec §0 E1).
+# made the deleted native-TTL path unsafe on history buckets, spec E1).
 # Runs with a 5 s reaper so the bound (expires + grace + 2*interval)
 # stays testable.
 case_begin "060_ttl_history_gate"

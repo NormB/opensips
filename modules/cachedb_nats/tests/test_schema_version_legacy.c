@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P11b / IMPLEMENTATION-PLAN P11b [REV-25], SPEC §4.1/§4.2: migration /
+ * Migration /
  * mixed-version read tolerance for the cachedb_nats-private `schema_version`
  * top-level peer.
  *
@@ -88,7 +88,7 @@ int main(void)
 	printf("== carried copy: lenient strip-by-name reader ==\n");
 #endif
 
-	printf("[REV-25] schema_version is a private peer stripped by NAME (value never read):\n");
+	printf("schema_version is a private peer stripped by NAME (value never read):\n");
 	CHECK(is_private_top_key("schema_version", 14) == 1, "\"schema_version\" => private (stripped)");
 	CHECK(is_private_top_key("row_exp", 7) == 1, "\"row_exp\" => private (stripped)");
 	CHECK(is_private_top_key("contacts", 8) == 0, "\"contacts\" => NOT private (kept)");
@@ -97,7 +97,7 @@ int main(void)
 	CHECK(is_private_top_key("schema_versio", 13) == 0, "truncated name => not matched");
 	CHECK(is_private_top_key("schema_version2", 15) == 0, "longer name => not matched");
 
-	printf("[REV-25] the read path MUST accept legacy AND future rows (read best-effort):\n");
+	printf("the read path MUST accept legacy AND future rows (read best-effort):\n");
 	CHECK(_schema_read_accept(0, 0) == 1, "LEGACY: schema_version ABSENT => read (not rejected)");
 	CHECK(_schema_read_accept(1, 1) == 1, "current: schema_version=1 => read");
 	CHECK(_schema_read_accept(1, 2) == 1, "FUTURE: schema_version=2 => read best-effort");

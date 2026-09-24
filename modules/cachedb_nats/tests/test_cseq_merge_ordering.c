@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.2 / SPEC.md §4.1-step-2 [REV-8]: same-subkey merge ordering.
+ * / SPEC.md-step-2: same-subkey merge ordering.
  *
  * On a collision for the SAME contact subkey, the merge MUST keep the higher
  * `cseq` (tie-broken by `last_mod`) and discard a stale write — even if its CAS
@@ -164,7 +164,7 @@ int main(void)
 	printf("== carried copy: FIXED cseq ordering ==\n");
 #endif
 
-	printf("[REV-8] higher cseq wins:\n");
+	printf("higher cseq wins:\n");
 	CHECK(wins("{\"cseq\":5,\"ua\":\"new\"}", "{\"cseq\":3,\"ua\":\"old\"}") == 1,
 	      "new cseq 5 > old 3 => new wins (overwrite)");
 	/* the load-bearing case: a STALE write (lower cseq) must be DISCARDED. */
@@ -173,7 +173,7 @@ int main(void)
 	CHECK(wins("{\"cseq\":100}", "{\"cseq\":99}") == 1, "100 > 99 => new");
 	CHECK(wins("{\"cseq\":99}", "{\"cseq\":100}") == 0, "99 < 100 => old");
 
-	printf("[REV-8] tie on cseq => higher last_mod wins:\n");
+	printf("tie on cseq => higher last_mod wins:\n");
 	CHECK(wins("{\"cseq\":5,\"last_mod\":2000}", "{\"cseq\":5,\"last_mod\":1000}") == 1,
 	      "equal cseq, newer last_mod => new wins");
 	CHECK(wins("{\"cseq\":5,\"last_mod\":1000}", "{\"cseq\":5,\"last_mod\":2000}") == 0,
@@ -183,14 +183,14 @@ int main(void)
 	CHECK(wins("{\"cseq\":5,\"last_mod\":5000000000}", "{\"cseq\":5,\"last_mod\":4000000000}") == 1,
 	      "int64 last_mod tie-break (post-2038)");
 
-	printf("[REV-8] last-writer-wins fallback when cseq is absent:\n");
+	printf("last-writer-wins fallback when cseq is absent:\n");
 	CHECK(wins("{\"ua\":\"x\"}", "{\"cseq\":5}") == 1, "new lacks cseq => overwrite (current behavior)");
 	CHECK(wins("{\"cseq\":3}", "{\"ua\":\"x\"}") == 1, "old lacks cseq => overwrite");
 	CHECK(wins("{\"ua\":\"a\"}", "{\"ua\":\"b\"}") == 1, "neither has cseq => overwrite (non-usrloc subkey)");
 	CHECK(wins("\"a string\"", "{\"cseq\":5}") == 1, "new not an object => overwrite");
 	CHECK(wins("{\"cseq\":5}", "42") == 1, "old not an object => overwrite");
 
-	printf("[REV-8] adversarial: tie with one side missing last_mod:\n");
+	printf("adversarial: tie with one side missing last_mod:\n");
 	CHECK(wins("{\"cseq\":5,\"last_mod\":1}", "{\"cseq\":5}") == 1, "new has last_mod 1, old missing(0) => new wins");
 	CHECK(wins("{\"cseq\":5}", "{\"cseq\":5,\"last_mod\":1}") == 0, "new missing last_mod(0) < old 1 => discarded");
 	CHECK(wins("{\"cseq\":-1}", "{\"cseq\":-2}") == 1, "signed cseq compare (-1 > -2)");

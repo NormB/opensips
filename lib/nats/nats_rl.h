@@ -19,7 +19,7 @@
  */
 
 /*
- * nats_rl.h -- one-per-interval log gate [P3.7].
+ * nats_rl.h -- one-per-interval log gate.
  *
  * The outage logging policy across the NATS modules: a state that
  * repeats per call (broker down, payload dropped, buffer truncated)

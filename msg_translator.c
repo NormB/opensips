@@ -251,10 +251,8 @@ char* received_builder(struct sip_msg *msg, unsigned int *received_len)
 		return 0;
 	}
 	memcpy(buf, RECEIVED, RECEIVED_LEN);
-	if ( (tmp=ip_addr2a(source_ip))==0) {
-		pkg_free(buf);
+	if ( (tmp=ip_addr2a(source_ip))==0)
 		return 0; /* error*/
-	}
 	tmp_len=strlen(tmp);
 	len=RECEIVED_LEN+tmp_len;
 
@@ -1373,11 +1371,7 @@ unsigned int prep_reassemble_body_parts( struct sip_msg* msg,
 					hdr = (char*)pkg_malloc( 14 + part->mime_s.len +CRLF_LEN +
 						part->headers.len);
 					if (hdr==NULL) {
-						LM_ERR("failed to allocate new ct hdr"
-							" (%d bytes) - response may be"
-							" malformed\n",
-							(int)(14 + part->mime_s.len +
-							CRLF_LEN + part->headers.len));
+						LM_ERR("failed to allocate new ct hdr\n");
 					} else {
 						memcpy( hdr, "Content-Type: ", 14);
 						memcpy( hdr+14, part->mime_s.s, part->mime_s.len);
@@ -1406,9 +1400,7 @@ unsigned int prep_reassemble_body_parts( struct sip_msg* msg,
 						/* add this hdr */
 						hdr = (char*)pkg_malloc( hf.len);
 						if (hdr==NULL) {
-							LM_ERR("failed to allocate new ct hdr"
-								" (%d bytes) - response may be"
-								" malformed\n", hf.len);
+							LM_ERR("failed to allocate new ct hdr\n");
 						} else {
 							memcpy( hdr, hf.name.s, hf.len);
 							if (insert_new_lump_before(ct, hdr,
@@ -1511,8 +1503,7 @@ unsigned int prep_reassemble_body_parts( struct sip_msg* msg,
 			/* "Content-Type: multipart/mixed;boundary=OSS_BOUNDARY CRLF" */
 			hdr = (char*)pkg_malloc( 39 + sizeof(OSS_BOUNDARY)-1 + CRLF_LEN );
 			if (hdr==NULL) {
-				LM_ERR("failed to allocate multipart ct hdr"
-					" - response may be malformed\n");
+				LM_ERR("failed to allocate new ct hdr\n");
 			} else {
 				memcpy( hdr,
 				"Content-Type: multipart/mixed;boundary=" OSS_BOUNDARY CRLF,
