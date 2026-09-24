@@ -3,6 +3,9 @@
 # from the host get a different git-revision stamp than the core rebuilt
 # in the container, which trips version_control at load time.
 **/*.o
+# gcc -MMD depfiles name HOST header paths (e.g. a private libnats
+# prefix); make inside the container would demand them and fail.
+**/*.d
 **/*.so
 **/*.so.*
 **/*.a
