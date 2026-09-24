@@ -166,7 +166,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 			<varname>index_resync_on_reconnect = 1</varname> and
 			cycle the broker, or set
 			<varname>index_resync_interval_secs</varname> to a
-			value &le; the longest tolerable staleness window so
+			value &#8804; the longest tolerable staleness window so
 			the periodic timer pulls the new state.  The lazy
 			self-heal in <function>nats_cache_query</function>
 			only evicts stale entries it already holds; it does
@@ -218,7 +218,7 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 					SHM.  Only relevant when
 					the <emphasis>cachedb_nats_fts</emphasis> module loaded;
 					ignored otherwise.  Recommended values:
-					4096 at &le; 20k AoRs, 16384 at 100k, 65536
+					4096 at &#8804; 20k AoRs, 16384 at 100k, 65536
 					at 1MM.
 				</para></listitem>
 			</varlistentry>
@@ -448,9 +448,9 @@ nats stream restore  KV_USRLOC ./usrloc-2026-05-08.tar.gz
 					<function>nats_cache_update</function> /
 					<function>nats_cache_counter_op</function>
 					call.  Combined with the jittered
-					backoff (50&nbsp;us base, 5&nbsp;ms cap),
+					backoff (50&#160;us base, 5&#160;ms cap),
 					the worst-case per-call latency is
-					~50&nbsp;ms.  Raise only if
+					~50&#160;ms.  Raise only if
 					<varname>cas_exhausted</varname> shows
 					non-zero rates; lowering risks lost writes
 					under contention.
