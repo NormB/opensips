@@ -131,7 +131,7 @@ static void test_multi_filter(void)
 
 static void test_unknown_key(void)
 {
-	/* Since the persist layer was deleted (owner decision 3) nothing
+	/* Since the persist layer was deleted nothing
 	 * consumes forward-compat extras: an unknown key is now a CONFIG
 	 * ERROR, rejected at parse time with a message naming the key. */
 	const char *err = NULL;
@@ -142,7 +142,7 @@ static void test_unknown_key(void)
 	if (h) nats_handle_free(h);
 }
 
-/* P2.3: negative counts must be rejected at parse time -- previously a
+/* Negative counts must be rejected at parse time -- previously a
  * negative max_deliver/max_ack_pending/rate_limit parsed "successfully"
  * and was silently treated as unset downstream. */
 static void test_negative_counts_rejected(void)

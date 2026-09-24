@@ -28,7 +28,7 @@
 
 /*
  * cachedb_nats_fts_api.h — the binds API cachedb_nats uses to reach the
- * optional FTS/search-index module (P1.2 split).  When the module is
+ * optional FTS/search-index module.  When the module is
  * not loaded every hook stays NULL and cachedb_nats runs PK-only: the
  * flagship usrloc path never touches any of this.
  */
@@ -90,7 +90,7 @@ typedef struct cdbn_fts_api {
 	 *
 	 * @param key      Doc key bytes; borrowed -- copied into the SHM
 	 *                 intern table as needed.  Need NOT be
-	 *                 NUL-terminated ([P3.5]: exactly @key_len bytes
+	 *                 NUL-terminated (exactly @key_len bytes
 	 *                 are read; no strlen on the hot path).
 	 * @param key_len  Length of @key in bytes (> 0).
 	 * @param json_str Raw JSON bytes; borrowed, parsed unlocked.
@@ -111,7 +111,7 @@ typedef struct cdbn_fts_api {
 	 * nats_json_index_remove).  Idempotent: an unknown key is success.
 	 *
 	 * @param key     Doc key bytes; borrowed.  Need NOT be
-	 *                NUL-terminated ([P3.5]).
+	 *                NUL-terminated.
 	 * @param key_len Length of @key in bytes (> 0).
 	 * @return 0 on success or key not found, -1 on error.
 	 *
@@ -128,7 +128,7 @@ typedef struct cdbn_fts_api {
 	 * full bucket walk.
 	 *
 	 * @param key     Doc key bytes; borrowed.  Need NOT be
-	 *                NUL-terminated ([P3.5]).
+	 *                NUL-terminated.
 	 * @param key_len Length of @key in bytes (> 0).
 	 * @return 0 on a hit (key removed), -1 on a miss -- the caller
 	 *         MUST fall back to remove(key) on -1.
@@ -147,7 +147,7 @@ typedef struct cdbn_fts_api {
 	 * when @json is NULL/empty.
 	 *
 	 * @param key      Doc key bytes; borrowed.  Need NOT be
-	 *                 NUL-terminated ([P3.5]).
+	 *                 NUL-terminated.
 	 * @param key_len  Length of @key in bytes (> 0).
 	 * @param json Pre-write JSON the key was indexed against; borrowed
 	 *             and must stay live across the call.

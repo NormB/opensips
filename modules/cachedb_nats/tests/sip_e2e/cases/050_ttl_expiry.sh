@@ -1,9 +1,9 @@
-# 050 — [HREV-1/2/3] native per-key TTL expiry, the case this suite was
+# 050 — native per-key TTL expiry, the case this suite was
 # missing: a REGISTER with a short Expires must PHYSICALLY leave the bucket
 # once expired -- Get fails, the key is not listed, and SIP lookup finds no
 # binding.  Runs at nats_expired_linger=0 (the default instance): removal is
 # expected at the first reaper pass after expires + grace(5)
-# (reaper-only expiry, P1.5; default scan interval 30 s).
+# (reaper-only expiry; default scan interval 30 s).
 case_begin "050_ttl_expiry"
 
 kv_clear
@@ -23,7 +23,7 @@ check "binding served while live (MESSAGE -> 202)" \
     $([ "$vis" = 202 ] && echo ok || echo fail) "vis=$vis"
 
 # expires(3) + grace(5) = TTL 8 s; give the broker sweep +12 s of slack.
-# reaper-only (P1.5): reclaim lands on the first reaper pass after
+# reaper-only: reclaim lands on the first reaper pass after
 # expires(3)+grace(5); default REAP_INTERVAL=30 -> poll to 45 s.
 wait_kv_gone "ttl050@127.0.0.1" 45
 check "doc PHYSICALLY gone within expires+grace+interval" \

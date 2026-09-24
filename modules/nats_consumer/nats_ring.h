@@ -137,7 +137,7 @@ typedef struct nats_ring nats_ring_t;
  */
 nats_ring_t *nats_ring_create(uint32_t capacity);
 
-/* [P2.2] How long the SAME generation may keep push blocked before the
+/* How long the SAME generation may keep push blocked before the
  * producer force-releases the orphaned slot (a live popper's release
  * lands in nanoseconds; this long means the popper died mid-pop). */
 #ifndef NATS_RING_FORCE_UNWEDGE_US
@@ -145,7 +145,7 @@ nats_ring_t *nats_ring_create(uint32_t capacity);
 #endif
 
 /**
- * [P2.2] Total force-unwedges on this ring (operator signal: worker
+ * Total force-unwedges on this ring (operator signal: worker
  * deaths mid-pop; each one implies a JetStream redelivery).
  *
  * @param r  The ring; NULL returns 0.
@@ -199,7 +199,7 @@ void nats_ring_destroy(nats_ring_t *r);
  * ring itself does NOT parse the stream -- it is copied byte-for-byte.
  * Passing headers_len > NATS_RING_HEADERS_MAX returns -4.
  */
-/* [P2.6] One published message: the payload/metadata inputs of a push,
+/* One published message: the payload/metadata inputs of a push,
  * mirroring the slot layout.  Spans are borrowed for the duration of
  * the call (the push copies).  Designated initializers keep call
  * sites self-describing; zeroed members mean "absent". */

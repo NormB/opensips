@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * TTL-HISTORY-FIX-SPEC.md D2 [HREV-2] regression lock: the seedless first
+ * regression lock: the seedless first
  * insert reuses the SAME cdbn_build_seed_doc output as the old write-the-seed
  * flow, now purely as the in-memory merge base.  If the builder's
  * serialization drifted, a first-insert row would silently differ from what
@@ -128,7 +128,7 @@ static void lock(const char *label, const char *field, const char *val,
 
 int main(void)
 {
-	fprintf(stderr, "[HREV-2] merge-base seed shape is locked (golden):\n");
+	fprintf(stderr, " merge-base seed shape is locked (golden):\n");
 
 	lock("plain AoR", "aor", "alice@example.com",
 	     "{\"aor\":\"alice@example.com\"}");
@@ -165,7 +165,7 @@ int main(void)
 	}
 
 	/* NUL handling note: an embedded NUL never reaches the builder -- the
-	 * update path rejects it earlier (cdbn_dict_has_nul_field, P2.3 [REV-20],
+	 * update path rejects it earlier (cdbn_dict_has_nul_field,
 	 * locked by test_update_nul_poison).  Locked here: a NUL-terminated
 	 * prefix is serialized as-is, not silently extended. */
 	lock("value stops at NUL (upstream guard owns rejection)", "aor", "ab",

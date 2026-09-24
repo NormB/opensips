@@ -29,27 +29,26 @@
  *
  *   - Standard cachedb operations (get/set/remove/add/sub/get_counter)
  *     mapped to KV put/get/delete/create/purge operations.
- *   - JSON full-text search via raw_query ("search:term") and the
- *     cachedb query/update/map_get/map_set/map_remove extensions.
+ *   - The cachedb query/update/map_get/map_set/map_remove extensions
+ *     (non-key query/update filters need the cachedb_nats_fts module).
  *   - Native script functions: nats_kv_* KV primitives and
  *     nats_kv_history() for key version history.  (Synchronous NATS
  *     request/reply from script is owned by the nats_consumer module.)
- *   - A self-healing KV watcher thread (cachedb_nats_watch.c) that
+ *   - A self-healing KV watcher process (cachedb_nats_watch.c) that
  *     keeps the JSON search index in sync with live KV mutations and
  *     raises E_NATS_KV_CHANGE EVI events.
  *
  * Connection management:
  *   mod_init() registers with the shared NATS connection pool (lib/nats/).
  *   child_init() obtains per-process connections, creates the KV bucket
- *   if needed, builds the initial search index, and starts the watcher
- *   thread on the first SIP worker.
+ *   if needed, and (rank 1 only, with cachedb_nats_fts loaded) builds
+ *   the initial search index.  The KV watcher and the reaper run in
+ *   their own dedicated processes (see nats_reaper_watcher_procs).
  *
  * Rank filtering:
- *   NATS initializes in SIP workers (UDP and TCP, rank >= 1) and the
- *   HTTPD/MI process (PROC_MODULE).  Attendant, timer, and TCP-main
- *   processes skip initialization.  The KV watcher thread spawns only
- *   on rank 1 (first SIP worker) to minimize JetStream consumer count;
- *   other workers receive live updates via the shared SHM index.
+ *   NATS initializes in SIP workers (UDP and TCP, rank >= 1), module
+ *   processes (PROC_MODULE) and the timer process; the attendant and
+ *   TCP-main processes skip it (lib/nats/nats_rank.c).
  *
  *   The admission rule is centralized in lib/nats/nats_pool_should_init().
  */
@@ -76,8 +75,8 @@
 #include "cachedb_nats_native.h"
 #include "cachedb_nats_stats.h"
 #include "cachedb_nats_expiry.h"
-#include "cachedb_nats_reg.h"      /* [OBS] registration MI + reap-pass gauges */
-#include "cachedb_nats_kvobs.h"    /* [KVOBS] generic stream/KV introspection MI */
+#include "cachedb_nats_reg.h"      /* registration MI + reap-pass gauges */
+#include "cachedb_nats_kvobs.h"    /* generic stream/KV introspection MI */
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_redact.h"
 
@@ -112,21 +111,21 @@ static struct cachedb_url *nats_cdb_urls = NULL;
 /* module parameters -- non-static, accessed from cachedb_nats_dbase.c */
 char *kv_bucket = "opensips";
 int kv_replicas = 3;
-/* [HREV-1] history default 1: per-message TTL (native expiry) is only safe
- * on a bucket that keeps NO old revisions -- on a history-keeping bucket an
+/* history default 1: per-message TTL (native expiry, kv_ttl_below_marker)
+ * is only safe on a bucket that keeps NO old revisions -- on a history-keeping bucket an
  * expired key ROLLS BACK to an older revision instead of disappearing
  * (verified on nats-server 2.11.10).  Raise only for nats_kv_history()
  * consumers, accepting reaper-only (scan-based) expiry. */
 int kv_history = 1;
 int kv_ttl = 0;
-/* [SPEC §11 / REV-24] strict security mode: FAIL init instead of
+/* Strict security mode: FAIL init instead of
  * warning.  Both default 0 -- the warn-only default is dev/lab
  * ergonomics (the usual lab broker is plaintext, no auth) and generic
  * non-PII cachedb use, not compatibility; a usrloc production profile
  * sets both to 1 (see the admin docs). */
 int require_secure_url = 0;
 int require_usrloc_safe_bucket = 0;
-/* [TTL-BELOW-MARKER] request the fork nats-server's
+/* request the fork nats-server's
  * allow_msg_ttl_below_marker option on bucket creation, so per-key TTLs
  * shorter than the marker TTL are honored on History>1 buckets (the
  * TTL-HISTORY rollback root cause).  Stock brokers reject the unknown
@@ -175,7 +174,7 @@ static char *nats_url = NULL;
  * convention requires a different separator. */
 char *fts_json_prefix = "json_";
 
-/* [P3.6] strlen(fts_json_prefix), stamped once in init_check_params --
+/* strlen(fts_json_prefix), stamped once in init_check_params --
  * the prefix is a config constant, yet the usrloc read/write/serialize
  * paths, the watch loop, the reg scan and the reaper each re-measured
  * it per operation/event/pass. */
@@ -191,24 +190,24 @@ int fts_json_prefix_len;
  * counters; minimum bound is 1. */
 int   nats_cas_retries = 10;
 
-/* [REV-1/REV-21] Max tolerated inter-node clock skew S, in seconds.  Used as
+/* Max tolerated inter-node clock skew S, in seconds.  Used as
  * the grace margin everywhere absolute `expires`/`row_exp` is compared with
- * node-local now: the write-side expiry hygiene (P2.7), the read filter (P4),
- * and the reaper (P9) all require `+S` slack so a node whose clock leads by S
+ * node-local now: the write-side expiry hygiene, the read filter,
+ * and the reaper all require `+S` slack so a node whose clock leads by S
  * never deletes/omits another node's still-live binding.  MUST be >= the
  * deployment's real maximum node skew. */
 int   nats_reap_grace = 5;
 
-/* [REV-1/16] (SPEC §4.3A) Reaper scan period, seconds.  The reaper is the
+/* Reaper scan period, seconds.  The reaper is the
  * SINGLE expiry mechanism (the native per-message-TTL fast path was
- * deleted in P1.5 -- it was lost on update, #1994/#6959, and misbehaves
+ * removed -- it was lost on update, #1994/#6959, and misbehaves
  * on history-keeping buckets): a periodic CAS-prune is what guarantees an
  * expired binding is physically reclaimed.  Must be > 0; a non-positive
  * value HARD-FAILS mod_init rather than silently leaving expiries
  * unreclaimed.  Default 30s. */
 int   nats_reap_interval = 30;
 
-/* [HREV-3/D6] Physical retention of a row past its logical expiry
+/* Physical retention of a row past its logical expiry
  * (expires + nats_reap_grace), in seconds.  0 = reclaim ASAP; e.g. 30 keeps an expired registration
  * readable in the bucket for ~30 s (forensics / churn damping).  Added to
  * every physical-reclamation cutoff (TTL computation, reaper due-gate +
@@ -216,7 +215,7 @@ int   nats_reap_interval = 30;
  * contact is not served, lingering or not.  Range 0..86400. */
 int   nats_expired_linger = 0;
 
-/* [REV-5] Max serialized KV value (one AoR row holds all its contacts), in
+/* Max serialized KV value (one AoR row holds all its contacts), in
  * bytes.  All contacts of an AoR share one message; NATS caps message size
  * (max_payload, default 1 MiB; a stream's max_msg_size may be lower).  An
  * oversize row is detected before the CAS write and the offending contact's
@@ -225,7 +224,7 @@ int   nats_expired_linger = 0;
  * (and <= the stream's max_msg_size).  <= 0 disables the guard. */
 int   nats_max_value_size = 1048576;
 
-/* Optional FTS/search-index module binds (P1.2 split): loading
+/* Optional FTS/search-index module binds: loading
  * cachedb_nats_fts IS the enable switch (replaces the former
  * enable_search_index modparam).  All hooks NULL / cdbn_fts_on == 0
  * when the module is absent — PK-only operation. */
@@ -233,7 +232,7 @@ cdbn_fts_api_t cdbn_fts;
 int cdbn_fts_on = 0;
 
 /* The KV watcher always runs as a dedicated OpenSIPS child process
- * (proc_export_t, forked when enable_search_index=1 and at least one
+ * (proc_export_t, forked when at least one
  * kv_watch pattern is configured).  The former in-worker pthread mode
  * (dedicated_watcher_proc=0) was removed: a pthread inside the rank-1
  * SIP worker called nats_pool_get_kv() concurrently with the worker's
@@ -249,14 +248,10 @@ int cdbn_fts_on = 0;
  * values were hardcoded at the nats_pool_register() call site.  They
  * now match the documented behaviour.
  *
- * First-registrant-wins: when event_nats (or any other NATS module)
- * is loaded before cachedb_nats and has already called
- * nats_pool_register(), the pool's connection parameters are already
- * set and these values are ignored.  See lib/nats/README.md
- * "Registration contract" for the rule.  In practice that means:
- * load the NATS module whose connection settings should take effect
- * FIRST (typically event_nats), or load only cachedb_nats and these
- * settings own the pool.
+ * Registrations merge: every NATS module passes its values to
+ * nats_pool_register(), and for each reconnect parameter the larger
+ * explicit value wins, whatever the module load order.  See
+ * lib/nats/README.md "How the modules share a connection".
  *
  * Defaults match the previously-hardcoded values so a deployment
  * that doesn't touch the modparams sees exactly the same behaviour
@@ -312,7 +307,7 @@ static const param_export_t params[] = {
 	{"index_resync_on_reconnect",   INT_PARAM,    &index_resync_on_reconnect},
 	{"index_resync_interval_secs",  INT_PARAM,    &index_resync_interval_secs},
 	/* Shared lib/nats shutdown drain timeout, ms (ONE pool value; see
-	 * nats_pool_drain_timeout_decide for the merge contract).  [P4.5]
+	 * nats_pool_drain_timeout_decide for the merge contract).
 	 * canonical name first; the old cdb_ spelling stays as an alias. */
 	{"drain_timeout_ms",            INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
@@ -320,7 +315,7 @@ static const param_export_t params[] = {
 	      (void *)nats_pool_drain_timeout_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
-	/* [P4.5] canonical names (the redundant nats_ prefix inside a
+	/* canonical names (the redundant nats_ prefix inside a
 	 * module already called cachedb_nats is dropped); the prefixed
 	 * spellings stay as aliases so existing configs keep loading. */
 	{"cas_retries",             INT_PARAM,         &nats_cas_retries},
@@ -343,7 +338,7 @@ static const param_export_t params[] = {
 static const cmd_export_t cmds[] = {
 	/* Synchronous NATS request/reply from script is provided ONLY by
 	 * the nats_consumer module (headers + async support); this module's
-	 * duplicate request/reply export was removed (P0.3). */
+	 * duplicate request/reply export was removed. */
 	{"nats_kv_history", (cmd_function)w_nats_kv_history_wrap, {
 		{CMD_PARAM_STR, 0, 0},   /* key */
 		{CMD_PARAM_VAR, 0, 0},   /* result pvar */
@@ -394,7 +389,7 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	/* [OBS] registration observability — usrloc's own MI is empty by
+	/* registration observability — usrloc's own MI is empty by
 	 * design in full-sharing-cachedb mode; the KV bucket is the truth. */
 	{"nats_reg_summary", 0, 0, 0, {
 		{mi_nats_reg_summary, {0}},
@@ -415,7 +410,7 @@ static const mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}},
 		{0}
 	},
-	/* [KVOBS] generic stream/KV introspection (read-only; buckets are
+	/* generic stream/KV introspection (read-only; buckets are
 	 * bound, never created). */
 	{"nats_stream_list", 0, 0, 0, {
 		{mi_nats_stream_list, {0}},
@@ -458,7 +453,7 @@ static const dep_export_t deps = {
  * exports.procs only after init_modules returns, so the late binding
  * is safe):
  *
- * "NATS Reaper" [P3.3] -- ALWAYS forked (the reaper is the single
+ * "NATS Reaper" -- ALWAYS forked (the reaper is the single
  *   expiry mechanism): its O(bucket) pass (kvStore_Keys + per-key Get
  *   + CAS prune) must not run in the shared core timer process, where
  *   at scale one pass stalls usrloc/tm/dialog timers system-wide.
@@ -467,8 +462,7 @@ static const dep_export_t deps = {
  * "NATS Watcher" -- the ONLY watcher mode, forked when at least one
  *   kv_watch pattern is set.  Single instance ("no" = 1): one watcher
  *   is enough; multiplying watchers does not parallelise the per-event
- *   cost (see the design-repo SCALING.md "Re-examining option 2
- *   (watcher)") and would just multiply broker delivery cost. */
+ *   cost and would just multiply broker delivery cost. */
 static const proc_export_t nats_reaper_procs[] = {
 	{ "NATS Reaper", 0, 0, nats_cdb_reaper_proc_main, 1, 0 },
 	{ 0, 0, 0, 0, 0, 0 }
@@ -487,7 +481,7 @@ struct module_exports exports = {
 	RTLD_NOW | RTLD_GLOBAL,     /* dlopen flags: GLOBAL so the optional
 	                             * cachedb_nats_fts module (loaded after
 	                             * us) resolves the shared JSON walkers
-	                             * this module defines (P1.2 split) */
+	                             * this module defines */
 	0,                          /* load function */
 	&deps,                      /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
@@ -520,7 +514,7 @@ struct module_exports exports = {
  *
  * @return  0 on success, -1 on error (aborts module loading).
  */
-/* [REV-24 / §11] Is the effective connection URL insecure for a PII store?
+/* Is the effective connection URL insecure for a PII store?
  * Returns 1 when the WARN must fire: not tls://, OR no "user[:pass]@" in the
  * authority (between "://" and the first '/').  Credentials in a path/query do
  * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
@@ -542,7 +536,7 @@ static int nats_url_insecure(const char *url)
 	return (!is_tls || !has_creds) ? 1 : 0;
 }
 
-/* ── mod_init phases [P2.7] ─────────────────────────────────────────
+/* ── mod_init phases ─────────────────────────────────────────
  * The 150-line init is four independent phases; each returns 0/-1 and
  * fails the boot loudly.  Order matters: params before pool (fail
  * closed before any network state), pool before engine (the engine
@@ -552,11 +546,11 @@ static int nats_url_insecure(const char *url)
 /* Phase 1: validate operator parameters -- fail closed at boot. */
 static int init_check_params(void)
 {
-	/* [P3.6] cache the prefix length (config constant; consumed on
+	/* cache the prefix length (config constant; consumed on
 	 * every usrloc read/write, watch event and reap pass). */
 	fts_json_prefix_len = fts_json_prefix ? (int)strlen(fts_json_prefix) : 0;
 
-	/* P8 [REV-7 / TTL-SOLUTION-SPEC.md §5.3]: kv_ttl becomes the KV bucket's
+	/* Kv_ttl becomes the KV bucket's
 	 * MaxAge (nats_pool.c: kvCfg.TTL).  Stream MaxAge takes precedence over
 	 * per-message TTL and would SILENTLY EXPIRE PERMANENT CONTACTS
 	 * (expires==0) -- data loss in a registration store.  Refuse to start
@@ -569,7 +563,7 @@ static int init_check_params(void)
 		return -1;
 	}
 
-	/* [D6/HREV-6] validate the new operator params -- fail loudly at boot,
+	/* validate the new operator params -- fail loudly at boot,
 	 * never misbehave silently at runtime. */
 	if (cdbn_linger_guard(nats_expired_linger) != 0) {
 		LM_ERR("cachedb_nats: nats_expired_linger=%d out of range (0..86400); "
@@ -590,7 +584,7 @@ static int init_pool(void)
 	 * isn't defined. */
 	nats_pool_bind_tls("cachedb_nats");
 
-	/* [TTL-BELOW-MARKER] hand the modparam request to the pool BEFORE any
+	/* hand the modparam request to the pool BEFORE any
 	 * bucket use; the probe itself runs at the first bucket create/bind
 	 * (child_init) and its outcome is surfaced there.  The 30 s marker
 	 * TTL matches the fork-server default expectations; it only shapes
@@ -623,7 +617,7 @@ static int init_pool(void)
 			 * format: nats:group1://host1:4222,host2:4223/
 			 * we need: nats://host1:4222,nats://host2:4223 */
 			char *hosts_start;
-			/* skip past "://" — counted search [P0.9]: core
+			/* skip past "://" — counted search: core
 			 * cachedb_store_url() does NOT NUL-terminate url.s,
 			 * so a libc strstr() here could read past the pkg
 			 * allocation when the URL lacks the separator */
@@ -653,7 +647,7 @@ static int init_pool(void)
 			url_to_use = "nats://localhost:4222";
 		}
 
-		/* [REV-24 / §11] The registration bucket is a PII / LI-relevant
+		/* The registration bucket is a PII / LI-relevant
 		 * store (subscriber IP, UA, call-id, path) and NATS KV has no
 		 * per-key ACL.  Transport + auth are mandatory: warn loudly when
 		 * the connection URL is plaintext and/or carries no credentials. */
@@ -709,7 +703,7 @@ static int init_engine(void)
 	cde.cdb_func.get = nats_cache_get;
 	cde.cdb_func.set = nats_cache_set;
 	cde.cdb_func.remove = nats_cache_remove;
-	/* [P11 / SPEC §1.2 REV-10] non-NULL "unsupported" stub: usrloc
+	/* non-NULL "unsupported" stub: usrloc
 	 * full-sharing never calls _remove; register it so a wrong-mode caller
 	 * fails loudly (-1 + LM_ERR) instead of a NULL function-pointer crash. */
 	cde.cdb_func._remove = nats_cache_remove_unsupported;
@@ -739,11 +733,11 @@ static int init_engine(void)
 }
 
 /* Phase 4: optional FTS bind, dedicated procs (reaper always; +watcher
- * when kv_watch is set) hosting the reap/resync passes [P3.3],
+ * when kv_watch is set) hosting the reap/resync passes,
  * E_NATS_KV_CHANGE registration. */
 static int init_services(void)
 {
-	/* Bind the optional FTS/search-index module (P1.2 split).  The
+	/* Bind the optional FTS/search-index module.  The
 	 * module owns the SHM index + intern table (allocated in ITS
 	 * mod_init, pre-fork); we only take its API here.  Without it,
 	 * query/update accept PK-only filters and the watcher serves the
@@ -763,7 +757,7 @@ static int init_services(void)
 
 	/* Periodic index resync: optional belt-and-braces rebuild for
 	 * deployments that want a hard upper bound on index staleness.
-	 * Only meaningful with the FTS module bound.  [P3.3] Hosted by the
+	 * Only meaningful with the FTS module bound. Hosted by the
 	 * dedicated reaper process (attached below), NOT the shared core
 	 * timer process -- a full-bucket rebuild there stalls every other
 	 * module's timers. */
@@ -771,10 +765,10 @@ static int init_services(void)
 		LM_INFO("cachedb_nats: periodic index resync every %d s "
 			"(in the reaper process)\n", index_resync_interval_secs);
 
-	/* P9 reaper host [REV-1/16/2] (SPEC §4.3A): the reaper is the
-	 * SINGLE expiry mechanism (P1.5), so a non-positive interval is
-	 * refused.  Index-independent (enumerates via kvStore_Keys), so it
-	 * runs regardless of enable_search_index. */
+	/* Reaper host: the reaper is the
+	 * SINGLE expiry mechanism, so a non-positive interval is
+	 * refused.  Index-independent (it enumerates the bucket itself), so it
+	 * runs whether or not cachedb_nats_fts is loaded. */
 	if (cdbn_reap_interval_guard(nats_reap_interval) < 0) {
 		LM_ERR("nats_reap_interval=%d disables the reaper, the only "
 			"expiry mechanism -- expired bindings would never be "
@@ -783,7 +777,7 @@ static int init_services(void)
 		return -1;
 	}
 
-	/* [P3.3] Attach the dedicated processes: the reaper process is
+	/* Attach the dedicated processes: the reaper process is
 	 * unconditional (it hosts the O(bucket) reap + resync passes,
 	 * keeping them out of the shared core timer process); the KV
 	 * watcher joins it when at least one kv_watch pattern was
@@ -878,7 +872,7 @@ static int child_init(int rank)
 		return -1;
 	}
 
-	/* P11b [REV-25]: a PRE-EXISTING bucket may already carry a non-zero
+	/* A PRE-EXISTING bucket may already carry a non-zero
 	 * backing-stream MaxAge (older deployment / another tool).  The kv_ttl
 	 * modparam guard (mod_init) only stops US from creating one; binding to an
 	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
@@ -907,13 +901,13 @@ static int child_init(int rank)
 				"recreate it with MaxAge=0 (kv_ttl=0) and migrate.\n",
 				kv_bucket, (long long)maxage_ns);
 		}
-		/* Reaper-only expiry (P1.5): a history-keeping bucket is fine
+		/* Reaper-only expiry: a history-keeping bucket is fine
 		 * for nats_kv_history() consumers; no per-message TTL exists to
 		 * misbehave on it, so nothing to surface beyond the MaxAge
 		 * check above. */
 		(void)mmps;
 
-		/* [TTL-BELOW-MARKER] surface the probe outcome once.  The
+		/* surface the probe outcome once.  The
 		 * probe ran inside nats_pool_get_kv() above (create carried
 		 * the flag / bind read the stream config); UNSUPPORTED
 		 * already WARNed at the latch site. */
@@ -953,8 +947,8 @@ static int child_init(int rank)
 	}
 
 	/* Live index updates come from the dedicated watcher process
-	 * (exports.procs, attached in mod_init when enable_search_index=1
-	 * and kv_watch patterns exist).  The former rank-1 in-worker
+	 * (exports.procs, attached in mod_init when kv_watch patterns
+	 * exist).  The former rank-1 in-worker
 	 * watcher pthread was removed: it shared the SIP worker's
 	 * per-process connection pool from a second thread, racing the
 	 * pool's single-threaded KV-handle cache (use-after-free under
@@ -1009,7 +1003,7 @@ static void destroy(void)
 
 
 /* ------------------------------------------------------------------ */
-/*   P9 reaper host (SPEC §4.3A [REV-1/16])                           */
+/*   Reaper host                                                      */
 /* ------------------------------------------------------------------ */
 
 

@@ -245,7 +245,7 @@ static const acmd_export_t acmds[] = {
 
 /* ── modparams ───────────────────────────────────────────────── */
 
-/* Declarative handle binds (owner decision 3).  Each `bind` modparam
+/* Declarative handle binds.  Each `bind` modparam
  * value uses the same config grammar as nats_consumer_bind(); values
  * are queued at cfg-parse time and bound in mod_init right after the
  * registry comes up.  A bad or duplicate declarative bind FAILS
@@ -310,7 +310,7 @@ int nats_consumer_poison_max_deliver = 20;
  * the worker's outbound buffer. */
 char *nats_request_id_header = "X-Request-Id";
 
-/* [P3.6] strlen(nats_request_id_header), computed ONCE at mod_init --
+/* strlen(nats_request_id_header), computed ONCE at mod_init --
  * the modparam is immutable after startup, yet both RPC start paths
  * used to re-measure it per request.  0 when auto-staging is off. */
 int nats_request_id_header_len;
@@ -502,7 +502,7 @@ static const pv_export_t mod_pvars[] = {
  * One instance -- there is a single process for the module. */
 static const proc_export_t procs[] = {
 	{ "NATS consumer", 0, 0, nats_consumer_proc_main, 1,
-		PROC_FLAG_HAS_IPC /* [P2.1] receives worker ack/RPC jobs */ },
+		PROC_FLAG_HAS_IPC /* receives worker ack/RPC jobs */ },
 	{ 0, 0, 0, 0, 0, 0 }
 };
 
@@ -547,7 +547,7 @@ static int mod_init(void)
 {
 	LM_INFO("nats_consumer %s initializing\n", NATS_CONSUMER_VERSION);
 
-	/* [P3.6] cache the request-id header length (config constant;
+	/* cache the request-id header length (config constant;
 	 * the RPC start paths consume it per request). */
 	nats_request_id_header_len = nats_request_id_header
 		? (int)strlen(nats_request_id_header) : 0;
@@ -594,7 +594,7 @@ static int mod_init(void)
 	LM_DBG("nats_consumer: registry ready (%d buckets)\n",
 		NATS_CONSUMER_REGISTRY_BUCKETS);
 
-	/* Worker acks ride core IPC [P2.1]; only the SHM stat counters
+	/* Worker acks ride core IPC; only the SHM stat counters
 	 * need setup.  Non-fatal: if SHM is short, stats read as zero. */
 	if (nats_ack_ipc_stats_init() < 0) {
 		LM_WARN("nats_consumer: ack IPC stats init failed; "
@@ -616,7 +616,7 @@ static int mod_init(void)
 	}
 
 	/* Worker -> consumer-process publish hop for the async transport
-	 * rides core IPC [P2.1]; only its SHM stat counters need setup.
+	 * rides core IPC; only its SHM stat counters need setup.
 	 * Non-fatal: if SHM is short, stats read as zero. */
 	if (nats_rpc_ipc_stats_init() < 0) {
 		LM_WARN("nats_consumer: rpc IPC stats init failed; "
@@ -630,7 +630,7 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* Declarative binds (owner decision 3): bind every queued `bind`
+	/* Declarative binds: bind every queued `bind`
 	 * modparam config now that the registry + rings + IPC are up.  A
 	 * failure here is a config error and fails the boot. */
 	{

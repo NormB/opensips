@@ -140,7 +140,7 @@ int main(void)
 			"publish_slot checks inbox readiness before publishing");
 		/* the abandon transition is the fail-fast: publish_slot calls
 		 * the shared helper, whose body performs the gen-safe CAS to
-		 * ABANDONED (and [P3.1] IPC-wakes the claiming worker) */
+		 * ABANDONED (and IPC-wakes the claiming worker) */
 		ASSERT(grep_in_function(c, "publish_slot",
 				"slot_abandon_and_wake") >= 1,
 			"publish_slot abandons the slot when it cannot publish");

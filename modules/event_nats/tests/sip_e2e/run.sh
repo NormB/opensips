@@ -23,7 +23,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# [P5.5] No core dumps: a crashing opensips/sipp under test would spill
+# No core dumps: a crashing opensips/sipp under test would spill
 # unbounded cores into the workdir -- a real hazard on small-tmpfs
 # hosts -- and the suites assert on behavior, not on cores.
 ulimit -c 0

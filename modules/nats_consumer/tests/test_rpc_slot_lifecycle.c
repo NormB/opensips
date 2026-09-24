@@ -69,7 +69,7 @@ int main(void)
 	CHECK(a != NULL, "claim returns a slot");
 	CHECK(a && state_of(a) == NATS_RPC_SLOT_CLAIMED, "claimed slot is CLAIMED");
 	CHECK(nats_rpc_slot_inflight_count() == 1, "inflight == 1 after claim");
-	/* [P3.1] a fresh claim carries no wake owner until the worker
+	/* a fresh claim carries no wake owner until the worker
 	 * stamps its process_no just before publish. */
 	CHECK(a && atomic_load_explicit(&a->owner_proc,
 			memory_order_relaxed) == -1,

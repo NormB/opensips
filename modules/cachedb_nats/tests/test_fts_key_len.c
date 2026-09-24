@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.5 residue] Behavioural (ASan, REAL TUs): the FTS write-side entry
+ * Behavioural (ASan, REAL TUs): the FTS write-side entry
  * points take an explicit key LENGTH — no strlen on the hot path, and a
  * key need not be NUL-terminated.  Every key handed to the index here
  * is a heap slice of EXACTLY key_len bytes with no terminator: if any

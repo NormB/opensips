@@ -19,7 +19,7 @@
  */
 
 /*
- * cachedb_nats_fmt.c — [FMT] table formatter (MI-OUTPUT-FORMAT-SPEC.md).
+ * cachedb_nats_fmt.c — table formatter.
  * Pure logic, unit-locked in tests/test_fmt_table.c (carried copies must
  * stay byte-identical to this file).
  */
@@ -173,7 +173,7 @@ int cdbn_fmt_kind_parse(const char *v, int n)
 	return -1;
 }
 
-/* One row per k=v option (P2.3); a leading bare token is the format
+/* One row per k=v option; a leading bare token is the format
  * kind shorthand ("csv;eol=lf" == "format=csv;eol=lf"). */
 static int fmt_apply_kv(const char *k, int klen, const char *v, int vlen,
 	int *kind, int *eol_lf, int *header)

@@ -304,7 +304,7 @@ int w_nats_fetch(struct sip_msg *msg, str *id, int *timeout_ms)
 				ret = cur_set_from_slot(h->index, &slot);
 				goto out;
 			}
-			/* [P3.2] the 100 ms slicing existed "to re-check the
+			/* the 100 ms slicing existed "to re-check the
 			 * connection" but never did -- a worker could sit out
 			 * the full timeout against a dead broker.  Bail early:
 			 * nothing can arrive while the pool is down. */
@@ -490,7 +490,7 @@ int w_nats_fetch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 
-	/* [P3.6] worker-local: allocated here, freed by THIS worker's
+	/* worker-local: allocated here, freed by THIS worker's
 	 * resume -- pkg (bounded by -M, leak-visible), like the rpc_async
 	 * call wrap.  It never crosses a process boundary. */
 	p = (nats_fetch_async_param_t *)pkg_malloc(sizeof(*p));
@@ -575,7 +575,7 @@ static int batch_parse_int(const char *s, int len, int *out)
 	return 0;
 }
 
-/* Option table for nats_fetch_batch(): one row per key (P2.3).
+/* Option table for nats_fetch_batch: one row per key.
  * Unknown keys stay silently ignored -- these are runtime script
  * options, and older cfgs must keep working against newer modules. */
 enum batch_opt_kind { BK_INT, BK_DUR_MS, BK_BOOL01 };
@@ -963,7 +963,7 @@ int w_nats_fetch_batch_async(struct sip_msg *msg, async_ctx *ctx,
 		return -6;
 	}
 
-	/* [P3.6] worker-local, like the single-fetch param above. */
+	/* worker-local, like the single-fetch param above. */
 	p = (nats_batch_async_param_t *)pkg_malloc(sizeof(*p));
 	if (!p) {
 		close(tfd);

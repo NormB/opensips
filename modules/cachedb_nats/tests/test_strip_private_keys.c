@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.6 / SPEC.md §3.2 §4.2-step-3 [REV-18 / REV-35]: the cdb_row_t handed back
+ * / SPEC.md-step-3: the cdb_row_t handed back
  * to usrloc must be exactly {contacts, aorhash}.  `row_exp` and `schema_version`
  * are cachedb_nats-PRIVATE top-level peers (reaper/expiry + mixed-version
  * metadata); usrloc must never see them.  They are stripped at row assembly —
@@ -138,7 +138,7 @@ int main(void)
 
 	strip(&dict);
 
-	printf("[REV-18/35] private peers stripped, public shape preserved:\n");
+	printf("private peers stripped, public shape preserved:\n");
 	CHECK(!has_key(&dict, "row_exp"), "row_exp stripped");
 	CHECK(!has_key(&dict, "schema_version"), "schema_version stripped");
 	CHECK(has_key(&dict, "contacts"), "contacts retained");
@@ -157,7 +157,7 @@ int main(void)
 	list_add_tail(&mk("schema", 0)->list, &d2);        /* NOT schema_version */
 	list_add_tail(&mk("schema_version", 0)->list, &d2);/* private @ tail */
 	strip(&d2);
-	printf("[REV-18] precise name match (no false strip):\n");
+	printf("precise name match (no false strip):\n");
 	CHECK(has_key(&d2, "row_exposure"), "'row_exposure' NOT stripped (prefix, not row_exp)");
 	CHECK(has_key(&d2, "schema"), "'schema' NOT stripped (prefix, not schema_version)");
 	CHECK(!has_key(&d2, "schema_version"), "tail-position schema_version stripped");

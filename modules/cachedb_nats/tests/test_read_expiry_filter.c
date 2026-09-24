@@ -17,14 +17,14 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P4 / SPEC.md §4.2 [REV-3 / REV-1 / REV-26]: read-side expiry filter.
+ * / SPEC.md: read-side expiry filter.
  *
  * On query(), each contact in the row is filtered before usrloc sees it:
  *   - expires == 0  (permanent)            -> ALWAYS emitted;
  *   - expires != 0 && expires + S <= now   -> OMITTED (S = nats_reap_grace);
  *   - absent / unparseable expires         -> treated EXPIRED, omitted
  *                                             (fail-closed: never serve an
- *                                             unparseable binding) [REV-26];
+ *                                             unparseable binding);
  *   - else (live)                          -> emitted.
  * G2 is defense-in-depth atop usrloc's own VALID_CONTACT re-check; with no
  * in-memory copy the reaper is the sole *physical* cleanup, so the read MUST
@@ -121,7 +121,7 @@ int main(void)
 	printf("== carried copy: FIXED read filter ==\n");
 #endif
 
-	printf("[REV-3/1] per-contact decision (now=1000, S=5):\n");
+	printf("per-contact decision (now=1000, S=5):\n");
 	CHECK(_omit_contact(1, 2000, now, S) == 0, "future expiry => emitted");
 	CHECK(_omit_contact(1, 996, now, S) == 0, "996+5>1000 => live, emitted (within skew)");
 	CHECK(_omit_contact(1, 995, now, S) == 1, "995+5==1000 boundary => omitted");
@@ -129,7 +129,7 @@ int main(void)
 	CHECK(_omit_contact(1, 0, now, S) == 0, "expires==0 (permanent) => ALWAYS emitted");
 	CHECK(_omit_contact(0, 0, now, S) == 1, "absent expires => fail-closed, omitted");
 
-	printf("[REV-3] filter surgery keeps live+permanent, drops expired+absent:\n");
+	printf("filter surgery keeps live+permanent, drops expired+absent:\n");
 	{
 		struct list_head d; INIT_LIST_HEAD(&d);
 		list_add_tail(&mk("live", 1, 2000)->list, &d);      /* keep */
@@ -146,7 +146,7 @@ int main(void)
 		free_all(&d);
 	}
 
-	printf("[REV-35] all-expired row => empty contacts (not an error):\n");
+	printf("all-expired row => empty contacts (not an error):\n");
 	{
 		struct list_head d; INIT_LIST_HEAD(&d);
 		list_add_tail(&mk("a", 1, 100)->list, &d);

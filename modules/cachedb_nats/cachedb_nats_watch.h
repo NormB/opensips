@@ -39,8 +39,8 @@ extern int kv_watch_count;
 /**
  * nats_watcher_proc_main() -- Dedicated-process watcher entry point.
  *
- * The ONLY watcher mode.  When enable_search_index=1 and at least one
- * kv_watch pattern is configured, the OpenSIPS core forks an extra
+ * The ONLY watcher mode.  When at least one kv_watch pattern is
+ * configured, the OpenSIPS core forks an extra
  * child process via the proc_export_t entry in cachedb_nats.c and
  * calls this function as its main loop.  The function never returns:
  * it joins the shared NATS pool, acquires the configured KV bucket
@@ -63,7 +63,7 @@ extern int kv_watch_count;
 void nats_watcher_proc_main(int rank);
 
 /**
- * [P3.3] Shared bring-up for the module's dedicated processes (KV
+ * Shared bring-up for the module's dedicated processes (KV
  * watcher + reaper): arms PR_SET_PDEATHSIG(SIGKILL) so the kernel
  * reaps the child if the OpenSIPS master dies, closes the
  * fork-vs-parent-death race via a getppid() re-check, and lazily
@@ -110,7 +110,7 @@ extern pid_t nats_cdb_parent_pid;
 int nats_cdb_parent_gone(void);
 
 /**
- * [P2.7] Periodic FTS index resync pass body: acquires a fresh KV
+ * Periodic FTS index resync pass body: acquires a fresh KV
  * handle from the per-process pool and rebuilds the SHM-backed JSON
  * search index in full (cdbn_fts.rebuild).  Skips the tick silently
  * when the broker is down (NULL KV handle); the next tick or the next
@@ -123,7 +123,7 @@ int nats_cdb_parent_gone(void);
  * memory is the SHM index owned by the module (freed in destroy()).
  * Locking: takes no locks itself — cross-process index writes are
  * serialized by the FTS index's internal per-shard locks.  Context:
- * [P3.3] the dedicated reaper process (hosted next to the reaper pass,
+ * the dedicated reaper process (hosted next to the reaper pass,
  * see nats_cdb_reaper_proc_main), no longer the core timer process.
  */
 void nats_cdb_periodic_resync(unsigned int ticks, void *param);

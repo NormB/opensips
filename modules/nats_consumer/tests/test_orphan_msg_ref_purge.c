@@ -136,12 +136,12 @@ natsConnection *nats_pool_get(void) { return NULL; }
 jsCtx *nats_pool_get_js(void) { return NULL; }
 int nats_pool_get_reconnect_epoch(void) { return 0; }
 
-/* [P2.1] worker acks/RPCs ride core IPC now; the seams below only
+/* worker acks/RPCs ride core IPC now; the seams below only
  * need to link (this test never enters the main loop). */
 int nats_rpc_consumer_subscribe(void) { return 0; }
 int nats_rpc_consumer_inbox_ready(void) { return 1; }
 
-/* [P2.1] core-IPC seam: the purge test never enters the main loop, so
+/* core-IPC seam: the purge test never enters the main loop, so
  * the pump's pt[]/ipc_handle_job references only need to link. */
 struct process_table *pt = NULL;
 void ipc_handle_job(int fd) { (void)fd; }

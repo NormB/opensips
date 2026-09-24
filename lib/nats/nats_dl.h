@@ -29,8 +29,8 @@
  *   could run.
  *
  *   This table replaces every direct libnats call across lib/nats
- *   and the three NATS user modules (cachedb_nats, event_nats,
- *   nats_consumer) with an indirect call through a function-pointer
+ *   and the NATS user modules (cachedb_nats, cachedb_nats_fts,
+ *   event_nats, nats_consumer) with an indirect call through a function-pointer
  *   table populated at lib/nats init time via dlopen + dlsym.
  *
  *   Result: no .so produced from this tree carries DT_NEEDED for

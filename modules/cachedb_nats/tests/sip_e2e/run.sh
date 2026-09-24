@@ -24,7 +24,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# [P5.5] No core dumps: a crashing opensips/sipp under test would spill
+# No core dumps: a crashing opensips/sipp under test would spill
 # unbounded cores into the workdir -- a real hazard on small-tmpfs
 # hosts -- and the suites assert on behavior, not on cores.
 ulimit -c 0
@@ -100,7 +100,7 @@ if ! nats --server "$NATS_URL" server check connection \
     skip "NATS broker not reachable at $NATS_URL"
 fi
 
-# Fresh bucket for this run -- history=1 [HREV-1] + marker TTL, exactly the
+# Fresh bucket for this run -- history=1 + marker TTL, exactly the
 # shape nats_pool_get_kv creates, so native per-key TTL is exercised.
 "$KVCTL" mk "$NATS_URL" "$KV_BUCKET" "${KV_HISTORY:-1}" 30 >/dev/null 2>&1 || true
 
@@ -129,7 +129,7 @@ render_cfg() {
         FTS_LOAD="# cachedb_nats_fts not loaded (ENABLE_INDEX=0): PK-only"
     fi
     # ENABLE_INDEX=1 loads the optional cachedb_nats_fts module (the
-    # P1.2 split replaced the enable_search_index modparam with the
+    # Split replaced the enable_search_index modparam with the
     # module itself); INDEX_BUCKETS becomes its index_buckets modparam.
     # placeholders for bench_ul_register.sh; integration cases default
     # both to legacy values (index on, 4096 buckets) unless the case

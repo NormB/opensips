@@ -1,4 +1,4 @@
-# e2e_harness.sh -- shared core for the NATS sip_e2e suites.  [P5.5]
+# e2e_harness.sh -- shared core for the NATS sip_e2e suites.
 #
 # Sourced by modules/*/tests/sip_e2e/lib/helpers.sh (which keep their
 # module-specific helpers).  Hoisted here because the two copies had

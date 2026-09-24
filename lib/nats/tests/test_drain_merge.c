@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P4.5] Drain-timeout merge decision.  The shared shutdown drain
+ * Drain-timeout merge decision.  The shared shutdown drain
  * timeout is one pool value fed by a modparam in each module; the old
  * setter max-merged against the 5000 ms DEFAULT, so an operator's
  * explicit lower value (e.g. drain_timeout_ms=2000 for fast restarts)

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Registration MI enumeration [IMPROVEMENT Tier-2]: reg_scan_bucket()
+ * Registration MI enumeration: reg_scan_bucket()
  * must enumerate via the shared value-carrying watch pass
  * (nats_kv_enum_live_values, the renamed reaper enumerator), NOT via
  * kvStore_Keys() + one kvStore_Get() per AoR.  The Keys+Get pattern

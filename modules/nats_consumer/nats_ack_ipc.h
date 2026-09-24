@@ -21,7 +21,7 @@
 /*
  * nats_ack_ipc.h -- worker -> consumer-process ack hop.
  *
- * [P2.1] Acks ride OpenSIPS core IPC.  The ACTION is the ipc_send_rpc
+ * Acks ride OpenSIPS core IPC.  The ACTION is the ipc_send_rpc
  * function identity -- one handler per JetStream ack verb -- and the
  * 64-bit ack token travels verbatim as the opaque param pointer, so
  * the hot path allocates nothing:
@@ -106,7 +106,7 @@ void nats_ack_ipc_on_nak_delay(int sender, void *param);
 void nats_ack_ipc_on_term(int sender, void *param);
 void nats_ack_ipc_on_in_progress(int sender, void *param);
 
-/* [P3.6] Per-tick AckSync budget for ACK_NEXT: the first
+/* Per-tick AckSync budget for ACK_NEXT: the first
  * NATS_ACK_SYNC_PER_TICK_MAX per consumer tick use the synchronous
  * (round-trip) ack, the rest of a burst degrade to the async ack so
  * serial RTTs cannot head-of-line-block the IPC drain + fetch sweep.

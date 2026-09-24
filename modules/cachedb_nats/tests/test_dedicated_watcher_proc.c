@@ -82,7 +82,7 @@ int main(void)
 	/* mod_init wires exports.procs whenever there is something to
 	 * watch — the watcher serves E_NATS_KV_CHANGE always and feeds the
 	 * FTS index only when the optional cachedb_nats_fts module is
-	 * bound (P1.2 split). */
+	 * bound. */
 	ASSERT(file_contains("../cachedb_nats.c",
 		"if (kv_watch_count > 0)"),
 		"mod_init gates exports.procs on kv_watch only");

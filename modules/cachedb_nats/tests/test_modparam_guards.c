@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * TTL-HISTORY-FIX-SPEC.md D6 [HREV-6]: mod_init validation of the new
+ *: mod_init validation of the new
  * operator parameters.  A bad value must refuse startup (fail loudly at boot,
  * never misbehave silently at runtime):
  *
@@ -28,13 +28,13 @@
  *                                floor for marker TTLs); 0/negative would ask
  *                                for markers that never/instantly vanish.
  *   cdbn_reap_interval_guard(interval, unsafe_ttl_only, native_ttl)
- *                                EXTENDED [D6]: with the reaper off
+ *                                EXTENDED: with the reaper off
  *                                (interval<=0), nats_unsafe_ttl_only=1 only
  *                                suffices while the native-TTL path is still
  *                                on.  nats_native_ttl=0 AND reaper off leaves
  *                                NO expiry mechanism at all -> always refused.
  *
- *   gcc -DGUARDS_CURRENT ... -> pre-HREV-6: no linger/marker guards (any value
+ *   gcc -DGUARDS_CURRENT... -> pre-: no linger/marker guards (any value
  *                               accepted) and the 2-arg reap guard (the
  *                               no-mechanism combo boots) => RED.
  *   gcc ...                  -> the guards => GREEN.
@@ -90,12 +90,12 @@ static int fails = 0;
 int main(void)
 {
 #ifdef GUARDS_CURRENT
-	printf("== carried copy: GUARDS_CURRENT (pre-HREV-6) ==\n");
+	printf("== carried copy: GUARDS_CURRENT (pre-) ==\n");
 #else
 	printf("== carried copy: FIXED guards ==\n");
 #endif
 
-	printf("[D6] nats_expired_linger range 0..86400:\n");
+	printf("nats_expired_linger range 0..86400:\n");
 	CHECK(cdbn_linger_guard(0) == 0, "0 (default, reclaim ASAP) => ok");
 	CHECK(cdbn_linger_guard(30) == 0, "30 => ok");
 	CHECK(cdbn_linger_guard(86400) == 0, "86400 (1 day, the ceiling) => ok");
@@ -103,13 +103,13 @@ int main(void)
 	CHECK(cdbn_linger_guard(86401) == -1, "86401 => refused (typo'd epoch)");
 	CHECK(cdbn_linger_guard(-2147483647) == -1, "INT_MIN-ish => refused");
 
-	printf("[D6] kv_marker_ttl minimum 1 s:\n");
+	printf("kv_marker_ttl minimum 1 s:\n");
 	CHECK(_marker_ttl_guard(30) == 0, "30 (default) => ok");
 	CHECK(_marker_ttl_guard(1) == 0, "1 (the server floor) => ok");
 	CHECK(_marker_ttl_guard(0) == -1, "0 => refused");
 	CHECK(_marker_ttl_guard(-5) == -1, "negative => refused");
 
-	printf("[D6] extended reap guard: no-mechanism combo always refused:\n");
+	printf("extended reap guard: no-mechanism combo always refused:\n");
 	CHECK(cdbn_reap_interval_guard(30, 0, 1) == 0, "reaper on, ttl on => ok");
 	CHECK(cdbn_reap_interval_guard(30, 0, 0) == 0, "reaper on, ttl OFF => ok (reaper covers)");
 	CHECK(cdbn_reap_interval_guard(0, 1, 1) == 0, "reaper off + ack, ttl on => ok (pre-D6 contract kept)");

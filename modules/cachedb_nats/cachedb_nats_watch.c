@@ -90,7 +90,7 @@ extern int index_resync_on_reconnect;
  * -Wredundant-decls under -Werror.  fts_json_prefix isn't yet in a
  * header, so it stays as a single extern below. */
 extern char *fts_json_prefix;
-extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
+extern int   fts_json_prefix_len;   /* cached at mod_init */
 
 /* ---- watcher state (process-local to the dedicated watcher proc) ---- */
 static atomic_int      _watcher_running = 0;
@@ -303,7 +303,7 @@ static void raise_kv_change_event(kvEntry *entry, kvOperation op)
  * terminates the process directly).
  */
 
-/* P8 [R1 / TTL-SOLUTION-SPEC.md §4 TREV-2a]: classify the index action for a
+/*: classify the index action for a
  * watched KV entry.  cnats 3.12 surfaces a server-side MaxAge TTL-expiry as an
  * EMPTY-VALUE kvOp_Put (NOT a Delete/Purge op); treating that as a REMOVAL is
  * what keeps the forward index from pointing at a vanished key once per-message
@@ -329,11 +329,11 @@ static void watcher_loop(void)
 	kvWatchOptions  opts;
 	kvStore        *kv;
 	kvWatcher      *w;
-	nats_epoch_t    watch_epoch;   /* [P2.8] tag of this build's KV */
+	nats_epoch_t    watch_epoch;   /* tag of this build's KV */
 	int             prefix_len;
 	int             builds = 0;   /* successful watcher (re)builds so far */
 
-	prefix_len = fts_json_prefix_len;   /* [P3.6] cached */
+	prefix_len = fts_json_prefix_len;   /* cached */
 
 	while (atomic_load(&_watcher_running)) {
 
@@ -499,7 +499,7 @@ static void watcher_loop(void)
 			}
 
 			if (cdbn_fts_on) {
-				/* [P3.5] one strlen at the cnats boundary; the
+				/* one strlen at the cnats boundary; the
 				 * index entry points take (key, key_len). */
 				int         fts_key_len = (int)strlen(key);
 				const char *val     = (op == kvOp_Put) ?
@@ -518,7 +518,7 @@ static void watcher_loop(void)
 							val, val_len);
 				} else if (act == WATCH_IDX_REMOVE) {
 					/* Delete/Purge OR an empty-value Put (MaxAge
-					 * tombstone, [R1]).  Fast path: remove only the
+					 * tombstone).  Fast path: remove only the
 					 * entries this doc was indexed under (O(fields));
 					 * on a reverse-map miss fall back to the full walk.
 					 * The revmap return is the PRECISE membership signal:
@@ -531,10 +531,9 @@ static void watcher_loop(void)
 							fts_key_len) == 0);
 					if (!was_indexed)
 						cdbn_fts.remove(key, fts_key_len);
-					/* [P10 / TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12
-					 * REV-26] observability: a server-side TTL expiry
+					/* Observability: a server-side TTL expiry
 					 * surfaces (cnats <=3.12) as an empty-value Put;
-					 * [P3.7] logged at DBG: it fires once per expired
+					 * logged at DBG: it fires once per expired
 					 * registration on the watcher hot path (a steady
 					 * per-expiry stream at scale), exactly like its
 					 * delete/purge sibling below.  The
@@ -586,8 +585,8 @@ static void watcher_loop(void)
 				 * refuted live: 10 SIGKILL broker-flap cycles,
 				 * Stop+Destroy on a disconnected connection with
 				 * the reconnect thread running, ASan-clean on the
-				 * pinned libnats (watcher_destroy_spike.c in the
-				 * design repo).  nats.c refcounts the underlying
+				 * pinned libnats (10 SIGKILL broker-flap cycles).
+				 * nats.c refcounts the underlying
 				 * subscription, so user-thread Destroy is safe in
 				 * any connection state. */
 				nats_dl.kvWatcher_Destroy(w_claim);
@@ -615,8 +614,8 @@ static void watcher_loop(void)
  * nats_watcher_proc_main() -- dedicated-process watcher entry point.
  *
  * Forked by the OpenSIPS core via the proc_export_t entry registered
- * in cachedb_nats.c when `enable_search_index` is 1 and at least one
- * kv_watch pattern is configured.  The function never returns.
+ * in cachedb_nats.c when at least one kv_watch pattern is
+ * configured.  The function never returns.
  * This is the ONLY watcher mode: the process runs a single thread
  * against the connection pool, so it has none of the pool races the
  * removed in-worker pthread mode had.
@@ -635,7 +634,7 @@ static void watcher_loop(void)
  * and the parent's destroy() path frees g_idx itself.
  */
 /*
- * [P3.3] Shared bring-up for the module's dedicated processes (the KV
+ * Shared bring-up for the module's dedicated processes (the KV
  * watcher and the reaper).  Parent-death handling: if the OpenSIPS
  * master process exits (orderly shutdown OR a pre-fork abort like a
  * failed mi_init_datagram_server), the kernel must reap us.  Without

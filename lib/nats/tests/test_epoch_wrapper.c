@@ -17,12 +17,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P2.8] nats_epoch.h -- the epoch-tagged handle idiom.  Truth table
+ * nats_epoch.h -- the epoch-tagged handle idiom.  Truth table
  * over a scripted pool (epoch counter + connected flag):
  *
  *   - save/current: a tag is current until the epoch bumps,
  *   - snapshot/adopt: the REFRESH protocol -- adopting a snapshot taken
- *     BEFORE a mid-refresh reconnect leaves the tag STALE (the P0.1
+ *     BEFORE a mid-refresh reconnect leaves the tag STALE (the
  *     non-latching property: the next check refreshes again; adopting
  *     a re-read epoch would wedge),
  *   - lost: stale OR disconnected, current AND connected is not lost.
@@ -49,7 +49,7 @@ int main(void)
 {
 	nats_epoch_t e;
 
-	printf("[P2.8] save/current across a reconnect:\n");
+	printf("save/current across a reconnect:\n");
 	nats_epoch_save(&e);
 	CHECK(nats_epoch_current(&e), "fresh tag is current");
 	g_epoch++;                            /* broker reconnects */
@@ -57,7 +57,7 @@ int main(void)
 	nats_epoch_save(&e);
 	CHECK(nats_epoch_current(&e), "re-save catches up");
 
-	printf("[P2.8] refresh protocol: snapshot-before-acquire (P0.1):\n");
+	printf("refresh protocol: snapshot-before-acquire:\n");
 	{
 		int snap = nats_epoch_snapshot();
 		g_epoch++;                        /* reconnect lands MID-refresh */
@@ -68,7 +68,7 @@ int main(void)
 			"(next call refreshes again -- never wedges)");
 	}
 
-	printf("[P2.8] lost = stale OR disconnected:\n");
+	printf("lost = stale OR disconnected:\n");
 	nats_epoch_save(&e);
 	CHECK(!nats_epoch_lost(&e), "current + connected: not lost");
 	g_connected = 0;

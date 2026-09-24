@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test [P0.9]: the mod_init cachedb_url -> nats_url rewrite
+ * Regression test: the mod_init cachedb_url -> nats_url rewrite
  * must not run libc strstr() over the URL.
  *
  * Core cachedb_store_url() (cachedb/cachedb.c) allocates exactly

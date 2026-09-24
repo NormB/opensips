@@ -17,19 +17,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P9 / ADVERSARIAL-ANALYSIS.md F2 [PREV-26 / REV-2]: nats_reap_interval == 0
+ * / ADVERSARIAL-ANALYSIS.md F2: nats_reap_interval == 0
  * (reaper-off, TTL-only) is NOT a supported configuration.
  *
  * The reaper is the authoritative expiry mechanism; native per-message TTL is an
  * opportunistic optimization that the server is NOT guaranteed to honor across
- * updates (#6959/#1994 — proven LIVE on 2.11.10 in the P8 e2e).  So a config
+ * updates (#6959/#1994 — proven LIVE on 2.11.10 in the TTL e2e).  So a config
  * that turns the reaper off must be REFUSED at startup, unless the operator
  * explicitly acknowledges the risk with nats_unsafe_ttl_only=1 (which logs an
  * LM_WARN quoting #6959/#1994).  Default is reaper-authoritative.
  *
  *   cdbn_reap_interval_guard(interval, unsafe_ttl_only, native_ttl):
  *       0 = ok to start, -1 = refuse.
- *   D6 [HREV-6] extension: the unsafe ack only covers reaper-off while the
+ *   D6 extension: the unsafe ack only covers reaper-off while the
  *   native-TTL path (nats_native_ttl) is still on; with BOTH mechanisms off
  *   there is nothing left to expire records and startup is refused
  *   unconditionally.
@@ -52,7 +52,7 @@ static int cdbn_reap_interval_guard(int interval, int unsafe_ttl_only,
 	if (interval > 0)
 		return 0;                       /* a real reaper interval: ok */
 	/* interval <= 0 means reaper-off: with native TTL ALSO off there is no
-	 * expiry mechanism at all -- refuse regardless of the ack [D6]. */
+	 * expiry mechanism at all -- refuse regardless of the ack. */
 	if (!native_ttl)
 		return -1;
 	/* reaper-off, TTL-only: refuse unless explicitly acked. */
@@ -72,19 +72,19 @@ int main(void)
 	printf("== carried copy: FIXED interval guard ==\n");
 #endif
 
-	printf("[REV-2/PREV-26] a real reaper interval starts:\n");
+	printf("a real reaper interval starts:\n");
 	CHECK(cdbn_reap_interval_guard(30, 0, 1) == 0, "interval 30 => ok");
 	CHECK(cdbn_reap_interval_guard(1, 0, 1) == 0, "interval 1 => ok");
 
-	printf("[REV-2/PREV-26] reaper-off (interval<=0) is REFUSED by default:\n");
+	printf("reaper-off (interval<=0) is REFUSED by default:\n");
 	CHECK(cdbn_reap_interval_guard(0, 0, 1) == -1, "interval 0, no ack => REFUSED");
 	CHECK(cdbn_reap_interval_guard(-1, 0, 1) == -1, "negative interval, no ack => refused");
 
-	printf("[REV-2] reaper-off allowed ONLY with the explicit unsafe ack:\n");
+	printf("reaper-off allowed ONLY with the explicit unsafe ack:\n");
 	CHECK(cdbn_reap_interval_guard(0, 1, 1) == 0, "interval 0 + nats_unsafe_ttl_only=1 => allowed (with WARN)");
 	CHECK(cdbn_reap_interval_guard(30, 1, 1) == 0, "a real interval is unaffected by the ack");
 
-	printf("[D6/HREV-6] the ack cannot bless a NO-mechanism config:\n");
+	printf("the ack cannot bless a NO-mechanism config:\n");
 	CHECK(cdbn_reap_interval_guard(0, 1, 0) == -1,
 	      "reaper off + ack + nats_native_ttl=0 => refused (nothing expires records)");
 	CHECK(cdbn_reap_interval_guard(0, 0, 0) == -1, "everything off, no ack => refused");

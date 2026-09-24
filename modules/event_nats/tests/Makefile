@@ -8,7 +8,7 @@ ASAN    := -fsanitize=address
 
 .PHONY: all check check-tsan clean
 
-# Auto-discovered [P5.3]: every test_*.c is a test with its own main().
+# Auto-discovered: every test_*.c is a test with its own main.
 TESTS := $(sort $(patsubst %.c,%,$(wildcard test_*.c)))
 
 # Tests safe to run under ThreadSanitizer.
@@ -46,7 +46,7 @@ test_child_init_degrade: test_child_init_degrade.c
 test_mi_command_collision: test_mi_command_collision.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-# P0.3 source-pattern: cachedb_nats owns the read-only JS observability
+# Source-pattern: cachedb_nats owns the read-only JS observability
 # MI (nats_stream_list/info); event_nats keeps only mutating admin.
 test_mi_single_owner: test_mi_single_owner.c
 	$(CC) $(CFLAGS) -o $@ $<
