@@ -19,13 +19,15 @@
 
 set -e
 
-# nats-io/nats.c ref to build -- PINNED to the PR #1001 merge (contains the
-# per-key KV TTL surface cachedb_nats requires: PR #1000 kvConfig.LimitMarkerTTL
-# + kvStore_*WithTTL, PR #1001 sub-second TTL rejection), which is merged on
-# main but not yet in a tagged release.  A pin (not 'main') keeps every CI leg
-# and every cache generation building the SAME libnats; the main.yml cache key
-# hashes this script, so bumping the pin rolls the cache automatically.
-LIBNATS_VERSION="${LIBNATS_VERSION:-47da162082bf54e2665064fe8fe8c38b8ddc32ae}"
+# nats-io/nats.c ref to build -- PINNED to main at the v3.15.0-beta bump
+# (PR #1029).  Needs the per-key KV TTL surface cachedb_nats requires
+# (PR #1000 kvConfig.LimitMarkerTTL + kvStore_*WithTTL, PR #1001 sub-second
+# TTL rejection) and picks up later fixes, notably the data race between
+# the library destructor and nats_Close[AndWait]() (PR #1020).  A pin (not
+# 'main') keeps every CI leg and every cache generation building the SAME
+# libnats; the main.yml cache key hashes this script, so bumping the pin
+# rolls the cache automatically.
+LIBNATS_VERSION="${LIBNATS_VERSION:-a0777d6daa4fb695f9dfd35901b7b734d3845bb2}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
 # TLS in the libnats build (-DNATS_BUILD_WITH_TLS).  Default OFF: the OpenSIPS
 # NATS modules link libnats at runtime via dlopen and only need it to

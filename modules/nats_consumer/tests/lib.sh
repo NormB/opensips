@@ -18,7 +18,10 @@ ensure_stack() {
         echo "docker not available; skipping integration test"
         exit 77
     fi
-    if ! ${COMPOSE} ps --format json >/dev/null 2>&1; then
+    # `compose ps` exits 0 even when nothing is running, so its exit
+    # status says nothing about the stack; ask for the running opensips
+    # container instead (ps -q lists running containers only).
+    if [ -z "$(${COMPOSE} ps -q opensips 2>/dev/null)" ]; then
         echo "compose stack not up; skipping integration test"
         echo "  run: (cd $(dirname ${COMPOSE_FILE}) && docker compose up -d)"
         exit 77
@@ -125,6 +128,14 @@ nats_bind() {
         return 1
     fi
     printf '%s' "${out}"
+}
+
+# Total RSS (kB) of every opensips process in the container.  PID 1 is
+# only the attendant (and a shell wrapper until run.sh execs opensips);
+# the consumer work, and any leak, lives in the worker processes.
+opensips_rss_total() {
+    ${COMPOSE} exec -T opensips sh -c \
+        'ps -eo rss=,comm= | awk '"'"'$2 == "opensips" { s += $1 } END { print s + 0 }'"'"''
 }
 
 # Unbind a handle by id.

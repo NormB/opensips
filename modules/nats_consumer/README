@@ -658,9 +658,14 @@ route[ON_MSG] {
 
    Example 1.11. High-throughput batch drain pattern
 timer_route[drain, 1] {
+    # A fetch waits up to expires_ms for its batch to fill, so while
+    # messages keep trickling in every call can take the full wait.
+    # Keep batches x expires_ms inside the timer interval
+    # (50 x 10 ms = 500 ms here) so passes never overlap; raise count,
+    # not the loop bound, for more throughput.
     $var(b) = 0;
-    while ($var(b) < 5000) {
-        nats_fetch_batch("jobs", "count=10;expires_ms=100");
+    while ($var(b) < 50) {
+        nats_fetch_batch("jobs", "count=100;expires_ms=10");
         $var(rc) = $retcode;
         if ($var(rc) <= 0) { break; }
         $var(i) = 0;
@@ -1053,9 +1058,13 @@ startup_route {
 }
 
 timer_route[drain, 1] {
-    while (nats_fetch("jobs", 250) > 0) {
+    # At most 100 messages x 5 ms wait = 500 ms, inside the 1 s
+    # interval; for higher rates use the nats_fetch_batch() pattern.
+    $var(n) = 0;
+    while ($var(n) < 100 && nats_fetch("jobs", 5) > 0) {
         xlog("L_INFO", "job $nats_seq: $nats_data\n");
         nats_ack_next();
+        $var(n) = $var(n) + 1;
     }
 }
 
@@ -1075,9 +1084,12 @@ startup_route {
 }
 
 timer_route[check_dlq, 5] {
-    while (nats_fetch("dlq", 100) > 0) {
+    # at most 40 x 100 ms = 4 s, inside the 5 s interval
+    $var(n) = 0;
+    while ($var(n) < 40 && nats_fetch("dlq", 100) > 0) {
         xlog("L_ALERT", "dead letter: $nats_subject $nats_data\n");
         nats_ack();
+        $var(n) = $var(n) + 1;
     }
 }
 
@@ -1095,12 +1107,15 @@ startup_route {
 }
 
 timer_route[rpc_srv, 1] {
-    while (nats_fetch("rpc_srv", 100) > 0) {
+    # at most 50 requests x 10 ms wait = 500 ms, inside the 1 s interval
+    $var(n) = 0;
+    while ($var(n) < 50 && nats_fetch("rpc_srv", 10) > 0) {
         nats_hdr_set("X-Trace-Id", "$nats_hdr(X-Trace-Id)");
         if (nats_reply("echo: $nats_data"))
             nats_ack();
         else
             nats_nak();
+        $var(n) = $var(n) + 1;
     }
 }
 
