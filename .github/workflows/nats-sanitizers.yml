@@ -109,7 +109,8 @@ jobs:
           # leg shares (P5.1); LIBNATS_TLS=ON for dev-env parity.  The
           # container runs as root, so SUDO stays empty.
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libuv1-dev cmake wget
+            build-essential pkg-config libssl-dev libuv1-dev cmake wget \
+            libxml2-utils
           LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
 
       - name: Lint — no unredacted URLs in log calls
@@ -120,6 +121,16 @@ jobs:
 
       - name: Strict-gate selftest (skip-vs-fail contract)
         run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+
+      - name: Harness self-tests (nats_consumer stress plumbing, TLS probe)
+        run: |
+          ./modules/nats_consumer/tests/selftest_harness.sh
+          ./lib/nats/tests/selftest_tls_probe.sh
+
+      - name: Docs — drain examples fit their timer interval; books parse
+        run: |
+          ./modules/nats_consumer/tests/test_doc_drain_budget.sh
+          ./lib/nats/tests/test_docbook_parse.sh
 
       - name: lib/nats unit tests
         run: |
