@@ -115,11 +115,11 @@ int main(void)
 
 	/* ---- documented ---------------------------------------------- */
 	{
-		const char *x = "../doc/cachedb_nats_admin.xml";
-		ASSERT(file_contains(x, "param_require_secure_url"),
-			"docbook documents require_secure_url");
-		ASSERT(file_contains(x, "param_require_usrloc_safe_bucket"),
-			"docbook documents require_usrloc_safe_bucket");
+		const char *x = "../README.md";
+		ASSERT(file_contains(x, "#### require_secure_url ("),
+			"README documents require_secure_url");
+		ASSERT(file_contains(x, "#### require_usrloc_safe_bucket ("),
+			"README documents require_usrloc_safe_bucket");
 	}
 
 	if (g_fails == 0) { fprintf(stderr, "=== ALL PASS ===\n"); return 0; }

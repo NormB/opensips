@@ -124,7 +124,7 @@ int main(void)
 		"consumer loop checks subscription validity post-reconnect");
 
 	/* The initial subscribe loop and the reconnect resubscribe loop both go
-	 * through the shared subscribe_one() helper (P3-66 consolidation), so
+	 * through the shared subscribe_one() helper, so
 	 * the raw Subscribe/QueueSubscribe calls live once inside the helper and
 	 * subscribe_one() is invoked from both paths. */
 	ASSERT(grep_count(src, "natsConnection_Subscribe") >= 1,

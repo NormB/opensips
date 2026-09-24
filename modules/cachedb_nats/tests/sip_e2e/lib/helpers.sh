@@ -236,7 +236,7 @@ except Exception:
 
 # raw REGISTER over nc: full control of the To-domain (AoR),
 # Contact URI, Expires and User-Agent -- sipsak can't set an arbitrary To
-# domain (it would try to resolve it), and the docbook examples use
+# domain (it would try to resolve it), and the README examples use
 # realistic AoRs like alice@example.com with device UAs.  rc 0 on 200 OK.
 raw_register() {
     # raw_register <user> <domain> <contact_uri> <expires> <ua> [sip_port]

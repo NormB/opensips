@@ -333,7 +333,7 @@ char *cdbn_row_finalize_metadata(const char *json, int len, int *out_len,
 	int64_t row_exp;
 	json_sink_t s;
 
-	/* P8: default the eligibility out-params to "ineligible" (no TTL) so every
+	/* Default the eligibility out-params to "ineligible" (no TTL) so every
 	 * early/error return leaves the caller with a safe value. */
 	if (out_row_exp)     *out_row_exp = 0;
 	if (out_n_contacts)  *out_n_contacts = 0;

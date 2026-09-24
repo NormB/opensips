@@ -1,15 +1,15 @@
-# 096 — the docbook's MI examples, validated 100%.
+# 096 — the README's MI examples, validated 100%.
 #
 # Contract: EVERY `## opensips-cli -x mi ...` invocation in
-# doc/cachedb_nats_admin.xml is extracted MECHANICALLY and executed against
+# modules/cachedb_nats/README.md is extracted MECHANICALLY and executed against
 # the live instance + broker; each must return a JSON-RPC result (never an
-# error).  A future docbook example is therefore tested the moment it is
+# error).  A future README example is therefore tested the moment it is
 # written — or it fails this case.  On top of the run-success sweep,
 # targeted asserts pin the STABLE parts of each documented output (counts,
 # header rows, field values); timestamp/sequence/size fields naturally vary
 # and are shape-checked only.
 #
-# The docbook examples use the DEFAULT bucket name ("opensips" /
+# The README examples use the DEFAULT bucket name ("opensips" /
 # "KV_opensips") and this sample population, registered below verbatim:
 #   alice@example.com  sip:alice@10.0.0.1:5060  3600s  "Yealink T54W"
 #                      sip:alice@10.0.0.2:5060   120s  "Zoiper 5"
@@ -17,10 +17,10 @@
 # The suite runs on an ephemeral bucket, so the literal bucket tokens are
 # mapped to $KV_BUCKET before execution (same command shape, parameterized
 # bucket — the one documented divergence).
-case_begin "096_docbook_examples"
+case_begin "096_readme_mi_examples"
 
-DOCBOOK="${TREE_ROOT}/modules/cachedb_nats/doc/cachedb_nats_admin.xml"
-[ -r "$DOCBOOK" ] || { check "docbook readable" fail "$DOCBOOK"; return 0; }
+DOCBOOK="${TREE_ROOT}/modules/cachedb_nats/README.md"
+[ -r "$DOCBOOK" ] || { check "README readable" fail "$DOCBOOK"; return 0; }
 
 kv_clear
 
@@ -35,7 +35,7 @@ check "documented population registered (alice x2, bob x1)" \
     $([ "$r1$r2$r3" = "000" ] && echo ok || echo fail) "rc=$r1$r2$r3"
 wait_kv_count 2
 
-# ── mechanical sweep: run EVERY docbook MI example ──
+# ── mechanical sweep: run EVERY README MI example ──
 # Extraction emits one TAB-separated line per example: method, then args.
 # key=value tokens (no ';') become NAMED params, everything else positional
 # (exactly opensips-cli's convention).
@@ -84,7 +84,7 @@ PYEOF
 )
 EXAMPLES_EOF
 
-check "every docbook MI example executes successfully ($n_total found)" \
+check "every README MI example executes successfully ($n_total found)" \
     $([ "$n_fail" = 0 ] && [ "$n_total" -ge 12 ] && echo ok || echo fail) \
     "total=$n_total failed=$n_fail"
 

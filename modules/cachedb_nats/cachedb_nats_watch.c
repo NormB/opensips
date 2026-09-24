@@ -585,8 +585,8 @@ static void watcher_loop(void)
 				 * refuted live: 10 SIGKILL broker-flap cycles,
 				 * Stop+Destroy on a disconnected connection with
 				 * the reconnect thread running, ASan-clean on the
-				 * pinned libnats (watcher_destroy_spike.c in the
-				 * design repo).  nats.c refcounts the underlying
+				 * pinned libnats (10 SIGKILL broker-flap cycles).
+				 * nats.c refcounts the underlying
 				 * subscription, so user-thread Destroy is safe in
 				 * any connection state. */
 				nats_dl.kvWatcher_Destroy(w_claim);
@@ -614,8 +614,8 @@ static void watcher_loop(void)
  * nats_watcher_proc_main() -- dedicated-process watcher entry point.
  *
  * Forked by the OpenSIPS core via the proc_export_t entry registered
- * in cachedb_nats.c when `enable_search_index` is 1 and at least one
- * kv_watch pattern is configured.  The function never returns.
+ * in cachedb_nats.c when at least one kv_watch pattern is
+ * configured.  The function never returns.
  * This is the ONLY watcher mode: the process runs a single thread
  * against the connection pool, so it has none of the pool races the
  * removed in-worker pthread mode had.

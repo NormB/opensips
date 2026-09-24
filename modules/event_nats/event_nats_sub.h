@@ -22,7 +22,7 @@
  * event_nats_sub.h — NATS subscription consumer for event_nats
  *
  * (Renamed from nats_consumer.h to disambiguate from the standalone
- *  nats_consumer module — P3-59.)
+ *  nats_consumer module.)
  *
  * Manages NATS subscriptions that dispatch received messages to OpenSIPS
  * event_route[E_*] handlers via the EVI subsystem.

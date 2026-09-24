@@ -39,8 +39,8 @@ extern int kv_watch_count;
 /**
  * nats_watcher_proc_main() -- Dedicated-process watcher entry point.
  *
- * The ONLY watcher mode.  When enable_search_index=1 and at least one
- * kv_watch pattern is configured, the OpenSIPS core forks an extra
+ * The ONLY watcher mode.  When at least one kv_watch pattern is
+ * configured, the OpenSIPS core forks an extra
  * child process via the proc_export_t entry in cachedb_nats.c and
  * calls this function as its main loop.  The function never returns:
  * it joins the shared NATS pool, acquires the configured KV bucket

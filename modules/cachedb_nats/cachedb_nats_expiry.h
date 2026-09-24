@@ -31,7 +31,7 @@
  *.  These helpers are broker-less and side-effect-free:
  * eligibility, TTL/unit computation, the marker-aware CAS predicate, and
  * js_PublishMsg outcome classification.  The actual raw-publish wiring (the
- * js_PublishMsg / js_UpdateStream bindings) is added later (P6+); keeping the
+ * js_PublishMsg / js_UpdateStream bindings) is added later; keeping the
  * decision logic pure makes it exhaustively unit-testable without a server.
  */
 
@@ -169,7 +169,7 @@ int cdbn_linger_guard(int linger);          /* nats_expired_linger: 0..86400 */
  * lands where the reader never looks (split-brain).
  *
  * @param bucket  KV bucket name.
- * @param key     the already P1-encoded, KV-safe row key.
+ * @param key     the already encoded, KV-safe row key.
  * @param buf     caller-owned output buffer (nothing allocated).
  * @param buflen  capacity of @buf in bytes.
  * @return the written length (excluding the NUL), or -1 if @buf is too
@@ -380,7 +380,7 @@ enum reap_action cdbn_reap_row_action(int n_live_survivors);
 int cdbn_reap_interval_guard(int interval);
 
 /**
- * The reaper pass body (P9 host); the SINGLE expiry mechanism.
+ * The reaper pass body; the SINGLE expiry mechanism.
  * Scans the bucket once (one value-carrying watch pass via
  * nats_kv_enum_live_values) and, for each DUE usrloc row, either
  * CAS-rewrites it to its survivors or CAS-deletes it when nothing

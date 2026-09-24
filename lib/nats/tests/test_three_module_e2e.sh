@@ -11,7 +11,7 @@
 #
 # Verifies:
 #   1. cachedb_nats, event_nats, and nats_consumer all load + register
-#      against the same pool (first registrant wins, others piggy-back).
+#      against the same pool (registrations merge into one connection).
 #   2. From a single SIP-driven request_route we exercise
 #        cachedb_nats: nats_kv_put + nats_kv_get round-trip
 #        event_nats : nats_publish to a fan-out subject

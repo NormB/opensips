@@ -1,8 +1,8 @@
 #!/bin/sh
 # scripts/build/install_libnats.sh -- install the libnats C client SDK.
 #
-# OpenSIPS's three NATS modules (event_nats, cachedb_nats, nats_consumer)
-# and lib/nats depend on the libnats C client SDK.  Ubuntu < 22.04 does
+# OpenSIPS's NATS modules (event_nats, cachedb_nats, cachedb_nats_fts,
+# nats_consumer) and lib/nats depend on the libnats C client SDK.  Ubuntu < 22.04 does
 # not ship libnats-dev in apt, and the package is universe-only on
 # 22.04+, so rather than maintain split logic we always build from a
 # pinned source tarball.  Output is staged at $LIBNATS_PREFIX (default

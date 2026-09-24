@@ -247,7 +247,7 @@ void nats_cachedb_destroy(cachedb_con *con)
 }
 
 /* The str→C-string helpers now live in lib/nats/nats_str.h
- * (nats_str_to_buf) -- see P3-63. */
+ * (nats_str_to_buf). */
 
 /**
  * validate_kv_key() — reject keys NATS KV cannot represent as a subject token.
@@ -262,7 +262,7 @@ void nats_cachedb_destroy(cachedb_con *con)
 int validate_kv_key(const str *s)
 {
 	/* The rules (no control/whitespace/wildcards, ':' reserved) live in the
-	 * shared lib/nats validator (P3-64); keep the cachedb-context log here. */
+	 * shared lib/nats validator; keep the cachedb-context log here. */
 	if (!s || !s->s || s->len <= 0) {
 		LM_ERR("KV key empty or NULL\n");
 		return -1;
@@ -428,7 +428,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 
 	/* Generic cache_store() path: no per-key TTL here.  (usrloc rows DO get
 	 * per-key expiry — via the row-write per-message Nats-TTL re-assert in
-	 * cachedb_nats_expiry.c, reclaimed by the P9 reaper —
+	 * cachedb_nats_expiry.c, reclaimed by the reaper —
 	 * but that rides the CAS-UPSERT row seam, not this generic set().) */
 	if (expires > 0)
 		LM_DBG("per-key TTL (%d s) ignored on generic cache_store — "

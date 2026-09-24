@@ -70,7 +70,7 @@ NATS_DL_FN(kvStore_Create)
 NATS_DL_FN(kvStore_CreateString)
 NATS_DL_FN(kvStore_CreateWithTTL)
 /* [PR #1000] create-if-absent carrying a per-key TTL; re-creates over a
- * DEL/PURGE/MaxAge marker first-attempt AND keeps the TTL (Phase B). */
+ * DEL/PURGE/MaxAge marker first-attempt AND keeps the TTL. */
 NATS_DL_FN(kvStore_Delete)
 NATS_DL_FN(kvStore_Destroy)
 NATS_DL_FN(kvStore_Get)

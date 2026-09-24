@@ -31,7 +31,7 @@
  *
  * necessary but not sufficient: this tests predicate SELECTION given a
  * fabricated entry/head; the authoritative "re-REGISTER after a real expiry
- * succeeds first-attempt" is the P8 e2e.
+ * succeeds first-attempt" is the TTL e2e.
  *
  *   gcc -DCASPRED_CURRENT ... -> bug: an empty value / NOT_FOUND is treated as
  *                               absent => ExpectNoMessage => RED.

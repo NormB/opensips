@@ -332,8 +332,8 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	 * (mirroring nats_cache_update's PK branch), do one kvStore_Get,
 	 * parse, return.  At 100k+ AoR scale this saves the chain walk
 	 * inside the per-shard mutex on every read; for a usrloc-only
-	 * deployment it makes the entire index optional (paired with the
-	 * enable_search_index modparam below). */
+	 * deployment it makes the entire index optional (the
+	 * cachedb_nats_fts module need not be loaded). */
 	if (filter && !filter->next && filter->key.is_pk &&
 	    filter->val.is_str && filter->op == CDB_OP_EQ)
 		return query_pk_fast_path(ncon, filter, res);
@@ -1036,7 +1036,7 @@ static int update_apply_and_cas(nats_cachedb_con *ncon,
 	int new_len = 0;
 	uint64_t new_rev;
 	int rc;
-	int64_t f_row_exp = 0;            /* P8: per-message-TTL eligibility */
+	int64_t f_row_exp = 0;            /* per-message-TTL eligibility */
 	int f_n_contacts = 0, f_all_same = 0;
 
 	/* Apply every pair in a single pass over the doc.  Replaces
@@ -1198,8 +1198,8 @@ int nats_cache_update(cachedb_con *con, const cdb_filter_t *row_filter,
 		return -1;
 	}
 
-	/* When the search index is disabled (modparam
-	 * enable_search_index=0) g_idx is NULL and we reject non-PK
+	/* When the search index is absent (cachedb_nats_fts not
+	 * loaded) we reject non-PK
 	 * updates outright -- there's no way to resolve the document
 	 * without scanning the whole bucket. */
 	if (!row_filter->key.is_pk && !cdbn_fts_on) {

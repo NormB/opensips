@@ -24,7 +24,7 @@
  * CAS-delete the whole key).
  *
  * cdbn_reap_project_survivors(json,len,now,grace,&n_survivors,&out_len):
- *   per-contact DUE decision (mirrors the P4 read filter, fail-closed):
+ *   per-contact DUE decision (mirrors the read-path filter, fail-closed):
  *     - expires == 0           -> permanent, KEEP (never reaped);
  *     - expires + grace <= now -> DUE, drop  (grace = nats_reap_grace = S);
  *     - absent/unparseable     -> fail-closed DUE, drop (never keep a binding

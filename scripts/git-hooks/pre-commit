@@ -40,10 +40,8 @@ EOF
 fi
 
 # Reject staged ELF binaries.  Compiled test binaries carry no
-# extension (test_foo), so name filters cannot catch them -- this is
-# the class of the committed-binary accident cleaned up in the P1 repo
-# hygiene pass.  Check the STAGED blob's magic bytes (not the worktree
-# file: they can differ).
+# extension (test_foo), so name filters cannot catch them.  Check the
+# STAGED blob's magic bytes (not the worktree file: they can differ).
 elves=""
 for f in $staged; do
 	magic=$(git cat-file blob ":$f" 2>/dev/null | head -c4)
@@ -62,6 +60,14 @@ Build artifacts do not belong in the tree (make clean, or add the
 binary name to the relevant tests/.gitignore).  Bypass (almost never
 the right call):    git commit --no-verify
 EOF
+	exit 1
+fi
+
+# No references to private planning material in the NATS tree (work-item
+# labels, review ids, documents that are not in this repository).
+lint="$(git rev-parse --show-toplevel)/lib/nats/tests/lint_private_refs.sh"
+if [ -f "$lint" ] && ! out=$(sh "$lint" 2>&1); then
+	printf 'pre-commit: %s\n' "$out" >&2
 	exit 1
 fi
 

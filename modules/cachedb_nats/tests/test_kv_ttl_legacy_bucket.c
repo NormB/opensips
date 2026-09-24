@@ -21,7 +21,7 @@
  * for a PRE-EXISTING bucket whose backing stream already carries a non-zero
  * MaxAge.
  *
- * The P7 guard `cdbn_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
+ * The guard `cdbn_kv_ttl_guard` (test_kv_ttl_zero_guard.c) refuses a non-zero
  * `kv_ttl` MODPARAM — it stops THIS module from CREATING a MaxAge bucket.  It
  * does NOT cover the migration case: on first deploy against an EXISTING bucket
  * created by an older deployment (or another tool), the bound stream may already

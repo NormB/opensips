@@ -491,7 +491,7 @@ void cdbn_row_filter_expired_contacts(cdb_dict_t *row_dict, time_t now, int grac
  * replacing any stale peers; a document with no top-level "contacts" is
  * returned byte-for-byte unchanged.
  *
- * P8: @out_row_exp/@out_n_contacts/@out_all_same (all NULL-able) expose
+ * @out_row_exp/@out_n_contacts/@out_all_same (all NULL-able) expose
  * the per-message-TTL eligibility inputs computed during finalize;
  * every early/error return leaves them at the safe "ineligible" values
  * (0/0/0).

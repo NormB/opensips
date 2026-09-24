@@ -22,7 +22,7 @@
  *
  * The reaper is the authoritative expiry mechanism; native per-message TTL is an
  * opportunistic optimization that the server is NOT guaranteed to honor across
- * updates (#6959/#1994 — proven LIVE on 2.11.10 in the P8 e2e).  So a config
+ * updates (#6959/#1994 — proven LIVE on 2.11.10 in the TTL e2e).  So a config
  * that turns the reaper off must be REFUSED at startup, unless the operator
  * explicitly acknowledges the risk with nats_unsafe_ttl_only=1 (which logs an
  * LM_WARN quoting #6959/#1994).  Default is reaper-authoritative.
