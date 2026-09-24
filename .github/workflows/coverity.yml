@@ -18,10 +18,7 @@ env:
 
 jobs:
   coverity:
-    # Needs COVERITY_SCAN_TOKEN, which only exists in the canonical
-    # repository -- the schedule fires on forks too, so guard on the
-    # repository as well as the branch.
-    if: github.repository == 'OpenSIPS/opensips' && github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-22.04
 
     steps:

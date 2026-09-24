@@ -89,14 +89,10 @@ override extra_defs+=$(static_defs) $(EXTRA_DEFS)
 export extra_defs
 
 # Take subset of all modules, excluding the exclude_modules and the
-# static_modules.  Only directories that ship a Makefile count as
-# modules: a plain $(wildcard modules/*) would also match regular
-# files left under modules/ by build tooling (build caches,
-# top-level workspace manifests, etc.) and the recursive build
-# would try to descend into them.
+# static_modules.
 modules=$(filter-out $(addprefix modules/, \
 			$(exclude_modules) $(static_modules)), \
-			$(patsubst %/Makefile,%,$(wildcard modules/*/Makefile)))
+			$(wildcard modules/*))
 # Let modules consist of modules and include_modules (but remove
 # duplicates).
 modules:=$(filter-out $(modules), $(addprefix modules/, $(include_modules) )) \

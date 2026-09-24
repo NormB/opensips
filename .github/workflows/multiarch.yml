@@ -2,12 +2,7 @@
 
 name: Multi-Architecture Build
 
-# Cancel superseded runs on the same ref so rapid pushes don't pile up.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-# Controls when the action will run.
+# Controls when the action will run. 
 on:
   # Triggers the workflow on push or pull request events touching source
   push:
