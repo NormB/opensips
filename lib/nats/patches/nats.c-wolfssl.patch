@@ -1,16 +1,16 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 7495fc2..6b4b056 100644
+index 57f3b990..ae3bf820 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -34,6 +34,7 @@ option(NATS_UPDATE_DOC "Update the doc template file" OFF)
- option(NATS_COVERAGE "Code coverage" OFF)
+@@ -35,6 +35,7 @@ option(NATS_COVERAGE "Code coverage" OFF)
+ option(NATS_BUILD_DEV_MODE "Enable type safety checks" OFF)
  option(NATS_BUILD_NO_SPIN "Enable if spin code does not compile on your arch" OFF)
  option(NATS_BUILD_WITH_TLS "Build with TLS support" ON)
 +option(NATS_BUILD_WITH_WOLFSSL "Use wolfSSL as TLS backend (instead of OpenSSL)" OFF)
  option(NATS_BUILD_TLS_FORCE_HOST_VERIFY "Forces hostname verification" ON)
  option(NATS_BUILD_USE_SODIUM "Build using libsodium library" OFF)
  option(NATS_BUILD_EXAMPLES "Build examples" ON)
-@@ -71,10 +72,64 @@ endif(NATS_COVERAGE)
+@@ -72,10 +73,64 @@ endif(NATS_COVERAGE)
  
  find_package(Threads REQUIRED)
  
@@ -77,7 +77,7 @@ index 7495fc2..6b4b056 100644
  
  set(LIBUV_DIR "" CACHE PATH "Libuv install directory")
  set(LIBEVENT_DIR "" CACHE PATH "Libevent install directory")
-@@ -255,13 +310,13 @@ if(UNIX)
+@@ -260,13 +315,13 @@ if(UNIX)
  endif(UNIX)
  add_definitions(-D${NATS_OS})
  add_definitions(-D_REENTRANT)
@@ -94,7 +94,7 @@ index 7495fc2..6b4b056 100644
  
  #------------
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 397c470..3989586 100644
+index 397c470f..39895866 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -5,10 +5,10 @@ include_directories(include)
@@ -129,7 +129,7 @@ index 397c470..3989586 100644
      VERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR}.${NATS_VERSION_PATCH}
      SOVERSION ${NATS_VERSION_MAJOR}.${NATS_VERSION_MINOR})
 diff --git a/src/conn.c b/src/conn.c
-index d7ba450..81b16d7 100644
+index 127bf6a0..86246eab 100644
 --- a/src/conn.c
 +++ b/src/conn.c
 @@ -44,6 +44,10 @@
@@ -143,25 +143,42 @@ index d7ba450..81b16d7 100644
  #ifdef DEV_MODE
  // For type safety
  
-@@ -735,9 +739,16 @@ _makeTLSConn(natsConnection *nc)
+@@ -780,7 +784,13 @@ _makeTLSConn(natsConnection *nc)
  #endif
              if (nc->tlsName != NULL)
              {
-+                // SSL_set_hostflags / SSL_set1_host aren't in
-+                // wolfSSL's OpenSSL compat layer.  Under wolfSSL
-+                // we rely on SSL_set_tlsext_host_name (called
-+                // below) plus the verify callback for cert
-+                // hostname checking.
-+#if !defined(NATS_HAS_WOLFSSL)
++#if defined(NATS_HAS_WOLFSSL)
++                // wolfSSL's compat layer has no SSL_set_hostflags();
++                // set the same flag through the SSL's verify params.
++                X509_VERIFY_PARAM_set_hostflags(SSL_get0_param(ssl), X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
++#else
                  SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
++#endif
                  if (!SSL_set1_host(ssl, nc->tlsName))
                      s = nats_setError(NATS_SSL_ERROR, "unable to set expected hostname '%s'", nc->tlsName);
-+#endif
              }
-             if (s == NATS_OK)
-             {
+@@ -826,9 +836,18 @@ DO_HANDSHAKE:
+                 nats_GetLastError(&s);
+                 if (s != NATS_SSL_ERROR)
+                 {
++#if defined(NATS_HAS_WOLFSSL)
++                    // wolfSSL returns the failure reason itself from
++                    // SSL_get_error() (e.g. -322, peer subject name
++                    // mismatch); its compat error queue can hold an
++                    // unrelated code, so describe sslErr instead.
++                    const char *reason = ERR_reason_error_string((unsigned long) sslErr);
++#else
++                    const char *reason = NATS_SSL_ERR_REASON_STRING;
++#endif
+                     s = nats_setError(NATS_SSL_ERROR,
+                                     "SSL handshake error: %s (ssl err=%d - errno=%d (%s))",
+-                                    (nc->errStr[0] != '\0' ? nc->errStr : NATS_SSL_ERR_REASON_STRING),
++                                    (nc->errStr[0] != '\0' ? nc->errStr : reason),
+                                     sslErr, errno, strerror(errno));
+                 }
+             }
 diff --git a/src/natsp.h b/src/natsp.h
-index edd5da2..6ab69eb 100644
+index 10b4e9f8..bd77d388 100644
 --- a/src/natsp.h
 +++ b/src/natsp.h
 @@ -20,6 +20,16 @@
@@ -181,3 +198,63 @@ index edd5da2..6ab69eb 100644
  #if defined(NATS_HAS_TLS)
  #include <openssl/ssl.h>
  #include <openssl/err.h>
+diff --git a/src/opts.c b/src/opts.c
+index a673ae22..b4ae1188 100644
+--- a/src/opts.c
++++ b/src/opts.c
+@@ -514,6 +514,12 @@ natsOptions_SetCATrustedCertificates(natsOptions *opts, const char *certs)
+         }
+         if (s == NATS_OK)
+         {
++#if defined(NATS_HAS_WOLFSSL)
++            // wolfSSL's PEM readers fail on any error already queued
++            // (SSL_CTX_set_default_verify_paths() can leave one from an
++            // expired system CA), so start from an empty queue.
++            ERR_clear_error();
++#endif
+             bio = BIO_new_mem_buf((char*) certs, -1);
+             if (bio != NULL)
+                 inf = PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL);
+@@ -694,6 +700,34 @@ natsOptions_SetCertificatesChain(natsOptions *opts, const char *certStr, const c
+     LOCK_AND_CHECK_OPTIONS(opts, 0);
+ 
+     s = _getSSLCtx(opts);
++#if defined(NATS_HAS_WOLFSSL)
++    // wolfSSL's compat SSL_CTX_use_PrivateKey() rejects the EVP_PKEY that
++    // its own PEM_read_bio_PrivateKey() returns, so load both PEM strings
++    // with wolfSSL's native buffer calls.  The explicit key check refuses
++    // a key that does not match the certificate (OpenSSL does the same
++    // when the key types agree).
++    if (s == NATS_OK)
++    {
++        int rc = wolfSSL_CTX_use_certificate_buffer(opts->sslCtx->ctx,
++                    (const unsigned char*) certStr, (long) strlen(certStr),
++                    WOLFSSL_FILETYPE_PEM);
++        if (rc != WOLFSSL_SUCCESS)
++            s = nats_setError(NATS_SSL_ERROR, "Error using certificate: %s",
++                              ERR_reason_error_string((unsigned long) rc));
++    }
++    if (s == NATS_OK)
++    {
++        int rc = wolfSSL_CTX_use_PrivateKey_buffer(opts->sslCtx->ctx,
++                    (const unsigned char*) keyStr, (long) strlen(keyStr),
++                    WOLFSSL_FILETYPE_PEM);
++        if (rc != WOLFSSL_SUCCESS)
++            s = nats_setError(NATS_SSL_ERROR, "Error using private key: %s",
++                              ERR_reason_error_string((unsigned long) rc));
++        else if (SSL_CTX_check_private_key(opts->sslCtx->ctx) != 1)
++            s = nats_setError(NATS_SSL_ERROR, "%s",
++                              "Error using private key: key does not match the certificate");
++    }
++#else
+     if (s == NATS_OK)
+     {
+         X509 *cert = NULL;
+@@ -741,6 +775,7 @@ natsOptions_SetCertificatesChain(natsOptions *opts, const char *certStr, const c
+         if (bio != NULL)
+             BIO_free(bio);
+     }
++#endif
+ 
+     UNLOCK_OPTS(opts);
+ 

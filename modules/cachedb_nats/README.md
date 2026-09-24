@@ -2185,8 +2185,8 @@ expiry time.
 expiry falls back to the reaper.
 - **The `expires` argument of `cache_store` and `cache_add` is
 ignored.**  Only usrloc rows expire.
-- **Keys** are at most 511 bytes and must not contain control
-characters, whitespace, `*`, `>` or `:`.
+- **Keys** are at most 511 bytes and may contain only letters, digits
+and `.` `_` `-` `/` `\` `=` (see [KV Key Validation](#kv-key-validation)).
 - **Values:** usrloc rows are limited by `max_value_size` (1 MiB by
 default); JSON documents over 1 MiB or nested deeper than 64 levels are
 rejected.

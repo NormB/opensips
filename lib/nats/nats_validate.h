@@ -53,8 +53,9 @@ int nats_validate_publish_subject(const char *s, int len);
  *   NATS_VALIDATE_FILTER_SUBJECT   subscribe filter: dots AND wildcards
  *                                  ('*','>') allowed.
  *   NATS_VALIDATE_STREAM_NAME      single token: no '.', '*', '>', '/', '\'.
- *   NATS_VALIDATE_KV_KEY           dots allowed; ':' rejected (reserved as
- *                                  the legacy map separator); no wildcards.
+ *   NATS_VALIDATE_KV_KEY           the nats.c key alphabet only: letters,
+ *                                  digits and . _ - / \ =; no leading,
+ *                                  trailing or consecutive dots.
  *
  * Pure function, content-only (re-scans every call -- see the security note
  * on nats_validate_publish_subject).  Returns 0 if valid, -1 otherwise.

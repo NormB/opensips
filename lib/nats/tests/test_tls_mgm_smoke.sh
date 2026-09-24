@@ -34,6 +34,7 @@ WAIT_SECS="${WAIT_SECS:-5}"
 
 WORKDIR="$(mktemp -d -t test_tls_mgm_smoke.XXXXXX)"
 NATS_PID=""
+WRONG_NATS_PID=""
 OPENSIPS_PID=""
 SUITE_FAIL=0
 PASSED=0
@@ -46,6 +47,7 @@ pass()  { echo "PASS: $*"; PASSED=$((PASSED+1)); }
 cleanup() {
     [ -n "$OPENSIPS_PID" ] && kill -TERM "$OPENSIPS_PID" 2>/dev/null
     [ -n "$NATS_PID"     ] && kill -TERM "$NATS_PID"     2>/dev/null
+    [ -n "$WRONG_NATS_PID" ] && kill -TERM "$WRONG_NATS_PID" 2>/dev/null
     sleep 0.3
     [ -n "$OPENSIPS_PID" ] && kill -KILL "$OPENSIPS_PID" 2>/dev/null
     [ -n "$NATS_PID"     ] && kill -KILL "$NATS_PID"     2>/dev/null
@@ -473,6 +475,66 @@ else
     fail "positive: verify_cert=0 path did not connect"
     tail -15 "${WORKDIR}/skip_verify.log" 2>&1 | sed 's/^/  | /'
 fi
+
+# ----------------------------------------------------------------
+# Scenario: the broker presents a certificate for another host.
+# A second nats-server serves a cert for "wrong.example" (same CA, so
+# the chain is trusted).  Connecting as localhost must fail the
+# hostname check -- on every libnats TLS backend.  This is what a TLS
+# backend that skips hostname verification would silently accept.
+# ----------------------------------------------------------------
+WRONG_PORT=$((NATS_PORT + 2))
+printf '[v3_wrong]\nbasicConstraints = CA:FALSE\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:wrong.example\n' >> openssl.cnf
+openssl genrsa -out wrong.key 2048 2>/dev/null
+openssl req -new -key wrong.key -out wrong.csr -subj "/CN=wrong.example" \
+    -config openssl.cnf 2>/dev/null
+openssl x509 -req -in wrong.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -out wrong.crt -days 1 -extfile openssl.cnf -extensions v3_wrong 2>/dev/null
+cat > nats-wrong.conf <<EOF
+listen: 127.0.0.1:${WRONG_PORT}
+tls {
+    cert_file: "${WORKDIR}/wrong.crt"
+    key_file:  "${WORKDIR}/wrong.key"
+    timeout:   2
+}
+EOF
+nats-server -c nats-wrong.conf -l "${WORKDIR}/nats-wrong.log" &
+WRONG_NATS_PID=$!
+for i in $(seq 1 20); do
+    nc -z 127.0.0.1 "$WRONG_PORT" 2>/dev/null && break
+    sleep 0.25
+done
+
+WRONG_HOST_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"nats\")
+modparam(\"tls_mgm\", \"certificate\", \"[nats]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[nats]${WORKDIR}/client.key\")
+modparam(\"tls_mgm\", \"ca_list\",     \"[nats]${WORKDIR}/ca.crt\")
+modparam(\"tls_mgm\", \"verify_cert\", \"[nats]1\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"nats_url\", \"tls://localhost:${WRONG_PORT}\")
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${WRONG_PORT}/\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_WRONG_HOST\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+${FOOTER}"
+
+# The first connect is asynchronous, so the refusal shows as: no
+# "connected to" line (the bucket create times out instead), and the
+# broker logging the handshake the client aborted.
+boot_scenario "wrong_host" "$WRONG_HOST_CFG" \
+        "NATS pool: connected to\|failed to get/create KV bucket" 10
+if ! grep -q "NATS pool: connected to" "${WORKDIR}/wrong_host.log" &&
+   grep -q "TLS handshake error" "${WORKDIR}/nats-wrong.log"; then
+    pass "negative: certificate for another host is refused (hostname check)"
+else
+    fail "negative: connected to a broker whose certificate names another host"
+    grep -E "connected to|handshake" "${WORKDIR}/wrong_host.log" \
+        "${WORKDIR}/nats-wrong.log" 2>&1 | tail -5 | sed 's/^/  | /'
+fi
+kill -TERM "$WRONG_NATS_PID" 2>/dev/null; wait "$WRONG_NATS_PID" 2>/dev/null
+WRONG_NATS_PID=""
 
 echo "==== summary: $PASSED pass, $FAILED fail ===="
 exit "$SUITE_FAIL"

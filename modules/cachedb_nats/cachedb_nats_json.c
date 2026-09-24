@@ -43,6 +43,7 @@
 #include "../../mem/shm_mem.h"
 #include "../../cachedb/cachedb.h"
 #include "../../lib/nats/nats_dl.h"   /* libnats function-pointer table */
+#include "../../lib/nats/nats_err.h"   /* NATS_ERR_TEXT */
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats.h"
@@ -115,7 +116,7 @@ static int query_pk_fast_path(nats_cachedb_con *ncon,
 	}
 	if (s != NATS_OK) {
 		LM_WARN("PK kvStore_Get failed for '%s': %s\n",
-			target_key, nats_dl.natsStatus_GetText(s));
+			target_key, NATS_ERR_TEXT(s));
 		if (key_heap) pkg_free(target_key);
 		return -1;
 	}
@@ -203,7 +204,7 @@ static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 		if (s != NATS_OK) {
 			LM_WARN("kvStore_Get failed for key '%s': %s; row "
 				"omitted from query result\n",
-				match_keys[i], nats_dl.natsStatus_GetText(s));
+				match_keys[i], NATS_ERR_TEXT(s));
 			continue;
 		}
 
@@ -939,7 +940,7 @@ static int update_fetch_or_seed(nats_cachedb_con *ncon,
 	}
 	if (s != NATS_OK) {
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
-			target_key, nats_dl.natsStatus_GetText(s));
+			target_key, NATS_ERR_TEXT(s));
 		return -1;
 	}
 
