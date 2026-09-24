@@ -79,6 +79,38 @@ static void *try_dlopen(const char *path)
  */
 #define NATS_DL_DEFAULT_SONAME "libnats.so"
 
+int nats_dl_version_compatible(uint32_t compiled, uint32_t runtime)
+{
+	/* major.minor live in the upper bits; the low byte is the patch */
+	return (compiled >> 8) == (runtime >> 8);
+}
+
+int nats_dl_check_version(void *handle, const char *path)
+{
+	uint32_t (*get_version)(void);
+	uint32_t runtime;
+
+	get_version = (uint32_t (*)(void)) dlsym(handle, "nats_GetVersionNumber");
+	if (!get_version) {
+		LM_ERR("nats_dl: '%s' does not export nats_GetVersionNumber; "
+		       "not a usable libnats\n", path);
+		return -1;
+	}
+	runtime = get_version();
+	if (!nats_dl_version_compatible(NATS_VERSION_NUMBER, runtime)) {
+		LM_ERR("nats_dl: '%s' is libnats %u.%u.%u but opensips was "
+		       "compiled against libnats %s headers; their struct "
+		       "layouts differ (e.g. kvWatchOptions), so loading it "
+		       "would corrupt memory.  Rebuild the NATS modules "
+		       "against the libnats you load, or point "
+		       "$NATS_DL_LIBNATS_PATH at a matching build.\n",
+		       path, runtime >> 16, (runtime >> 8) & 0xff,
+		       runtime & 0xff, NATS_VERSION_STRING);
+		return -1;
+	}
+	return 0;
+}
+
 int nats_dl_load(const char *libnats_path)
 {
 	const char *env_override;
@@ -133,6 +165,20 @@ int nats_dl_load(const char *libnats_path)
 	_path = NATS_DL_DEFAULT_SONAME;
 
 loaded:
+
+	/*
+	 * Refuse a libnats whose major.minor differs from the headers we
+	 * were compiled against BEFORE touching any of its functions: the
+	 * struct layouts the calls below pass by pointer are version
+	 * specific.  An explicitly chosen library that fails the check is
+	 * an operator error, so there is no fallback to another library.
+	 */
+	if (nats_dl_check_version(_handle, _path) < 0) {
+		dlclose(_handle);
+		_handle = NULL;
+		_path   = NULL;
+		return -1;
+	}
 
 	/*
 	 * Populate every function pointer.  The X-macro expansion below
