@@ -94,7 +94,7 @@ static jsReplayPolicy map_replay_policy(nats_replay_policy_e p)
 /* ── helpers ─────────────────────────────────────────────────── */
 
 /* nats_str_to_cstr() was consolidated into lib/nats/nats_str.h as
- * nats_str_to_cstr() -- see P3-63.  It mallocs a process-local NUL-terminated
+ * nats_str_to_cstr().  It mallocs a process-local NUL-terminated
  * copy (nats.c wants C strings; registry str buffers are not NUL-terminated);
  * subscriptions are long-lived so the copies are kept on the proc_sub_state_t
  * and freed by the retire/reap teardown path. */

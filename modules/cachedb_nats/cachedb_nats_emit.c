@@ -19,7 +19,7 @@
  */
 
 /*
- * cachedb_nats_emit.c — [P2.4] row emitter: one result-set walk per MI
+ * cachedb_nats_emit.c — row emitter: one result-set walk per MI
  * handler, json-vs-table decided by the backend (cachedb_nats_emit.h).
  * The table backend is unit-locked in tests/test_emit_rows.c, which
  * compiles this file directly.

@@ -31,7 +31,7 @@ OBJS     = nats_dl.o nats_pool.o nats_rank.o nats_redact.o nats_validate.o \
 # Bring in pkg-config CFLAGS/LIBS for the external libnats C client.
 include ./Makefile.nats
 
-# Gate the build on libnats being present; reaper-only expiry (P1.5)
+# Gate the build on libnats being present; reaper-only expiry
 # removed the last per-key-TTL API use, so any libnats the header probe
 # accepts is usable.
 ifneq ($(NATS_FOUND),yes)

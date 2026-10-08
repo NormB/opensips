@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.3 / SPEC.md §3.1 §4.1-step-0 [REV-20]: reject-at-write any contact field
+ * / SPEC.md-step-0: reject-at-write any contact field
  * that carries an embedded NUL.  An OpenSIPS `str` is length-based, so a `0x00`
  * byte is reachable in fields like `ua`/`attr`.  Such a value CANNOT round-trip:
  * the reader is `cJSON_Parse` + `str.len = strlen(valuestring)`
@@ -37,7 +37,7 @@
  *                               modelled as "always 0") => RED.
  *   gcc ...                  -> the FIXED detector => GREEN.
  *
- * Rule 6 [PREV-4 / REV-20/F20]: a carried Tier-1 copy cannot prove byte-exact
+ * Rule 6: a carried Tier-1 copy cannot prove byte-exact
  * production behavior; the AUTHORITATIVE proof is the Tier-2
  * test_usrloc_nul_field_e2e.sh (NUL field => clean reject, vs production).
  *
@@ -87,7 +87,7 @@ int main(void)
 	printf("== carried copy: FIXED behavior ==\n");
 #endif
 
-	printf("[REV-20] clean fields are accepted (no NUL):\n");
+	printf("clean fields are accepted (no NUL):\n");
 	CHECK(HASNUL("alice@example.com") == 0, "plain AoR-ish value accepted");
 	CHECK(field_has_nul("", 0) == 0, "empty value accepted");
 	CHECK(field_has_nul(NULL, 0) == 0, "NULL value accepted (defensive)");
@@ -95,19 +95,19 @@ int main(void)
 	CHECK(HASNUL("version0000build") == 0, "bare '0000' digits NOT a false positive");
 	CHECK(HASNUL("u0000") == 0, "'u0000' without backslash accepted");
 
-	printf("[REV-20] a raw 0x00 byte is rejected:\n");
+	printf("a raw 0x00 byte is rejected:\n");
 	{ const char v[] = {'a','\0','b'};  CHECK(field_has_nul(v, 3) == 1, "interior raw NUL rejected"); }
 	{ const char v[] = {'\0','a','b'};  CHECK(field_has_nul(v, 3) == 1, "leading raw NUL rejected"); }
 	{ const char v[] = {'a','b','\0'};  CHECK(field_has_nul(v, 3) == 1, "trailing raw NUL rejected"); }
 	{ const char v[] = {'\0'};          CHECK(field_has_nul(v, 1) == 1, "lone raw NUL rejected"); }
 
-	printf("[REV-20] the escaped form \\u0000 is equally rejected:\n");
+	printf("the escaped form \\u0000 is equally rejected:\n");
 	CHECK(HASNUL("\\u0000") == 1, "bare \\u0000 rejected");
 	CHECK(HASNUL("ua\\u0000evil") == 1, "interior \\u0000 rejected");
 	CHECK(HASNUL("\\u0000tail") == 1, "leading \\u0000 rejected");
 	CHECK(HASNUL("head\\u0000") == 1, "trailing \\u0000 rejected");
 
-	printf("[REV-20] adversarial: non-NUL escapes must NOT be rejected:\n");
+	printf("adversarial: non-NUL escapes must NOT be rejected:\n");
 	CHECK(HASNUL("line\\none") == 0, "\\n (newline escape) accepted");
 	CHECK(HASNUL("tab\\tend") == 0, "\\t accepted");
 	CHECK(HASNUL("back\\\\slash") == 0, "\\\\ (escaped backslash) accepted");

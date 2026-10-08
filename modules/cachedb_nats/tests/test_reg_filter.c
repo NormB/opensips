@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Registration-observability MI [OBS]: the nats_reg_list filter language and
+ * Registration-observability MI: the nats_reg_list filter language and
  * the per-contact state model.
  *
  * Operators drive the list command with ONE string parameter of
@@ -35,7 +35,7 @@
  *   sort=aor|expiry|contacts|last_mod      (+ desc=1)
  *   limit=<n> (default 50, HARD CAP 200 -- MI datagram size)  offset=<n>
  *
- * Contact state mirrors the read filter exactly [D-OBS-4]:
+ * Contact state mirrors the read filter exactly:
  *   permanent: expires == 0
  *   active:    expires + grace >  now   (would be served)
  *   expired:   expires + grace <= now   (stored-but-hidden: lingering or
@@ -79,9 +79,9 @@ struct reg_filter {
 	int  desc;
 	long limit;
 	long offset;
-	int  format;                /* [FMT] 0=json 1=csv 2=txt */
-	int  eol_lf;                /* [FMT-7] 0=CRLF 1=LF */
-	int  header;                /* [FMT-5] header record on/off */
+	int  format;                /* 0=json 1=csv 2=txt */
+	int  eol_lf;                /* 0=CRLF 1=LF */
+	int  header;                /* header record on/off */
 };
 
 static int cdbn_reg_contact_state(int64_t expires, time_t now, int grace)
@@ -189,7 +189,7 @@ static int reg_filter_kv(struct reg_filter *f, const char *k, int klen,
 #undef CPY
 }
 
-/* [FMT-4/7] string-valued format keys, shared shape with the kvobs parser */
+/* string-valued format keys, shared shape with the kvobs parser */
 static int reg_filter_fmt_kv(struct reg_filter *f, const char *k, int klen,
 	const char *v, int vlen)
 {
@@ -270,7 +270,7 @@ int main(void)
 	printf("== carried copy: FIXED filter + state model ==\n");
 #endif
 
-	printf("[D-OBS-4] contact state mirrors the read filter (grace, never linger):\n");
+	printf("contact state mirrors the read filter (grace, never linger):\n");
 	CHECK(cdbn_reg_contact_state(0, NOW, G) == REG_C_PERMANENT, "expires=0 => permanent");
 	CHECK(cdbn_reg_contact_state(NOW + 100, NOW, G) == REG_C_ACTIVE, "future => active");
 	CHECK(cdbn_reg_contact_state(NOW - 2, NOW, G) == REG_C_ACTIVE,
@@ -279,7 +279,7 @@ int main(void)
 	      "exactly expires+grace==now => expired (boundary)");
 	CHECK(cdbn_reg_contact_state(NOW - 500, NOW, G) == REG_C_EXPIRED, "long past => expired");
 
-	printf("[D-OBS-3] domain = after the LAST '@', case-insensitive compare:\n");
+	printf("domain = after the LAST '@', case-insensitive compare:\n");
 	{
 		const char *d; int dl;
 		CHECK(cdbn_reg_domain_of("alice@example.com", 17, &d, &dl) == 0 &&
@@ -296,7 +296,7 @@ int main(void)
 		      "length mismatch never equal");
 	}
 
-	printf("[OBS] filter parse — defaults and happy path:\n");
+	printf("filter parse — defaults and happy path:\n");
 	CHECK(cdbn_reg_filter_parse("", 0, &f) == 0 && f.state == REG_F_ACTIVE &&
 	      f.limit == REG_LIMIT_DEFAULT && f.offset == 0 && f.sort == REG_SORT_AOR,
 	      "empty filter => defaults (state=active, limit=50, sort=aor)");
@@ -327,7 +327,7 @@ int main(void)
 	}
 	CHECK(cdbn_reg_filter_parse(";;", 2, &f) == 0, "empty tokens (';;') tolerated");
 
-	printf("[OBS] filter parse — fail loudly, never list the wrong subset:\n");
+	printf("filter parse — fail loudly, never list the wrong subset:\n");
 	CHECK(cdbn_reg_filter_parse("bogus=1", 7, &f) == -1, "unknown key => refused");
 	CHECK(cdbn_reg_filter_parse("state=zombie", 12, &f) == -1, "bad enum value => refused");
 	CHECK(cdbn_reg_filter_parse("sort=up", 7, &f) == -1, "bad sort key => refused");
@@ -341,13 +341,13 @@ int main(void)
 	CHECK(cdbn_reg_filter_parse("=x", 2, &f) == -1, "empty key => refused");
 	CHECK(cdbn_reg_filter_parse("aor", 3, &f) == -1, "token without '=' => refused");
 
-	printf("[OBS] limit hard cap (MI datagram size):\n");
+	printf("limit hard cap (MI datagram size):\n");
 	CHECK(cdbn_reg_filter_parse("limit=200", 9, &f) == 0 && f.limit == 200,
 	      "limit=200 (the cap) accepted verbatim");
 	CHECK(cdbn_reg_filter_parse("limit=100000", 12, &f) == 0 && f.limit == 200,
 	      "limit above the cap CLAMPS to 200 (not an error)");
 
-	printf("[FMT] output-format keys in the filter language:\n");
+	printf("output-format keys in the filter language:\n");
 	CHECK(cdbn_reg_filter_parse("", 0, &f) == 0 && f.format == 0 &&
 	      f.eol_lf == 0 && f.header == 1,
 	      "defaults: json, CRLF, header on");
@@ -365,7 +365,7 @@ int main(void)
 	CHECK(cdbn_reg_filter_parse("eol=cr", 6, &f) == -1, "bad eol refused");
 	CHECK(cdbn_reg_filter_parse("header=2", 8, &f) == -1, "bad header refused");
 
-	printf("[OBS] oversize values are refused, not truncated:\n");
+	printf("oversize values are refused, not truncated:\n");
 	{
 		char big[600];
 		memset(big, 'a', sizeof(big));

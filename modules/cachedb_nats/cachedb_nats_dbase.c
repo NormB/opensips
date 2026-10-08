@@ -62,13 +62,14 @@
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
-#include "../../lib/nats/nats_rl.h"   /* [P3.7] rate-limited outage WARN */
+#include "../../lib/nats/nats_rl.h"   /* rate-limited outage WARN */
 #include "../../lib/nats/nats_validate.h"
 #include "../../lib/nats/nats_str.h"
+#include "../../lib/nats/nats_err.h"   /* NATS_ERR_TEXT */
 
 extern int nats_cas_retries;   /* defined in cachedb_nats.c */
 
-/* [P3.7] One shared, rate-limited WARN for every KV-op disconnect
+/* One shared, rate-limited WARN for every KV-op disconnect
  * fast-fail in this module (the per-call lines stay DBG).  Before this
  * a broker outage was invisible at the default log level: all 13
  * fast-fail sites logged DBG only, and the pool's own transition
@@ -163,14 +164,14 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 	 * nats.c's internal I/O thread (race between reconnection cleanup
 	 * and our KV operations). */
 	if (!nats_pool_is_connected()) {
-		nats_cdb_disconnected_warn("KV operation");   /* [P3.7] */
+		nats_cdb_disconnected_warn("KV operation");
 		LM_DBG("NATS disconnected — KV operation deferred\n");
 		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}
 
-	/* [P2.8] refresh protocol: snapshot BEFORE the acquire, adopt only
-	 * after success (nats_epoch.h documents why -- this was P0.1). */
+	/* refresh protocol: snapshot BEFORE the acquire, adopt only
+	 * after success (nats_epoch.h documents why). */
 	epoch = nats_epoch_snapshot();
 	if (nats_epoch_current(&ncon->kv_epoch) && ncon->kv)
 		return 0;  /* still valid */
@@ -247,29 +248,31 @@ void nats_cachedb_destroy(cachedb_con *con)
 }
 
 /* The str→C-string helpers now live in lib/nats/nats_str.h
- * (nats_str_to_buf) -- see P3-63. */
+ * (nats_str_to_buf). */
 
 /**
  * validate_kv_key() — reject keys NATS KV cannot represent as a subject token.
  *
  * NATS JetStream KV maps keys onto a subject of the form "$KV.<bucket>.<key>",
  * so the key must be a valid subject token: alphanumeric plus `_`, `-`, `=`,
- * `/`, `\`, `.` (dots split into sub-tokens), no whitespace, no control chars,
- * and no wildcard chars (`*`, `>`). An empty key is rejected by NATS too.
+ * `/`, `\`, `.` (dots split into sub-tokens, no empty token) -- the same
+ * alphabet nats.c's kv.c validKey() enforces.
  *
  * Returns 0 if key is valid, -1 otherwise.
  */
 int validate_kv_key(const str *s)
 {
-	/* The rules (no control/whitespace/wildcards, ':' reserved) live in the
-	 * shared lib/nats validator (P3-64); keep the cachedb-context log here. */
+	/* The rules (the nats.c key alphabet) live in the shared lib/nats
+	 * validator; keep the cachedb-context log here. */
 	if (!s || !s->s || s->len <= 0) {
 		LM_ERR("KV key empty or NULL\n");
 		return -1;
 	}
 	if (nats_validate(s->s, s->len, NATS_VALIDATE_KV_KEY) < 0) {
-		LM_ERR("invalid KV key (control/whitespace/wildcard/':' "
-			"reserved): '%.*s'\n", s->len, s->s);
+		LM_ERR("invalid KV key '%.*s': keys may contain only letters, "
+			"digits and . _ - / \\ =, with no leading, trailing or "
+			"double dot (hash SIP values such as a Call-ID first)\n",
+			s->len, s->s);
 		return -1;
 	}
 	return 0;
@@ -346,7 +349,7 @@ int nats_cache_get(cachedb_con *con, str *attr, str *val)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for key '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -428,14 +431,14 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 
 	/* Generic cache_store() path: no per-key TTL here.  (usrloc rows DO get
 	 * per-key expiry — via the row-write per-message Nats-TTL re-assert in
-	 * cachedb_nats_expiry.c, reclaimed by the P9 reaper —
+	 * cachedb_nats_expiry.c, reclaimed by the reaper —
 	 * but that rides the CAS-UPSERT row seam, not this generic set().) */
 	if (expires > 0)
 		LM_DBG("per-key TTL (%d s) ignored on generic cache_store — "
 			"NATS KV uses bucket-level TTL on this path\n",
 			expires);
 
-	/* [P3.6] length-aware write: the value travels as (ptr,len) --
+	/* length-aware write: the value travels as (ptr,len) --
 	 * the old NUL-termination copy (stack or a pkg alloc per >4 KB
 	 * set) existed solely to feed kvStore_PutString, which would
 	 * also silently truncate an embedded-NUL value. */
@@ -447,7 +450,7 @@ int nats_cache_set(cachedb_con *con, str *attr, str *val, int expires)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Put failed for key '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -498,7 +501,7 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Delete failed for key '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}
@@ -510,7 +513,7 @@ int nats_cache_remove(cachedb_con *con, str *attr)
 
 /**
  * nats_cache_remove_unsupported() — non-NULL "unsupported" stub for the
- * cachedb_funcs._remove slot  [P11 / SPEC §1.2 REV-10].
+ * cachedb_funcs._remove slot.
  *
  * _remove deletes a federation-metadata entry by named key and is only invoked
  * in CM_FEDERATION_CACHEDB metadata maintenance (usrloc udomain.c:1315), which
@@ -663,7 +666,7 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 			char _rk[NATS_REDACT_KEY_BUF];
 			nats_redact_key(key_buf, _rk, sizeof(_rk));
 			LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-				_rk, nats_dl.natsStatus_GetText(s));
+				_rk, NATS_ERR_TEXT(s));
 			NATS_CDB_STATS_INC(op_failed);
 			return -1;
 		}
@@ -710,7 +713,7 @@ static int nats_cache_counter_op(cachedb_con *con, str *attr, int delta,
 		if (!nats_cas_should_retry(s) || !nats_pool_is_connected()) {
 			LM_WARN("counter '%s' CAS write failed (%s); not a conflict "
 				"-- bailing instead of exhausting the retry budget\n",
-				key_buf, nats_dl.natsStatus_GetText(s));
+				key_buf, NATS_ERR_TEXT(s));
 			return -1;
 		}
 
@@ -822,7 +825,7 @@ int nats_cache_get_counter(cachedb_con *con, str *attr, int *val)
 		char _rk[NATS_REDACT_KEY_BUF];
 		nats_redact_key(key_buf, _rk, sizeof(_rk));
 		LM_ERR("kvStore_Get failed for counter '%s': %s\n",
-			_rk, nats_dl.natsStatus_GetText(s));
+			_rk, NATS_ERR_TEXT(s));
 		NATS_CDB_STATS_INC(op_failed);
 		return -1;
 	}

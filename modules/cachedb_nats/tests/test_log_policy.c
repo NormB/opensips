@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.7] Outage / hot-path logging policy, cachedb_nats side:
+ * Outage / hot-path logging policy, cachedb_nats side:
  *
  *   - a broker outage must be VISIBLE: the KV-op disconnect fast-fail
  *     (13 sites, all DBG -- invisible in production) gains ONE shared

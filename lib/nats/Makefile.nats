@@ -1,7 +1,7 @@
 # lib/nats/Makefile.nats — shared NATS dependency detection.
 # Include this from any consumer that needs libnats headers (lib/nats
 # itself plus modules/event_nats, modules/cachedb_nats,
-# modules/nats_consumer).  Follows the same pattern as Makefile.openssl.
+# modules/cachedb_nats_fts, modules/nats_consumer).  Follows the same pattern as Makefile.openssl.
 #
 # Sets:
 #   NATS_FOUND := yes      iff libnats headers are reachable
@@ -11,9 +11,8 @@
 # Important: this fragment NO LONGER adds -lnats to LIBS.  Since the
 # function-pointer table in lib/nats/nats_dl.{c,h} dlopens libnats at
 # runtime, no .so produced from this tree should carry DT_NEEDED for
-# libnats.so.  The runtime backend selector (lib/nats Phase 2) is then
-# free to choose whichever libnats variant matches the tls_mgm-
-# configured TLS backend.
+# libnats.so; the library is chosen at run time (the ld.so search, or
+# $NATS_DL_LIBNATS_PATH).
 #
 # Consumers of this fragment MUST gate their build rules on
 # NATS_FOUND so that hosts without libnats headers produce a clean

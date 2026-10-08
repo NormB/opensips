@@ -22,7 +22,7 @@
  * nats_rpc_ipc.h -- worker -> consumer-process publish hop for the
  * consumer-process-routed async nats_request transport.
  *
- * [P2.1] This hop rides OpenSIPS core IPC: the SIP worker calls
+ * This hop rides OpenSIPS core IPC: the SIP worker calls
  * ipc_send_rpc(<consumer proc>, nats_rpc_ipc_on_publish, param) and the
  * whole payload -- {slot_idx u32, generation u32} -- is packed INTO the
  * opaque param pointer (zero allocation; the pipe is the queue).  The

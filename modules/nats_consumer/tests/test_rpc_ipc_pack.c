@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P2.1] The async-RPC worker->consumer hop rides core IPC
+ * The async-RPC worker->consumer hop rides core IPC
  * (ipc_send_rpc), and the whole payload -- {slot_idx u32, generation
  * u32} -- is packed INTO the opaque `void *param` (zero SHM allocation
  * on the hot path).  This locks the pack/unpack pair:
@@ -59,7 +59,7 @@ int main(void)
 	char label[80];
 	unsigned i, j;
 
-	printf("[P2.1] pack/unpack roundtrip over the corner grid:\n");
+	printf("pack/unpack roundtrip over the corner grid:\n");
 	for (i = 0; i < 4; i++)
 		for (j = 0; j < 4; j++) {
 			snprintf(label, sizeof(label),
@@ -68,7 +68,7 @@ int main(void)
 			roundtrip(corners[i], corners[j], label);
 		}
 
-	printf("[P2.1] field isolation:\n");
+	printf("field isolation:\n");
 	{
 		uint32_t s = 0, g = 0;
 		nats_rpc_ipc_unpack(nats_rpc_ipc_pack(0xFFFFFFFFu, 0), &s, &g);
@@ -79,7 +79,7 @@ int main(void)
 			"all-ones generation leaves slot zero");
 	}
 
-	printf("[P2.1] pack(0,0) == NULL is still a valid encoding:\n");
+	printf("pack(0,0) == NULL is still a valid encoding:\n");
 	{
 		uint32_t s = 7, g = 7;
 		void *p = nats_rpc_ipc_pack(0, 0);

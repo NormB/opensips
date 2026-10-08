@@ -15,26 +15,27 @@
 #                                           -> worst = N * E ms
 #   - while ($var(x) < N && nats_fetch("id", T) > 0)  -> worst = N * T ms
 #   - a fetch loop with no iteration bound  -> unbounded, fails
-# The generated README must carry the same drain examples as the docbook
-# master.  bash + awk only (runs in the minimal CI containers).
+# The examples are read from the module README.md code blocks.
+# bash + awk only (runs in the minimal CI containers).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MOD="$(cd "$HERE/.." && pwd)"
-XML="$MOD/doc/nats_consumer_admin.xml"
-README="$MOD/README"
+README="$MOD/README.md"
 FAILS=0
 
-# extract_blocks <file>: every "timer_route[...] {" ... "}" block that calls
-# nats_fetch*, entities unescaped, one block per record (records separated
-# by a line holding only "@@").
+# extract_blocks <file>: every "timer_route[...] {" ... "}" block inside a
+# ``` code block that calls nats_fetch*, one block per record (records
+# separated by a line holding only "@@").
 extract_blocks() {
-    sed -e 's/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g' "$1" | awk '
+    awk '
+        /^```/ { fence = !fence; next }
+        !fence { next }
         /^timer_route\[/ { inb = 1; blk = "" }
         inb { blk = blk $0 "\n" }
         inb && /^}[[:space:]]*$/ {
             inb = 0
             if (blk ~ /nats_fetch/) printf "%s@@\n", blk
-        }'
+        }' "$1"
 }
 
 # budget: read blocks, print "<name> <interval_ms> <worst_ms|unbounded|unknown>"
@@ -76,10 +77,9 @@ budget() {
         END { flush() }'
 }
 
-[ -f "$XML" ] || { echo "FAIL: $XML missing"; exit 1; }
 [ -f "$README" ] || { echo "FAIL: $README missing"; exit 1; }
 
-echo "== drain examples fit their timer interval ($XML)"
+echo "== drain examples fit their timer interval ($README)"
 n=0
 while read -r name ival worst; do
     n=$((n + 1))
@@ -95,18 +95,9 @@ while read -r name ival worst; do
             FAILS=$((FAILS + 1))
         fi ;;
     esac
-done < <(extract_blocks "$XML" | budget)
+done < <(extract_blocks "$README" | budget)
 if [ "$n" -eq 0 ]; then
     echo "  FAIL: no timer_route fetch examples found (parser out of date?)"
-    FAILS=$((FAILS + 1))
-fi
-
-echo "== README carries the docbook's drain examples"
-if diff <(extract_blocks "$XML") <(extract_blocks "$README") >/dev/null; then
-    echo "  ok: README drain examples == docbook master"
-else
-    echo "  FAIL: README drain examples differ from $XML (regenerate/sync README):"
-    diff <(extract_blocks "$XML") <(extract_blocks "$README") | sed 's/^/    /' | head -20
     FAILS=$((FAILS + 1))
 fi
 

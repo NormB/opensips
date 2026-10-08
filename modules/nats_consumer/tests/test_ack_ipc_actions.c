@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P2.1] Worker acks ride core IPC: the ACTION is the ipc_send_rpc
+ * Worker acks ride core IPC: the ACTION is the ipc_send_rpc
  * function identity (nats_ack_ipc_on_ack / _nak / _term / _in_progress
  * / _ack_next, param = the 64-bit ack token verbatim) and only
  * NAK_DELAY -- the one action that cannot fit token+delay in a pointer
@@ -196,7 +196,7 @@ int main(void)
 	CHECK(nats_ack_ipc_stats_init() == 0, "ack IPC stats block allocated");
 	drained0 = nats_ack_ipc_drained_total();
 
-	printf("[P2.1] plain ack: JetStream Ack + destroy + ref released:\n");
+	printf("plain ack: JetStream Ack + destroy + ref released:\n");
 	tok = stash((natsMsg *)&fake1);
 	nats_ack_ipc_on_ack(0, tok_param(tok));
 	CHECK(rec.ack == 1 && rec.last == (natsMsg *)&fake1,
@@ -206,12 +206,12 @@ int main(void)
 	CHECK(nats_ack_ipc_drained_total() == drained0 + 1,
 		"drained stat bumped");
 
-	printf("[P2.1] stale token: no JetStream call at all:\n");
+	printf("stale token: no JetStream call at all:\n");
 	nats_ack_ipc_on_ack(0, tok_param(tok));
 	CHECK(rec.ack == 1 && rec.destroy == 1,
 		"replayed token is a no-op (no double ack/destroy)");
 
-	printf("[P2.1] nak / term route to their JetStream calls:\n");
+	printf("nak / term route to their JetStream calls:\n");
 	tok = stash((natsMsg *)&fake1);
 	nats_ack_ipc_on_nak(0, tok_param(tok));
 	CHECK(rec.nak == 1, "natsMsg_Nak called");
@@ -221,7 +221,7 @@ int main(void)
 		"natsMsg_Term called on the right message");
 	CHECK(rec.destroy == 3, "both messages destroyed");
 
-	printf("[P2.1] ack_next: AckSync + per-handle refill hint:\n");
+	printf("ack_next: AckSync + per-handle refill hint:\n");
 	CHECK(nats_ack_next_take(H_IDX) == 0, "refill hint starts clear");
 	tok = stash((natsMsg *)&fake1);
 	nats_ack_ipc_on_ack_next(0, tok_param(tok));
@@ -229,7 +229,7 @@ int main(void)
 	CHECK(nats_ack_next_take(H_IDX) == 1, "refill hint set for the handle");
 	CHECK(nats_ack_next_take(H_IDX) == 0, "take() clears the hint");
 
-	printf("[P3.6] ack_next AckSync budget: a burst degrades to async Ack:\n");
+	printf("ack_next AckSync budget: a burst degrades to async Ack:\n");
 	{
 		/* Each AckSync is a full broker round-trip executed serially
 		 * inside the consumer's IPC drain; a worker-side burst of
@@ -264,7 +264,7 @@ int main(void)
 		(void)nats_ack_next_take(H_IDX);
 	}
 
-	printf("[P2.1] in_progress: keeps the message alive under the SAME token:\n");
+	printf("in_progress: keeps the message alive under the SAME token:\n");
 	tok = stash((natsMsg *)&fake2);
 	{
 		int destroys_before = rec.destroy;
@@ -276,7 +276,7 @@ int main(void)
 			"same token still redeems the message afterwards");
 	}
 
-	printf("[P2.1] nak_delay: SHM payload, ms->ns, freed by the handler (ASan):\n");
+	printf("nak_delay: SHM payload, ms->ns, freed by the handler (ASan):\n");
 	tok = stash((natsMsg *)&fake1);
 	{
 		nats_ack_nak_delay_t *d = shm_malloc(sizeof(*d));
@@ -287,7 +287,7 @@ int main(void)
 			"NakWithDelay called with 1500ms as nanoseconds");
 	}
 
-	printf("[P2.1] sent/dropped counters (worker-side helper):\n");
+	printf("sent/dropped counters (worker-side helper):\n");
 	{
 		uint64_t s0 = nats_ack_ipc_enqueued_total();
 		uint64_t d0 = nats_ack_ipc_dropped_total();

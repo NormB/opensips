@@ -28,7 +28,7 @@
 
 /*
  * fts_query.c — the non-PK filter walk over the FTS index (moved out of
- * cachedb_nats_json.c in the P1.2 module split).  Produces a retained
+ * cachedb_nats_json.c when the index became its own module).  Produces a retained
  * key snapshot for cachedb_nats's row fetcher.
  */
 

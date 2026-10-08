@@ -21,7 +21,7 @@
  */
 
 /*
- * Owner decision 3 wiring test: config-declared handle binds replace
+ * Wiring test: config-declared handle binds replace
  * file persistence.
  *
  *   - nats_consumer exports a `bind` modparam (repeatable): each value

@@ -15,7 +15,7 @@ done
 for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 
 # Watcher counts puts on this key.  Poll for the full count, bounded,
-# instead of a blind settle sleep [P5.5].
+# instead of a blind settle sleep.
 _all_puts_seen() {
     [ "$(grep -c "E_NATS_KV_CHANGE op=put key=${key} " "$WORKDIR/opensips.log")" -ge 10 ]
 }

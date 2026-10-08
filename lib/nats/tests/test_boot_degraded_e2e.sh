@@ -3,7 +3,7 @@
 #
 # Distinct fault class from crash/restart-mid-traffic: the broker is
 # unreachable while every OpenSIPS process runs child_init.  The
-# NATS_TODO #7 hardening requires:
+# The hardening requires:
 #
 #   - event_nats: child_init logs + returns 0 (degraded), publish
 #     fails cleanly while down (no crash, no abort)

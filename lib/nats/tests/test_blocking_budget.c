@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.2] The SIP-worker blocking budget, lib side:
+ * The SIP-worker blocking budget, lib side:
  *
  *   - nats_pool_kv_op_timeout_ms ships a NON-ZERO default (the usrloc
  *     update path is two synchronous KV round-trips per REGISTER; the

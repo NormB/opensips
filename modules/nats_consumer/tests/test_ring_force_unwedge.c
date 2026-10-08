@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P2.2] Ring force-unwedge.  A worker that dies between its tail-CAS
+ * Ring force-unwedge.  A worker that dies between its tail-CAS
  * and the consumed_gen release orphans one slot; once the producer
  * wraps to that slot it bounded-spins, bails "full", and -- before
  * this change -- the handle was dead forever (every future push waits

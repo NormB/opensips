@@ -107,7 +107,7 @@ int main(void)
 		const char *w = "../cachedb_nats_watch.c";
 		ASSERT(file_contains(w, "if (cdbn_fts_on && index_resync_on_reconnect)"),
 			"watcher rebuilds on reconnect when the flag is set "
-			"(and the FTS module is bound, P1.2)");
+			"(and the FTS module is bound)");
 		ASSERT(file_contains(w, "cdbn_fts.rebuild"),
 			"watcher calls the full index rebuild via the binds");
 	}

@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P9 / SPEC.md §4.3A [REV-1/16/21]: the reaper's row-selection and per-row
+ * / SPEC.mdA: the reaper's row-selection and per-row
  * action decisions (the broker-less core of the reaper loop).
  *
  *   cdbn_reap_row_due(row_exp, now, grace): a row is a reap candidate iff
@@ -27,9 +27,9 @@
  *
  *   cdbn_reap_row_action(n_live_survivors): after the reaper prunes the expired
  *     contacts of a due row, > 0 survivors => a CAS survivor-write through
- *     nats_kv_put_row (which RE-asserts the per-message TTL, [TREV-3], and
- *     preserves aorhash/schema_version, [REV-31]); 0 survivors => a CAS-guarded
- *     publish-delete (never a revision-blind kvStore_Delete, [REV-16]).
+ *     nats_kv_put_row (which RE-asserts the per-message TTL,, and
+ *     preserves aorhash/schema_version); 0 survivors => a CAS-guarded
+ *     publish-delete (never a revision-blind kvStore_Delete).
  *
  *   gcc -DREAP_CURRENT ... -> naive: ignores the grace margin AND reaps
  *                            row_exp==0 (would purge permanent contacts) => RED.
@@ -75,7 +75,7 @@ int main(void)
 	printf("== carried copy: FIXED reaper decisions ==\n");
 #endif
 
-	printf("[REV-1] row due selection (now=1000, S=5):\n");
+	printf("row due selection (now=1000, S=5):\n");
 	CHECK(cdbn_reap_row_due(900, now, S) == 1, "row_exp 900 +5 <= 1000 => due");
 	CHECK(cdbn_reap_row_due(995, now, S) == 1, "row_exp 995 +5 == 1000 boundary => due");
 	CHECK(cdbn_reap_row_due(996, now, S) == 0, "row_exp 996 +5 > 1000 => NOT due (within skew)");
@@ -84,7 +84,7 @@ int main(void)
 	CHECK(cdbn_reap_row_due(0, 9999999999LL, S) == 0, "permanent still not due far in the future");
 	CHECK(cdbn_reap_row_due(5000000000LL, now, S) == 0, "post-2038 future row_exp => not due");
 
-	printf("[REV-16/31] per-row action after pruning:\n");
+	printf("per-row action after pruning:\n");
 	CHECK(cdbn_reap_row_action(3) == REAP_WRITE_SURVIVORS, "3 survivors => CAS survivor-write (re-assert TTL)");
 	CHECK(cdbn_reap_row_action(1) == REAP_WRITE_SURVIVORS, "1 survivor => survivor-write");
 	CHECK(cdbn_reap_row_action(0) == REAP_DELETE_EMPTY, "0 survivors => CAS-guarded publish-delete");

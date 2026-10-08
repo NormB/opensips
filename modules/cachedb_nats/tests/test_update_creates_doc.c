@@ -35,17 +35,17 @@
  *   _json_apply_pair()   — already covered by test_update_nested_dict, used
  *                          here to verify the seed → apply → final flow.
  *
- * TTL-HISTORY-FIX-SPEC.md D2 [HREV-2] REWORK: the first-insert path no
+ * REWORK: the first-insert path no
  * longer WRITES the seed.  The old flow (Get NOT_FOUND -> CreateString(seed)
  * -> CAS-update at the create's revision) left an un-TTL'd seed revision at
  * the bottom of the key's history; on a history-keeping bucket the key then
  * ROLLED BACK to that immortal seed when the TTL'd head expired [RC-2, spec
- * §0 E1].  Now update_fetch_or_seed returns the seed purely as the merge
+ * E1].  Now update_fetch_or_seed returns the seed purely as the merge
  * base with rev==0 (JetStream sequences are 1-based, so 0 is unambiguous
  * "no prior message") and the single CAS write creates the FULL row with its
  * TTL.  The fetch decision skeleton below locks that contract:
  *
- *   gcc -DSEEDWRITE_CURRENT ... -> pre-HREV-2: NOT_FOUND writes the seed and
+ *   gcc -DSEEDWRITE_CURRENT... -> pre-: NOT_FOUND writes the seed and
  *                                  returns the create's revision => RED.
  *   gcc ...                     -> seedless: no write, rev==0 => GREEN.
  *
@@ -156,7 +156,7 @@ static char *cdbn_build_seed_doc(const char *field, int flen,
 
 static int g_fails;
 
-/* ─── D2 [HREV-2]: carried copy of the update_fetch_or_seed decision ───
+/* ─── D2: carried copy of the update_fetch_or_seed decision ───
  * Models what the fetch step does per kvStore_Get outcome.  @wrote_seed
  * reports whether a standalone seed write was issued (the RC-2 bug). */
 enum fetch_kind { FETCH_NOT_FOUND, FETCH_MARKER, FETCH_LIVE };
@@ -167,14 +167,14 @@ static int fetch_or_seed_decision(enum fetch_kind k, uint64_t entry_rev,
 	switch (k) {
 	case FETCH_NOT_FOUND:
 #ifdef SEEDWRITE_CURRENT
-		*wrote_seed = 1;             /* pre-HREV-2: CreateString(seed) */
+		*wrote_seed = 1;             /* pre-: CreateString(seed) */
 		*out_rev = 1;                /* the create's revision          */
 #else
-		*out_rev = 0;                /* HREV-2: merge base only, rev==0 */
+		*out_rev = 0;                /*: merge base only, rev==0 */
 #endif
 		return 0;
 	case FETCH_MARKER:
-		*out_rev = entry_rev;        /* CAS at the marker rev [REV-27] */
+		*out_rev = entry_rev;        /* CAS at the marker rev */
 		return 0;
 	case FETCH_LIVE:
 		*out_rev = entry_rev;
@@ -249,7 +249,7 @@ int main(void)
 	}
 	free(out);
 
-	/* G. [HREV-2] first insert issues NO standalone seed write and returns
+	/* G. first insert issues NO standalone seed write and returns
 	 *    the rev==0 "no prior message" sentinel; marker/live paths keep
 	 *    returning the real revision (CAS targets unchanged). */
 	{

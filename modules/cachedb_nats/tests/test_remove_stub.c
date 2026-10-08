@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P11 / SPEC.md §1.2 [REV-10]: the `cachedb_funcs._remove` slot.
+ * / SPEC.md: the `cachedb_funcs._remove` slot.
  *
  *   int (*_remove)(cachedb_con *con, str *attr, const str *key);
  *
@@ -26,7 +26,7 @@
  * today the slot is left unset => NULL.  A wrong-mode / misconfigured deployment
  * that reached it would dispatch through a NULL function pointer => SEGFAULT.
  *
- * [REV-10] v1 MUST register a NON-NULL "unsupported" stub that returns -1 (with
+ * v1 MUST register a NON-NULL "unsupported" stub that returns -1 (with
  * an LM_ERR naming the unsupported op) so a misconfiguration fails LOUDLY rather
  * than crashing.  The real federation implementation (G4) is a scoped follow-up.
  *
@@ -72,7 +72,7 @@ static const remove_fn registered_remove =
 #ifdef REMOVE_CURRENT
 	NULL;                               /* today: slot left unset */
 #else
-	nats_cache_remove_unsupported;      /* [REV-10] non-NULL stub */
+	nats_cache_remove_unsupported;      /* non-NULL stub */
 #endif
 
 static int fails = 0;
@@ -87,20 +87,20 @@ int main(void)
 	printf("== carried copy: FIXED (_remove non-NULL unsupported stub) ==\n");
 #endif
 
-	printf("[REV-10] the _remove slot MUST be non-NULL (no latent NULL-call):\n");
+	printf("the _remove slot MUST be non-NULL (no latent NULL-call):\n");
 	CHECK(registered_remove != NULL, "cde.cdb_func._remove registered non-NULL");
 
 	/* Guard every invocation on non-NULL so the RED build reports the NULL as a
 	 * failed assertion instead of actually segfaulting the test runner. */
 	if (registered_remove == NULL) {
 		printf("\n  (slot is NULL — invocation tests skipped to avoid the very "
-			"segfault [REV-10] forbids)\n");
+			"segfault forbids)\n");
 		printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED",
 			fails, fails == 1 ? "" : "s");
 		return fails ? 1 : 0;
 	}
 
-	printf("[REV-10] invoking the stub MUST return -1 (loud), never crash:\n");
+	printf("invoking the stub MUST return -1 (loud), never crash:\n");
 
 	/* Nominal-ish args. */
 	{

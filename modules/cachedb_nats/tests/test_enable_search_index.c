@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * FTS-split wiring test (P1.2): the former enable_search_index modparam
+ * FTS-split wiring test: the former enable_search_index modparam
  * is GONE — loading the optional cachedb_nats_fts module is the enable
  * switch.  cachedb_nats binds it at mod_init (cdbn_fts_bind) and:
  *   - query/update reject non-PK filters when the module is absent;

@@ -9,7 +9,8 @@
 #   1. $NATS_DL_LIBNATS_PATH wins over the system libnats (it is what
 #      lib/nats/nats_dl.c dlopen()s when set).
 #   2. Without it, the system libnats from `ldconfig -p` is checked.
-#   3. TLS-capable == dynamically links libssl.
+#   3. TLS-capable == dynamically links libssl or libwolfssl (a libnats
+#      built with the wolfSSL patch in lib/nats/patches/).
 #   4. A missing or unfindable library is "not TLS-capable", with a reason.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -24,12 +25,16 @@ check() {
 mkdir -p "$WORK/bin" "$WORK/lib"
 : > "$WORK/lib/libnats-tls.so"
 : > "$WORK/lib/libnats-plain.so"
+: > "$WORK/lib/libnats-wolf.so"
 # ldd stub: libraries whose FILE name contains "tls" link libssl (the
 # work dir's own name may contain "tls", so match the basename only)
 cat > "$WORK/bin/ldd" <<'STUB'
 #!/bin/sh
 echo "	libc.so.6 => /lib/libc.so.6"
-case "$(basename "$1")" in *tls*) echo "	libssl.so.3 => /lib/libssl.so.3" ;; esac
+case "$(basename "$1")" in
+    *tls*)  echo "	libssl.so.3 => /lib/libssl.so.3" ;;
+    *wolf*) echo "	libwolfssl.so.44 => /opt/wolfssl/lib/libwolfssl.so.44" ;;
+esac
 STUB
 # ldconfig stub: reports $FAKE_SYSTEM_LIBNATS as the system libnats (if set)
 cat > "$WORK/bin/ldconfig" <<'STUB'
@@ -53,7 +58,7 @@ probe() {  # probe <NATS_DL_LIBNATS_PATH or -> <system libnats or -> -> rc
     )
 }
 
-T="$WORK/lib/libnats-tls.so"; P="$WORK/lib/libnats-plain.so"
+T="$WORK/lib/libnats-tls.so"; P="$WORK/lib/libnats-plain.so"; WF="$WORK/lib/libnats-wolf.so"
 echo "== libnats_tls_check"
 check "override -> TLS lib (system plain) = capable"         0 "$(probe "$T" "$P")"
 check "override -> plain lib (system TLS) = not capable"     1 "$(probe "$P" "$T")"
@@ -61,6 +66,7 @@ check "no override, system TLS = capable"                    0 "$(probe - "$T")"
 check "no override, system plain = not capable"              1 "$(probe - "$P")"
 check "override -> missing file = not capable"               1 "$(probe "$WORK/lib/nope.so" "$T")"
 check "no override, no system libnats = not capable"         1 "$(probe - -)"
+check "override -> wolfSSL-backed lib = capable"              0 "$(probe "$WF" "$P")"
 
 reason=$( export PATH="$WORK/bin:$PATH" NATS_DL_LIBNATS_PATH="$P"
           [ -f "$HERE/libnats_tls_probe.sh" ] && . "$HERE/libnats_tls_probe.sh" && libnats_tls_check )

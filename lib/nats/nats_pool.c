@@ -43,7 +43,7 @@
  * threads, NOT on an OpenSIPS process main thread.  LM_* and pkg_malloc
  * are forbidden there (per-process / main-thread-only state); atomic
  * ops, write(), nats.c APIs, and the shm_malloc + ipc_dispatch_rpc
- * handoff are safe — see the callback-doctrine block below [P4.3].
+ * handoff are safe — see the callback-doctrine block below.
  *
  * ## Design
  *
@@ -82,6 +82,7 @@
 #include "nats_redact.h"
 #include "nats_server_info.h"
 #include "nats_ca_dir.h"
+#include "nats_err.h"
 #include "../../modules/tls_mgm/api.h"   /* tls_mgm_binds, tls_domain */
 
 /* This is a shared library (lib/nats), not a loadable module.
@@ -154,7 +155,7 @@ void nats_pool_set_tls_api(void *binds)
 }
 
 /* The tls_mgm attach ritual, shared by every NATS module's mod_init
- * (P2.8): look up load_tls_mgm, bind, hand the table to the pool.
+ *: look up load_tls_mgm, bind, hand the table to the pool.
  * Absence of tls_mgm is not an error -- nats:// keeps working; the
  * connect path errors cleanly on tls:// URLs. */
 void nats_pool_bind_tls(const char *modname)
@@ -241,7 +242,7 @@ int nats_pool_drain_timeout_setter(modparam_t type, void *val)
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
  * like usrloc so a slow-but-connected broker can't block a SIP worker for
  * the full default. */
-/* [P3.2] Non-zero DEFAULT: the usrloc update path is two synchronous
+/* Non-zero DEFAULT: the usrloc update path is two synchronous
  * KV round-trips per REGISTER; with cnats's library default (5 s) a
  * slow-but-connected broker can hold a SIP worker ~10 s per attempt.
  * 1000 ms bounds the per-REGISTER worst case at ~2 s; operators can
@@ -375,7 +376,7 @@ err_free_partial:
  * nats.c callbacks (run on nats.c internal I/O thread)
  *
  * CRITICAL: These callbacks run on a thread created by nats.c, NOT
- * an OpenSIPS process main thread.  [P4.3 doctrine]
+ * an OpenSIPS process main thread.
  *
  * Safe operations in these callbacks:
  *   - C11 atomic ops (atomic_store, atomic_exchange, atomic_fetch_add)
@@ -981,7 +982,7 @@ natsConnection *nats_pool_get(void)
 				break;
 			}
 
-			/* [P3.2] Non-transient failure classes: retrying cannot
+			/* Non-transient failure classes: retrying cannot
 			 * succeed until an operator fixes configuration (TLS
 			 * material, credentials, malformed options).  Fail the
 			 * boot NOW instead of burning max_reconnect x sleep
@@ -1128,7 +1129,7 @@ jsCtx *nats_pool_get_js(void)
  * The KV cache is process-local.  The _kv_stale flag is set by the
  * reconnect callback (nats.c thread) and consumed here via atomic_exchange.
  */
-/* P11b [REV-25]: read the bound bucket's backing-stream MaxAge (ns). */
+/* Read the bound bucket's backing-stream MaxAge (ns). */
 int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
 {
 	char stream[160];
@@ -1153,7 +1154,7 @@ int nats_pool_bucket_maxage_ns(const char *bucket, int64_t *out_ns)
 	return 0;
 }
 
-/* [HREV-1/D1.4] read the bound bucket's backing-stream MaxMsgsPerSubject
+/* read the bound bucket's backing-stream MaxMsgsPerSubject
  * (the KV history depth) for the module's startup surfacing.  Mirrors
  * nats_pool_bucket_maxage_ns.  0 = ok (*out_mmps filled), -1 = unavailable. */
 int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps)
@@ -1181,7 +1182,7 @@ int nats_pool_bucket_mmps(const char *bucket, int64_t *out_mmps)
 	return 0;
 }
 
-/* kv_ttl_below_marker request + probe [TTL-BELOW-MARKER].
+/* kv_ttl_below_marker request + probe.
  *
  * The fork nats-server honors per-key TTLs shorter than LimitMarkerTTL on
  * History>1 buckets when the bucket's backing stream carries
@@ -1313,19 +1314,18 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 		s = nats_dl.js_CreateKeyValue(&kv, _js, &kvCfg);
 #ifdef LIBNATS_HAS_TTL_BELOW_MARKER
 		if (s != NATS_OK && _kv_tbm_req && kvCfg.AllowMsgTTLBelowMarker) {
-			/* [TTL-BELOW-MARKER probe] a stock broker rejects the
+			/* a stock broker rejects the
 			 * unknown config field; retry WITHOUT the flag.  Retry
 			 * success proves the flag was the problem -> latch
 			 * UNSUPPORTED (retry failure is a genuine error and
 			 * falls through to the plain error path, state stays
 			 * unprobed for the next attempt). */
 			LM_WARN("NATS pool: KV bucket '%s' create with "
-				"allow_msg_ttl_below_marker rejected (%s: %s); "
+				"allow_msg_ttl_below_marker rejected (%s); "
 				"retrying without it -- broker lacks the option, "
 				"per-key TTLs on history-keeping buckets stay "
 				"reaper-only\n",
-				bucket, nats_dl.natsStatus_GetText(s),
-				nats_dl.nats_GetLastError(NULL));
+				bucket, NATS_ERR_TEXT(s));
 			kvCfg.AllowMsgTTLBelowMarker = false;
 			kvCfg.LimitMarkerTTL = 0;
 			kv = NULL;
@@ -1339,7 +1339,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 #endif
 		if (s != NATS_OK) {
 			LM_ERR("NATS pool: KV bucket '%s' create failed: %s\n",
-				bucket, nats_dl.natsStatus_GetText(s));
+				bucket, NATS_ERR_TEXT(s));
 			return NULL;
 		}
 		LM_INFO("NATS pool: KV bucket '%s' created "
@@ -1349,7 +1349,7 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 	} else {
 		LM_DBG("NATS pool: bound to existing KV bucket '%s'\n", bucket);
 #ifdef LIBNATS_HAS_TTL_BELOW_MARKER
-		/* [TTL-BELOW-MARKER probe, bind path] the bucket pre-exists:
+		/* the bucket pre-exists:
 		 * its backing stream config decides the latch.  Read it once
 		 * per process (state stays latched afterwards). */
 		if (_kv_tbm_req && _kv_tbm_state < 0) {

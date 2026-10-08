@@ -19,7 +19,7 @@
  *
  * Single-owner test for the JetStream observability MI commands.
  *
- * The defect (P0.3): both event_nats and cachedb_nats registered MI
+ * The defect: both event_nats and cachedb_nats registered MI
  * commands named nats_stream_list / nats_stream_info.  mi/mi.c rejects
  * the duplicate registration and sr_module.c only LM_ERRs, so whichever
  * module loaded FIRST silently owned the command — while both docbooks

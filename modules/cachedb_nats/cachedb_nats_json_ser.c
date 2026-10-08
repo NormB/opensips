@@ -51,7 +51,7 @@
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
-extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
+extern int   fts_json_prefix_len;   /* cached at mod_init */
 extern int   nats_cas_retries;   /* defined in cachedb_nats.c */
 
 
@@ -253,7 +253,7 @@ int cdbn_sink_emit_raw_string(json_sink_t *s, const char *p, int n)
 
 int cdbn_sink_emit_int(json_sink_t *s, int64_t v)
 {
-	/* [P3.5] plain divide-loop: the old per-field "%lld" formatter
+	/* plain divide-loop: the old per-field "%lld" formatter
 	 * parsed a format string for every integer of every row (expires,
 	 * cseq, last_mod, row_exp, ... a dozen per REGISTER).  The
 	 * negative arm negates via unsigned arithmetic so INT64_MIN is
@@ -385,7 +385,7 @@ static int sink_kv_char_safe(unsigned char c)
 	    (c >= 'a' && c <= 'z'))
 		return 1;
 	switch (c) {
-	/* [REV-23] '\\' removed from the safe set: it must be '=HH'-escaped, both
+	/* '\\' removed from the safe set: it must be '=HH'-escaped, both
 	 * to satisfy the project's backslash-adversarial rule and to keep the
 	 * encoded key unambiguous. '.' and '/' stay literal (valid NATS subject
 	 * token chars; keeps `nats kv` greppability); keys that would yield an
@@ -396,7 +396,7 @@ static int sink_kv_char_safe(unsigned char c)
 	return 0;
 }
 
-/* [REV-23] Validate an already-encoded usrloc row key (the AoR portion, not the
+/* Validate an already-encoded usrloc row key (the AoR portion, not the
  * fts_json_prefix which ends on a token boundary). NATS rejects a subject with
  * an empty token, so a leading '.', trailing '.', or '..' would make JetStream
  * reject the publish and the REGISTER would be silently lost. Reject such keys

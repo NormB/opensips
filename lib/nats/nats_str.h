@@ -24,7 +24,7 @@
  * Header-only inline helpers (no new symbol in libnats_pool.so).  These
  * previously lived as per-module copies (cachedb_nats's str_to_buf /
  * native_str_to_buf, nats_consumer's str_to_cstr); consolidated here so the
- * negative-length guard and the bounds check live in one place (P3-63).
+ * negative-length guard and the bounds check live in one place.
  *
  * Only the NATS modules include this (they all pull in dprint.h / str.h);
  * lib/nats's own translation units and standalone unit tests do not.
@@ -84,7 +84,7 @@ static inline int nats_str_to_buf(const str *s, char *buf, size_t buf_size)
 	 * NUL -- a truncated key reads/writes SOMEBODY ELSE'S entry.  Fail
 	 * closed (keys never legitimately carry a NUL).  VALUES no longer pass
 	 * through here: the set paths ride the length-aware kvStore_Put/
-	 * Create/Update [P3.6], which carry embedded NULs verbatim. */
+	 * Create/Update, which carry embedded NULs verbatim. */
 	if (memchr(s->s, '\0', s->len)) {
 		LM_ERR("string contains an embedded NUL (%d bytes) -- refusing "
 			"(the NATS C-string KV API would silently truncate it)\n",

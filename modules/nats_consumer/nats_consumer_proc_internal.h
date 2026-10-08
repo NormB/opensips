@@ -231,7 +231,7 @@ natsMsg *release_msg_ref(uint64_t token);
  */
 int reap_orphan_msg_refs(void);
 /**
- * [P2.1] Consume (and clear) a handle's ACK_NEXT refill hint.
+ * Consume (and clear) a handle's ACK_NEXT refill hint.
  *
  * @param handle_idx  Handle index; out-of-range returns 0.
  * @return            1 iff the hint was set (it is cleared).

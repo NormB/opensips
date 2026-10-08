@@ -62,8 +62,10 @@ int nats_validate(const char *s, int len, nats_validate_mode_t mode)
 	if (!s || len <= 0)
 		return -1;
 
-	/* Publish subjects must not start or end with a token separator. */
-	if (mode == NATS_VALIDATE_PUBLISH_SUBJECT &&
+	/* Publish subjects and KV keys must not start or end with a token
+	 * separator. */
+	if ((mode == NATS_VALIDATE_PUBLISH_SUBJECT ||
+			mode == NATS_VALIDATE_KV_KEY) &&
 			(s[0] == '.' || s[len - 1] == '.'))
 		return -1;
 
@@ -80,8 +82,14 @@ int nats_validate(const char *s, int len, nats_validate_mode_t mode)
 				mode != NATS_VALIDATE_FILTER_SUBJECT)
 			return -1;
 
-		/* ':' is reserved as the legacy map-key separator */
-		if (c == ':' && mode == NATS_VALIDATE_KV_KEY)
+		/* KV keys: exactly the alphabet nats.c accepts (kv.c validKey),
+		 * so an invalid key fails here with a clear message instead of
+		 * inside kvStore_* with "Invalid Argument".  This also keeps ':'
+		 * out (reserved as the legacy map-key separator). */
+		if (mode == NATS_VALIDATE_KV_KEY &&
+				!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				  (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+				  c == '-' || c == '/' || c == '\\' || c == '='))
 			return -1;
 
 		/* stream/consumer names are a single token: no separators */
@@ -91,7 +99,8 @@ int nats_validate(const char *s, int len, nats_validate_mode_t mode)
 
 		/* empty tokens (consecutive dots) are illegal in a publish subject */
 		if (c == '.') {
-			if (mode == NATS_VALIDATE_PUBLISH_SUBJECT) {
+			if (mode == NATS_VALIDATE_PUBLISH_SUBJECT ||
+					mode == NATS_VALIDATE_KV_KEY) {
 				if (last_was_dot) return -1;
 				last_was_dot = 1;
 			}

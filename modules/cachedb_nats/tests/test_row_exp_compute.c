@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.1 / SPEC.md §3.3 §3.2 §4.1 [REV-34 + REV-25 + REV-18]: compute the
+ * / SPEC.md: compute the
  * row-level expiry sentinel `row_exp` from the merged contact set and emit it
  * (plus `schema_version`) as cachedb_nats-private top-level peers, WITHOUT
  * disturbing a non-usrloc document.
@@ -25,16 +25,16 @@
  * Part A — row_exp_min(exp[], n):
  *   - 0 is the "permanent / never auto-expire" sentinel.  expires==0 means a
  *     permanent contact; if ANY contact is permanent the whole row is
- *     permanent => row_exp == 0  (§3.3 / GATE "any expires==0 => 0").
+ *     permanent => row_exp == 0.
  *   - an empty contact set (or NULL) yields 0 (nothing to expire).
  *   - otherwise row_exp == min(expires) over the contacts.
- *   - int64 THROUGHOUT [REV-34]: no int32 clamp, so post-2038 epochs survive.
+ *   - int64 THROUGHOUT: no int32 clamp, so post-2038 epochs survive.
  *   - only 0 is the sentinel; a negative (already-past) expiry is a real
  *     candidate value, NOT a permanent marker.
  *
  * Part B — cdbn_row_finalize_metadata(json,len): recompute row_exp+schema_version
- *   over the MERGED contacts (§4.1 step 3) and re-emit them as top-level peers
- *   [REV-18/D3], replacing any stale ones; a document with no top-level
+ *   over the MERGED contacts and re-emit them as top-level peers
+ *, replacing any stale ones; a document with no top-level
  *   "contacts" object is returned byte-for-byte unchanged (other cachedb_nats
  *   consumers must never be reshaped).
  *
@@ -45,9 +45,9 @@
  *                               => RED.
  *   gcc ...                   -> the FIXED int64 sentinel-aware helper => GREEN.
  *
- * Rule 6 [PREV-4]: the GREEN copy here mirrors the production helpers in
+ * Rule 6: the GREEN copy here mirrors the production helpers in
  * cachedb_nats_json.c; the AUTHORITATIVE round-trip proof is the Tier-2
- * test_usrloc_roundtrip_int64_e2e.sh vs production [REV-30/PREV-19].
+ * test_usrloc_roundtrip_int64_e2e.sh vs production.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_row_exp_compute test_row_exp_compute.c
  */
@@ -59,7 +59,7 @@
 /* ─── carried copy: row_exp arithmetic (cachedb_nats_json.c) ─────── */
 
 #ifdef ROWEXP_CURRENT
-/* CURRENT (naive): int32 accumulation (clamps post-2038, violates REV-34) and
+/* CURRENT (naive): int32 accumulation (clamps post-2038, violates) and
  * no permanent sentinel (empty => INT32_MAX, and a negative beats a 0). */
 static int64_t row_exp_min(const int64_t *exp, int n)
 {
@@ -68,7 +68,7 @@ static int64_t row_exp_min(const int64_t *exp, int n)
 	if (!exp || n <= 0)            /* NULL-guard is NOT the bug under test */
 		return INT32_MAX;          /* ...but empty => INT32_MAX is (want 0) */
 	for (i = 0; i < n; i++) {
-		int32_t v = (int32_t)exp[i];   /* REV-34 clamp bug */
+		int32_t v = (int32_t)exp[i];   /* clamp bug */
 		if (v < m) m = v;
 	}
 	return (int64_t)m;
@@ -398,7 +398,7 @@ int main(void)
 	printf("== carried copy: FIXED behavior ==\n");
 #endif
 
-	printf("[A][REV-34] min over non-zero expiries:\n");
+	printf("[A] min over non-zero expiries:\n");
 	{ int64_t a[] = {100, 50, 200};   EXPECT(a, 50,  "min{100,50,200} == 50"); }
 	{ int64_t a[] = {200, 100, 50};   EXPECT(a, 50,  "order-independent: min{200,100,50} == 50"); }
 	{ int64_t a[] = {42};             EXPECT(a, 42,  "single contact => its own expiry"); }
@@ -413,7 +413,7 @@ int main(void)
 	CHECK(row_exp_min(NULL, 5) == 0, "NULL,n => 0 (defensive)");
 	{ int64_t a[] = {7}; CHECK(row_exp_min(a, 0) == 0, "n==0 => 0 (empty contact set)"); }
 
-	printf("[A][REV-34] int64: no int32 clamp (post-2038 epochs survive):\n");
+	printf("[A] int64: no int32 clamp (post-2038 epochs survive):\n");
 	{ int64_t a[] = {5000000000LL, 4000000000LL}; EXPECT(a, 4000000000LL, "min of >2038 epochs preserved"); }
 	{ int64_t a[] = {1LL << 40};      EXPECT(a, 1LL << 40, "single 2^40 expiry not truncated"); }
 	{ int64_t a[] = {1LL << 40, 0};   EXPECT(a, 0,        "permanent still wins over a huge expiry"); }
@@ -423,7 +423,7 @@ int main(void)
 	{ int64_t a[] = {-5, 100};        EXPECT(a, -5, "negative (past) expiry is the min => row due now"); }
 	{ int64_t a[] = {-1};             EXPECT(a, -1, "lone negative preserved (not treated as permanent)"); }
 
-	printf("[B][REV-18] finalize emits row_exp + schema_version peers:\n");
+	printf("[B] finalize emits row_exp + schema_version peers:\n");
 	{ char *o = _fin("{\"contacts\":{\"c1\":{\"expires\":100},\"c2\":{\"expires\":50}},\"aorhash\":7}");
 	  CHECK(o != NULL, "finalize returns a document");
 	  CHECK(o && _rowexp_of(o) == 50, "row_exp == min(100,50) == 50");
@@ -436,7 +436,7 @@ int main(void)
 	{ char *o = _fin("{\"contacts\":{\"c1\":{\"expires\":0},\"c2\":{\"expires\":50}},\"aorhash\":7}");
 	  CHECK(o && _rowexp_of(o) == 0, "permanent member => row_exp 0"); free(o); }
 
-	printf("[B][REV-34] int64 expiry survives the finalize emit:\n");
+	printf("[B] int64 expiry survives the finalize emit:\n");
 	{ char *o = _fin("{\"contacts\":{\"c1\":{\"expires\":5000000000}},\"aorhash\":7}");
 	  CHECK(o && _rowexp_of(o) == 5000000000LL, "row_exp 5e9 emitted intact (no int32 clamp)"); free(o); }
 
@@ -451,7 +451,7 @@ int main(void)
 	{ char *o = _fin("{\"contacts\":{},\"aorhash\":7}");
 	  CHECK(o && _rowexp_of(o) == 0, "no contacts => row_exp 0"); free(o); }
 
-	printf("[B][REV-18] non-usrloc doc (no contacts) returned byte-for-byte:\n");
+	printf("[B] non-usrloc doc (no contacts) returned byte-for-byte:\n");
 	{ const char *in = "{\"foo\":1,\"bar\":\"x\"}";
 	  char *o = _fin(in);
 	  CHECK(o && strcmp(o, in) == 0, "doc without contacts unchanged");

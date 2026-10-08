@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P3 / SPEC.md §3.2 §4.1 [REV-5]: value-size / payload bound.
+ * / SPEC.md: value-size / payload bound.
  *
  * All contacts of an AoR live in ONE KV value; NATS caps message size
  * (max_payload, default 1 MiB; a stream's max_msg_size may be lower).  SQL /
@@ -25,7 +25,7 @@
  * detect an oversize merged value BEFORE the CAS write and fail the single
  * offending contact's save (return error) — never corrupt or silently truncate
  * the row, and leave the existing bindings intact.  (max_contacts is a separate
- * usrloc responsibility, [REV-35]; this is the independent value-size guard.)
+ * usrloc responsibility,; this is the independent value-size guard.)
  *
  * cdbn_value_size_ok(len, max): max <= 0 means "unbounded" (knob disabled); else the
  * serialized value must be <= max bytes.  The check runs on the FINAL merged doc
@@ -70,17 +70,17 @@ int main(void)
 	printf("== carried copy: FIXED bound ==\n");
 #endif
 
-	printf("[REV-5] within bound writes, over bound is rejected:\n");
+	printf("within bound writes, over bound is rejected:\n");
 	CHECK(cdbn_value_size_ok(100, 1048576) == 1, "100 B <= 1 MiB => ok");
 	CHECK(cdbn_value_size_ok(1048576, 1048576) == 1, "exactly at limit => ok (<=)");
 	CHECK(cdbn_value_size_ok(1048577, 1048576) == 0, "one over the limit => rejected");
 	CHECK(cdbn_value_size_ok(5000000, 1048576) == 0, "5 MB value => rejected (would hit max_payload)");
 
-	printf("[REV-5] the knob disabled (max<=0) means unbounded:\n");
+	printf("the knob disabled (max<=0) means unbounded:\n");
 	CHECK(cdbn_value_size_ok(5000000, 0) == 1, "max==0 => unbounded (no guard)");
 	CHECK(cdbn_value_size_ok(5000000, -1) == 1, "max<0 => unbounded");
 
-	printf("[REV-5] small / boundary / defensive:\n");
+	printf("small / boundary / defensive:\n");
 	CHECK(cdbn_value_size_ok(0, 1048576) == 1, "empty value => ok");
 	CHECK(cdbn_value_size_ok(1, 1) == 1, "len==max==1 => ok");
 	CHECK(cdbn_value_size_ok(2, 1) == 0, "2 > 1 => rejected");
