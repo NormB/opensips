@@ -17,8 +17,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * MI-OUTPUT-FORMAT-SPEC.md [FMT-4..7]: the pure table formatter behind
- * format=csv / format=txt on the [OBS]/[KVOBS] commands, plus the format
+ *: the pure table formatter behind
+ * format=csv / format=txt on the MI commands, plus the format
  * option parsing (bare "csv" or "csv;eol=lf;header=0").
  *
  *   csv  RFC 4180: CRLF records, header first, fields containing comma /
@@ -32,7 +32,7 @@
  *   gcc -DFMT_CURRENT ... -> naive formatter: no quoting, no sanitizing,
  *                            LF-only, header always, options unparsed => RED.
  *   gcc ...               -> the PRODUCTION formatter (../cachedb_nats_fmt.c
- *                            compiled directly -- no carried copy, P2.4)
+ *                            compiled directly -- no carried copy)
  *                            => GREEN.
  *
  * Build: gcc -g -O0 -fsanitize=address -Wall -o test_fmt_table test_fmt_table.c
@@ -45,7 +45,7 @@
 
 #include "../cachedb_nats_fmt.c"
 
-#else /* FMT_CURRENT: the naive pre-[FMT] formatter, kept as RED evidence */
+#else /* FMT_CURRENT: the naive pre- formatter, kept as RED evidence */
 
 enum fmt_kind { FMT_JSON = 0, FMT_CSV = 1, FMT_TXT = 2 };
 
@@ -189,14 +189,14 @@ int main(void)
 	printf("== production TU: FIXED formatter ==\n");
 #endif
 
-	printf("[FMT-5] csv basics: header, CRLF, plain fields:\n");
+	printf("csv basics: header, CRLF, plain fields:\n");
 	fmt_init(&t, FMT_CSV, 0, 1, C3, 3);
 	fmt_str(&t, "alice@x", 7); fmt_int(&t, 2); fmt_str(&t, "sipsak", 6);
 	fmt_end_record(&t);
 	BLOB_IS("aor,contacts,ua\r\nalice@x,2,sipsak\r\n",
 		"header + record, CRLF-terminated");
 
-	printf("[FMT-5] csv quoting matrix:\n");
+	printf("csv quoting matrix:\n");
 	fmt_init(&t, FMT_CSV, 0, 0, C3, 3);
 	fmt_str(&t, "a,b", 3); fmt_int(&t, 1); fmt_str(&t, "say \"hi\"", 8);
 	fmt_end_record(&t);
@@ -208,7 +208,7 @@ int main(void)
 	BLOB_IS("\"evil\r\nua\",1,back\\slash\r\n",
 		"embedded CRLF quoted VERBATIM; backslash NOT special");
 
-	printf("[FMT-6] txt: TAB join, '# ' header, sanitization:\n");
+	printf("txt: TAB join, '# ' header, sanitization:\n");
 	fmt_init(&t, FMT_TXT, 0, 1, C3, 3);
 	fmt_str(&t, "alice@x", 7); fmt_int(&t, 2); fmt_str(&t, "tab\there", 8);
 	fmt_end_record(&t);
@@ -220,19 +220,19 @@ int main(void)
 	BLOB_IS("cr lf \t0\t\r\n",
 		"CR/LF in value sanitized; empty field renders empty");
 
-	printf("[FMT-7] eol=lf:\n");
+	printf("eol=lf:\n");
 	fmt_init(&t, FMT_CSV, 1, 1, C3, 3);
 	fmt_str(&t, "a", 1); fmt_int(&t, 1); fmt_empty(&t);
 	fmt_end_record(&t);
 	BLOB_IS("aor,contacts,ua\na,1,\n", "csv with bare-LF records");
 
-	printf("[FMT-5] empty optional fields (never null/sentinel):\n");
+	printf("empty optional fields (never null/sentinel):\n");
 	fmt_init(&t, FMT_CSV, 0, 0, C3, 3);
 	fmt_str(&t, "b@x", 3); fmt_empty(&t); fmt_empty(&t);
 	fmt_end_record(&t);
 	BLOB_IS("b@x,,\r\n", "csv empty fields are just separators");
 
-	printf("[FMT-4/5] option parsing:\n");
+	printf("option parsing:\n");
 	{
 		int k, e, h;
 		CHECK(cdbn_fmt_opts_parse("csv", 3, &k, &e, &h) == 0 &&

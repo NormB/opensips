@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.6] Small hot-path policies, consumer side:
+ * Small hot-path policies, consumer side:
  *
  *   - the async fetch/batch RESUME PARAMS never leave the allocating
  *     worker (allocated in w_nats_fetch_async / w_nats_fetch_batch,

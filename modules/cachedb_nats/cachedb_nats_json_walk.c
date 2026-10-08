@@ -24,7 +24,7 @@
  * used by this module's JSON layer AND by the optional cachedb_nats_fts
  * module (declared in cachedb_nats_json_internal.h).  Split into their
  * own TU so unit tests can link them without dragging either module's
- * full dependency graph (P1.2).
+ * full dependency graph.
  */
 
 #include <stdint.h>
@@ -262,7 +262,7 @@ int cdbn_safe_json_to_dict(const char *data, int data_len, cdb_dict_t *out)
 
 
 /*
- * [P2.5] The ONE top-level field iterator behind the row-mutation
+ * The ONE top-level field iterator behind the row-mutation
  * paths.  Walks `{ "name": <value>, ... }` and hands the cb each
  * field's name span (raw, still-escaped bytes between the quotes) and
  * value span (raw bytes; a nested object/array is one span).  The cb

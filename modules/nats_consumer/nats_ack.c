@@ -34,7 +34,7 @@
  */
 
 #include "../../dprint.h"
-#include "../../ipc.h"           /* ipc_send_rpc [P2.1] */
+#include "../../ipc.h"           /* ipc_send_rpc */
 #include "../../mem/shm_mem.h"
 
 #include "nats_ack.h"
@@ -42,7 +42,7 @@
 #include "nats_ack_ipc.h"
 #include "nats_consumer_proc.h"  /* nats_consumer_proc_no */
 
-/* [P2.1] One ack over core IPC: the action selects the handler
+/* One ack over core IPC: the action selects the handler
  * function, the token IS the param (zero alloc) -- except NAK_DELAY,
  * whose token+delay need a small SHM payload the handler frees. */
 static int send_ack_ipc(uint64_t token, nats_ack_action_e action,

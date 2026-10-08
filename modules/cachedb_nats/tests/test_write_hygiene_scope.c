@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P2.7 / SPEC.md §4.1-step-4 [REV-21 + REV-1]: skew-safe write-side hygiene.
+ * / SPEC.md-step-4: skew-safe write-side hygiene.
  *
  * On update(), drop an already-expired contact ONLY IF it is among the subkeys
  * THIS update explicitly set/unset, and only when `expires != 0 && expires + S
@@ -199,7 +199,7 @@ int main(void)
 	printf("== carried copy: FIXED hygiene ==\n");
 #endif
 
-	printf("[REV-21/1] expiry decision (now=1000, grace S=5):\n");
+	printf("expiry decision (now=1000, grace S=5):\n");
 	CHECK(contact_is_expired(990, 1000, 5) == 1, "990+5<=1000 => expired");
 	CHECK(contact_is_expired(995, 1000, 5) == 1, "995+5==1000 boundary => expired");
 	CHECK(contact_is_expired(996, 1000, 5) == 0, "996+5>1000 => live (within skew)");
@@ -209,7 +209,7 @@ int main(void)
 
 	/* The removal transform itself is not toggled (it is mechanical); it always
 	 * drops exactly the subkeys it is given and nothing else. */
-	printf("[REV-21] contacts_drop_subkeys removes exactly the named subkeys:\n");
+	printf("contacts_drop_subkeys removes exactly the named subkeys:\n");
 	{ char *o = drop1("{\"contacts\":{\"a\":{\"expires\":1},\"b\":{\"expires\":2},\"c\":{\"expires\":3}},\"aorhash\":7}", "b");
 	  CHECK(o && has(o,"\"a\":") && has(o,"\"c\":") && !has(o,"\"b\":"), "drop middle 'b' keeps a,c");
 	  CHECK(o && has(o,"\"aorhash\":7"), "aorhash preserved"); free(o); }
@@ -225,7 +225,7 @@ int main(void)
 
 	/* Integration: drop set built ONLY from the touched contacts via the
 	 * (toggled) decision.  An untouched-yet-expired contact is never considered. */
-	printf("[REV-21] scope: touched-expired dropped, touched-live + UNTOUCHED kept:\n");
+	printf("scope: touched-expired dropped, touched-live + UNTOUCHED kept:\n");
 	{
 		const char *doc =
 		  "{\"contacts\":{"

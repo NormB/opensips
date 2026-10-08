@@ -19,9 +19,9 @@
  */
 
 /*
- * cachedb_nats_kvobs.c — generic JetStream/KV introspection MI [KVOBS].
+ * cachedb_nats_kvobs.c — generic JetStream/KV introspection MI.
  *
- * The [OBS] commands (cachedb_nats_reg.c) answer usrloc questions; these
+ * The registration MI commands (cachedb_nats_reg.c) answer usrloc questions; these
  * answer the layer below, for ANY stream or bucket on the connected server:
  *
  *   nats_stream_list [filter]        streams (name glob, kv=1 for KV backing
@@ -51,8 +51,8 @@
 #include "../../lib/nats/nats_pool.h"
 #include "cachedb_nats_dbase.h"          /* kv_bucket default                */
 #include "cachedb_nats_reg.h"            /* cdbn_reg_page (shared pagination)    */
-#include "cachedb_nats_fmt.h"            /* [FMT] csv/txt table rendering    */
-#include "cachedb_nats_emit.h"           /* [P2.4] one-walk row emitter      */
+#include "cachedb_nats_fmt.h"            /* csv/txt table rendering          */
+#include "cachedb_nats_emit.h"           /* one-walk row emitter             */
 #include "cachedb_nats_kvobs.h"
 
 /* ==================================================================== */
@@ -240,7 +240,7 @@ mi_response_t *mi_nats_stream_list(const mi_params_t *params,
 	    add_mi_number(obj, MI_SSTR("offset"), start) < 0)
 		goto oom;
 	{
-		/* [P2.4] ONE walk; json rows land in the `streams` array,
+		/* ONE walk; json rows land in the `streams` array,
 		 * table rows in the format/data blob */
 		static const char *COLS[] = {"name", "kv_bucket", "messages",
 			"bytes", "subjects", "consumers", "storage"};
@@ -342,8 +342,8 @@ mi_response_t *mi_nats_stream_info(const mi_params_t *params,
 	}
 
 	if (fk != FMT_JSON) {
-		/* [FMT] csv: one flattened record; txt: field<TAB>value lines
-		 * (a 16-column one-liner is unreadable, spec §2) */
+		/* csv: one flattened record; txt: field<TAB>value lines
+		 * */
 		struct fmt_table t;
 		char *blob;
 		int blen;
@@ -611,7 +611,7 @@ mi_response_t *mi_nats_kv_keys(const mi_params_t *params,
 					(int)strlen(match[i])) < 0)
 				goto oom;
 	} else {
-		/* [P2.4] ONE walk for the table pages and the json detail
+		/* ONE walk for the table pages and the json detail
 		 * page; detail=1 does one Get per RETURNED key (bounded by
 		 * the limit cap) */
 		static const char *COLS1[] = {"key"};

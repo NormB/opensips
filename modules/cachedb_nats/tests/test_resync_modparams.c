@@ -78,7 +78,7 @@ int main(void)
 		"index_resync_on_reconnect"),
 		"watcher consults index_resync_on_reconnect on epoch change");
 
-	/* [P3.3] The periodic resync no longer rides the shared core timer
+	/* The periodic resync no longer rides the shared core timer
 	 * process: it is hosted by the dedicated reaper process, gated on
 	 * the same interval modparam. */
 	ASSERT(!file_contains("../cachedb_nats.c", "register_timer"),

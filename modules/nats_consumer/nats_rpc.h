@@ -303,7 +303,7 @@ void nats_rpc_staged_clear(void);
 int nats_rpc_staged_serialize(char *out, int cap,
                               int *truncated, int *count_out);
 
-/* [P2.6] Borrowed view of one reply's buffers -- the inputs of
+/* Borrowed view of one reply's buffers -- the inputs of
  * nats_rpc_cur_set_from_buffers, which copies them into the worker's
  * current-message slot (spans only borrowed for the call).  Zeroed
  * members mean "absent". */

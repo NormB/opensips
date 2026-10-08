@@ -17,16 +17,16 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P7 / SPEC.md §5.3 [REV-7] + TTL-SOLUTION-SPEC.md §6 [TREV-8]: the kv_ttl==0
+ * / SPEC.md +: the kv_ttl==0
  * startup guard and the per-message-TTL capability latch.
  *
- * [REV-7] kv_ttl (bucket MaxAge) MUST be 0.  A non-zero bucket TTL becomes
+ * kv_ttl (bucket MaxAge) MUST be 0.  A non-zero bucket TTL becomes
  * stream MaxAge, which takes precedence over per-message TTL and would (a) cap
  * our per-key TTL and (b) SILENTLY EXPIRE PERMANENT CONTACTS (expires==0),
  * violating "a permanent contact is never reaped".  cachedb_nats refuses to
  * start (or LM_WARNs loudly) when usrloc owns the bucket and kv_ttl != 0.
  *
- * [TREV-8] Capability is operational, "by attempt": SUPPORTED once the
+ * Capability is operational, "by attempt": SUPPORTED once the
  * js_UpdateStream that sets AllowMsgTTL succeeds and no JSMessageTTLDisabledErr
  * (10166) has been seen on a runtime publish; a 10166 latches UNSUPPORTED for
  * the connection (plain CAS + reaper, no per-write error spam); a reconnect
@@ -88,13 +88,13 @@ int main(void)
 	printf("== carried copy: FIXED guard + latch ==\n");
 #endif
 
-	printf("[REV-7] kv_ttl==0 guard (protects permanent contacts):\n");
+	printf("kv_ttl==0 guard (protects permanent contacts):\n");
 	CHECK(cdbn_kv_ttl_guard(0) == 0, "kv_ttl==0 => accepted");
 	CHECK(cdbn_kv_ttl_guard(30) == -1, "kv_ttl==30 => REJECTED (bucket MaxAge expires permanent contacts)");
 	CHECK(cdbn_kv_ttl_guard(1) == -1, "kv_ttl==1 => rejected");
 	CHECK(cdbn_kv_ttl_guard(-5) == -1, "negative kv_ttl => rejected (invalid)");
 
-	printf("[TREV-8] capability latch transitions:\n");
+	printf("capability latch transitions:\n");
 	CHECK(_ttl_cap_next(TTL_CAP_UNPROBED, TTL_EV_SETUP_OK) == TTL_CAP_SUPPORTED,
 	      "UNPROBED + AllowMsgTTL setup ok => SUPPORTED");
 	CHECK(_ttl_cap_next(TTL_CAP_UNPROBED, TTL_EV_SETUP_FAIL) == TTL_CAP_UNSUPPORTED,

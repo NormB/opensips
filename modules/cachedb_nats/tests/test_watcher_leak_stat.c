@@ -23,8 +23,7 @@
  * I/O thread) and count each skip in watcher_handle_leaks -- one leaked
  * handle per broker flap, unbounded under a flapping broker.
  *
- * The suspicion was refuted live (design repo watcher_destroy_spike.c:
- * 10 SIGKILL broker-flap cycles, Stop+Destroy on a disconnected connection
+ * The suspicion was refuted live (10 SIGKILL broker-flap cycles, Stop+Destroy on a disconnected connection
  * with the reconnect thread running, ASan-clean on the pinned libnats), so
  * the destroy is now UNCONDITIONAL and no teardown path leaks.  The counter
  * stays declared and MI-exported -- expected 0 -- so existing dashboards

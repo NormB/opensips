@@ -13,7 +13,7 @@
 : "${SIP_HOST:=127.0.0.1}"
 : "${SIP_PORT:=5072}"
 
-# ── shared core (result aggregation + bounded pollers) [P5.5] ────
+# ── shared core (result aggregation + bounded pollers) ────
 # HERE is the sip_e2e dir (set by run.sh before sourcing us).
 . "${HERE}/../../../../lib/nats/tests/e2e_harness.sh"
 
@@ -108,7 +108,7 @@ sipp_send() {
 # ── nats subscriber (one-shot, count=1) ─────────────────────────
 nats_sub_oneshot() {
     # nats_sub_oneshot <subject> <out-file>  -> background pid
-    # Bounded [P5.5]: returns once the CLI reports the subscription
+    # Bounded: returns once the CLI reports the subscription
     # attached ("Subscribing on <subject>" in the out file) so callers
     # can publish immediately -- replaces the blind post-launch sleeps
     # the cases used to carry.

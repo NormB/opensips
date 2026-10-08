@@ -28,7 +28,7 @@
 
 /*
  * cachedb_nats_fts.c — optional full-text-search / secondary-index module
- * for cachedb_nats (P1.2 split).
+ * for cachedb_nats.
  *
  * Loading this module IS the enable switch (it replaces the former
  * enable_search_index modparam): cachedb_nats binds to it at startup via

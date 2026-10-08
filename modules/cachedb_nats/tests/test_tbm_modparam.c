@@ -80,13 +80,11 @@ int main(void)
 	}
 
 	{
-		char *doc = slurp("../doc/cachedb_nats_admin.xml");
-		if (!doc)
-			doc = slurp("../doc/cachedb_nats.xml");
-		ASSERT(doc != NULL, "can read the docbook admin doc");
+		char *doc = slurp("../README.md");
+		ASSERT(doc != NULL, "can read the module README");
 		if (doc) {
-			ASSERT(strstr(doc, "kv_ttl_below_marker") != NULL,
-				"docbook documents kv_ttl_below_marker");
+			ASSERT(strstr(doc, "#### kv_ttl_below_marker (") != NULL,
+				"README documents kv_ttl_below_marker");
 			free(doc);
 		}
 	}

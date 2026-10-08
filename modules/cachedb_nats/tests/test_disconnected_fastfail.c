@@ -93,11 +93,11 @@ int main(void)
 {
 	int n;
 
-	/* (cachedb_nats's request/reply function was removed in P0.3 —
+	/* (cachedb_nats's request/reply function was removed —
 	 * nats_consumer owns nats_request and has its own fast-fail test,
 	 * test_request_fastfail.) */
 
-	/* P3-66: nats_evi_raise and w_nats_publish share the publish path via
+	/* nats_evi_raise and w_nats_publish share the publish path via
 	 * nats_publish_checked(), which does the connection fast-fail.  Assert
 	 * the check lives in the helper and that both callers route through it. */
 	n = grep_in_function(

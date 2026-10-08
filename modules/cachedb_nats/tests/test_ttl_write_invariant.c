@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * P8 [§2.0 invariant]: EVERY usrloc-row write goes through nats_kv_write_row_cas()
+ * [ invariant]: EVERY usrloc-row write goes through nats_kv_write_row_cas
  * (which re-asserts Nats-TTL), so no kvStore_UpdateString may remain on the
  * usrloc row path -- otherwise that writer silently strips the TTL and
  * re-creates #1994 (the registration update AND the reaper survivor-write are
@@ -61,7 +61,7 @@ static int grep_in_function(const char *path, const char *fn, const char *needle
 
 int main(void)
 {
-	printf("[§2.0] usrloc-row-write invariant -- no kvStore_UpdateString off the helper:\n");
+	printf;
 
 	/* the two writers must NOT call kvStore_UpdateString directly */
 	ASSERT(grep_in_function("../cachedb_nats_json.c",
@@ -80,7 +80,7 @@ int main(void)
 		"reaper survivor-write routes through nats_kv_write_row_cas");
 
 	/* the helper delegates to the single CAS publish (nats_kv_put_row);
-	 * since P1.5 (reaper-only) NO kvStore_UpdateString remains anywhere
+	 * since expiry became reaper-only NO kvStore_UpdateString remains anywhere
 	 * on the row path -- the legacy fallback is gone too */
 	ASSERT(grep_in_function("../cachedb_nats_expiry.c",
 		"nats_kv_write_row_cas", "nats_kv_put_row") >= 1,

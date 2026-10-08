@@ -62,7 +62,7 @@ mi_response_t *mi_consumer_list(const mi_params_t *params,
 
 /* One flat object of cross-handle aggregates (rings, ack/RPC IPC,
  * slot pool) for back-pressure monitoring; documented field-by-field
- * in doc/nats_consumer_admin.xml.  Read-only. */
+ * in README.md.  Read-only. */
 mi_response_t *mi_consumer_stats(const mi_params_t *params,
 		struct mi_handler *async);
 

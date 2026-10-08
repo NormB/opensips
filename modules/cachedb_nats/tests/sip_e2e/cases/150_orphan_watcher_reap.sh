@@ -81,7 +81,7 @@ fi
 check "dedicated watcher proc forked + logged startup" ok \
     "watcher pid=$WATCHER"
 
-# [P3.3] The reaper runs in its own dedicated proc too (always forked);
+# The reaper runs in its own dedicated proc too (always forked);
 # same startup-log contract, same PDEATHSIG guard.
 REAPER=$(sed -nE 's/.*reaper proc starting \(pid=([0-9]+).*/\1/p' \
     "$ORPHAN_LOG" 2>/dev/null | tail -1)
@@ -121,7 +121,7 @@ done
 check "watcher reaped within 5s of master SIGKILL" "$REAPED" \
     "watcher pid=$WATCHER ppid_at_check=$(awk '/^PPid:/ {print $2}' /proc/$WATCHER/status 2>/dev/null)"
 
-# [P3.3] The reaper proc rides the same PDEATHSIG guard.
+# The reaper proc rides the same PDEATHSIG guard.
 if [ -n "$REAPER" ]; then
     DEADLINE=$(($(date +%s) + 5))
     R_REAPED=fail

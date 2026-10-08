@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.4] nats_registry_foreach_unlocked(): the reconcile pass runs
+ * nats_registry_foreach_unlocked: the reconcile pass runs
  * JetStream network calls (js_AddConsumer / js_PullSubscribe, seconds
  * each against a slow broker) per handle -- doing that inside
  * nats_registry_foreach()'s global+bucket read locks lets one slow

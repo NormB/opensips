@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [P3.5] (ptr,len) threading through the update compose path: every
+ * (ptr,len) threading through the update compose path: every
  * builder stage already knows the length of the document it produced
  * (the growable sink tracks it), yet update_apply_and_cas re-measured
  * the full document with strlen() ~6x per REGISTER -- kilobyte scans

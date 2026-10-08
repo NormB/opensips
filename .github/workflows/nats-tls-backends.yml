@@ -1,17 +1,15 @@
-# NATS TLS smoke CI for v4.0-nats-rc1+.
+# NATS TLS smoke CI.
 #
-# The NATS user modules (cachedb_nats, event_nats, nats_consumer)
-# route TLS through tls_mgm using a 'nats' client_domain; the legacy
-# nats_tls_openssl / nats_tls_wolfssl wrapper modules and their dual-
-# backend matrix are gone.  This workflow is the smoke that pins the
-# tls_mgm-routing path: a real nats-server with TLS, OpenSIPS booted
-# with tls_mgm + cachedb_nats, the handshake completing end-to-end,
-# plus four negative scenarios that exercise the operator-error path.
+# The NATS modules route TLS through tls_mgm using a 'nats'
+# client_domain.  This workflow pins that path: a real nats-server with
+# TLS, OpenSIPS booted with tls_mgm + cachedb_nats, the handshake
+# completing end-to-end, plus four negative scenarios that exercise the
+# operator-error path.  The same built tree also config-checks every
+# opensips example in the NATS READMEs.
 #
 # The single source of truth is lib/nats/tests/test_tls_mgm_smoke.sh
 # which is what we exec at the end -- so any expansion of the smoke
-# (TLS over a wolfSSL-backed libnats, etc.) extends the shell test
-# rather than this workflow.
+# extends the shell test rather than this workflow.
 #
 # Security note: every `run:` block uses only literal strings and
 # env:-set version pins.  No untrusted github.event.* values are
@@ -66,7 +64,7 @@ jobs:
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
             nats-server
-          # One pinned nats.c SHA across every CI leg (P5.1); the pin
+          # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
           # NATS-over-TLS.
           SUDO=sudo LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
@@ -76,9 +74,13 @@ jobs:
           make -j"$(nproc)" opensips
           for m in signaling sl tm rr maxfwd sipmsgops proto_udp \
                    tls_mgm tls_openssl \
-                   cachedb_nats event_nats nats_consumer; do
+                   cachedb_nats cachedb_nats_fts event_nats nats_consumer; do
             make modules=modules/$m modules
           done
+      - name: Docs — every opensips example in the NATS READMEs passes opensips -C
+        run: |
+          bash lib/nats/tests/selftest_readme_examples.sh
+          bash lib/nats/tests/test_readme_examples.sh
       - name: Run lib/nats tls_mgm smoke
         run: |
           set -e

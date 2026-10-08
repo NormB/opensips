@@ -107,7 +107,7 @@ int validate_kv_key(const str *s)
 { return (s && s->s && s->len > 0) ? 0 : -1; }
 int nats_con_refresh_kv(nats_cachedb_con *ncon)
 { (void)ncon; return 0; }
-void nats_cdb_disconnected_warn(const char *op)   /* [P3.7] no-op seam */
+void nats_cdb_disconnected_warn(const char *op)   /* no-op seam */
 { (void)op; }
 
 /* MI plumbing: referenced by the raw-query MI paths, never reached */
@@ -172,7 +172,7 @@ static natsStatus fake_kvStore_Get(kvEntry **e, kvStore *kv, const char *k)
 static natsStatus fake_kvStore_PutString(uint64_t *rev, kvStore *kv,
 	const char *k, const char *v)
 { (void)kv; (void)k; (void)v; if (rev) *rev = 3; return NATS_OK; }
-/* [P3.6] the length-aware Put: records (data, len) so the test can
+/* the length-aware Put: records (data, len) so the test can
  * prove the ORIGINAL bytes travel uncopied, embedded NUL included. */
 static const void *put_last_data;
 static int         put_last_len;
@@ -265,7 +265,7 @@ int main(void)
 	ASSERT(rc == -1 && pkg_live == 0,
 		"disconnected kv_put with small value: -1, no pkg delta");
 
-	/* 4. connected happy paths: [P3.6] the value rides the
+	/* 4. connected happy paths: the value rides the
 	 * length-aware kvStore_Put UNCOPIED -- no pkg traffic even for a
 	 * >4 KB value (the old copy existed solely to gain a NUL). */
 	fake_connected = 1;

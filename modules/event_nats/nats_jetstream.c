@@ -82,14 +82,14 @@ static jsStorageType parse_storage(const char *s, int len)
 
 /* Validate a NATS identifier (stream or consumer name): single token, no
  * dots/wildcards/path chars/whitespace/control.  Thin wrapper over the shared
- * lib/nats validator (P3-64). */
+ * lib/nats validator. */
 static int valid_nats_name(const char *s, int len)
 {
 	return nats_validate(s, len, NATS_VALIDATE_STREAM_NAME);
 }
 
 /* Validate a NATS subscribe-filter subject: dots and wildcards ('*','>')
- * allowed; control/whitespace/empty rejected.  Thin wrapper (P3-64). */
+ * allowed; control/whitespace/empty rejected.  Thin wrapper. */
 static int valid_nats_subject(const char *s, int len)
 {
 	return nats_validate(s, len, NATS_VALIDATE_FILTER_SUBJECT);
@@ -167,7 +167,7 @@ cleanup:
 /* The read-only observability handlers were removed: cachedb_nats
  * owns the stream list/info MI commands (richer variants with
  * filter/pagination/format support), and defining the same global
- * handler symbols in two co-loaded modules was an ODR hazard (P0.3).
+ * handler symbols in two co-loaded modules was an ODR hazard.
  * Only the mutating admin handlers remain here. */
 
 /* ── nats_stream_create ─────────────────────────────────────── */

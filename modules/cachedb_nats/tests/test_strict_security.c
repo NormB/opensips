@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * [SPEC §11 / REV-24, Tier-2] Strict security mode for usrloc
+ * Strict security mode for usrloc
  * deployments.  The default stays warn-only (dev/lab ergonomics: the
  * usual lab broker is plaintext, and generic cachedb users are not
  * PII stores), but a usrloc production profile must be able to fail
@@ -115,11 +115,11 @@ int main(void)
 
 	/* ---- documented ---------------------------------------------- */
 	{
-		const char *x = "../doc/cachedb_nats_admin.xml";
-		ASSERT(file_contains(x, "param_require_secure_url"),
-			"docbook documents require_secure_url");
-		ASSERT(file_contains(x, "param_require_usrloc_safe_bucket"),
-			"docbook documents require_usrloc_safe_bucket");
+		const char *x = "../README.md";
+		ASSERT(file_contains(x, "#### require_secure_url ("),
+			"README documents require_secure_url");
+		ASSERT(file_contains(x, "#### require_usrloc_safe_bucket ("),
+			"README documents require_usrloc_safe_bucket");
 	}
 
 	if (g_fails == 0) { fprintf(stderr, "=== ALL PASS ===\n"); return 0; }

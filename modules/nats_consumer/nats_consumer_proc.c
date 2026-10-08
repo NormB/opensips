@@ -40,7 +40,7 @@
  *        keeps the un-fetched messages on the broker side until the
  *        next iteration after the worker drains.
  *     3. pump_worker_ipc() runs every pending worker job from the
- *        core-IPC pipe [P2.1]; each ack job looks up the stashed
+ *        core-IPC pipe; each ack job looks up the stashed
  *        natsMsg and calls the requested natsMsg_Ack / Nak / Term /
  *        InProgress.
  *
@@ -714,7 +714,7 @@ out:
 	return pushed;
 }
 
-/* [P2.1] Pump the core-IPC pipe: each pending job is one
+/* Pump the core-IPC pipe: each pending job is one
  * worker->consumer request (an ack verb or an async-RPC publish).
  * Gated on a live broker connection so jobs wait in the pipe
  * across reconnects -- the pipe IS the queue.  The core's
@@ -883,12 +883,12 @@ void mark_orphan_retired_handles(void)
 void nats_consumer_proc_main(int rank)
 {
 	int retry_fd;
-	nats_epoch_t proc_epoch;   /* [P2.8] tag of the current sub set */
+	nats_epoch_t proc_epoch;   /* tag of the current sub set */
 
 	LM_INFO("nats_consumer_proc: starting (pid=%d rank=%d)\n",
 		(int)getpid(), rank);
 
-	/* [P2.1] Publish our pt[] index FIRST -- before the connect-retry
+	/* Publish our pt index FIRST -- before the connect-retry
 	 * loop below, which can sleep for as long as the broker is down.
 	 * Worker ipc_send_rpc() calls target this index; the IPC pipe
 	 * exists from fork time, so jobs sent while we are still
@@ -979,7 +979,7 @@ void nats_consumer_proc_main(int rank)
 			long long now = now_monotonic_us();
 			if (now - last_reap_us >= NATS_MSG_REF_REAP_INTERVAL_US) {
 				reap_orphan_msg_refs();
-				/* [P2.2] also reclaim RPC slots whose owning
+				/* also reclaim RPC slots whose owning
 				 * worker died mid-call (nothing else returns
 				 * them to the shared pool). */
 				(void)nats_rpc_slot_reap_orphans(now);
@@ -1016,7 +1016,7 @@ void nats_consumer_proc_main(int rank)
 				ss->dirty = 1;
 			}
 			/* adopt the PRE-refresh snapshot: a reconnect landing
-			 * mid-loop re-triggers this block next tick [P2.8] */
+			 * mid-loop re-triggers this block next tick */
 			nats_epoch_adopt(&proc_epoch, cur_epoch);
 		}
 
@@ -1034,7 +1034,7 @@ void nats_consumer_proc_main(int rank)
 
 		/* 1. Reconcile subscriptions with the registry.  New binds
 		 *    land here on the next tick; dirty subs are rebuilt in
-		 *    place.  [P3.4] The unlocked walk: reconcile runs
+		 *    place. The unlocked walk: reconcile runs
 		 *    JetStream calls (seconds each against a slow broker),
 		 *    which must not hold the registry read locks -- writer
 		 *    priority would let one queued MI unbind stall every
@@ -1070,11 +1070,11 @@ void nats_consumer_proc_main(int rank)
 		}
 
 		/* 3. Service worker acks + async-RPC publishes: pump the
-		 *    core-IPC pipe [P2.1], then honour any ACK_NEXT refill
+		 *    core-IPC pipe, then honour any ACK_NEXT refill
 		 *    hints the ack handlers set on this tick -- the extra
 		 *    pull runs now instead of waiting for the next idle
 		 *    wake-up (fallback for the missing +NXT payload API).
-		 *    [P3.6] fresh AckSync budget for this tick's drain. */
+		 * fresh AckSync budget for this tick's drain. */
 		nats_ack_ipc_tick_reset();
 		if (pump_worker_ipc())
 			any_work = 1;
@@ -1102,7 +1102,7 @@ void nats_consumer_proc_main(int rank)
 		if (!any_work) {
 			/* Blocking idle: wait until the core-IPC pipe becomes
 			 * readable (a worker acked something or issued an async
-			 * nats_request [P2.1]) or the retry timerfd fires
+			 * nats_request) or the retry timerfd fires
 			 * (bounded stall recovery).  Avoids a busy poll
 			 * so the consumer process spends ~0% CPU on empty
 			 * subscriptions.  The IPC fd only joins the set while

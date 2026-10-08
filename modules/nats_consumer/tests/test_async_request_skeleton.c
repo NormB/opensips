@@ -200,7 +200,7 @@ int main(void)
 			"impl transitions slot CLAIMED -> INFLIGHT before IPC");
 		ASSERT(strstr(impl, "ipc_send_rpc(ipc_dst, nats_rpc_ipc_on_publish") != NULL,
 			"impl sends the packed slot/gen over core IPC to the "
-			"consumer proc [P2.1]");
+			"consumer proc");
 		ASSERT(strstr(impl, "nats_rpc_ipc_pack(slot->slot_idx") != NULL,
 			"impl packs {slot_idx, generation} into the IPC param");
 		ASSERT(strstr(impl, "timerfd_create") != NULL,
@@ -213,7 +213,7 @@ int main(void)
 			"impl hands the timerfd to the reactor via async_status");
 		/* The superseded per-worker inbox machine (hash table,
 		 * on_inbox_reply, ensure_inbox_subscription) was DELETED
-		 * in P1.1 -- assert it stays gone (running a libnats
+		 * -- assert it stays gone (running a libnats
 		 * subscription on a SIP worker crashes libnats 3.x on
 		 * aarch64; the slot transport replaced it). */
 		ASSERT(strstr(impl, "static void on_inbox_reply") == NULL,

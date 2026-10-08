@@ -19,8 +19,8 @@
  */
 
 /*
- * cachedb_nats_emit.h — the row emitter behind the [OBS]/[KVOBS] MI handlers
- * (MAINTAINABILITY-PERF-SPEC.md P2.4).  A handler walks its result set ONCE;
+ * cachedb_nats_emit.h — the row emitter behind the MI handlers.
+ * A handler walks its result set ONCE;
  * the backend picked at open time decides what a row becomes:
  *
  *   MI backend     rec() opens an object in a json array, str/i64 add named
@@ -80,11 +80,11 @@ struct nats_emit {
 
 /**
  * Open the emitter on the TABLE backend (csv/txt): zeroes @e, installs
- * the table ops and writes the header record per the [FMT] options.
+ * the table ops and writes the header record per the options.
  *
  * @param e       emitter to initialize (caller-owned, stack is fine).
  * @param kind    FMT_CSV or FMT_TXT.
- * @param eol_lf  0 = CRLF [FMT-7], 1 = LF.
+ * @param eol_lf  0 = CRLF, 1 = LF.
  * @param header  0 drops the header record.
  * @param cols    column names for the header (borrowed for the call).
  * @param ncols   column count.
@@ -215,7 +215,7 @@ int nats_emit_open(struct nats_emit *e, mi_item_t *obj,
 
 /**
  * Finish the walk: the table backend attaches the blob to @obj as the
- * [FMT-3] format+data fields (the blob is consumed and freed here, via
+ * format+data fields (the blob is consumed and freed here, via
  * nats_emit_attach_blob); the MI backend is a no-op.
  *
  * @param e    open emitter (released either way).
@@ -227,7 +227,7 @@ int nats_emit_open(struct nats_emit *e, mi_item_t *obj,
 int nats_emit_close(struct nats_emit *e, mi_item_t *obj);
 
 /**
- * The [FMT-3] response shape for a pre-built table blob — for handlers
+ * The response shape for a pre-built table blob — for handlers
  * whose table layout is not row-shaped (nats_stream_info).  Adds
  * `format` (kind name) and `data` (@blob) strings to @obj.
  *

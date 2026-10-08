@@ -22,7 +22,7 @@
  * nats_rpc_wake.h -- consumer -> worker reply wake for the async
  * nats_request transport.
  *
- * [P3.1] Without this hop the worker learns of a DELIVERED reply only
+ * Without this hop the worker learns of a DELIVERED reply only
  * on the next tick of its per-call guard timerfd, so reply latency is
  * floored at the poll interval and every in-flight call costs periodic
  * timer wakeups.  Instead, the consumer process signals the claiming

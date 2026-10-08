@@ -663,7 +663,7 @@ out:
 }
 
 /*
- * [P3.4] Lock-free variant for callbacks that do slow work (the
+ * Lock-free variant for callbacks that do slow work (the
  * reconcile pass runs JetStream network calls, seconds each against a
  * slow broker).  Under nats_registry_foreach() that work runs inside
  * the global+bucket READ locks; combined with rwlock writer priority,

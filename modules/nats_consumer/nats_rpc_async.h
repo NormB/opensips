@@ -38,10 +38,10 @@
 
 /* The in-flight ctx state machine that used to be declared here (the
  * per-worker inbox-subscription async transport) was superseded by the
- * consumer-routed SHM-slot transport and deleted (P1.1). */
+ * consumer-routed SHM-slot transport and deleted. */
 
 /**
- * Mint a UUIDv7 correlation id (RFC 9562 §5.7) into the provided
+ * Mint a UUIDv7 correlation id into the provided
  * buffer.
  *
  * @param out  Caller-owned destination buffer; NUL-terminated on
@@ -122,7 +122,7 @@ int nats_rpc_async_request_id_consume_user(char *out, int cap);
 
 
 /* Per-call guard-timerfd tick interval (ms), tunable via the
- * nats_consumer "async_rpc_poll_ms" modparam.  [P3.1] Replies resume
+ * nats_consumer "async_rpc_poll_ms" modparam. Replies resume
  * via the consumer's IPC wake; this tick only bounds timeout /
  * lost-wake detection.  Clamped to [1, 1000] when used. */
 extern int nats_rpc_async_poll_ms;

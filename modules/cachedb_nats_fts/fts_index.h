@@ -20,7 +20,7 @@
 
 /*
  * fts_index.h — the FTS/search-index storage and maintenance API
- * (moved from cachedb_nats_json.h in the P1.2 module split).
+ * (moved from cachedb_nats_json.h when the index became its own module).
  */
 
 #ifndef CDBN_FTS_INDEX_H
@@ -234,7 +234,7 @@ int nats_json_index_add(const char *key, int key_len,
 int nats_json_index_remove(const char *key, int key_len);
 
 /*
- * P10 [TTL-SOLUTION-SPEC §4 TREV-2a / SPEC §12 REV-26]: live forward-index
+ * [a /]: live forward-index
  * document count, for observability and the joint reaper⊕watcher e2e.
  * @return  num_documents (>= 0), or -1 if the index is not initialized.
  *          NULL-safe — never dereferences a NULL g_idx.

@@ -328,7 +328,7 @@ void nats_consumer_process(int rank)
 	 * survived the reconnect on the broker side report
 	 * nats_dl.natsSubscription_IsValid()=true and are left alone. */
 	{
-		nats_epoch_t sub_epoch;   /* [P2.8] tag of the live sub set */
+		nats_epoch_t sub_epoch;   /* tag of the live sub set */
 		int prev_connected = nats_pool_is_connected();
 
 		nats_epoch_save(&sub_epoch);
@@ -382,7 +382,7 @@ void nats_consumer_process(int rank)
 /* ── nats.c message callback ─────────────────────────────────────── */
 
 /*
- * [P3.7] Rate-limited drop warning, safe for the nats.c I/O thread.
+ * Rate-limited drop warning, safe for the nats.c I/O thread.
  * The two admission-control branches below used to drop SILENTLY
  * (only the MI counters moved); but this callback may not call LM_*
  * (dprint is not warranted reentrant against the worker thread's
@@ -466,7 +466,7 @@ static void nats_msg_handler(natsConnection *nc, natsSubscription *sub,
 
 	/* ONE combined SHM allocation: event struct + subject + data laid out
 	 * back-to-back.  Per-field mallocs tripled the SHM allocator lock
-	 * traffic that the design-repo PERF_NOTES.md flags as the dominant cost at high rates;
+	 * traffic, which profiling shows is the dominant cost at high rates;
 	 * the whole event is freed with a single shm_free. */
 	need = sizeof(nats_ipc_event_t) + (size_t)subject_len + 1 +
 		(size_t)data_len + 1;

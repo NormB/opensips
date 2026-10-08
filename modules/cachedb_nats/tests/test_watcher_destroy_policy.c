@@ -24,8 +24,7 @@
  * the broker was down ("nats.c's I/O thread may be cleaning up the same
  * internal structures -- destroying here causes double-free") and count
  * the skip in `watcher_handle_leaks`.  The fear was refuted by a live
- * spike (design repo code/tests/watcher_destroy_spike.c: 10 SIGKILL
- * broker-flap cycles, Stop+Destroy on a disconnected connection with
+ * spike (10 SIGKILL broker-flap cycles, Stop+Destroy on a disconnected connection with
  * the reconnect thread live, ASan-clean on the pinned libnats).  Under
  * a flapping broker the old skip accumulated one handle per cycle in a
  * long-lived process.

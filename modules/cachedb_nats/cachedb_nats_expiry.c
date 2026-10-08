@@ -20,20 +20,20 @@
 
 /*
  * cachedb_nats_expiry.c — the module's single expiry translation unit
- * (P1.5b consolidation of cachedb_nats_ttl.c, cachedb_nats_ttl_put.c,
+ * (consolidation of cachedb_nats_ttl.c, cachedb_nats_ttl_put.c,
  * cachedb_nats_reaper.c and cachedb_nats_json_reap.c).
  *
  * Contents:
  *   - pure decision helpers for the CAS row write (predicate, jsErrCode
  *     classification, key->subject mapping) and the mod_init guards;
  *   - nats_kv_put_row()/nats_kv_write_row_cas(): the single-shot CAS
- *     publish EVERY usrloc-row write goes through (§2.0 invariant);
+ *     publish EVERY usrloc-row write goes through;
  *   - the reaper decision logic (due-gate, per-row action) and the
  *     survivor projection used by the reaper timer host in
  *     cachedb_nats.c.
  *
  * The reaper is the module's SINGLE expiry mechanism: the native
- * per-message-TTL path was deleted in P1.5a.
+ * per-message-TTL path was removed.
  */
 
 #include <stdio.h>   /* snprintf */
@@ -41,18 +41,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>  /* [P3.3] getpid/getppid/sleep (reaper proc) */
+#include <unistd.h>  /* getpid/getppid/sleep (reaper proc) */
 
 #include <nats/nats.h>
 
 #include "../../dprint.h"
-#include "../../mem/mem.h"   /* [P3.5] pkg buffers on the projection path */
+#include "../../mem/mem.h"   /* pkg buffers on the projection path */
 #include "../../lib/nats/nats_dl.h"
 #include "../../lib/nats/nats_pool.h"     /* nats_pool_get_js */
 #include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
 #include "cachedb_nats.h"          /* cdbn_fts_on (resync gate) */
 #include "cachedb_nats_dbase.h"    /* kv_bucket / kv_replicas / ... */
-#include "cachedb_nats_watch.h"    /* [P3.3] proc guard + resync body */
+#include "cachedb_nats_watch.h"    /* proc guard + resync body */
 #include "cachedb_nats_reg.h"      /* cdbn_reg_row_scan (reaper due-check) */
 #include "cachedb_nats_stats.h"    /* NATS_CDB_STATS_* (reaper counters) */
 #include "cachedb_nats_expiry.h"
@@ -64,7 +64,7 @@
 /* pure decisions (was cachedb_nats_ttl.c)                              */
 /* ==================================================================== */
 
-/* (§2.2 [TREV-2/2a], [REV-27]) marker-aware CAS predicate. */
+/* marker-aware CAS predicate. */
 enum ttl_cas_pred cdbn_ttl_cas_predicate(int got_entry, int value_len,
 	uint64_t entry_rev, uint64_t head_seq, uint64_t *out_seq)
 {
@@ -83,7 +83,7 @@ enum ttl_cas_pred cdbn_ttl_cas_predicate(int got_entry, int value_len,
 	return TTL_CAS_NO_MESSAGE;   /* provably empty subject */
 }
 
-/* (§2.2.1 [TREV-13]) js_PublishMsg outcome classification. */
+/* js_PublishMsg outcome classification. */
 enum ttl_outcome cdbn_ttl_classify(enum ttl_pub_status st, int jerr)
 {
 	if (st == TTL_PUB_OK)
@@ -96,26 +96,26 @@ enum ttl_outcome cdbn_ttl_classify(enum ttl_pub_status st, int jerr)
 	return TTL_FAIL_SAVE;
 }
 
-/* (§2.5) KV-Operation value for a publish-delete. */
+/* KV-Operation value for a publish-delete. */
 const char *cdbn_ttl_delete_op(int purge)
 {
 	return purge ? NATS_KV_OP_PURGE : NATS_KV_OP_DEL;
 }
 
-/* (§5.3 [REV-7]) kv_ttl==0 startup guard. */
+/* kv_ttl==0 startup guard. */
 int cdbn_kv_ttl_guard(int kv_ttl)
 {
 	return (kv_ttl == 0) ? 0 : -1;
 }
 
-/* [D6/HREV-6] nats_expired_linger range guard: negative is meaningless,
+/* nats_expired_linger range guard: negative is meaningless,
  * > 1 day is almost certainly a typo'd epoch pasted into the config. */
 int cdbn_linger_guard(int linger)
 {
 	return (linger >= 0 && linger <= 86400) ? 0 : -1;
 }
 
-/* P11b [REV-25 / §5.3 REV-7]: policy for a PRE-EXISTING bucket whose backing
+/* Policy for a PRE-EXISTING bucket whose backing
  * stream already carries a non-zero MaxAge (created by an older deployment or
  * another tool — the cdbn_kv_ttl_guard modparam check above only stops THIS module
  * from creating one).  A non-zero stream MaxAge expires EVERY key after that
@@ -127,7 +127,7 @@ int cdbn_kv_legacy_bucket_maxage_warn(int64_t maxage_ns)
 	return maxage_ns != 0 ? 1 : 0;
 }
 
-/* (§2.1 [TREV-5]) build "$KV.<bucket>.<key>" — one mapping, three consumers. */
+/* build "$KV.<bucket>.<key>" — one mapping, three consumers. */
 int nats_kv_key_to_subject(const char *bucket, const char *key,
 	char *buf, int buflen)
 {
@@ -164,14 +164,14 @@ static enum ttl_pub_status pub_status(natsStatus s)
  * Returns an enum ttl_outcome (TTL_DONE/RETRY/FAIL_SAVE); the caller maps
  * RETRY to its re-read loop.
  */
-/* [TTL-BELOW-MARKER] pure TTL-derivation helpers, resurrected verbatim
- * from the pre-P1.5a native-TTL path (TTL-SOLUTION-SPEC §2.3/§5).  The
- * P1.5a deletion rationale is resolved: TTL-loss-on-update is prevented
- * by the §2.0 re-assert below, the history-bucket rollback by the fork
+/* pure TTL-derivation helpers, resurrected verbatim
+ * from the former native-TTL path.  The
+ * Deletion rationale is resolved: TTL-loss-on-update is prevented
+ * by the re-assert below, the history-bucket rollback by the fork
  * server (allow_msg_ttl_below_marker / marker replacement), and the old
  * capability-latch layer by the kv_ttl_below_marker pool probe. */
 
-/* [REV-6/F6] (§5) per-message TTL eligibility. */
+/* per-message TTL eligibility. */
 int cdbn_ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
 {
 	if (n_contacts < 1)
@@ -181,13 +181,13 @@ int cdbn_ttl_eligible(int64_t row_exp, int n_contacts, int all_same_expiry)
 	return (n_contacts == 1) || all_same_expiry;
 }
 
-/* (§2.3) ttl_seconds = row_exp - now + grace. */
+/* ttl_seconds = row_exp - now + grace. */
 int64_t cdbn_ttl_seconds(int64_t row_exp, int64_t now, int grace)
 {
 	return row_exp - now + (int64_t)grace;
 }
 
-/* (§2.3 [TREV-12] / [HREV-3]) MsgTTL in ms; <=0 floors to the 1 s server
+/* MsgTTL in ms; <=0 floors to the 1 s server
  * minimum so an already-expired-at-write row still self-expires instead of
  * being written TTL-less (RC-6). */
 int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds)
@@ -195,7 +195,7 @@ int64_t cdbn_ttl_msgttl_ms(int64_t ttl_seconds)
 	int64_t ms;
 
 	if (ttl_seconds <= 0)
-		return 1000;                           /* HREV-3: floor to 1 s min */
+		return 1000;                           /*: floor to 1 s min */
 	/* overflow-safe: cap before *1000 (real epochs never reach this). */
 	if (ttl_seconds > 9223372036854775LL)
 		ttl_seconds = 9223372036854775LL;
@@ -219,7 +219,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	jsPubOptions o;
 	natsStatus s;
 
-	/* [R11] one mapping, three consumers (§2.1): never publish to a truncated
+	/* one mapping, three consumers: never publish to a truncated
 	 * subject -- that would land the value where the reader never queries
 	 * (silent split-brain).  Fail the save instead. */
 	if (nats_kv_key_to_subject(bucket, key, subj, sizeof(subj)) < 0) {
@@ -230,16 +230,16 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 		return TTL_FAIL_SAVE;
 	}
 
-	/* head_seq=0: js_GetLastMsg is unbound [R3], so an absent entry resolves to
+	/* head_seq=0: js_GetLastMsg is unbound, so an absent entry resolves to
 	 * NO_MESSAGE and is serviced with kvStore_CreateString -- which re-creates
-	 * over a server-side DEL/PURGE marker first-attempt (avoids the [REV-27]
+	 * over a server-side DEL/PURGE marker first-attempt (avoids the
 	 * re-REGISTER lockout). */
 	pred = cdbn_ttl_cas_predicate(got_entry, json_len, entry_rev, 0, &cas_seq);
 
 	if (pred == TTL_CAS_NO_MESSAGE) {
-		/* [P3.6] length-aware create: json_len is already in hand;
+		/* length-aware create: json_len is already in hand;
 		 * the *String form re-measured the full document.
-		 * [TTL-BELOW-MARKER] ttl_ms <= 0 makes CreateWithTTL identical
+		 * ttl_ms <= 0 makes CreateWithTTL identical
 		 * to kvStore_Create (no TTL); > 0 carries the row's TTL on the
 		 * create itself, so first inserts self-expire too. */
 		s = nats_dl.kvStore_CreateWithTTL(&rev, kv, key, json, json_len,
@@ -250,7 +250,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 			return TTL_DONE;
 		}
 		if (pub_status(s) == TTL_PUB_CONN_DOWN) {
-			/* [P3.7] outage itself is covered by the pool transition
+			/* outage itself is covered by the pool transition
 			 * + rate-limited fast-fail WARNs; per-write detail DBG */
 			LM_DBG("nats_kv_put_row: create of '%s.%s' failed, "
 				"broker down: %s\n", bucket, key,
@@ -266,13 +266,13 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 
 	/* update OR create-over-empty-marker: CAS-publish.
 	 * ExpectLastSubjectSeq == the revision we read is byte-for-byte the
-	 * optimistic check kvStore_UpdateString(rev) performed (§2.1). */
+	 * optimistic check kvStore_UpdateString(rev) performed. */
 	if (nats_dl.natsMsg_Create(&m, subj, NULL, json, json_len) != NATS_OK)
 		return TTL_FAIL_SAVE;
 	nats_dl.jsPubOptions_Init(&o);
 	o.ExpectLastSubjectSeq = cas_seq;
 	if (ttl_ms > 0)
-		o.MsgTTL = ttl_ms;   /* re-assert Nats-TTL on update [TREV-3] */
+		o.MsgTTL = ttl_ms;   /* re-assert Nats-TTL on update */
 
 	s = nats_dl.js_PublishMsg(&pa, js, m, &o, &je);
 	if (s == NATS_OK && pa && out_rev)
@@ -283,7 +283,7 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	{
 		enum ttl_outcome out = cdbn_ttl_classify(pub_status(s), je);
 
-		/* [P3.7] this is the PRIMARY usrloc write path -- a failed
+		/* this is the PRIMARY usrloc write path -- a failed
 		 * save used to produce zero diagnostics.  A CAS conflict is
 		 * normal contention (DBG); broker-down is covered by the
 		 * transition WARNs (DBG here); anything else fails the save
@@ -314,14 +314,14 @@ enum ttl_outcome nats_kv_put_row(jsCtx *js, kvStore *kv,
 	}
 }
 
-/* The §2.0 usrloc-row write entry point.  All writers (registration update,
+/* The usrloc-row write entry point.  All writers (registration update,
  * first insert, reaper survivor-write) go through this; no caller calls
  * kvStore_UpdateString on the row path directly.
  *
- * `rev == 0` is the "no prior message" sentinel [HREV-2] (JetStream sequences
+ * `rev == 0` is the "no prior message" sentinel (JetStream sequences
  * are 1-based): the write routes to a CREATE (kvStore_CreateString via the
  * NO_MESSAGE predicate).  `rev > 0` CAS-updates at that revision (a live doc
- * or a marker rev [REV-27]).
+ * or a marker rev).
  *
  * Returns 0 = committed, 1 = CAS conflict (caller re-reads + retries),
  * -1 = fatal/fail-the-save.  *out_rev set on success. */
@@ -333,8 +333,8 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 	int64_t ttl_ms = 0;
 	enum ttl_outcome o;
 
-	/* [TTL-BELOW-MARKER] native per-key TTL, re-asserted on EVERY row
-	 * write (§2.0): only when the operator opted in AND the broker probe
+	/* native per-key TTL, re-asserted on EVERY row
+	 * write: only when the operator opted in AND the broker probe
 	 * latched SUPPORTED (fork server; verified further by the canary).
 	 * Everything else -- knob off, stock broker, old libnats, mixed or
 	 * permanent rows -- writes TTL-less exactly as before and relies on
@@ -359,20 +359,20 @@ int nats_kv_write_row_cas(kvStore *kv, const char *bucket, const char *key,
 /* reaper decision logic (was cachedb_nats_reaper.c)                    */
 /* ==================================================================== */
 
-/* (§4.3A [REV-1]) row-due selection. */
+/* row-due selection. */
 int cdbn_reap_row_due(int64_t row_exp, time_t now, int grace)
 {
 	return row_exp != 0 && (row_exp + (int64_t)grace) <= (int64_t)now;
 }
 
-/* (§4.3A [REV-16/31]) per-row action after pruning expired contacts. */
+/* per-row action after pruning expired contacts. */
 enum reap_action cdbn_reap_row_action(int n_live_survivors)
 {
 	return (n_live_survivors > 0) ? REAP_WRITE_SURVIVORS : REAP_DELETE_EMPTY;
 }
 
-/* (F2 [PREV-26/REV-2]) reaper-off guard.  The reaper is the SINGLE expiry
- * mechanism (the native per-message-TTL path was deleted, P1.5), so a
+/* Reaper-off guard.  The reaper is the SINGLE expiry
+ * mechanism (the native per-message-TTL path was removed), so a
  * non-positive interval leaves nothing to reclaim expired records and is
  * refused unconditionally. */
 int cdbn_reap_interval_guard(int interval)
@@ -385,10 +385,10 @@ int cdbn_reap_interval_guard(int interval)
 /* reaper row projection (was cachedb_nats_json_reap.c)                 */
 /* ==================================================================== */
 
-/* [REV-1/25] Cheap reaper due-gate over a STORED row: read the top-level
+/* Cheap reaper due-gate over a STORED row: read the top-level
  * `row_exp` (= min contact expiry, 0 = permanent) and apply the grace-padded
  * due test.  1 = due (worth a full projection), 0 = not due / permanent (skip),
- * -1 = `row_exp` absent (legacy/pre-row_exp row [REV-25]) which the caller MUST
+ * -1 = `row_exp` absent (legacy/pre-row_exp row) which the caller MUST
  * treat as due (fail-closed: project it rather than leave it unreaped). */
 int cdbn_reap_row_due_json(const char *json, int len, time_t now, int grace)
 {
@@ -402,7 +402,7 @@ int cdbn_reap_row_due_json(const char *json, int len, time_t now, int grace)
 
 /* A JSON contact is DUE (the reaper drops it) iff expired OR carrying no
  * parseable integer `expires` -- fail-closed: a binding we cannot prove is live
- * is reaped, never retained [REV-26].  expires==0 is permanent and never due
+ * is reaped, never retained.  expires==0 is permanent and never due
  * (cdbn_reap_row_due returns 0 for it). */
 static int reap_contact_due(const char *cvs, const char *cve, time_t now, int grace)
 {
@@ -466,7 +466,7 @@ static int emit_survivor_contacts(json_sink_t *s, const char *c_vs,
 	return 0;
 }
 
-/* [REV-1/16] (SPEC §4.3A) Reaper survivor projection.  From a stored usrloc row
+/* Reaper survivor projection.  From a stored usrloc row
  * @json, drop every DUE contact, recompute `row_exp` over the survivors, and
  * return a fresh document (caller frees).  *n_survivors is set to the survivor
  * count (0 => the row is fully due and the caller must CAS-DELETE the key), or
@@ -477,7 +477,7 @@ static int emit_survivor_contacts(json_sink_t *s, const char *c_vs,
  * then (2) hand it to cdbn_row_finalize_metadata() which recomputes row_exp +
  * schema_version over exactly those survivors — so the 0=permanent sentinel and
  * int64 arithmetic have a single owner (the rowmeta TU). */
-/* [P2.5] pass-1: is this a usrloc row?  (has a top-level "contacts") */
+/* pass-1: is this a usrloc row?  (has a top-level "contacts") */
 static int find_contacts_flag_cb(const char *name, int nlen,
 	const char *vstart, const char *vend, void *ud)
 {
@@ -489,7 +489,7 @@ static int find_contacts_flag_cb(const char *name, int nlen,
 	return 0;
 }
 
-/* [P2.5] stage-1: copy every top-level field, filtering the contacts
+/* stage-1: copy every top-level field, filtering the contacts
  * object down to its surviving members. */
 struct project_walk_ctx {
 	json_sink_t *s;
@@ -533,13 +533,13 @@ char *cdbn_reap_project_survivors(const char *json, int len, time_t now, int gra
 
 	if (n_survivors)
 		*n_survivors = 0;
-	if (out_row_exp)            /* P8: TTL eligibility of the projected survivors */
+	if (out_row_exp)            /* TTL eligibility of the projected survivors */
 		*out_row_exp = 0;
 	if (out_all_same)
 		*out_all_same = 0;
 	if (!json || len <= 0)
 		return NULL;
-	/* pass 1: is this a usrloc row at all? [P2.5] */
+	/* pass 1: is this a usrloc row at all? */
 	if (cdbn_json_foreach_top_field(json, len,
 			find_contacts_flag_cb, &has_contacts) < 0)
 		return NULL;
@@ -591,13 +591,13 @@ fail:
 }
 
 /* Module globals owned by cachedb_nats.c (modparams + FTS prefix),
- * consumed by the reaper timer body moved here in P2.7. */
+ * consumed by the reaper timer body moved here. */
 extern int   nats_reap_grace;
 extern int   nats_expired_linger;
 extern char *fts_json_prefix;
-extern int   fts_json_prefix_len;   /* [P3.6] cached at mod_init */
+extern int   fts_json_prefix_len;   /* cached at mod_init */
 
-/* CAS-guarded publish-delete of a KV key [REV-16].  Publishes a KV-Operation:DEL
+/* CAS-guarded publish-delete of a KV key.  Publishes a KV-Operation:DEL
  * marker for "$KV.<bucket>.<key>" with ExpectLastSubjectSeq=@rev, so a
  * concurrent re-REGISTER that bumped the head between our read and this delete
  * makes the delete FAIL (jerr 10071) instead of destroying the renew.  A blind
@@ -643,7 +643,7 @@ struct reap_pass_ctx {
 	int slack;
 	int prefix_len;
 	int reaped;
-	/* [OBS/D-OBS-2] pass gauges */
+	/* pass gauges */
 	long g_keys, g_aors, g_contacts, g_active, g_perm, g_due;
 };
 
@@ -658,7 +658,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 	const char *key = nats_dl.kvEntry_Key(e);
 	const char *val;
 	int vlen, n_surv = 0, plen = 0, p_all_same = 0, n_before = 0;
-	int64_t p_row_exp = 0;            /* P8: survivors' TTL eligibility */
+	int64_t p_row_exp = 0;            /* survivors' TTL eligibility */
 	uint64_t rev;
 	char *proj;
 
@@ -672,7 +672,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 	vlen = nats_dl.kvEntry_ValueLen(e);
 	rev = nats_dl.kvEntry_Revision(e);
 
-	/* [OBS] pass gauges (visibility semantics: grace only); n_before
+	/* pass gauges (visibility semantics: grace only); n_before
 	 * feeds the contacts_pruned tally in the survivors branch. */
 	n_before = 0;
 	{
@@ -707,7 +707,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 			c->reaped++;
 		}
 	} else {
-		/* P8 [§2.0]: WRITE-SURVIVORS through the one row-write helper so
+		/*: WRITE-SURVIVORS through the one row-write helper so
 		 * the pruned row goes through the one row-write helper (CAS
 		 * publish, conflict-classified).  The reaper defers index
 		 * convergence to the watcher (no index code). */
@@ -716,7 +716,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 				p_row_exp, n_surv, p_all_same, c->slack,
 				&newrev) == 0) {
 			NATS_CDB_STATS_INC(rows_reaped);
-			/* [OBS] bindings physically removed by this survivor-write */
+			/* bindings physically removed by this survivor-write */
 			if (n_before > n_surv)
 				NATS_CDB_STATS_ADD(contacts_pruned,
 					n_before - n_surv);
@@ -730,13 +730,13 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 
 /* The reaper pass: scan the bucket once, and for each DUE usrloc row either
  * CAS-rewrite it to its survivors or CAS-delete it when nothing survives.
- * [P3.3] Runs in the dedicated reaper process (nats_cdb_reaper_proc_main
+ * Runs in the dedicated reaper process (nats_cdb_reaper_proc_main
  * below).  It still does not gate on nats_pool_is_connected(): a NULL KV/JS
  * handle means the broker is down and we skip just this pass.
  *
- * Independent of the search index [REV-17]: enumeration is ONE
+ * Independent of the search index: enumeration is ONE
  * value-carrying watch pass (nats_kv_enum_live_values), so the reaper works
- * with enable_search_index=0.  The watch pass replaced the previous
+ * without the cachedb_nats_fts module.  The watch pass replaced the previous
  * kvStore_Keys() + per-key kvStore_Get() sweep: that pattern issued
  * O(bucket) synchronous round trips per tick, and the 30k-AoR bench
  * (2026-07-07) measured it dragging REGISTER p99/max from ~1 ms to
@@ -770,7 +770,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	c.kv = kv;
 	c.js = js;
 	c.now = time(NULL);
-	/* [HREV-3] physical-reclamation slack: the skew margin plus the
+	/* physical-reclamation slack: the skew margin plus the
 	 * operator's retention window -- without the linger term the reaper
 	 * would reclaim rows the TTL path was told to keep. */
 	c.slack = nats_reap_grace + nats_expired_linger;
@@ -787,7 +787,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 		LM_DBG("reaper: enumeration ended early (%d); next tick rescans\n",
 			rc);
 
-	/* [OBS/D-OBS-2] publish the pass gauges (single writer: this process) */
+	/* publish the pass gauges (single writer: this process) */
 	clock_gettime(CLOCK_MONOTONIC, &g_t1);
 	NATS_CDB_STATS_SET(reap_last_run, (unsigned long)time(NULL));
 	NATS_CDB_STATS_SET(reap_last_ms,
@@ -805,7 +805,7 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 			c.reaped);
 }
 
-/* ── [TTL-BELOW-MARKER] ttl_canary: broker truth beats config truth ──
+/* ── ttl_canary: broker truth beats config truth ──
  *
  * The kv_ttl_below_marker probe proves the broker ACCEPTED the option;
  * the canary proves it HONORS it: when the probe latched SUPPORTED, the
@@ -897,7 +897,7 @@ static void ttl_canary_check(time_t now)
 	}
 }
 
-/* ── [P3.3] dedicated reaper process ─────────────────────────────── */
+/* ── dedicated reaper process ─────────────────────────────── */
 
 /* Owned by cachedb_nats.c (modparams / mod_init state). */
 extern int nats_reap_interval;
@@ -909,7 +909,7 @@ extern int index_resync_interval_secs;
  * watch pass + CAS prune) and, when the FTS module is bound and
  * index_resync_interval_secs > 0, the periodic index resync.
  *
- * [P3.3] Both used to run as register_timer callbacks in the SHARED
+ * Both used to run as register_timer callbacks in the SHARED
  * core timer process; at 100k AoRs one pass holds that process for
  * tens of seconds, stalling usrloc/tm/dialog timers system-wide.
  * Here they stall only this process, and a slow pass simply delays
@@ -949,7 +949,7 @@ void nats_cdb_reaper_proc_main(int rank)
 	sc.last_reap += nats_cdb_reap_first_jitter(nats_reap_interval,
 		(unsigned int)getpid());
 
-	/* [TTL-BELOW-MARKER] arm the broker-truth canary once. */
+	/* arm the broker-truth canary once. */
 	ttl_canary_arm();
 
 	for (;;) {
