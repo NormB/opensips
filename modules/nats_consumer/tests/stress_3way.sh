@@ -79,7 +79,7 @@ DRIVER_PIDS=()
 cleanup() {
     local pid
     for pid in "${DRIVER_PIDS[@]}"; do
-        kill "$pid" 2>/dev/null
+        stop_driver "$pid"
     done
     if [ -n "$OPENSIPS_PID" ]; then
         kill "$OPENSIPS_PID" 2>/dev/null

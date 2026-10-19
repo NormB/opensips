@@ -21,6 +21,9 @@
 #   5. stress_multi_worker rides out one failed MI poll (a docker exec
 #      that fails on a loaded host) instead of dying silently under
 #      set -e, and on a real failure says why and dumps the handle.
+#   6. stop_driver (stress_helpers.sh) stops a load-driver loop together
+#      with the command it is running: killing only the loop orphaned its
+#      in-flight `nats pub`, which outlived the nightly batch.
 #
 # Exit 0 iff every check passes.
 set -u
@@ -183,6 +186,33 @@ r=$(run_mw 0 3)
 check "redeliveries fail the run" 1 "${r%% *}"
 check "a redelivery failure dumps the handle" yes \
     "$(grep -q '"redeliveries":3' "$WORK/mw.out.0.3" && echo yes || echo no)"
+
+echo "== stop_driver"
+# A driver like stress_3way's: a loop that keeps a child running.  The
+# child's argv carries a unique marker so it can be found after the loop
+# is gone (an orphan is reparented to init).
+mark="drv-marker-$$-$RANDOM"
+child() { python3 -c 'import time; time.sleep(300)' "$mark"; }
+( while true; do child; done ) >/dev/null 2>&1 &
+drv=$!
+( while true; do child; sleep 0.1; done ) >/dev/null 2>&1 &
+drv2=$!
+sleep 0.5
+before=$(pgrep -f -- "$mark" | wc -l)
+if [ -f "$HERE/stress_helpers.sh" ] && ( . "$HERE/stress_helpers.sh"; type stop_driver ) >/dev/null 2>&1; then
+    ( . "$HERE/stress_helpers.sh"; stop_driver "$drv"; stop_driver "$drv2" )
+else
+    kill "$drv" "$drv2" 2>/dev/null   # the old cleanup
+fi
+sleep 0.5
+check "drivers were running their children" yes "$( [ "$before" -ge 1 ] && echo yes || echo no)"
+check "the driver loops are gone" no \
+    "$(kill -0 "$drv" 2>/dev/null || kill -0 "$drv2" 2>/dev/null && echo yes || echo no)"
+left=$(pgrep -f -- "$mark" | wc -l)
+check "no child left behind" 0 "$left"
+pkill -9 -f -- "$mark" 2>/dev/null
+check "stop_driver on a pid that is gone is a no-op" 0 \
+    "$( [ -f "$HERE/stress_helpers.sh" ] && . "$HERE/stress_helpers.sh" && type stop_driver >/dev/null 2>&1 && { stop_driver 999999999; echo $?; } || echo missing)"
 
 echo "== docker build context"
 # The compose image rebuilds opensips from source inside the container, so
