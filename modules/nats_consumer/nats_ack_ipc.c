@@ -202,8 +202,10 @@ static int apply_ack_action(uint64_t token, nats_ack_action_e action,
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;
 		case NATS_ACK_ACTION_NAK_DELAY:
-			s = nats_dl.natsMsg_NakWithDelay(nmsg,
-				(int64_t)delay_ms * 1000000LL, NULL);
+			/* the delay is in milliseconds: nats.c converts to the
+			 * nanoseconds the server expects */
+			s = nats_dl.natsMsg_NakWithDelay(nmsg, (int64_t)delay_ms,
+				NULL);
 			if (s == NATS_OK && cb_h)
 				hstat_add(cb_h, &cb_h->naks, 1);
 			break;

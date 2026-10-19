@@ -129,7 +129,7 @@ nats_dl_funcs_t nats_dl;
 static struct {
 	int ack, ack_sync, nak, nak_delay, term, in_progress, destroy;
 	const natsMsg *last;
-	int64_t last_delay_ns;
+	int64_t last_delay;	/* as passed: natsMsg_NakWithDelay takes ms */
 } rec;
 
 static natsStatus r_ack(natsMsg *m, jsOptions *o)
@@ -139,7 +139,7 @@ static natsStatus r_ack_sync(natsMsg *m, jsOptions *o, jsErrCode *e)
 static natsStatus r_nak(natsMsg *m, jsOptions *o)
 { (void)o; rec.nak++; rec.last = m; return 0; }
 static natsStatus r_nak_delay(natsMsg *m, int64_t ns, jsOptions *o)
-{ (void)o; rec.nak_delay++; rec.last = m; rec.last_delay_ns = ns; return 0; }
+{ (void)o; rec.nak_delay++; rec.last = m; rec.last_delay = ns; return 0; }
 static natsStatus r_term(natsMsg *m, jsOptions *o)
 { (void)o; rec.term++; rec.last = m; return 0; }
 static natsStatus r_in_progress(natsMsg *m, jsOptions *o)
@@ -283,8 +283,17 @@ int main(void)
 		d->token = tok;
 		d->delay_ms = 1500;
 		nats_ack_ipc_on_nak_delay(0, d);
-		CHECK(rec.nak_delay == 1 && rec.last_delay_ns == 1500000000LL,
-			"NakWithDelay called with 1500ms as nanoseconds");
+		CHECK(rec.nak_delay == 1 && rec.last_delay == 1500,
+			"NakWithDelay called with 1500 (milliseconds; nats.c converts)");
+	}
+	tok = stash((natsMsg *)&fake1);
+	{
+		nats_ack_nak_delay_t *d = shm_malloc(sizeof(*d));
+		d->token = tok;
+		d->delay_ms = UINT32_MAX;
+		nats_ack_ipc_on_nak_delay(0, d);
+		CHECK(rec.nak_delay == 2 && rec.last_delay == (int64_t)UINT32_MAX,
+			"largest delay passed through unscaled (no overflow)");
 	}
 
 	printf("sent/dropped counters (worker-side helper):\n");
