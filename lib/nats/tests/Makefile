@@ -111,6 +111,25 @@ test_server_info_redact: test_server_info_redact.c ../nats_server_info.h ../nats
 test_js_opts_policy: test_js_opts_policy.c ../nats_js_opts.h
 	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_js_opts_policy.c
 
+# Behavioural: a pool connection opened before fork() is closed in the
+# parent, so children connect on their own.  Links the REAL ../nats_pool.c
+# against a fake libnats table and forks for real.  CORE_DEFS mirrors the
+# module build flags the core headers need.
+CORE_DEFS := -fPIC -DPIC -DHAVE_STDATOMIC -DHAVE_GENERICS -D__SMP_yes \
+             -DNAME='"opensips"' -DVERSION='"test"' -DARCH='"x86_64"' \
+             -DOS='"linux"' -DCOMPILER='"cc"' -DCFG_DIR='"/etc/opensips/"' \
+             -DVERSIONTYPE='"git"' -DTHISREVISION='"test"' \
+             -D__CPU_x86_64 -D__OS_linux -DPKG_MALLOC -DSHM_MMAP \
+             -DF_MALLOC -DQ_MALLOC -DHP_MALLOC -DF_PARALLEL_MALLOC \
+             -DFAST_LOCK -DADAPTIVE_WAIT -DADAPTIVE_WAIT_LOOPS=1024 \
+             -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
+# (-Wno-cast-function-type: modules/tls_mgm/api.h, included by nats_pool.c,
+# casts cmd_function -- a header the NATS code does not own.)
+test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def
+	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
+		-I/usr/local/include -o $@ test_pool_fork.c \
+		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
+
 # Behavioural refcount model + source-pattern: the pool is torn down only
 # on the last unregister, waits for async publishes before jsCtx_Destroy,
 # and event_nats frees stats after the pool.

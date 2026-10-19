@@ -64,6 +64,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include <nats/nats.h>
 
@@ -77,6 +78,7 @@
 #include "../../mem/shm_mem.h"
 #include "../../mem/mem.h"
 #include "../../ut.h"
+#include "../../globals.h"   /* process_no */
 #include "nats_pool.h"
 #include "nats_js_opts.h"
 #include "nats_redact.h"
@@ -142,6 +144,10 @@ static jsCtx           *_js = NULL;              /* JetStream context */
 static int              _register_count = 0;
 static atomic_int       _connected = 0;          /* 1 if connected */
 static atomic_int       _reconnect_epoch = 0;    /* bumped on each reconnect */
+
+/* pthread_atfork() prepare handler, registered once nats.c is open */
+static int              _atfork_registered = 0;
+static void pool_prefork_teardown(void);
 
 /* tls_mgm bind table set by user-module mod_init via
  * nats_pool_set_tls_api().  NULL means "tls_mgm not loaded" -- the
@@ -849,6 +855,15 @@ natsConnection *nats_pool_get(void)
 			return NULL;
 		}
 		_lib_initialized = 1;
+
+		if (!_atfork_registered) {
+			if (pthread_atfork(pool_prefork_teardown, NULL, NULL) == 0)
+				_atfork_registered = 1;
+			else
+				LM_WARN("NATS pool: pthread_atfork failed; a NATS "
+					"connection opened before fork would reach the "
+					"children unusable\n");
+		}
 	}
 
 	/* TLS probe: if tls:// URLs were configured, check whether nats.c
@@ -1396,6 +1411,58 @@ kvStore *nats_pool_get_kv(const char *bucket, int replicas,
 	}
 
 	return kv;
+}
+
+/*
+ * fork() safety.  nats.c is not fork-safe: the connection's I/O threads and
+ * the library's timer, callback and GC threads exist only in the process
+ * that started them.  When a module uses NATS before the processes are
+ * forked (b2b_entities restores its state from cachedb in mod_init), the
+ * attendant opens the pool; a forked child would inherit the handles
+ * without the threads behind them, and every request there times out.
+ *
+ * Right before the attendant forks, close everything -- KV handles, the
+ * JetStream context, the connection and the library itself -- so each
+ * child opens its own.  The reconnect epoch is bumped so that a module
+ * still holding a KV handle from before fork fetches a new one.  Only the
+ * attendant (process_no 0) does this: a worker that forks (e.g. the exec
+ * module) keeps its connection.
+ */
+#define NATS_POOL_PREFORK_CLOSE_MS 2000
+
+static void pool_prefork_teardown(void)
+{
+	natsStatus s;
+	int i;
+
+	if (process_no != 0 || !_lib_initialized)
+		return;
+
+	LM_INFO("NATS pool: closing the connection opened before fork; "
+		"each process connects on its own\n");
+	for (i = 0; i < _kv_cache_cnt; i++) {
+		if (_kv_cache[i].kv) {
+			nats_dl.kvStore_Destroy(_kv_cache[i].kv);
+			_kv_cache[i].kv = NULL;
+		}
+	}
+	_kv_cache_cnt = 0;
+	if (_js) {
+		nats_dl.jsCtx_Destroy(_js);
+		_js = NULL;
+	}
+	if (_nc) {
+		nats_dl.natsConnection_Destroy(_nc);
+		_nc = NULL;
+	}
+	s = nats_dl.nats_CloseAndWait(NATS_POOL_PREFORK_CLOSE_MS);
+	if (s != NATS_OK)
+		LM_WARN("NATS pool: closing the library before fork: %s\n",
+			nats_dl.natsStatus_GetText(s));
+	_lib_initialized = 0;
+	atomic_store(&_connected, 0);
+	atomic_store(&_kv_stale, 1);
+	atomic_fetch_add(&_reconnect_epoch, 1);
 }
 
 /**

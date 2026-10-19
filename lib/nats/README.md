@@ -212,6 +212,15 @@ After the fork, each process opens its own connection on first use
 module processes and timer processes connect; the attendant and the
 TCP main process do not (`nats_rank.c`).
 
+A module may still use NATS before the fork (b2b_entities restores its
+state through cachedb_nats in `mod_init`). nats.c is not fork-safe, so
+the attendant then closes everything -- KV handles, the JetStream
+context, the connection and the library -- right before it forks
+(a `pthread_atfork()` handler), and bumps the reconnect epoch so handles
+kept from before the fork are fetched again. A worker that forks (for
+example through the exec module) keeps its connection.
+`tests/test_pool_fork.c` covers this.
+
 ### Handle lifetime and the reconnect epoch
 
 `nats_pool_get_kv()` returns KV handles owned by the pool. A reconnect
