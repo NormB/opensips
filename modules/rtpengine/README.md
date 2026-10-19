@@ -1251,7 +1251,7 @@ completed with
 The subscription is identified by its own tag, which is never one of the
 tags of the call's legs. Unless *to-tag=* is given, RTP generates it and the
 function returns it in *tag_var*; it must then be passed, as *to-tag=*, to
-`rtpengine_subscribe_answer()` and
+[rtpengine_subscribe_answer()](#rtpengine_subscribe_answerflags-sock_var-body_var) and
 [rtpengine_unsubscribe()](#rtpengine_unsubscribeflags-sock_var).
 
 
@@ -1288,7 +1288,7 @@ Meaning of the parameters is as follows:
 flag RTP accepts for this command.
 - *sock_var(var, optional)* - variable used to store/retrieve the RTP
 socket chosen for this call. Pass the same variable to
-`rtpengine_subscribe_answer()` and `rtpengine_unsubscribe()`, so all the
+[rtpengine_subscribe_answer()](#rtpengine_subscribe_answerflags-sock_var-body_var) and [rtpengine_unsubscribe()](#rtpengine_unsubscribeflags-sock_var), so all the
 commands of one subscription reach the same RTP node.
 - *body_var(var, optional)* - variable that receives the offer SDP of the
 subscription.
@@ -1338,7 +1338,7 @@ if (rtpengine_subscribe_request("all codec=[transcode=[L16/16000]]",
 ```
 
 
-#### rtpengine_subscribe_answer([flags[, sock_var[, body_var]]])
+#### rtpengine_subscribe_answer(flags, [sock_var[, body_var]])
 
 
 Completes a subscription started by
@@ -1351,10 +1351,10 @@ Meaning of the parameters is as follows:
 
 
 - *flags(string)* - must contain *to-tag=...*, the tag of the
-subscription. The function fails without it, before anything is sent to
+subscription; without it the function fails before anything is sent to
 RTP. Other useful flags: *allow-transcoding*, *trust-address*.
 - *sock_var(var, optional)* - the variable passed to
-`rtpengine_subscribe_request()`.
+[rtpengine_subscribe_request()](#rtpengine_subscribe_requestflags-sock_var-body_var-tag_var).
 - *body_var(var, optional)* - variable holding the answer SDP. Without it,
 the body of the message is used.
 
@@ -1376,7 +1376,7 @@ if (!rtpengine_subscribe_answer("to-tag=$var(sub_tag)", $var(rtpe_sock),
 ```
 
 
-#### rtpengine_unsubscribe([flags[, sock_var]])
+#### rtpengine_unsubscribe(flags, [sock_var])
 
 
 Removes a subscription created by
@@ -1389,10 +1389,10 @@ Meaning of the parameters is as follows:
 
 
 - *flags(string)* - must contain *to-tag=...*, the tag of the
-subscription. The function fails without it, before anything is sent to
+subscription; without it the function fails before anything is sent to
 RTP. Note that RTP accepts an unknown subscription tag.
 - *sock_var(var, optional)* - the variable passed to
-`rtpengine_subscribe_request()`.
+[rtpengine_subscribe_request()](#rtpengine_subscribe_requestflags-sock_var-body_var-tag_var).
 
 
 This function can be used from any route.
@@ -1417,8 +1417,8 @@ with
 
 The publisher is identified by *from-tag=...*, by default the tag of the
 message's From header, and the call by *call-id=...*, by default the
-message's Call-ID. No to-tag is sent. Note that RTP creates the call if it
-does not exist yet.
+message's Call-ID. The message's To tag is never sent. Note that RTP
+creates the call if it does not exist yet.
 
 
 Meaning of the parameters is as follows:
