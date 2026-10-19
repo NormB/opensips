@@ -60,7 +60,7 @@ int main(void)
 	printf("== carried copy: FIXED byte-exact headers ==\n");
 #endif
 
-	printf;
+	printf("KV-Operation header name + values are byte-exact:\n");
 	CHECK(strcmp(NATS_KV_OP_HDR, "KV-Operation") == 0, "header name == 'KV-Operation'");
 	CHECK(strcmp(cdbn_ttl_delete_op(0), "DEL") == 0, "delete op == 'DEL' (tombstone)");
 	CHECK(strcmp(cdbn_ttl_delete_op(1), "PURGE") == 0, "purge op == 'PURGE' (drop history)");

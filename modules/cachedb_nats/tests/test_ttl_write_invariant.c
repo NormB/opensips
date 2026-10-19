@@ -61,7 +61,7 @@ static int grep_in_function(const char *path, const char *fn, const char *needle
 
 int main(void)
 {
-	printf;
+	printf("usrloc-row-write invariant -- no kvStore_UpdateString off the helper:\n");
 
 	/* the two writers must NOT call kvStore_UpdateString directly */
 	ASSERT(grep_in_function("../cachedb_nats_json.c",
