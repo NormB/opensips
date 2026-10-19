@@ -227,7 +227,7 @@ xcap_node_sel_t* xcapNodeSelAddStep(xcap_node_sel_t* curr_sel, str* name,
 	}
 
 	curr_sel->size+= 1+ new_step.len;
-	if(namespace->len)
+	if(namespace && namespace->len)
 	{
 		curr_sel->size+= namespace->len+ 3;
 	}
@@ -473,6 +473,11 @@ char* xcapGetElem(xcap_get_req_t req, char** etag)
 	char* path= NULL;
 	str stream= {0, 0};
 
+	if (!etag) {
+		LM_ERR("no etag holder provided\n");
+		return NULL;
+	}
+
 	path= get_xcap_path(req);
 	if(path== NULL)
 	{
@@ -484,13 +489,6 @@ char* xcapGetElem(xcap_get_req_t req, char** etag)
 	if(stream.s== NULL)
 	{
 		LM_DBG("the serched element was not found\n");
-	}
-
-	if(etag== NULL)
-	{
-		LM_ERR("no etag found\n");
-		pkg_free(stream.s);
-		stream.s= NULL;
 	}
 
 	if(path)
@@ -555,33 +553,30 @@ char* send_http_get(char* path, unsigned int xcap_port, char* match_etag,
 	LM_DBG("path = [%s]\n", path);
 
 	curl_handle = curl_easy_init();
+	if (!curl_handle)
+		return NULL;
 
-	curl_easy_setopt(curl_handle, CURLOPT_URL, path);
-
-	curl_easy_setopt(curl_handle, CURLOPT_PORT, (long)xcap_port);
-
-	curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L);
-
-	curl_easy_setopt(curl_handle,  CURLOPT_STDERR, stdout);
-
-	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_function);
-
-	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &buff);
-
-	curl_easy_setopt(curl_handle, CURLOPT_HEADERFUNCTION, get_xcap_etag);
-
-	curl_easy_setopt(curl_handle, CURLOPT_WRITEHEADER, etag);
-
-	curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, err_buff);
+	if (curl_easy_setopt(curl_handle, CURLOPT_URL, path) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_PORT, (long)xcap_port) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_STDERR, stdout) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_function) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &buff) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_HEADERFUNCTION, get_xcap_etag) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_WRITEHEADER, etag) != CURLE_OK ||
+			curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, err_buff) != CURLE_OK)
+		goto curl_error;
 
 	if(match_header)
 	{
 		slist = curl_slist_append(slist, match_header);
-		curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, slist);
+		if (!slist || curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, slist) != CURLE_OK)
+			goto curl_error;
 	}
 
 	/* non-2xx => error */
-	curl_easy_setopt(curl_handle, CURLOPT_FAILONERROR, 1L);
+	if (curl_easy_setopt(curl_handle, CURLOPT_FAILONERROR, 1L) != CURLE_OK)
+		goto curl_error;
 
 	ret_code= curl_easy_perform(curl_handle );
 
@@ -594,7 +589,7 @@ char* send_http_get(char* path, unsigned int xcap_port, char* match_etag,
 			buff.s = NULL;
 		}
 //		curl_easy_cleanup(&curl_handle);
-		return NULL;
+		goto curl_error;
 	} else {
 		curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_ret_code);
 	}
@@ -602,9 +597,17 @@ char* send_http_get(char* path, unsigned int xcap_port, char* match_etag,
 
 	if(slist)
 		curl_slist_free_all(slist);
-//	curl_easy_cleanup(&curl_handle);
+	curl_easy_cleanup(curl_handle);
 	*doc_len = buff.len;
 	return buff.s;
+
+curl_error:
+	if (slist)
+		curl_slist_free_all(slist);
+	curl_easy_cleanup(curl_handle);
+	if (buff.s)
+		pkg_free(buff.s);
+	return NULL;
 }
 
 

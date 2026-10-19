@@ -185,6 +185,8 @@ static const param_export_t params[] = {
 	{"hash_size",         INT_PARAM, &aka_hash_size },
 	{"sync_timeout",      INT_PARAM, &aka_sync_timeout },
 	{"async_timeout",      INT_PARAM, &aka_async_timeout },
+	{"unused_timeout",    INT_PARAM, &aka_unused_timeout },
+	{"pending_timeout",   INT_PARAM, &aka_pending_timeout },
 	{0, 0, 0}
 };
 
@@ -415,9 +417,12 @@ static int fixup_check_var(void** param)
 #define AKA_AUTS_LEN 14
 #define AKA_AUTHORIZATION_LEN (AKA_RAND_LEN + AKA_AUTS_LEN)
 
+#define AKA_AUTS_B64_LEN calc_base64_encode_len(AKA_AUTS_LEN)
+
 static int aka_build_resync(str *nonce, str* auts, str *resync)
 {
 	static unsigned char auth_buf[AKA_AUTHORIZATION_LEN];
+	unsigned char auts_buf[calc_max_base64_decode_len(AKA_AUTS_B64_LEN)];
 	int len;
 
 	/* check what we have */
@@ -426,14 +431,14 @@ static int aka_build_resync(str *nonce, str* auts, str *resync)
 				nonce->len, calc_base64_encode_len(AKA_RAND_LEN));
 		return -1;
 	}
-	if (calc_base64_encode_len(AKA_AUTS_LEN) != auts->len) {
-		if (calc_base64_encode_len(AKA_AUTS_LEN) > auts->len) {
+	if (AKA_AUTS_B64_LEN != auts->len) {
+		if (AKA_AUTS_B64_LEN > auts->len) {
 			LM_ERR("invalid AUTS length - have %d, need %d\n",
-					auts->len, calc_base64_encode_len(AKA_AUTS_LEN));
+					auts->len, AKA_AUTS_B64_LEN);
 			return -1;
 		} else {
 			LM_WARN("AUTS length too long - have %d, need %d; dropping the tail\n",
-					auts->len, calc_base64_encode_len(AKA_AUTS_LEN));
+					auts->len, AKA_AUTS_B64_LEN);
 		}
 	}
 	len = base64decode(auth_buf, (unsigned char *)nonce->s, calc_max_base64_decode_len(AKA_AUTHORIZATION_LEN));
@@ -441,15 +446,24 @@ static int aka_build_resync(str *nonce, str* auts, str *resync)
 		LM_ERR("not enough bytes for RAND - have %d, need %d\n", len, AKA_RAND_LEN);
 		return -1;
 	}
-	len = base64decode(auth_buf + AKA_RAND_LEN, (unsigned char *)auts->s, auts->len);
+	/* only decode the AUTS we expect, in a buffer that fits it */
+	len = base64decode(auts_buf, (unsigned char *)auts->s, AKA_AUTS_B64_LEN);
 	if (len + AKA_RAND_LEN != AKA_AUTHORIZATION_LEN) {
 		LM_ERR("mismatch bytes for RAND + AUTS - have %d, need %d\n", len, AKA_AUTHORIZATION_LEN);
 		return -1;
 	}
+	memcpy(auth_buf + AKA_RAND_LEN, auts_buf, AKA_AUTS_LEN);
 	resync->s = (char *)auth_buf;
 	resync->len = AKA_AUTHORIZATION_LEN;
 	return 0;
 }
+
+#ifdef UNIT_TESTS
+int aka_test_build_resync(str *nonce, str *auts, str *resync)
+{
+	return aka_build_resync(nonce, auts, resync);
+}
+#endif
 
 static int aka_challenge_pre(struct sip_msg *_msg, str *realm, int _code,
 		hdr_types_t *hftype, struct hdr_field **h, struct aka_user **user,
@@ -736,7 +750,6 @@ static inline int aka_avs_get_new(struct aka_user *user, int *algmask,
 	for (c = 0; c < count - *err_count;) {
 		switch (aka_av_get_new(user, *algmask, &avs[c])) {
 			case -1: /* error */
-				c--;
 				(*err_count)++;
 				break;
 			case  0: /* no AV found within the expected time */
@@ -760,28 +773,42 @@ static int aka_challenge(struct sip_msg *_msg, struct aka_av_mgm *mgm, str *_rea
 	hdr_types_t hftype;
 	struct hdr_field *h;
 	struct aka_user *user;
-	struct aka_av *av, **avs;
+	struct aka_av *av, **avs = NULL;
 	int count = aka_count_avs(algmask), new_count;
 	int sync_count, err_count;
 
 	realm = (_realm?*_realm:str_init(""));
-	if (count > 1) {
-		avs = pkg_malloc(count * sizeof *avs);
-		if (!avs) {
-			LM_ERR("could not allocate %d AVs\n", count);
-			return -1;
-		}
-	} else {
-		avs = &av;
-	}
-
 	if (aka_challenge_pre(_msg, &realm, _code, &hftype, &h, &user, &auts, &sync_count) < 0) {
 		LM_ERR("cannot prepare challenge from message\n");
 		goto end;
 	}
+	if (sync_count < 0 || count < 0 || count > INT_MAX - sync_count) {
+		LM_ERR("invalid authentication vector count %d + %d\n", count,
+				sync_count);
+		goto release;
+	}
 	count += sync_count;
+	if (count > INT_MAX / (int)sizeof(*avs)) {
+		LM_ERR("invalid authentication vector count %d\n", count);
+		goto release;
+	}
+	if (count > 1) {
+		avs = pkg_malloc(count * sizeof *avs);
+		if (!avs) {
+			LM_ERR("could not allocate %d AVs\n", count);
+			goto release;
+		}
+	} else {
+		avs = &av;
+	}
 	/* try to fetch as many local AVs as possible */
 	new_count = aka_avs_get_new(user, &algmask, avs, count, &err_count);
+	if (new_count < 0 || err_count < 0 ||
+			new_count > count || err_count > count - new_count) {
+		LM_ERR("invalid authentication vector result: %d fetched, %d errors, %d requested\n",
+				new_count, err_count, count);
+		goto release;
+	}
 
 	/* if we need more, fetch them remotely */
 	if (new_count + err_count != count) {
@@ -792,6 +819,8 @@ static int aka_challenge(struct sip_msg *_msg, struct aka_av_mgm *mgm, str *_rea
 			goto release;
 		}
 		new_count += aka_avs_new_wait(user, &algmask, avs + new_count, count - new_count - err_count);
+		if (new_count < 0 || new_count > count)
+			goto release;
 		if (new_count < count)
 			LM_WARN("Could not get get %d (out of %d) authentication vectors!\n",
 					count - new_count, count);
@@ -803,7 +832,7 @@ static int aka_challenge(struct sip_msg *_msg, struct aka_av_mgm *mgm, str *_rea
 release:
 	aka_user_release(user);
 end:
-	if (count > 1)
+	if (count > 1 && avs)
 		pkg_free(avs);
 	return ret;
 }
@@ -950,8 +979,10 @@ struct aka_async_param {
 
 static inline void aka_async_param_remove(struct aka_async_param *param)
 {
+	cond_lock(&param->user->cond);
 	if (list_is_valid(&param->list))
-		aka_pop_async(param->user, &param->list);
+		aka_pop_unsafe_async(param->user, &param->list);
+	cond_unlock(&param->user->cond);
 }
 
 static int aka_async_param_unref(struct aka_async_param *param)
@@ -979,8 +1010,15 @@ static int aka_challenge_async_resume_handle(struct sip_msg *msg, void *_param, 
 	}
 
 	/* check to see how many events we got */
+	if (param->avs_count < 0 || param->avs_fetched < 0 ||
+			param->avs_error < 0 || param->avs_fetched > param->avs_count ||
+			param->avs_error > param->avs_count - param->avs_fetched)
+		goto end;
 	param->avs_fetched += aka_avs_get_new(param->user, &param->algmask,
 			param->avs + param->avs_fetched, param->avs_count - param->avs_fetched, &err_count);
+	if (err_count < 0 || param->avs_fetched < 0 ||
+			param->avs_fetched > param->avs_count - param->avs_error)
+		goto end;
 	param->avs_error += err_count;
 	left = param->avs_count - param->avs_fetched - param->avs_error;
 	/* check to see if we still have AVS to wait for */
@@ -998,6 +1036,11 @@ static int aka_challenge_async_resume_handle(struct sip_msg *msg, void *_param, 
 	async_status = ASYNC_DONE_NO_IO;
 	if (!param->replied) {
 		if (param->avs_fetched) {
+			if (param->avs_fetched < 0 || param->avs_fetched > param->avs_count) {
+				LM_ERR("invalid fetched authentication vector count %d/%d\n",
+						param->avs_fetched, param->avs_count);
+				goto end;
+			}
 			/* now send whatever we have fetched so far */
 			aka_send_resp(msg, &param->realm, param->user, param->avs, param->avs_fetched,
 					param->qop, param->code, _cs2cc(&param->challenge_msg));
@@ -1053,6 +1096,12 @@ static int aka_challenge_async(struct sip_msg *_msg, async_ctx *ctx,
 		LM_ERR("cannot prepare challenge from message\n");
 		return -1;
 	}
+	if (sync_count < 0 || count < 0 || count > INT_MAX - sync_count ||
+			count + sync_count > INT_MAX / (int)sizeof(*av)) {
+		LM_ERR("invalid asynchronous authentication vector count %d + %d\n",
+				count, sync_count);
+		goto release;
+	}
 	count += sync_count;
 	/* try to sort them out synchronously */
 	if (count == 1) {
@@ -1063,7 +1112,8 @@ static int aka_challenge_async(struct sip_msg *_msg, async_ctx *ctx,
 			goto error;
 	}
 	/* unfortunately we might need to do it asynchronously */
-	param = shm_malloc(sizeof *param + realm.len + _challenge_msg->len +
+	param = shm_malloc(sizeof *param + (size_t)realm.len +
+			(size_t)_challenge_msg->len +
 			count * sizeof *av);
 	if (!param) {
 		LM_ERR("oom for preparing async params!\n");
@@ -1144,7 +1194,6 @@ static void aka_challenge_resume_tout(int fd, void *_param)
 
 static void aka_signal_async_resume(struct aka_async_param *param, ipc_rpc_f *func)
 {
-	param->ref++;
 	if (ipc_send_rpc(param->process_no, func, param) < 0) {
 		LM_ERR("could not resume aka challenge\n");
 		aka_async_param_remove(param);
@@ -1152,20 +1201,39 @@ static void aka_signal_async_resume(struct aka_async_param *param, ipc_rpc_f *fu
 	}
 }
 
-void aka_signal_async(struct aka_user *user, struct  list_head *subs)
+struct aka_async_param *aka_prepare_async(struct list_head *subs)
 {
 	struct aka_async_param *param = list_entry(subs, struct aka_async_param, list);
+	param->ref++;
+	return param;
+}
+
+void aka_signal_async(struct aka_async_param *param)
+{
 	aka_signal_async_resume(param, aka_challenge_resume);
 }
 
-void aka_check_expire_async(unsigned int ticks, struct list_head *subs)
+void aka_check_expire_async(unsigned int ticks, struct list_head *subs,
+		struct list_head *expired)
 {
 	struct aka_async_param *param = list_entry(subs, struct aka_async_param, list);
 	if (param->ticks + aka_async_timeout > ticks)
 		return;
 	/* this subscription expired - should drop it */
 	aka_pop_unsafe_async(param->user, subs);
-	aka_signal_async_resume(param, aka_challenge_resume_tout);
+	param->ref++;
+	list_add_tail(&param->list, expired);
+}
+
+void aka_resume_expired_async(struct list_head *expired)
+{
+	struct aka_async_param *param;
+
+	while (!list_empty(expired)) {
+		param = list_entry(expired->next, struct aka_async_param, list);
+		list_del(&param->list);
+		aka_signal_async_resume(param, aka_challenge_resume_tout);
+	}
 }
 
 void aka_check_expire_av(unsigned int ticks, struct aka_av *av)

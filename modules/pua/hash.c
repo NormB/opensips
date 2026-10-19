@@ -584,7 +584,6 @@ void destroy_htable(void)
 					shm_free(q->remote_contact.s);
 			if(q->extra_headers.s) shm_free(q->extra_headers.s);
 			shm_free(q);
-			q= NULL;
 		}
 		shm_free(p);
 	}
@@ -633,7 +632,6 @@ int replace_in_htable(unsigned int hash_index, unsigned int local_index,
 	{
 		if(p->local_index == local_index)
 		{
-			q->next = p->next;
 			q->next = new_pres;
 			new_pres->next = p->next;
 			new_pres->local_index = local_index;

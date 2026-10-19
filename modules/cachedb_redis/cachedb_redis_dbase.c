@@ -310,7 +310,9 @@ int redis_connect(redis_con *con)
 {
 	redisContext *ctx;
 	redisReply *rpl;
+#ifdef HAVE_REDIS_SSL
 	struct tls_domain *tls_dom = NULL;
+#endif
 
 	/* Unix socket: skip cluster probe, force single instance */
 	if (con->flags & REDIS_UNIX_SOCKET) {
@@ -476,8 +478,10 @@ int redis_connect(redis_con *con)
 
 	redisFree(ctx);
 
+#ifdef HAVE_REDIS_SSL
 	if (use_tls && tls_dom)
 		tls_api.release_domain(tls_dom);
+#endif
 
 	con->flags |= REDIS_INIT_NODES;
 
@@ -493,8 +497,10 @@ int redis_connect(redis_con *con)
 
 error:
 	redisFree(ctx);
+#ifdef HAVE_REDIS_SSL
 	if (use_tls && tls_dom)
 		tls_api.release_domain(tls_dom);
+#endif
 	return -1;
 }
 
@@ -1774,6 +1780,10 @@ int redis_update_subkeys(cachedb_con *_con, const cdb_filter_t *row_filter,
 		pair = list_entry(_, cdb_pair_t, list);
 		if (pair->val.type != CDB_DICT || !pair->subkey.s)
 			continue;
+		if (i + 2 >= REDIS_ARGV_MAX_LEN) {
+			LM_ERR("too many subkeys in update\n");
+			goto error2;
+		}
 
 		argv[i] = skey.s;
 		argvlen[i] = skey.len;
@@ -1937,7 +1947,7 @@ error1:
 	return -1;
 
 error2:
-	for (i = 2; argv[i] && i < REDIS_ARGV_MAX_LEN; i += 3)
+	for (i = 2; i < REDIS_ARGV_MAX_LEN && argv[i]; i += 3)
 		pkg_free(argv[i]);
 
 	freeReplyObject(rpl);

@@ -167,6 +167,7 @@ enum rtpe_operation {
 	OP_SUBSCRIBE_REQUEST,
 	OP_SUBSCRIBE_ANSWER,
 	OP_UNSUBSCRIBE,
+	OP_ROLLBACK,
 };
 
 enum rtpe_stat {
@@ -206,7 +207,7 @@ struct rtpe_ctx {
 
 
 struct ng_flags_parse {
-	int via, to, packetize, transport, directional;
+	int via, to, packetize, transport, directional, no_from_tag;
 	bencode_item_t *dict, *flags, *direction, *replace, *rtcp_mux;
 	str call_id, from_tag, to_tag, received_from;
 	str viabranch;
@@ -258,6 +259,7 @@ static const char *command_strings[] = {
 	[OP_SUBSCRIBE_REQUEST]= "subscribe request",
 	[OP_SUBSCRIBE_ANSWER] = "subscribe answer",
 	[OP_UNSUBSCRIBE]    = "unsubscribe",
+	[OP_ROLLBACK]       = "rollback",
 };
 
 static const str stat_maps[] = {
@@ -301,6 +303,8 @@ static int rtpengine_answer_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar,
 static int rtpengine_manage_f(struct sip_msg *msg, str *flags, pv_spec_t *spvar,
 		pv_spec_t *bpvar, str *body);
 static int rtpengine_delete_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar);
+static int rtpengine_rollback_f(struct sip_msg* msg, str *flags,
+		pv_spec_t *spvar, pv_spec_t *rolled_back);
 static void free_rtpe_nodes(struct rtpe_set *list);
 static int rtpengine_playmedia_f(struct sip_msg* msg, str *flags,
 		pv_spec_t *duration, pv_spec_t *spvar);
@@ -507,6 +511,12 @@ static const cmd_export_t cmds[] = {
 	{"rtpengine_delete", (cmd_function)rtpengine_delete_f, {
 		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"rtpengine_rollback", (cmd_function)rtpengine_rollback_f, {
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
 		ALL_ROUTES},
 	{"rtpengine_play_media", (cmd_function)rtpengine_playmedia_f, {
 		{CMD_PARAM_STR, 0, 0},
@@ -1264,7 +1274,8 @@ static mi_response_t *mi_enable_rtpengine(const mi_params_t *params,
 	int enable, set;
 	struct rtpe_set * rtpe_list;
 	struct rtpe_node * crt_rtpe;
-	int found, disabled, prev_disabled, recheck_ticks;
+	int found, disabled, prev_disabled;
+	unsigned int recheck_ticks;
 
 	found = 0;
 
@@ -1734,7 +1745,7 @@ mod_init(void)
 
 	if (err_pv_param) {
 		init_str(&s, err_pv_param);
-		if (pv_parse_spec(&s, &err_pv) < 0) {
+		if (pv_parse_spec(&s, &err_pv) == NULL) {
 			LM_ERR("malformed return variable definition <%s>\n",
 					err_pv_param);
 			return -1;
@@ -1862,7 +1873,7 @@ static inline int rtpengine_connect_node(struct rtpe_node *pnode)
 	}
 
 	pnode->ai_addrlen = res->ai_addrlen;
-	memcpy(&pnode->ai_addr.s, res->ai_addr, res->ai_addrlen);
+	memcpy(&pnode->ai_addr, res->ai_addr, res->ai_addrlen);
 
 	freeaddrinfo(res);
 	return 1;
@@ -2365,6 +2376,9 @@ static int parse_flags(struct ng_flags_parse *ng_flags, struct sip_msg *msg,
 						goto error;
 					BCHECK(bencode_dictionary_add_integer(ng_flags->dict, "repacketize", ng_flags->packetize));
 					continue;
+				} else if (str_eq(&key, "no-from-tag")) {
+					ng_flags->no_from_tag = 1;
+					continue;
 				} else if (str_eq(&key, "directional")) {
 					ng_flags->directional = 1;
 					bitem = bencode_str(bencode_item_buffer(ng_flags->flags), &key);
@@ -2824,14 +2838,14 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 			op == OP_BLOCK_MEDIA || op == OP_UNBLOCK_MEDIA ||
 			op == OP_BLOCK_DTMF || op == OP_UNBLOCK_DTMF ||
 			op == OP_START_FORWARD || op == OP_STOP_FORWARD) {
-		if (ng_flags->directional && !from_tag_exist)
+		if (ng_flags->directional && !from_tag_exist && !ng_flags->no_from_tag)
 			bencode_dictionary_add_str(ng_flags->dict, "from-tag", &ng_flags->from_tag);
 	} else if (ng_flags->directional
 		|| (msg && ((msg->first_line.type == SIP_REQUEST && op != OP_ANSWER)
-		|| (msg->first_line.type == SIP_REPLY && op == OP_DELETE)
+		|| (msg->first_line.type == SIP_REPLY && (op == OP_DELETE || op == OP_ROLLBACK))
 		|| (msg->first_line.type == SIP_REPLY && op == OP_ANSWER))))
 	{
-		if (!from_tag_exist && op != OP_DELETE)
+		if (!from_tag_exist && !ng_flags->no_from_tag)
 			bencode_dictionary_add_str(ng_flags->dict, "from-tag", &ng_flags->from_tag);
 		if (op != OP_START_MEDIA && op != OP_STOP_MEDIA) {
 			/* no need of to-tag if we are just playing media */
@@ -2844,7 +2858,7 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 			*err = "No to-tag present";
 			goto error;
 		}
-		if (!from_tag_exist)
+		if (!from_tag_exist && !ng_flags->no_from_tag)
 			bencode_dictionary_add_str(ng_flags->dict, "from-tag", &ng_flags->to_tag);
 		if (!to_tag_exist && !extra_dict)
 			bencode_dictionary_add_str(ng_flags->dict, "to-tag", &ng_flags->from_tag);
@@ -2900,8 +2914,10 @@ static bencode_item_t *rtpe_function_call(bencode_buffer_t *bencbuf, struct sip_
 
 	/*** If the spvar "sock_var" has been specified, parse it into a (socket_val) STR variable ***/
 	memset(&socket_val, 0, sizeof(pv_value_t));
-	if (spvar)
-		pv_get_spec_value(msg, spvar, &socket_val);
+	if (spvar && pv_get_spec_value(msg, spvar, &socket_val) < 0) {
+		LM_ERR("could not retrieve rtpengine socket variable\n");
+		goto error;
+	}
 	forced_socket = socket_val.rs.len > 0;
 
 	failed_node = NULL;
@@ -3461,6 +3477,35 @@ rtpengine_delete_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar)
 	return rtpengine_delete(msg, flags, NULL, NULL, spvar);
 }
 
+static int
+rtpengine_rollback_f(struct sip_msg* msg, str *flags, pv_spec_t *spvar,
+		pv_spec_t *rolled_back)
+{
+	bencode_buffer_t bencbuf;
+	bencode_item_t *dict;
+	pv_value_t val;
+
+	if (set_rtpengine_set_from_avp(msg) == -1)
+		return -1;
+
+	dict = rtpe_function_call_ok(&bencbuf, msg, OP_ROLLBACK, flags,
+			NULL, spvar, NULL, NULL, NULL);
+	if (!dict) {
+		LM_ERR("could not roll back media!\n");
+		return -1;
+	}
+
+	if (rolled_back) {
+		memset(&val, 0, sizeof(pv_value_t));
+		val.flags = PV_TYPE_INT|PV_VAL_INT;
+		val.ri = bencode_dictionary_get_integer(dict, "rolled-back", -1);
+		if (pv_set_value(msg, rolled_back, 0, &val) != 0)
+			LM_ERR("failed to set rolled-back after rolling back media!\n");
+	}
+	bencode_buffer_free(&bencbuf);
+	return 1;
+}
+
 static bencode_item_t *rtpe_function_call_process(bencode_buffer_t *bencbuf, char* cp, int ret)
 {
         bencode_item_t *resp;
@@ -3514,7 +3559,12 @@ enum async_ret_code resume_async_send_rtpe_command(int fd, struct sip_msg *msg, 
 		struct timeval tv;
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
-		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+				(const char *)&tv, sizeof tv) < 0) {
+			LM_ERR("failed to set RTP Engine receive timeout: %s\n",
+					strerror(errno));
+			goto error;
+		}
 
 		len = recv(fd, buf, sizeof(buf)-1, 0);
 		if (len <= 0) {
@@ -4224,10 +4274,33 @@ static inline void pv_get_rtpstat_line(bencode_item_t *dict, pv_value_t *res)
 		(_s)->len = (_be)->iov[1].iov_len; \
 	} while (0)
 
+static int bencode_ssrc_matches(bencode_item_t *item, str *ssrc)
+{
+	bencode_item_t *ss;
+	str i;
+
+	ss = bencode_dictionary_get_expect(item, "SSRC", BENCODE_INTEGER);
+	if (!ss)
+		return 0;
+	i.s = int2str(ss->value, &i.len);
+	return str_strcmp(&i, ssrc) == 0;
+}
+
+static int bencode_ssrc_list_matches(bencode_item_t *list, str *ssrc)
+{
+	bencode_item_t *e;
+
+	if (!list)
+		return 0;
+	for (e = list->child; e; e = e->sibling)
+		if (bencode_ssrc_matches(e, ssrc))
+			return 1;
+	return 0;
+}
+
 static int bencode_dictionary_tag_has_ssrc(bencode_item_t *dict, str *ssrc, str *tag)
 {
-	str i;
-	bencode_item_t *m, *s, *ss;
+	bencode_item_t *m, *s;
 	dict = bencode_dictionary_get_expect(dict, "medias", BENCODE_LIST);
 	if (!dict) {
 		LM_DBG("medias list not found!\n");
@@ -4240,11 +4313,12 @@ static int bencode_dictionary_tag_has_ssrc(bencode_item_t *dict, str *ssrc, str 
 			continue;
 		/* now go through each stream */
 		for (s = s->child; s; s = s->sibling) {
-			ss = bencode_dictionary_get_expect(s, "SSRC", BENCODE_INTEGER);
-			if (!ss)
-				continue;
-			i.s = int2str(ss->value, &i.len);
-			if (str_strcmp(&i, ssrc) == 0) {
+			/* rtpengine >= 12.x sends the SSRCs as lists */
+			if (bencode_ssrc_matches(s, ssrc) ||
+					bencode_ssrc_list_matches(bencode_dictionary_get_expect(s,
+							"ingress SSRCs", BENCODE_LIST), ssrc) ||
+					bencode_ssrc_list_matches(bencode_dictionary_get_expect(s,
+							"egress SSRCs", BENCODE_LIST), ssrc)) {
 				LM_DBG("SSRC %.*s belongs to tag %.*s\n", ssrc->len,
 						ssrc->s, tag->len, tag->s);
 				return 1;
@@ -5004,9 +5078,16 @@ end:
 static int fill_rtpengine_node(struct rtp_relay_server *server,
 		str *s)
 {
+	str node = {0, 0};
+
+	if (server->node.s && !str_strcmp(&server->node, s))
+		return 0;
+	if (shm_nt_str_dup(&node, s) < 0)
+		return -1;
 	if (server->node.s)
 		shm_free(server->node.s);
-	return shm_nt_str_dup(&server->node, s);
+	server->node = node;
+	return 0;
 }
 
 #define RTPE_APPEND_STR(_v) \
@@ -5125,7 +5206,8 @@ static int rtpengine_api_offer(struct rtp_relay_session *sess,
 			fill_rtpengine_node(server, &val.rs);
 		else
 			LM_ERR("could not retrieve the value of the used rtpengine!\n");
-		pv_set_value(sess->msg, &media_pvar, EQ_T, NULL);
+		if (pv_set_value(sess->msg, &media_pvar, EQ_T, NULL) < 0)
+			LM_ERR("could not reset the used rtpengine variable!\n");
 	}
 	return ret;
 }
@@ -5156,6 +5238,7 @@ static int rtpengine_api_answer(struct rtp_relay_session *sess,
 static int rtpengine_api_delete(struct rtp_relay_session *sess, struct rtp_relay_server *server,
 			str *flags, str *extra)
 {
+	static str no_from_tag = str_init("no-from-tag");
 	struct sip_msg *msg;
 	struct rtpe_set* rset;
 	str *newflags;
@@ -5165,7 +5248,9 @@ static int rtpengine_api_delete(struct rtp_relay_session *sess, struct rtp_relay
 	rset = select_rtpe_set(server->set);
 	RTPE_STOP_READ();
 
-	newflags = rtpengine_get_call_flags(sess, NULL, NULL, NULL, flags, extra, NULL);
+	newflags = rtpengine_get_call_flags(sess, NULL, NULL, NULL, flags, extra,
+			(sess->flags & RTP_RELAY_SESS_DELETE_ALL_BRANCHES) ?
+			&no_from_tag : NULL);
 	if (!newflags)
 		return -1;
 	msg = (sess->msg?sess->msg:get_dummy_sip_msg());

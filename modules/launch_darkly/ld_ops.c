@@ -21,86 +21,161 @@
  */
 
 
-#include <launchdarkly/api.h>
+#include <launchdarkly/server_side/bindings/c/sdk.h>
+#include <launchdarkly/bindings/c/context_builder.h>
 
 #include "../../pvar.h"
 #include "../../ut.h"
+
+/* default streaming endpoint used when ServiceEndpoints is not customized
+ * via LDServerConfigBuilder_ServiceEndpoints_StreamingBaseURL() - only used
+ * for the informational log line below, not passed to the SDK */
+#define LD_DEFAULT_STREAM_URI "https://stream.launchdarkly.com/all"
 
 unsigned int connect_wait = 500;       //milliseconds
 unsigned int re_init_interval = 10;    //seconds
 char * sdk_key = NULL;
 
-static struct LDConfig *ld_cfg = NULL;
-static struct LDClient *ld_client = NULL;
+static LDServerSDK ld_sdk = NULL;
+/* new LD client being connected in background, to take over from a shut down ld_sdk */
+static LDServerSDK ld_sdk_pending = NULL;
 static unsigned int last_init_attempt_time = 0;
-static int ld_log_level = LD_LOG_WARNING;
+static enum LDLogLevel ld_log_level = LD_LOG_WARN;
 
 void set_ld_log_level( char *log_level_s)
 {
-	if (strcasecmp( log_level_s, "LD_LOG_FATAL")==0)
-		ld_log_level = LD_LOG_FATAL;
-	else
-	if (strcasecmp( log_level_s, "LD_LOG_CRITICAL")==0)
-		ld_log_level = LD_LOG_CRITICAL;
-	else
-	if (strcasecmp( log_level_s, "LD_LOG_ERROR")==0)
+	/* FATAL/CRITICAL/TRACE aren't valid enum LDLogLevel values - map them
+	 * onto their closest equivalent so existing modparam values still work */
+	if (strcasecmp( log_level_s, "LD_LOG_FATAL")==0 ||
+	strcasecmp( log_level_s, "LD_LOG_CRITICAL")==0 ||
+	strcasecmp( log_level_s, "LD_LOG_ERROR")==0)
 		ld_log_level = LD_LOG_ERROR;
 	else
-	if (strcasecmp( log_level_s, "LD_LOG_WARNING")==0)
-		ld_log_level = LD_LOG_WARNING;
+	if (strcasecmp( log_level_s, "LD_LOG_WARNING")==0 ||
+	strcasecmp( log_level_s, "LD_LOG_WARN")==0)
+		ld_log_level = LD_LOG_WARN;
 	else
 	if (strcasecmp( log_level_s, "LD_LOG_INFO")==0)
 		ld_log_level = LD_LOG_INFO;
 	else
-	if (strcasecmp( log_level_s, "LD_LOG_DEBUG")==0)
+	if (strcasecmp( log_level_s, "LD_LOG_DEBUG")==0 ||
+	strcasecmp( log_level_s, "LD_LOG_TRACE")==0)
 		ld_log_level = LD_LOG_DEBUG;
-	else
-	if (strcasecmp( log_level_s, "LD_LOG_TRACE")==0)
-		ld_log_level = LD_LOG_TRACE;
 	else {
-		LM_WARN("unrecognized '%s' LG log level, using LD_LOG_WARNING\n",
+		LM_WARN("unrecognized '%s' LG log level, using LD_LOG_WARN\n",
 			log_level_s);
 	}
 }
 
 
-static void _oss_logger(const LDLogLevel level, const char *const text)
+static bool _oss_log_enabled(enum LDLogLevel level, void *user_data)
 {
-	/*
-	enum  LDLogLevel {
-		LD_LOG_FATAL = 0, LD_LOG_CRITICAL, LD_LOG_ERROR, LD_LOG_WARNING,
-		LD_LOG_INFO, LD_LOG_DEBUG, LD_LOG_TRACE }
-	*/
-	int log_map[LD_LOG_TRACE+1] = {L_ALERT,L_CRIT,L_ERR,L_WARN,
-		L_INFO, L_DBG, L_DBG};
-
-	LM_GEN( log_map[level], "[LD] %s\n", text);
-	return;
+	return level >= ld_log_level;
 }
 
+
+static void _oss_log_write(enum LDLogLevel level, char const *msg, void *user_data)
+{
+	/* enum LDLogLevel { LD_LOG_DEBUG=0, LD_LOG_INFO, LD_LOG_WARN, LD_LOG_ERROR } */
+	static const int log_map[LD_LOG_ERROR+1] = {L_DBG, L_INFO, L_WARN, L_ERR};
+
+	LM_GEN( log_map[level], "[LD] %s\n", msg);
+}
+
+
+static void ld_configure_logging(LDServerConfigBuilder cfg_builder)
+{
+	struct LDLogBackend backend;
+	LDLoggingCustomBuilder custom_logging;
+
+	LDLogBackend_Init(&backend);
+	backend.Enabled = _oss_log_enabled;
+	backend.Write = _oss_log_write;
+	backend.UserData = NULL;
+
+	custom_logging = LDLoggingCustomBuilder_New();
+	LDLoggingCustomBuilder_Backend(custom_logging, backend);
+	LDServerConfigBuilder_Logging_Custom(cfg_builder, custom_logging);
+}
+
+
+/* the SDK retries recoverable errors (network outages, 5xx) on its own, but
+ * an unrecoverable one (e.g. 401/403 on the SDK key) permanently shuts its
+ * data source down (OFF state) - such a client never reconnects again */
+static int ld_client_is_off(void)
+{
+	LDServerDataSourceStatus status;
+	enum LDServerDataSourceStatus_State state;
+
+	status = LDServerSDK_DataSourceStatus_Status(ld_sdk);
+	state = LDServerDataSourceStatus_GetState(status);
+	LDServerDataSourceStatus_Free(status);
+
+	return state==LD_SERVERDATASOURCESTATUS_STATE_OFF;
+}
 
 
 static int ld_client_init_attempt(void)
 {
-	/* maybe already connected? */
-	if (ld_client)
-		return 0;
+	LDServerConfigBuilder cfg_builder;
+	LDServerConfig ld_cfg;
+	LDStatus ld_status;
+	LDServerSDK new_sdk;
+	bool ld_succeeded;
 
 	/* too soon to retry a new connect ?*/
 	if (last_init_attempt_time!=0 &&
 	(last_init_attempt_time + re_init_interval > get_ticks()) )
 		return -2;
 
-	LM_DBG("attempting LD client re-init\n");
+	if (ld_sdk)
+		LM_WARN("LD client was permanently shut down, re-creating it\n");
 
-	/* we do expect a valid ld config here */
-	ld_client = LDClientInit( ld_cfg, connect_wait);
-	if (!LDClientIsInitialized(ld_client)) {
-		//LDClientClose(ld_client); this triggered a double free in LD lib :-/
-		ld_client = NULL;
+	LM_DBG("attempting LD client re-init\n");
+	LM_INFO("waiting to initialize\n");
+
+	/* the config (and its builder) are single-use, so we rebuild them
+	 * on every attempt */
+	cfg_builder = LDServerConfigBuilder_New( sdk_key );
+	ld_configure_logging(cfg_builder);
+
+	ld_status = LDServerConfigBuilder_Build(cfg_builder, &ld_cfg);
+	if (!LDStatus_Ok(ld_status)) {
+		LM_ERR("failed to build LD config: %s\n", LDStatus_Error(ld_status));
+		LDStatus_Free(ld_status);
 		last_init_attempt_time = get_ticks();
 		return -1;
 	}
+
+	/* ownership of ld_cfg is transferred into the SDK instance */
+	new_sdk = LDServerSDK_New(ld_cfg);
+
+	LM_INFO("connection to streaming url: %s\n", LD_DEFAULT_STREAM_URI);
+
+	if (ld_sdk) {
+		/* connect in background, the shut down client keeps serving
+		 * its last known flags meanwhile */
+		if (ld_sdk_pending)
+			LDServerSDK_Free(ld_sdk_pending);
+		ld_sdk_pending = new_sdk;
+		LDServerSDK_Start(new_sdk, LD_NONBLOCKING, NULL);
+		last_init_attempt_time = get_ticks();
+		return 0;
+	}
+
+	ld_sdk = new_sdk;
+
+	/* block for up to connect_wait ms while the SDK connects and fetches flags */
+	LDServerSDK_Start(ld_sdk, connect_wait, &ld_succeeded);
+	if (!ld_succeeded) {
+		LDServerSDK_Free(ld_sdk);
+		ld_sdk = NULL;
+		last_init_attempt_time = get_ticks();
+		return -1;
+	}
+
+	LM_INFO("initialized\n");
+
 	last_init_attempt_time = 0;
 
 	return 0;
@@ -109,18 +184,6 @@ static int ld_client_init_attempt(void)
 
 int ld_init_child(void)
 {
-	LDConfigureGlobalLogger( ld_log_level, _oss_logger);
-
-	LDGlobalInit();
-
-	LM_DBG("LD globally initialized, proceeding with the connect\n");
-
-	ld_cfg = LDConfigNew( sdk_key );
-	if (ld_cfg==NULL) {
-		LM_ERR("failed to perform LD config\n");
-		return -1;
-	}
-
 	if (ld_client_init_attempt()!=0)
 		LM_ERR("LD client failed to initialize, proceeding offline\n");
 	else
@@ -133,36 +196,44 @@ int ld_init_child(void)
 int ld_feature_enabled(str *feat, str *user, int user_extra_avp_id,
 																int fallback)
 {
-	struct LDUser *ld_user;
-	struct LDJSON *ld_extra, *ld_val;
-	struct LDDetails ld_details;
-	LDBoolean ld_res;
+	LDContextBuilder ctx_builder;
+	LDContext ld_context;
+	LDValue ld_val;
+	LDEvalDetail ld_detail;
+	LDEvalReason ld_reason;
+	enum LDEvalReason_ErrorKind error_kind;
+	bool ld_res;
 	struct usr_avp *avp;
 	int_str val;
 	str s_nt, extra_key, extra_val;
 	char *p;
+	int ret;
 
-	if (ld_client==NULL && ld_client_init_attempt()<0) {
-		LM_ERR("not having a connected LD client :(\n");
-		goto error;
+	/* not connected yet or permanently shut down? */
+	if (ld_sdk==NULL || ld_client_is_off()) {
+		if (ld_sdk_pending && LDServerSDK_Initialized(ld_sdk_pending)) {
+			/* new client connected, take over from the shut down one */
+			LM_INFO("shut down LD client replaced\n");
+			LDServerSDK_Free(ld_sdk);
+			ld_sdk = ld_sdk_pending;
+			ld_sdk_pending = NULL;
+		} else if (ld_client_init_attempt()<0 && ld_sdk==NULL) {
+			LM_ERR("not having a connected LD client :(\n");
+			goto error;
+		}
 	}
 
 	if (pkg_nt_str_dup( &s_nt, user)<0) {
 		LM_ERR("failed to pkg_nt duplicate the user\n");
 		goto error;
 	}
-	ld_user = LDUserNew( s_nt.s );
+	ctx_builder = LDContextBuilder_New();
+	LDContextBuilder_AddKind( ctx_builder, "user", s_nt.s);
 	pkg_free(s_nt.s);
-	if (ld_user==NULL) {
-		return -1;
-		LM_ERR("failed to create new LD user\n");
-		goto error;
-	}
 
 	/* do we have custom key-val pairs to add to the user? */
 	if (user_extra_avp_id>=0) {
 		avp = NULL;
-		ld_extra = NULL;
 		/* iterate all the AVPs with the keys */
 		while ((avp=search_first_avp(AVP_VAL_STR,user_extra_avp_id,&val,avp))!=NULL) {
 			/* split and evaluate the value part */
@@ -182,43 +253,30 @@ int ld_feature_enabled(str *feat, str *user, int user_extra_avp_id,
 			extra_val.s = p;
 			extra_val.len = val.s.s+val.s.len-p;
 
-			/* add the new extra to the user */
-			if (ld_extra==NULL) {
-				ld_extra = LDNewObject();
-				if (ld_extra==NULL) {
-					LM_ERR("failed to create new user object\n");
-					goto error1;
-				}
-			}
-
 			/* create the new value */
 			if (pkg_nt_str_dup( &s_nt, &extra_val)<0) {
 				LM_ERR("failed to pkg_nt duplicate the extra value\n");
 				goto error1;
 			}
-			ld_val = LDNewText( s_nt.s );
-			pkg_free(s_nt.s);
-			if (ld_val==NULL) {
-				LM_ERR("failed create new extra LD val\n");
-				goto error1;
-			}
 
-			/* add the value as key */
+			ld_val = LDValue_NewString( s_nt.s );
+			pkg_free(s_nt.s);
+
+			/* add the value as key (LDContextBuilder_Attributes_Set
+			 * consumes the LDValue we pass in) */
 			if (pkg_nt_str_dup( &s_nt, &extra_key)<0) {
 				LM_ERR("failed to pkg_nt duplicate the extra key\n");
+				LDValue_Free(ld_val);
 				goto error1;
 			}
-			if (!LDObjectSetKey( ld_extra, s_nt.s, ld_val)) {
+			if (!LDContextBuilder_Attributes_Set( ctx_builder, "user",
+			s_nt.s, ld_val)) {
 				LM_ERR("failed to add new key+val to user extra\n");
 				pkg_free(s_nt.s);
 				goto error1;
 			}
 			pkg_free(s_nt.s);
-
 		}
-
-		if (ld_extra)
-			LDUserSetCustom(ld_user, ld_extra);
 	}
 
 	/* now, run the check */
@@ -226,55 +284,53 @@ int ld_feature_enabled(str *feat, str *user, int user_extra_avp_id,
 		LM_ERR("failed to pkg_nt duplicate the feature name\n");
 		goto error1;
 	}
-	ld_res = LDBoolVariation( ld_client, ld_user, s_nt.s,
-		fallback?LDBooleanTrue:LDBooleanFalse, &ld_details);
-	ld_res = ld_res ? 1 : -1;
+
+	ld_context = LDContextBuilder_Build(ctx_builder);
+
+	ld_res = LDServerSDK_BoolVariationDetail( ld_sdk, ld_context, s_nt.s,
+		fallback?true:false, &ld_detail);
+	ret = ld_res ? 1 : -1;
 
 	/* any error ? */
-	if (ld_details.reason==LD_ERROR) {
-		ld_res = 2 * ld_res; //return some internal error indication
-		switch (ld_details.extra.errorKind) {
-			case LD_CLIENT_NOT_READY:
-				LM_BUG("LD client not initialized at this point!?!\n");
-				break;
-			case LD_NULL_KEY:
-				LM_ERR("LD flag key is empty/NULL\n");
-				break;
-			case LD_STORE_ERROR:
-				LM_ERR("LD internal exception with the flag store\n");
-				break;
-			case LD_FLAG_NOT_FOUND:
-				LM_ERR("the caller provided a flag key that did not match any known flag\n");
-				break;
-			case LD_USER_NOT_SPECIFIED:
-				LM_ERR("LD user is empty/NULL!\n");
-				break;
-			case LD_CLIENT_NOT_SPECIFIED:
-				LM_BUG("LD client is NULL?!?!\n");
-				break;
-			case LD_MALFORMED_FLAG:
-				LM_ERR("internal inconsistency in the flag data, a rule specified a nonexistent variation\n");
-				break;
-			case LD_WRONG_TYPE:
-				LM_ERR("the result value was not of the requested type- expected LDBoolVariation\n");
-				break;
-			case LD_OOM:
-				LM_ERR("LD clientran out of memory.\n");
-				break;
-			default:
-				LM_ERR("unknown %d error reported by LDBoolVariation\n",ld_details.extra.errorKind);
-				break;
+	if (LDEvalDetail_Reason(ld_detail, &ld_reason) &&
+	LDEvalReason_Kind(ld_reason)==LD_EVALREASON_ERROR) {
+		ret = 2 * ret; //return some internal error indication
+		if (LDEvalReason_ErrorKind(ld_reason, &error_kind)) {
+			switch (error_kind) {
+				case LD_EVALREASON_ERROR_CLIENT_NOT_READY:
+					LM_BUG("LD client not initialized at this point!?!\n");
+					break;
+				case LD_EVALREASON_ERROR_USER_NOT_SPECIFIED:
+					LM_ERR("LD user is empty/NULL!\n");
+					break;
+				case LD_EVALREASON_ERROR_FLAG_NOT_FOUND:
+					LM_ERR("the caller provided a flag key that did not match any known flag\n");
+					break;
+				case LD_EVALREASON_ERROR_WRONG_TYPE:
+					LM_ERR("the result value was not of the requested type- expected LDServerSDK_BoolVariation\n");
+					break;
+				case LD_EVALREASON_ERROR_MALFORMED_FLAG:
+					LM_ERR("internal inconsistency in the flag data, a rule specified a nonexistent variation\n");
+					break;
+				case LD_EVALREASON_ERROR_EXCEPTION:
+					LM_ERR("an unexpected error happened that stopped evaluation\n");
+					break;
+				default:
+					LM_ERR("unknown %d error reported by LDServerSDK_BoolVariationDetail\n",error_kind);
+					break;
+			}
 		}
 	}
+	LDEvalDetail_Free(ld_detail);
 
-	LM_DBG("feature flag %s is %s\n", s_nt.s, (ld_res>0)?"TRUE":"FALSE");
+	LM_DBG("feature flag %s is %s\n", s_nt.s, (ret>0)?"TRUE":"FALSE");
 	pkg_free(s_nt.s);
 
-	LDUserFree(ld_user);
-	return ld_res;
+	LDContext_Free(ld_context);
+	return ret;
 
 error1:
-	LDUserFree(ld_user);
+	LDContextBuilder_Free(ctx_builder);
 error:
 	return fallback?2:-2;
 }

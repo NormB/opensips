@@ -26,9 +26,8 @@
 #ifndef _WS_HANDSHAKE_H_
 #define _WS_HANDSHAKE_H_
 
-#include <pthread.h>
-
 #include "../../ip_addr.h"
+#include "../../lib/csv.h"
 
 #define HTTP_SEP			"\r\n"
 #define HTTP_SEP_LEN		(sizeof(HTTP_SEP) - 1)
@@ -121,7 +120,61 @@ static int complete_ws_trace( struct tcp_connection* conn, trans_trace_status st
 #define WS_TRACE_MAX 1024
 static char ws_trace_buf[WS_TRACE_MAX];
 
-static pthread_mutex_t ws_http_parse_lock = PTHREAD_MUTEX_INITIALIZER;
+static inline int ws_parse_headers(struct sip_msg *msg)
+{
+	struct hdr_field *hf;
+	char *tmp, *rest, *end;
+
+	tmp = msg->unparsed;
+	end = msg->buf + msg->len;
+
+	while (tmp < end) {
+		hf = thread_malloc(sizeof *hf);
+		if (!hf) {
+			LM_ERR("thread memory allocation failed\n");
+			return -1;
+		}
+
+		memset(hf, 0, sizeof *hf);
+		hf->type = HDR_ERROR_T;
+		rest = get_hdr_field_aux(tmp, end, hf, 0);
+
+		if (hf->type == HDR_ERROR_T) {
+			LM_INFO("bad header field\n");
+			thread_free(hf);
+			return -1;
+		}
+
+		if (hf->type == HDR_EOH_T) {
+			msg->eoh = tmp;
+			msg->unparsed = tmp;
+			thread_free(hf);
+			return 0;
+		}
+
+		if (!msg->headers)
+			msg->headers = hf;
+		else
+			msg->last_header->next = hf;
+		msg->last_header = hf;
+		tmp = rest;
+	}
+
+	msg->unparsed = tmp;
+	return 0;
+}
+
+static inline void ws_free_parsed_headers(struct sip_msg *msg)
+{
+	struct hdr_field *hf, *next;
+
+	for (hf = msg->headers; hf; hf = next) {
+		next = hf->next;
+		thread_free(hf);
+	}
+	msg->headers = NULL;
+	msg->last_header = NULL;
+}
 
 /* safety checks */
 #ifndef _ws_common_module
@@ -145,6 +198,47 @@ static pthread_mutex_t ws_http_parse_lock = PTHREAD_MUTEX_INITIALIZER;
 #ifndef _ws_common_require_origin
 #error "_ws_common_require_origin not defined!"
 #endif
+/* the "allowed_origins" list, parsed once in mod_init; NULL = any Origin */
+static csv_record *ws_allowed_origins_list;
+
+/* Parse the comma-separated "allowed_origins" parameter into a list (spaces
+ * around the entries are ignored). Called once, from mod_init. */
+static int ws_parse_allowed_origins(str *param)
+{
+	str origins;
+
+	if (!param->s)
+		return 0;
+	param->len = strlen(param->s);
+	origins = *param;
+	trim(&origins);
+	if (origins.len == 0)
+		return 0;
+
+	ws_allowed_origins_list = parse_csv_record(&origins);
+	if (!ws_allowed_origins_list) {
+		LM_ERR("failed to parse allowed_origins <%.*s>\n",
+				param->len, param->s);
+		return -1;
+	}
+	return 0;
+}
+
+/* Is <origin> in the "allowed_origins" list (exact, case-insensitive match)?
+ * An empty or unset list allows any Origin, which is the behaviour without
+ * the "allowed_origins" parameter. */
+static int ws_origin_allowed(const str *origin)
+{
+	csv_record *it;
+
+	if (!ws_allowed_origins_list)
+		return 1;
+	for (it = ws_allowed_origins_list; it; it = it->next)
+		if (it->s.len && it->s.len == origin->len &&
+				strncasecmp(it->s.s, origin->s, origin->len) == 0)
+			return 1;
+	return 0;
+}
 
 /* all flags for req */
 #define WS_ALL_REQ_F (WS_HOST_F | \
@@ -795,13 +889,10 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 	memset(&tmp_msg, 0, sizeof(struct sip_msg));
 	tmp_msg.len = len;
 	tmp_msg.buf = tmp_msg.unparsed = msg;
-	pthread_mutex_lock(&ws_http_parse_lock);
-	if (parse_headers_aux(&tmp_msg, HDR_EOH_F, 0,0) < 0) {
-		pthread_mutex_unlock(&ws_http_parse_lock);
+	if (ws_parse_headers(&tmp_msg) < 0) {
 		LM_ERR("cannot parse headers\n%.*s\n", len, msg);
 		goto ws_error;
 	}
-	pthread_mutex_unlock(&ws_http_parse_lock);
 	/* verify headers according to RFC6455 */
 	for (hf = tmp_msg.headers; hf; hf = hf->next) {
 		if (hf->type != HDR_OTHER_T)
@@ -856,6 +947,12 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 					GET_LOWER(hf->name.s + 5) != 'n')
 				break;
 
+			str_trim_spaces_lr(hf->body);
+			if (!ws_origin_allowed(&hf->body)) {
+				LM_ERR("Origin <%.*s> not in allowed_origins\n",
+						hf->body.len, hf->body.s);
+				goto ws_error;
+			}
 			if (_ws_common_require_origin)
 				flags |= WS_ORIGIN_F;
 			break;
@@ -952,11 +1049,11 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 	}
 
 	/* parsing done, free headers */
-	free_hdr_field_lst(tmp_msg.headers);
+	ws_free_parsed_headers(&tmp_msg);
 
 	return 0;
 ws_error:
-	free_hdr_field_lst(tmp_msg.headers);
+	ws_free_parsed_headers(&tmp_msg);
 error:
 	WS_STATE(c) = WS_CON_BAD_REQ;
 	return -1;
@@ -1076,13 +1173,10 @@ static int ws_parse_rpl_handshake(struct tcp_connection *c, char *msg, int len)
 	memset(&tmp_msg, 0, sizeof(struct sip_msg));
 	tmp_msg.len = len;
 	tmp_msg.buf = tmp_msg.unparsed = msg;
-	pthread_mutex_lock(&ws_http_parse_lock);
-	if (parse_headers_aux(&tmp_msg, HDR_EOH_F, 0, 0) < 0) {
-		pthread_mutex_unlock(&ws_http_parse_lock);
+	if (ws_parse_headers(&tmp_msg) < 0) {
 		LM_ERR("cannot parse headers\n%.*s\n", len, msg);
 		goto ws_error;
 	}
-	pthread_mutex_unlock(&ws_http_parse_lock);
 	/* verify headers according to RFC6455 */
 	for (hf = tmp_msg.headers; hf; hf = hf->next) {
 		if (hf->type != HDR_OTHER_T)
@@ -1210,11 +1304,11 @@ static int ws_parse_rpl_handshake(struct tcp_connection *c, char *msg, int len)
 	}
 
 	/* parsing done, free headers */
-	free_hdr_field_lst(tmp_msg.headers);
+	ws_free_parsed_headers(&tmp_msg);
 
 	return 0;
 ws_error:
-	free_hdr_field_lst(tmp_msg.headers);
+	ws_free_parsed_headers(&tmp_msg);
 error:
 	WS_STATE(c) = WS_CON_BAD_REQ;
 	return -1;

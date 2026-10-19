@@ -243,16 +243,22 @@ If the value specified by the id is an integer
 it will be returned as an integer value.
 
 
+If the value specified by the id is a boolean, `true` is returned as
+the integer `1` and `false` as the integer `0`. This makes JSON booleans
+behave consistently with the OpenSIPS `true` and `false` script constants
+and allows them to be used directly in conditions.
+
+
 If the value specified by the id is a string it will
 be returned as a string.
 
 
 If the value specified by the id is any other
-type of json ( null, boolean, object, array )
+type of json ( null, object, array )
 the serialized version of the object will be returned
 as a string value. Using this and the ":="
 operator you can duplicate json objects and put them
-in other json objects ( for string or integer you may
+in other json objects ( for string, integer or boolean you may
 use the "=" operator).
 
 
@@ -336,6 +342,21 @@ $json(object) := "{}";
 $json(object/array) := $json(array) ;
 ...
 			
+```
+
+
+#### $json_true and $json_false
+
+
+These read-only variables provide JSON boolean values for assignments made
+with the `=` operator. Unlike the integer values `1` and `0`, they are stored
+and serialized as the JSON literals `true` and `false`.
+
+
+```opensips title="Assigning JSON boolean values"
+$json(object) := "{}";
+$json(object/acc_enabled) = $json_true;
+$json(object/blocked) = $json_false;
 ```
 
 

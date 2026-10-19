@@ -61,6 +61,8 @@ static int wss_hs_read_tout = 100;
 static int wss_hs_tls_tout = 100;
 static int wss_send_tout = 100;
 static int wss_require_origin = 1;
+/* comma-separated list of accepted Origin values; empty = any */
+static str wss_allowed_origins = {NULL, 0};
 
 /* check the SSL certificate when comes to TCP conn reusage */
 static int cert_check_on_conn_reusage = 0;
@@ -137,6 +139,7 @@ static const param_export_t params[] = {
 	{ "wss_resource",       STR_PARAM, &wss_resource.s     },
 	{ "wss_send_timeout",   INT_PARAM, &wss_send_tout      },
 	{ "require_origin",     INT_PARAM, &wss_require_origin },
+	{ "allowed_origins",    STR_PARAM, &wss_allowed_origins.s },
 	{ "wss_handshake_timeout", INT_PARAM, &wss_hs_read_tout},
 	{ "trace_destination",     STR_PARAM,         &trace_destination_name.s  },
 	{ "wss_tls_handshake_timeout",  INT_PARAM, &wss_hs_tls_tout           },
@@ -223,6 +226,8 @@ static int mod_init(void)
 	LM_INFO("initializing Secure WebSocket protocol\n");
 
 	wss_resource.len = strlen(wss_resource.s);
+	if (ws_parse_allowed_origins(&wss_allowed_origins) < 0)
+		return -1;
 
 	if(load_tls_mgm_api(&tls_mgm_api) != 0){
 		LM_DBG("failed to find tls API - is tls_mgm module loaded?\n");
@@ -528,7 +533,8 @@ static int wss_read_req(struct tcp_connection* con, int* bytes_read)
 	}
 
 	/* we need to fix the SSL connection before doing anything */
-	if (tls_mgm_api.tls_fix_read_conn(con, con->fd, 0, t_dst, 1) < 0) {
+	size = tls_mgm_api.tls_fix_read_conn(con, con->fd, 0, t_dst, 1);
+	if (size < 0) {
 		LM_ERR("cannot fix read connection\n");
 		if ( (d=con->proto_data) && d->dest && d->tprot ) {
 			if ( d->message ) {
@@ -541,6 +547,10 @@ static int wss_read_req(struct tcp_connection* con, int* bytes_read)
 			}
 		}
 		goto error;
+	}
+	if (size == 0) {
+		LM_DBG("SSL accept/connect still pending!\n");
+		goto done;
 	}
 
 	d=con->proto_data;

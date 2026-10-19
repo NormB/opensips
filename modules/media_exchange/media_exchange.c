@@ -1058,15 +1058,15 @@ static int handle_media_indialog_refresh(struct sip_msg *msg,
 		}
 	} else {
 		/* here, we still have the initial leg - it is part of an exchange - proxy it */
-		if (media_session_req(leg, INVITE, body) < 0) {
+		if (media_session_req(tleg, INVITE, body) < 0) {
 			media_send_fail(t, ms->dlg, req_leg);
 			ret = -3;
 		} else if (t) {
 			/* link the transaction here */
 			p = media_session_tm_new(t, req_leg);
 			if (p) {
-				MSL_REF(leg); /* make sure the media session leg does not dissapear either */
-				leg->params = p;
+				MSL_REF(tleg); /* make sure the media session leg does not dissapear either */
+				tleg->params = p;
 			}
 			ret = -2;
 		}
@@ -1152,7 +1152,7 @@ static int media_fork_pause(struct sip_msg *msg,
 	struct dlg_cell *dlg;
 	struct media_session *ms;
 	struct media_session_leg *msl;
-	int ret = 0;
+	long long ret = 0;
 
 	dlg = media_dlg.get_dlg();
 	if (!dlg) {
@@ -1188,7 +1188,9 @@ static int media_fork_pause(struct sip_msg *msg,
 		LM_DBG("no sessions to resume!\n");
 		return -1;
 	}
-	return ret;
+	if (ret < INT_MIN || ret > INT_MAX)
+		return -1;
+	return (int)ret;
 }
 
 static int media_fork_resume(struct sip_msg *msg,
@@ -1197,7 +1199,7 @@ static int media_fork_resume(struct sip_msg *msg,
 	struct dlg_cell *dlg;
 	struct media_session *ms;
 	struct media_session_leg *msl;
-	int ret = 0;
+	long long ret = 0;
 
 	dlg = media_dlg.get_dlg();
 	if (!dlg) {
@@ -1233,7 +1235,9 @@ static int media_fork_resume(struct sip_msg *msg,
 		LM_DBG("no sessions to resume!\n");
 		return -1;
 	}
-	return ret;
+	if (ret < INT_MIN || ret > INT_MAX)
+		return -1;
+	return (int)ret;
 }
 
 static int media_session_exchange_negative_reply(struct sip_msg *msg, int status, void *param)

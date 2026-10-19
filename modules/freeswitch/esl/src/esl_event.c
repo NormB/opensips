@@ -431,7 +431,7 @@ static esl_status_t esl_event_base_add_header(esl_event_t *event, esl_stack_t st
 		index = atoi(index_ptr);
 		real_header_name = DUP(header_name);
 		if ((real_index_ptr = strchr(real_header_name, '['))) {
-			*real_index_ptr++ = '\0';
+			*real_index_ptr = '\0';
 		}
 		header_name = real_header_name;
 	}
@@ -528,7 +528,6 @@ static esl_status_t esl_event_base_add_header(esl_event_t *event, esl_stack_t st
 			header->value = NULL;
 			header->array = m;
 			header->idx++;
-			m = NULL;
 		}
 
 		i = header->idx + 1;
