@@ -243,8 +243,10 @@ blocks.**  It is refused in request, failure, branch and error routes
 unless [allow_sync_anywhere](#allow_sync_anywhere-integer) is set.
 A `failure_route` entered on `fr_timer` expiry has no non-blocking
 alternative.
-- **A durable consumer on a deleted stream** stays failed until an
-operator unbinds it and binds it again after re-creating the stream.
+- **A durable consumer on a deleted stream** stays failed until the
+stream is re-created: the consumer process retries the subscription
+with a backoff capped at 60 s (see *ensure_failures* in
+[nats_consumer:nats_consumer_list](#nats_consumernats_consumer_list)).
 - **Poison messages:** a message delivered more than
 [poison_max_deliver](#poison_max_deliver-integer) times (20 by default)
 is terminated.
@@ -549,7 +551,7 @@ Blocking delays the error response back to the peer.
 
 *The recommended pattern for any worker
 route is the async form*, which yields
-on a per-call eventfd while the reply is in flight
+on a per-call timerfd while the reply is in flight
 and does not block SIP processing:
 
 
@@ -816,7 +818,9 @@ modparam("nats_consumer", "async_rpc_poll_ms", 50)
 Delay, in milliseconds, between reconnect attempts.  The
 connection is shared by all NATS modules; when several set this
 value, the largest wins.  A value of **0** keeps the
-shared default (2000 ms).
+shared default (2000 ms).  The value is ignored unless this module
+registers servers with the pool: its own [nats_url](#nats_url-string)
+is set, or no NATS module loaded before it registered one.
 
 
 *Default value is "0" (use the shared default).*
@@ -832,11 +836,15 @@ modparam("nats_consumer", "reconnect_wait_ms", 1000)
 #### max_reconnect (integer)
 
 
-Number of connection attempts made at startup before the process
-continues without a connection and keeps retrying in the
-background.  Once connected, reconnection after an outage is not
-limited.  When several NATS modules set this value, the largest
-wins.  A value of **0** keeps the shared default (60).
+Number of connection attempts made at startup for failures other
+than an unreachable broker (which starts the process at once without
+a connection, retrying in the background) or a TLS, authentication or
+URL error (which fails startup at once).  Once connected,
+reconnection after an outage is not limited.  When several NATS
+modules set this value, the largest wins.  A value of **0** keeps the
+shared default (60).  As with
+[reconnect_wait_ms](#reconnect_wait_ms-integer), the value is ignored
+unless this module registers servers with the pool.
 
 
 *Default value is "0" (use the shared default).*
@@ -887,7 +895,10 @@ shared connection reports disconnected, so the call returns at once
 instead of waiting out *timeout_ms*; the script can tell a transport
 failure from an empty ring and back off.
 - **-3** - the handle id is not found or is retiring.
-- **-6** - internal error.
+- **-4** - asynchronous flavor only: *timeout_ms* is missing or
+not positive and no message is waiting.
+- **-6** - asynchronous flavor only: internal error (timerfd setup
+or out of memory).
 
 
 This function can be used from any route.  The asynchronous flavor is
@@ -937,8 +948,9 @@ and `no_wait` (bool, default 0).
 
 Returns the number of messages staged in
 `$retcode`, or a negative error
-code identical to [nats_fetch()](#nats_fetchid-timeout_ms)
-(-1 when nothing arrived within the budget).
+code as for [nats_fetch()](#nats_fetchid-timeout_ms)
+(-1 when nothing arrived within the budget).  Malformed *opts* return
+-1 from this function and -4 from its asynchronous flavor.
 The OpenSIPS script does not allow direct
 assignment of a function return to a
 `$var()`; capture
@@ -1098,8 +1110,8 @@ if (nats_fetch("jobs", 0)) {
 #### nats_nak()
 
 
-Negative-ack the current message; the broker schedules redelivery
-using the consumer's `ack_wait`.
+Negative-ack the current message; the broker redelivers it at once,
+or after the consumer's `backoff` delay when one is configured.
 
 
 Returns 1 on success, -1 when there is no current message, -2 when
@@ -1119,8 +1131,7 @@ if (nats_fetch("jobs", 0))
 
 
 Same as [nats_nak()](#nats_nak) but the broker schedules redelivery for
-*delay_ms* milliseconds in the future instead of using the consumer's
-`ack_wait`.
+*delay_ms* milliseconds in the future instead of at once.
 
 
 Meaning of the parameters is as follows:
@@ -1297,7 +1308,7 @@ Meaning of the parameters is as follows:
 - *subject* (string) - the request subject.
 - *payload* (string) - the request payload.
 - *timeout_ms* (integer) - how long to wait for the reply, in
-milliseconds.
+milliseconds; 0 or less means 1000.
 
 
 Return codes.  No path returns `0` -- a 0 return
@@ -1338,14 +1349,14 @@ before any publish attempt; the script can
 short-circuit without paying the
 *timeout_ms* wait.
 - **-4** - request error
-(subject empty, too long or invalid, payload too long, msg create
-failed, publish or sync-request failed).
+(subject empty, too long or invalid, payload too long (asynchronous
+flavor only), msg create failed, publish or sync-request failed).
 - **-5** - asynchronous flavor only: no free slot in the
 [async_rpc_slots](#async_rpc_slots-integer) pool, or the request could
 not be queued to the consumer process.  Callers should implement
 back-pressure when this surfaces.
 - **-6** - asynchronous flavor only: internal error
-(oom, format failure, missing eventfd, etc.).
+(oom, format failure, timerfd setup failure, etc.).
 
 
 This function can be used from STARTUP_ROUTE, TIMER_ROUTE,
@@ -1404,7 +1415,9 @@ startup_route {
 
 
 The asynchronous flavor of the [nats_fetch()](#nats_fetchid-timeout_ms)
-function. It receives the same parameters, with the same meanings.
+function. It receives the same parameters, with the same meanings,
+except that *timeout_ms* is required and must be > 0; otherwise the
+call returns -4 (unless a message is already waiting).
 
 
 The worker yields immediately after the
@@ -1469,10 +1482,10 @@ The asynchronous flavor of the
 function. It receives the same parameters, with the same meanings.
 
 
-It yields the worker to the reactor on a per-call
-eventfd.  A libnats subscription thread receives
-the reply on the worker's persistent inbox
-subscription and signals the eventfd; the
+The worker hands the request to the consumer process over IPC and
+yields to the reactor on a private guard timerfd.  The consumer
+process publishes the request, receives the reply on its persistent
+inbox subscription and wakes the worker over IPC; the
 resume route runs with the per-worker
 current-message state populated.  It is accepted from every route
 that supports `async()`, whatever
@@ -1536,7 +1549,9 @@ the full JetStream pull-consumer matrix:
 `inactive_threshold`,
 `js_domain`,
 `api_prefix`,
-`ring_capacity`.
+`ring_capacity`,
+[fetch_batch](#fetch_batch-integer),
+[fetch_timeout_ms](#fetch_timeout_ms-integer).
 
 
 ```bash
@@ -1574,9 +1589,10 @@ opensips-cli -x mi nats_consumer:nats_consumer_unbind id=jobs
 
 List all registered handles with their bind-time
 configuration and current runtime counters
-(pulls_requested, msgs_delivered, acks, naks, terms,
-redeliveries, poisoned, fetch_skips_full,
-backpressure_drops, fetch_errors, ring_depth).
+(created_at, last_used_at, pulls_requested, msgs_delivered, acks,
+naks, terms, redeliveries, poisoned, fetch_skips_full,
+backpressure_drops, fetch_errors, ring_depth,
+ring_forced_unwedges).
 
 
 Parameters: *none*
@@ -1750,7 +1766,7 @@ Message payload.
 #### $nats_reply_to
 
 
-Reply subject (empty string when the publisher did not request a
+Reply subject (NULL when the publisher did not request a
 reply).
 
 

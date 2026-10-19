@@ -39,9 +39,9 @@ NATS connections are managed by the shared
 `lib/nats` connection pool
 (`libnats_pool.so`).  Each qualifying worker
 process obtains its own connection from the pool during
-`child_init()`.  The pool handles startup
-retries (bounded by [max_reconnect](#max_reconnect-integer)) and runtime
-reconnection (unlimited) automatically.
+`child_init()`.  A broker that is unreachable at startup does not
+block the boot: the process starts degraded and keeps connecting in the
+background.  Runtime reconnection is unlimited.
 
 
 ### TLS
@@ -307,7 +307,7 @@ total), 1 to 5 replicas, names up to 255 characters and a `max_age` of
 at most 10 years.
 - **The attendant and TCP main processes have no connection.**
 - **[drain_timeout_ms](#drain_timeout_ms-integer) is shared with
-*cachedb_nats*.**  If both modules set it, the value set last wins.
+*cachedb_nats*.**  If both modules set it, the larger value wins.
 - **Statistics** cover process numbers below 512.
 
 
@@ -397,8 +397,9 @@ Enable JetStream async publish for both EVI events and
 [nats_publish()](#nats_publishsubject-payload) script calls.
 
 
-When set to `1`, all publishes use the
-nats.c `js_PublishAsync()` API.  The NATS
+When set to `1`, publishes use the
+nats.c `js_PublishAsync()` API (a process without a JetStream context
+falls back to core publish).  The NATS
 server acknowledges each message asynchronously; ack results
 are tracked in the module statistics counters
 `js_ack_ok` and
@@ -435,12 +436,11 @@ modparam("event_nats", "jetstream", 1)
 The old name "reconnect_wait" is accepted as an alias.
 
 
-Time in milliseconds to wait between consecutive connection
-attempts during `child_init()` startup.
-This parameter governs only the bounded startup retry loop;
-runtime reconnection (after a connection drop) is handled
-automatically by the nats.c library using its own internal
-backoff and is not limited by this value.
+Time in milliseconds to wait between connection attempts, both in
+the `child_init()` startup loop and for runtime reconnects after a
+connection drop (nats.c adds up to one more wait of random jitter).
+A value of 0 or less means 2000.  The pool is shared, so the largest
+value set by any NATS module wins.
 
 
 *Default value is "2000" (2 seconds).*
@@ -457,19 +457,16 @@ modparam("event_nats", "reconnect_wait_ms", 1000)
 
 
 Maximum number of connection attempts made during
-`child_init()` startup before the worker
-stops waiting for the broker.  If the NATS server is not
-reachable within
-[max_reconnect](#max_reconnect-integer) ×
-[reconnect_wait_ms](#reconnect_wait_ms-integer) milliseconds, `child_init()` logs a warning
-and starts in a *degraded* state (it returns
-`0`, not `-1`): the OpenSIPS
-worker boots and routes calls normally while NATS publishes
-fail cleanly and are counted in the `failed` statistic of
+`child_init()` startup for failures other than the ones below.
+If the NATS server is not reachable, `child_init()` does not wait
+and counts no attempts: it logs a warning and starts in a *degraded*
+state, keeps connecting in the background, and the OpenSIPS worker
+boots and routes calls normally while NATS publishes fail cleanly
+and are counted in the `failed` statistic of
 [event_nats:nats_stats](#event_natsnats_stats) until the broker
-becomes reachable.  Returning `-1` here would
-be fatal to the whole OpenSIPS instance, so it is deliberately
-avoided.
+becomes reachable.  TLS, authentication and URL errors fail startup
+at once.  The pool is shared, so the largest value set by any NATS
+module wins.
 
 
 This limit applies only to the *startup*
@@ -507,9 +504,9 @@ Cross-DC deployments with high broker round-trip latency
 may need a larger budget.  The setting is shared across
 all NATS modules that link `libnats_pool.so`
 (notably *cachedb_nats*'s
-[drain_timeout_ms](../cachedb_nats/README.md#drain_timeout_ms-integer));
-the last writer at `mod_init()` wins because
-they all map onto the same library-level global.
+[drain_timeout_ms](../cachedb_nats/README.md#drain_timeout_ms-integer)):
+the first value set replaces the default (even a lower one), after
+that the largest value wins.  A negative value refuses startup.
 
 
 *Default value is "5000" (5 seconds).*
@@ -627,8 +624,8 @@ are counted in the `failed` statistic of
 
 
 The *payload* is published as-is with no
-transformation.  By convention JSON is used, but any binary
-or text content accepted by nats.c is valid.
+transformation.  By convention JSON is used, but any non-empty
+text content is valid; an empty payload returns `-1`.
 
 
 When the [jetstream](#jetstream-integer) module parameter is
@@ -699,7 +696,10 @@ parameters before forwarding to the NATS server.
 Invalid inputs are rejected with HTTP 400 / JSON-RPC
 error code 400 rather than being delegated to NATS
 (which would otherwise return opaque 500 errors), and a
-subject list is never silently truncated:
+subject list is never silently truncated.  The policy enums are the
+exception: an unknown *retention* or *storage* falls back to
+`limits` / `file`, and an unknown *deliver_policy* or *ack_policy* is
+ignored (the server default applies).
 
 
 - *Stream / consumer names* must
@@ -718,7 +718,7 @@ comma-separated token is validated individually.
 More than 32 subjects returns
 `too many subjects (max 32)`.
 - *filter_subject* (consumer) - same
-rules as subjects; rejected above 512 bytes.
+rules as subjects; rejected above 511 bytes.
 - *Numeric ranges* - `replicas`
 must be 1..5; `max_msgs` and
 `max_bytes` must be ≥ -1
@@ -786,8 +786,9 @@ opensips-cli -x mi event_nats:nats_status
 
 
 Returns cumulative publish statistics from the shared-memory
-statistics block.  Counters are incremented atomically across
-all worker processes and accumulate until OpenSIPS is restarted.
+statistics block.  All counters (except *reconnects*) are incremented
+atomically across all worker processes and accumulate until OpenSIPS
+is restarted.
 
 
 Parameters: *none*
@@ -804,16 +805,26 @@ via the EVI transport (from event subscriptions).
 published via [nats_publish()](#nats_publishsubject-payload)
 script calls.
 - *failed* - publish attempts that
-returned an error from nats.c.
-- *reconnects* - number of times the
-nats.c reconnect callback fired (connection was
-re-established after a drop).
+returned an error from nats.c, plus messages dropped because the
+connection was down.  Subjects rejected as invalid or too long are
+not counted.
+- *reconnects* - number of times the connection was re-established,
+as seen by the process serving the MI command (a per-process value,
+not a sum across workers); the first connect after a degraded start
+counts as one.
 - *js_ack_ok* - JetStream acks received
 with a success status (only meaningful when
 [jetstream](#jetstream-integer) is 1).
 - *js_ack_failed* - JetStream acks
-received with an error status, or acks that timed out
-(only meaningful when [jetstream](#jetstream-integer) is 1).
+received with an error status (only meaningful when
+[jetstream](#jetstream-integer) is 1).  Publishes carry no ack
+timeout, so an ack that never arrives is not counted.
+- *inbound_dropped_oversize* - inbound [subscribe](#subscribe-string)
+messages dropped for exceeding 1 MiB.
+- *inbound_dropped_backpressure* - inbound messages dropped because
+4096 events were already waiting for a worker.
+- *inbound_inflight* - inbound events currently waiting for or being
+raised by a worker (a gauge).
 
 
 ```bash
@@ -829,7 +840,10 @@ opensips-cli -x mi event_nats:nats_stats
     "failed": 3,
     "reconnects": 1,
     "js_ack_ok": 14820,
-    "js_ack_failed": 3
+    "js_ack_failed": 3,
+    "inbound_dropped_oversize": 0,
+    "inbound_dropped_backpressure": 0,
+    "inbound_inflight": 0
 }
 ```
 
@@ -904,8 +918,9 @@ Parameters:
 - *max_age* (optional) - maximum message age in seconds, 0 to
 10 years (0 = unlimited).
 - *retention* (optional) - retention policy: `limits`,
-`interest` or `workqueue`.
-- *storage* (optional) - storage backend: `file` or `memory`.
+`interest` or `workqueue`; any other value means `limits`.
+- *storage* (optional) - storage backend: `file` or `memory`; any
+other value means `file`.
 
 
 ```bash
@@ -1014,11 +1029,12 @@ Parameters:
 
 - *stream* - the stream name.
 - *name* - the durable consumer name.
-- *filter_subject* (optional) - subject filter (defaults to the
-stream's wildcard).
+- *filter_subject* (optional) - subject filter; left unset, the
+consumer receives all of the stream's subjects.
 - *deliver_policy* (optional) - `all`, `last`, `new` or
 `last_per_subject`.
-- *ack_policy* (optional) - `explicit`, `none` or `all`.
+- *ack_policy* (optional) - `explicit`, `none` or `all`.  An unknown
+*deliver_policy* or *ack_policy* is ignored (server default).
 
 
 ```bash

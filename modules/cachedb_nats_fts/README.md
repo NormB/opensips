@@ -94,9 +94,10 @@ OpenSIPS with this module loaded:
 
 
 Number of hash buckets in the index.  More buckets mean shorter
-chains on lookup, at about 32 KB of shared memory per doubling.
+chains on lookup, at about 24 bytes of shared memory per bucket
+(three tables of 8-byte heads), so 4096 -> 8192 adds about 96 KB.
 The value is rounded up to the next power of two, with a minimum of
-16.
+16; a value of 0 or less uses the default.
 
 
 Recommended values: **4096** up to 20 000 AoRs, **16384** at

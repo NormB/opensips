@@ -139,15 +139,16 @@ using them in a key, for example `"call.$(ci{s.md5})"`.
 
 
 Stores a string value under the given key in the NATS KV bucket.
-The key must consist of valid NATS subject tokens (alphanumeric,
-hyphens, underscores, and dots as separators; no spaces or colons).
+The key may contain letters, digits and `.` `_` `-` `/` `\` `=` only
+(see [KV Key Validation](#kv-key-validation)).
 If the key already exists it is overwritten.
 
 
-When the key begins with [fts_json_prefix](#fts_json_prefix-string) and the
-value is a valid JSON object, the document is parsed and added to the
-in-process search index so that it becomes immediately queryable via
-`cache_query`.
+`cache_store` itself does not touch the search index.  With
+*cachedb_nats_fts* loaded and a [kv_watch](#kv_watch-string) pattern
+covering the key, a JSON object stored under
+[fts_json_prefix](#fts_json_prefix-string) is indexed when the watcher
+sees the put.
 
 
 ```opensips title="cache_store with nats"
@@ -155,8 +156,8 @@ in-process search index so that it becomes immediately queryable via
 # Plain key-value
 cache_store("nats", "call.$(ci{s.md5})", "$fu|$tu");
 
-# JSON document (auto-indexed because key starts with "json_")
-cache_store("nats", "json.user.alice",
+# JSON document (indexed by the watcher: key starts with "json_")
+cache_store("nats", "json_user.alice",
     "{\"name\":\"alice\",\"domain\":\"example.com\",\"status\":\"active\"}");
 ...
 ```
@@ -260,28 +261,23 @@ if ($var(n) > 5) {
 ### Map Operations
 
 
-The module supports composite *key:subkey*
-addressing for reading and writing individual fields of JSON
-documents stored in the KV bucket.  These operations are accessible
-via the column-oriented CacheDB API functions
-(`map_get`, `map_set`,
-`map_remove`) which are used internally by
-OpenSIPS modules such as *usrloc* when configured
-with a CacheDB backend.
+The column-oriented CacheDB API functions (`map_get`, `map_set`,
+`map_remove`), used internally by OpenSIPS modules such as
+*b2b_entities* and *b2b_logic* when configured with a CacheDB backend,
+store a map as one KV entry per field.  A field lives under the key
+`enc(key).enc(field)`, where `enc()` escapes every byte that is not
+valid in a KV key; with a subkey the field part is
+`enc(subkey:field)`.
 
 
-- *map_get* - retrieves the JSON
-document at *key* and returns its top-level
-fields as separate columns in a *cdb_res_t*
-result set.
-- *map_set* - reads the existing JSON
-document at *key* (or starts from an empty
-object), merges the provided field-value pairs, and writes the
-result back using CAS for consistency.
-- *map_remove* - reads the existing
-JSON document, removes the named field (subkey), and writes the
-result back.  If no fields remain after removal the entire key is
-deleted from the bucket.
+- *map_get* - lists the keys under `enc(key).>` and returns one
+result row per field, holding the field name and its value.
+- *map_set* - writes each field-value pair as its own entry with a
+plain put (no read, merge or CAS); integer values are stored as
+decimal strings.
+- *map_remove* - with a subkey, deletes the single entry
+`enc(key).enc(subkey)`; without one, deletes every entry under
+`enc(key).>`.  Removing an entry that does not exist succeeds.
 
 
 ### JSON Search Index
@@ -384,9 +380,9 @@ nats kv update opensips --replicas=3
 
 The internal reconnection loop is unlimited at runtime: nats.c will
 never permanently remove a server from its routing pool.  The
-[max_reconnect](#max_reconnect-integer) parameter only limits the number of
-retries during the initial connection phase in
-`child_init`.
+[max_reconnect](#max_reconnect-integer) parameter only caps startup
+connection attempts in `child_init`; a broker unreachable at startup
+does not use it up (the process starts degraded).
 
 
 ```opensips title="Three-node cluster configuration"
@@ -400,8 +396,8 @@ modparam("cachedb_nats", "kv_bucket",   "opensips")
 modparam("cachedb_nats", "kv_replicas", 3)
 modparam("cachedb_nats", "kv_history",  1)
 modparam("cachedb_nats", "kv_ttl",      0)
+modparam("cachedb_nats", "fts_json_prefix", "usrloc.")
 modparam("cachedb_nats", "kv_watch",    "usrloc.>")
-modparam("cachedb_nats", "kv_watch",    "json.>")
 ...
 ```
 
@@ -471,10 +467,10 @@ NATS-internal and adds ~1-2 ms to write latency.
 Recommended only when the inter-DC RTT is
 < 50 ms and concurrent same-AoR writes are
 rare.  Every `kvStore_UpdateString`
-CAS pays full inter-DC RTT.  The jittered
-backoff bounds the worst-case at ~50 ms across
-the default [cas_retries](#cas_retries-integer) = 10
-budget; raise the budget if cross-DC
+CAS pays full inter-DC RTT.  Across the default
+[cas_retries](#cas_retries-integer) = 10 attempts the
+jittered backoff adds at most ~16 ms of sleep, plus
+one inter-DC RTT per attempt; raise the budget if cross-DC
 contention drives `cas_exhausted`
 above zero.
 
@@ -503,14 +499,16 @@ broker cluster size up to 3.  Replicas > 3 add
 latency without meaningful availability gains for
 usrloc workloads.
 - *History:*
-[kv_history](#kv_history-integer) = 1 — required for
-on-time native expiry.  A bucket that keeps old
-revisions makes an expired key roll back to a
-previous version instead of disappearing, so the
-module disables server-side auto-expiry on it and
-falls back to the periodic cleanup scan (correct,
-but up to [reap_interval](#reap_interval-integer)
-seconds late).  Use a history-keeping bucket only
+[kv_history](#kv_history-integer) = 1.  The module
+does not check the history depth: rows carry a native
+per-key TTL only with
+[kv_ttl_below_marker](#kv_ttl_below_marker-integer) on a
+broker that supports it, and that option is what keeps
+an expiring key on a history-keeping bucket from rolling
+back to an older revision.  Otherwise expiry is the
+periodic cleanup scan (correct, but up to
+[reap_interval](#reap_interval-integer) seconds late)
+at any history depth.  Use a history-keeping bucket only
 when routing logic genuinely needs
 [nats_kv_history()](#nats_kv_historykey-result_pvar), and keep it
 OFF the registration bucket if possible.
@@ -678,8 +676,9 @@ among others, four counters tracking the
 cachedb path:
 
 
-- *cas_retry* - bumped per
-failed UpdateString / CreateString race.  Steady
+- *cas_retry* - bumped per CAS
+conflict in `cache_add` / `cache_sub` / CacheDB `update()`, and per
+retried fetch in `update()`.  Steady
 non-zero values are normal under contention; a
 sustained high rate suggests
 [cas_retries](#cas_retries-integer) is too low
@@ -692,8 +691,8 @@ writes.  Page on
 `delta(cas_exhausted) > 0`
 over any reasonable interval.
 - *create_doc* - bumped per
-first-insert path (`kvStore_CreateString`
-of a seed doc).  Roughly equal to the rate of
+first insert of a document (a create at
+revision 0) by CacheDB `update()`.  Roughly equal to the rate of
 genuinely new AoRs.  A spike usually maps to a
 burst of new registrations.
 - *index_miss_kv* - bumped when
@@ -713,7 +712,7 @@ self-heal pace; consider enabling
 The legacy mode `full-sharing-cachedb-cluster`
 additionally relies on clusterer to broadcast cachedb
 invalidation events.  With cachedb_nats, the KV watcher
-thread + stale-entry self-heal subsume that role.  To
+process + stale-entry self-heal subsume that role.  To
 migrate:
 
 
@@ -723,7 +722,8 @@ to `full-sharing-cachedb`;
 keep the existing `location_cluster`
 (clusterer is still required for shtag /
 pinging coordination).
-3. Roll instances one at a time.  Each rolled
+3. Roll instances one at a time.  With
+*cachedb_nats_fts* loaded, each rolled
 instance rebuilds its index from KV on
 `child_init` and is
 immediately consistent with peers still on the
@@ -765,8 +765,10 @@ and a libnats that support
 *allow_msg_ttl_below_marker*; no release of either does.  Native TTLs
 are whole seconds, and apply only to rows whose contacts share one
 expiry time.
-- **[kv_history](#kv_history-integer) above 1 disables native expiry**
-on that bucket; expiry falls back to the reaper.
+- **Native expiry is opt-in.**  Without
+[kv_ttl_below_marker](#kv_ttl_below_marker-integer) and a broker that
+supports it, rows carry no per-key TTL and expire only through the
+reaper, whatever [kv_history](#kv_history-integer) is set to.
 - **The `expires` argument of `cache_store` and `cache_add` is
 ignored.**  Only usrloc rows expire.
 - **Keys** are at most 511 bytes and may contain only letters, digits
@@ -779,8 +781,10 @@ rejected.
 [nats_kv_update()](#nats_kv_updatebucket-key-value-expected_rev) compares
 against a revision truncated to 32 bits, so a compare-and-swap fails
 once a key passes revision 2 147 483 647.
-- **The nats_kv_\* functions on another bucket** need that bucket to
-exist already.
+- **The nats_kv_\* functions create a missing bucket** on first use,
+with this module's [kv_replicas](#kv_replicas-integer),
+[kv_history](#kv_history-integer) and [kv_ttl](#kv_ttl-integer)
+settings; pre-create a bucket that needs other settings.
 - **Filters:** without *cachedb_nats_fts*, only single primary-key
 equality filters are accepted; with it, only equality filters.
 - **usrloc NAT pinging does not work with this backend.**  In
@@ -790,8 +794,10 @@ contacts are returned for pinging.
 - **A recreated bucket is not replayed.**  If the bucket is deleted
 and recreated while the KV watcher is disconnected, the watcher starts
 at the new bucket's end: changes made to the new bucket before the
-reconnect do not raise *E_NATS_KV_CHANGE*.  (The *cachedb_nats_fts*
-index is rebuilt after a reconnect and is not affected.)
+reconnect do not raise *E_NATS_KV_CHANGE*.  (With
+[index_resync_on_reconnect](#index_resync_on_reconnect-integer) = 1, the
+default, the *cachedb_nats_fts* index is rebuilt after the reconnect and
+is not affected.)
 - **TLS needs [nats_url](#nats_url-string).**  The server list derived
 from [cachedb_url](#cachedb_url-string) is always plaintext.
 - **MI listings** return at most 200 rows;
@@ -907,10 +913,14 @@ automatically following topology changes in the cluster.
 
 
 When this parameter is set it takes precedence over the host:port
-embedded in [cachedb_url](#cachedb_url-string).
+embedded in [cachedb_url](#cachedb_url-string).  When it is not set,
+the server list is the host:port part of the first
+[cachedb_url](#cachedb_url-string), as plain `nats://` URLs; if there
+is no cachedb_url or it cannot be parsed, `nats://localhost:4222` is
+used and a warning is logged.
 
 
-*Default value is "nats://127.0.0.1:4222".*
+*Default value is "NULL" (servers taken from the first cachedb_url).*
 
 
 ```opensips title="Set nats_url parameter"
@@ -1043,14 +1053,16 @@ history-keeping bucket rolls back to an older revision instead of
 disappearing.
 
 
-Once the support probe confirms the option (and a short-TTL canary
-key verifies the broker actually honours it), every usrloc row
+Once the support probe confirms the option, every usrloc row
 write carries a native per-key TTL derived from the row's contact
 expiry (plus the reclamation slack), so expired registrations
 disappear on their own; the periodic cleanup scan (the reaper)
 remains active as a backstop and stays authoritative for rows
 that are not TTL-eligible (mixed-expiry multi-contact rows and
-rows containing permanent contacts).
+rows containing permanent contacts).  A few seconds after startup
+the reaper process also writes a short-TTL canary key; if it
+survives, a warning is logged and native TTL writes stop in the
+reaper process only (SIP workers keep the probe's verdict).
 
 
 The option requires a NATS server built with the
@@ -1143,8 +1155,12 @@ Key name prefix that marks JSON documents for the search index
 kept by the optional *cachedb_nats_fts* module (see
 [JSON Search Index](#json-search-index)).  Documents stored under
 other keys are still available through the normal KV operations but
-are not indexed.  Has no effect when *cachedb_nats_fts* is not
-loaded.
+are not indexed.
+
+
+The prefix applies with or without *cachedb_nats_fts*: usrloc rows are
+stored under the prefix followed by the encoded AoR, and the reaper and
+the *nats_reg_\** MI commands only scan keys that start with it.
 
 
 *Default value is "json_".*
@@ -1184,8 +1200,7 @@ at least one pattern is configured).*
 
 ```opensips title="Set kv_watch parameter"
 ...
-modparam("cachedb_nats", "kv_watch", "usrloc.>")
-modparam("cachedb_nats", "kv_watch", "json.>")
+modparam("cachedb_nats", "kv_watch", ">")
 ...
 ```
 
@@ -1196,12 +1211,12 @@ modparam("cachedb_nats", "kv_watch", "json.>")
 The old name "nats_cas_retries" is accepted as an alias.
 
 
-Number of compare-and-swap retries used by atomic counter
-increments (`cache_add()`) and JSON field
-updates (`cache_update()`).  Each retry
-costs one round-trip to the NATS server; combined with the jittered
-backoff (50 us base, 5 ms cap), the worst-case per-call latency is
-~50 ms at the default.  When the retry
+Total number of compare-and-swap attempts (the first try included)
+made by atomic counter increments (`cache_add()`) and JSON field
+updates (`cache_update()`); a value of 0 or less is treated as 1.
+Each attempt reads the key and writes it back conditionally; between
+attempts a jittered backoff (50 us base, doubling, 5 ms cap) sleeps
+at most ~16 ms in total at the default.  When the retry
 budget is exhausted the operation is dropped and a warning naming the
 affected key is logged, and the `cas_exhausted` counter of
 [cachedb_nats:nats_cdb_stats](#cachedb_natsnats_cdb_stats) is bumped.
@@ -1262,7 +1277,8 @@ modparam("cachedb_nats", "index_resync_on_reconnect", 0)
 Periodic full rebuild of the in-memory search index, in seconds.
 Belt-and-braces upper bound on per-process index
 staleness regardless of reconnect cadence or self-heal
-pace.  Skipped silently while NATS is disconnected.
+pace.  A tick that cannot get a KV handle (NATS disconnected) is
+skipped; the next tick retries.
 Runs in the dedicated "NATS Reaper" module
 process, not the shared core timer process.
 
@@ -1301,8 +1317,9 @@ forcibly closing connections.  Cross-DC deployments
 with high RTT may need to extend the budget; the
 underlying setting is shared with
 *event_nats*'s
-[drain_timeout_ms](../event_nats/README.md#drain_timeout_ms-integer)
-(last writer wins).
+[drain_timeout_ms](../event_nats/README.md#drain_timeout_ms-integer):
+the first value set replaces the default (even a lower one), after
+that the largest value wins.  A negative value refuses startup.
 
 
 *Default value is "5000" (milliseconds).*
@@ -1339,11 +1356,13 @@ modparam("cachedb_nats", "reconnect_wait_ms", 1000)
 #### max_reconnect (integer)
 
 
-Maximum number of reconnection attempts during
-`child_init`.  Once the initial connection is
-established, the nats.c library handles runtime reconnection
-autonomously with no limit.  This parameter affects only the startup
-retry loop, not runtime resilience.
+Maximum number of connection attempts made during `child_init`
+for failures other than the ones below.  A broker that is
+unreachable at startup counts no attempts: the process starts
+degraded and keeps connecting in the background.  TLS,
+authentication and URL errors fail startup at once.  Once connected,
+the nats.c library reconnects with no limit.  The pool is shared, so
+the largest value set by any NATS module wins.
 
 
 *Default value is "60" (attempts).*
@@ -1363,8 +1382,10 @@ The old name "nats_reap_interval" is accepted as an alias.
 
 
 Period, in seconds, of the reaper pass that CAS-prunes expired
-bindings from the bucket.  The reaper is the module's single
-expiry mechanism, so this periodic prune is what guarantees an
+bindings from the bucket.  The reaper is the module's authoritative
+expiry mechanism (the only one unless
+[kv_ttl_below_marker](#kv_ttl_below_marker-integer) native TTLs are
+active), so this periodic prune is what guarantees an
 expired binding is physically reclaimed.  The value must be
 **> 0**; a non-positive value is
 refused at startup (it would leave expired bindings
@@ -1482,10 +1503,12 @@ modparam("cachedb_nats", "max_value_size", 65536)
 #### kv_op_timeout_ms (integer)
 
 
-Per-operation timeout, in milliseconds, for KV get/put/update
-calls issued from a SIP worker (e.g. the usrloc read/write path),
-so a slow-but-connected broker cannot block a worker for the full
-library default (5 s).  The usrloc update path performs two
+Per-request timeout, in milliseconds, of the shared JetStream
+context of the *lib/nats* pool, so a slow-but-connected broker cannot
+block a process for the full library default (5 s).  It applies to
+every JetStream and KV request made through the shared pool in every
+process, including those of *event_nats* and *nats_consumer*, not only
+to the usrloc read/write path.  The usrloc update path performs two
 synchronous round-trips per REGISTER, so the per-REGISTER worst
 case is roughly twice this value.  A value
 **<= 0** removes the cap (the libnats
@@ -1569,13 +1592,11 @@ revision number; pass it to a subsequent
 perform a Compare-And-Swap update.
 
 
-The bucket must already exist.  At
-`child_init` time the module creates the
-bucket named by the [kv_bucket](#kv_bucket-string) modparam; if
-you call this function with a different
-bucket name that bucket must have been pre-created out of
-band (e.g. via the `nats` CLI or another
-opensips instance).
+An empty *bucket* means the [kv_bucket](#kv_bucket-string) bucket.
+A bucket that does not exist yet is created on first use, with the
+[kv_replicas](#kv_replicas-integer), [kv_history](#kv_history-integer)
+and [kv_ttl](#kv_ttl-integer) settings; this applies to all the
+*nats_kv_\** functions.
 
 
 **CAS contract for
@@ -1604,7 +1625,7 @@ Return values:
 
 
 - **1** - success.
-- **-1** - error (no NATS connection, bucket missing, etc).
+- **-1** - error (no NATS connection, bucket bind/create failure, etc).
 - **-2** - key not found.
 
 
@@ -1883,18 +1904,16 @@ Counters in the response include:
 
 - *cas_retry* - total CAS
 retries across all `cache_add`
-/ `cache_sub` / CacheDB `update()` calls.  Bumped
-once per failed
-`kvStore_Update`.
+/ `cache_sub` / CacheDB `update()` calls: bumped
+once per CAS conflict, and once per retried fetch in `update()`.
 - *cas_exhausted* - total
 CacheDB calls that ran out of
 [cas_retries](#cas_retries-integer) attempts and
 dropped the write.  Should be 0 in steady state;
 any non-zero value means writes were lost.
-- *create_doc* - total times a CacheDB `update()` synthesised
-a seed document and called
-`kvStore_CreateString` (the
-insert path).
+- *create_doc* - total first inserts by CacheDB `update()`: a
+seed document created at revision 0 (with a native TTL when one
+applies).
 - *index_miss_kv* - query/update
 found a key in the in-memory search index but the
 KV store said NOT_FOUND.  Flags index staleness,
@@ -1915,7 +1934,8 @@ cost: `reap_last_run` (epoch) /
 `_due`.  These describe the last complete pass and refresh every
 [reap_interval](#reap_interval-integer) seconds; a pass whose bucket
 scan failed or stopped early keeps the previous values and increments
-the `reap_enum_failures` counter instead.  They are the
+the `reap_enum_failures` counter instead; a tick skipped because no KV
+handle is available (broker unreachable) changes neither.  They are the
 recommended monitoring feed for registration counts (poll this, not
 [cachedb_nats:nats_reg_summary](#cachedb_natsnats_reg_summary), on large
 buckets).
@@ -1974,7 +1994,9 @@ unexpired, or within the [reap_grace](#reap_grace-integer) margin),
 scan cost.
 
 
-The scan costs one round-trip per stored AoR; on very large buckets
+The scan is one streaming, value-carrying watch pass over the bucket
+(not one request per AoR), but it still reads every stored row; on very
+large buckets
 prefer the free `reap_last_*` gauges in
 [cachedb_nats:nats_cdb_stats](#cachedb_natsnats_cdb_stats) for
 monitoring, and reserve this command for interactive use.
@@ -2313,9 +2335,11 @@ Parameters:
 - *key* (string) - the KV key that was modified.
 - *operation* (string) - the type of mutation: *put* (value created
 or updated), *delete* (soft delete tombstone), or
-*purge* (hard delete with history removal).
-- *value* (string) - the new value of the key.  Only present for
-*put* operations; absent for
+*purge* (hard delete with history removal).  A put with an empty
+value (how a TTL or MaxAge expiry is delivered) is raised as
+*delete*.
+- *value* (string) - the new value of the key.  Present only for a
+*put* with a non-empty value; absent for
 *delete* and *purge*.
 - *revision* (integer) - the NATS JetStream sequence number
 (revision) of this mutation.
@@ -2350,15 +2374,14 @@ following commands are supported:
 #### KV KEYS
 
 
-Lists all keys currently present in the KV bucket.  The result is
-stored in the provided pseudo-variable as a comma-separated string
-of key names.
+Lists all keys currently present in the KV bucket.  The result has
+one row per key, so the output AVP receives one value per key.
 
 
 ```opensips title="KV KEYS raw query"
 ...
-cache_raw_query("nats", "KV KEYS", $var(keys));
-xlog("all KV keys: $var(keys)\n");
+cache_raw_query("nats", "KV KEYS", "$avp(keys)");
+xlog("first KV key: $avp(keys)\n");
 ...
 ```
 
@@ -2369,12 +2392,13 @@ xlog("all KV keys: $var(keys)\n");
 Permanently removes a key and its entire revision history from the
 KV bucket.  Unlike a soft delete (which leaves a deletion tombstone),
 a purge is irreversible and frees the storage used by all historical
-revisions.
+revisions.  Wildcard or invalid keys are refused; purging a
+non-existent key succeeds.
 
 
 ```opensips title="KV PURGE raw query"
 ...
-cache_raw_query("nats", "KV PURGE json.user.alice");
+cache_raw_query("nats", "KV PURGE json_user.alice");
 ...
 ```
 
@@ -2382,15 +2406,16 @@ cache_raw_query("nats", "KV PURGE json.user.alice");
 #### KV BUCKET INFO
 
 
-Returns a JSON object describing the KV bucket configuration:
-bucket name, replication factor, history depth, TTL, and the
-backing JetStream stream name.
+Returns one row of six columns describing the KV bucket: bucket
+name, number of values, history depth, TTL in seconds, replica count
+and bytes stored.
 
 
 ```opensips title="KV BUCKET INFO raw query"
 ...
-cache_raw_query("nats", "KV BUCKET INFO", $var(info));
-xlog("bucket info: $var(info)\n");
+cache_raw_query("nats", "KV BUCKET INFO",
+    "$avp(bucket);$avp(values);$avp(history);$avp(ttl);$avp(replicas);$avp(bytes)");
+xlog("bucket $avp(bucket): $avp(values) values, $avp(bytes) bytes\n");
 ...
 ```
 <!-- CONTRIBUTORS -->

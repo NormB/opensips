@@ -1,9 +1,10 @@
 # NATS for OpenSIPS — start here
 
 OpenSIPS talks to [NATS](https://nats.io) and its JetStream persistence
-layer through four modules. All four share one connection per OpenSIPS
-process, provided by the connection pool in this directory
-(`libnats_pool.so`).
+layer through four modules. The three that talk to NATS
+(`event_nats`, `cachedb_nats`, `nats_consumer`) share one connection
+per OpenSIPS process, provided by the connection pool in this directory
+(`libnats_pool.so`); `cachedb_nats_fts` works through `cachedb_nats`.
 
 | Module | Direction | What it gives you |
 | ------ | --------- | ----------------- |
@@ -12,9 +13,11 @@ process, provided by the connection pool in this directory
 | [cachedb_nats_fts](../../modules/cachedb_nats_fts/README.md) | inside OpenSIPS | Optional secondary index for `cachedb_nats` JSON documents; loading it turns non-key queries on |
 | [nats_consumer](../../modules/nats_consumer/README.md) | NATS → OpenSIPS | JetStream pull consumers delivered to SIP workers, explicit ack/nak/term, `nats_request()` request/reply (sync and async) |
 
-Pick the modules you need. Any one of them runs on its own, and any
-combination shares the same connection. Load order does not matter,
-except that `cachedb_nats_fts` must be loaded after `cachedb_nats`.
+Pick the modules you need. `event_nats`, `cachedb_nats` and
+`nats_consumer` each run on their own, and any combination shares the
+same connection; `cachedb_nats_fts` needs `cachedb_nats`. Load order
+does not matter, except that `cachedb_nats_fts` must be loaded after
+`cachedb_nats`.
 
 
 ## Requirements
@@ -183,21 +186,24 @@ the patch changes and where it came from.
 
 ## How the modules share a connection
 
-Each module calls
+Each module that talks to NATS calls
 `nats_pool_register(const char *url, const char *module, int
 reconnect_wait, int max_reconnect)` from `mod_init`, before OpenSIPS
 forks. Registrations merge:
 
 - the pool keeps the union of all modules' server URLs (duplicates are
-  dropped; past 16 URLs the extras are skipped with a warning);
+  dropped; more than 16 URLs in the first registration is a startup
+  error, while a later registration's URLs past 16 are skipped with a
+  warning);
 - for the reconnect settings, the larger value wins, whatever the module
   load order;
 - TLS settings are not registration parameters; they come from
   `tls_mgm` (`nats_pool_bind_tls()`).
 
-All four modules self-register. `nats_consumer` has its own `nats_url`
-parameter; if that is unset and no other NATS module has registered, it
-falls back to `nats://localhost:4222`. It never adds that fallback to a
+`event_nats` and `cachedb_nats` always register; `cachedb_nats_fts`
+has no connection of its own. `nats_consumer` registers too, with its
+own `nats_url` parameter; if that is unset and no other NATS module has
+registered, it falls back to `nats://localhost:4222`. It never adds that fallback to a
 pool another module has already configured. `tests/test_pool_merge.c`
 covers these rules.
 
@@ -213,8 +219,9 @@ marks them stale, and they are destroyed and re-created, so a
 `kvStore *` kept across a reconnect is a use-after-free. Code that caches
 one tags it with a `nats_epoch_t` (`nats_epoch.h`) and checks it before
 use: snapshot, compare with `nats_epoch_current`, re-acquire, and call
-`nats_epoch_adopt` only on success. The disconnect and reconnect
-callbacks bump the epoch and set the stale flag.
+`nats_epoch_adopt` only on success. The disconnect callback sets the
+stale flag; the reconnect callback (also run on the first connect after
+a degraded start) sets it and bumps the epoch.
 
 
 ## Behaviour during broker outages
@@ -269,7 +276,9 @@ These apply to the whole family. Each module's README lists its own.
 
 - **libnats must be 3.14 or later, with the same major.minor as the
   build.** Older libraries lack required symbols; any other major.minor
-  is refused at load time. There is no fallback library.
+  is refused at load time, with no fallback to another library. Only
+  a `NATS_DL_LIBNATS_PATH` that cannot be opened at all falls back to
+  the default `libnats.so`, with a warning.
 - **One libnats per process.** All connections in an OpenSIPS instance
   use the same library; switching builds needs a restart.
 - **wolfSSL on the NATS side needs a patched libnats.** Upstream nats.c
