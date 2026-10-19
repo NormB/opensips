@@ -15,6 +15,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/lib.sh"
+# never die silently: a nightly run once exited 1 with no FAIL line
+trap 'echo "FAIL: multi_worker: aborted at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ensure_stack
 # Clear the OpenSIPS handle registry before binding: stale handles
@@ -111,7 +113,8 @@ deadline=$(( $(date +%s) + 120 ))
 delivered=0; redeliveries=0
 delta_delivered=0; delta_redeliveries=0
 while [ $(date +%s) -lt ${deadline} ]; do
-    list_out=$(nats_list 2>/dev/null)
+    # one failed poll (a docker exec on a loaded host) is not a verdict
+    list_out=$(nats_list 2>/dev/null || true)
     delivered=$(nats_list_field "${list_out}" mw msgs_delivered 2>/dev/null)
     redeliveries=$(nats_list_field "${list_out}" mw redeliveries 2>/dev/null)
     delivered=${delivered:-0}
@@ -123,6 +126,8 @@ while [ $(date +%s) -lt ${deadline} ]; do
             pass "multi_worker: ${delta_delivered} delivered (cumulative ${delivered}), 0 redeliveries this run"
             exit 0
         else
+            echo "handle at failure: ${list_out}"
+            ncli consumer info MW mw --json 2>/dev/null || true
             fail "multi_worker: ${delta_redeliveries} redeliveries this run (expected 0; cumulative ${redeliveries})"
         fi
     fi

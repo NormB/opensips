@@ -18,6 +18,9 @@
 #   4. stress_3way's log-error count ignores the harness's own
 #      "core limits increased only to 0" notice (it sets ulimit -c 0) but
 #      still counts real ERROR/CRITICAL/FATAL lines.
+#   5. stress_multi_worker rides out one failed MI poll (a docker exec
+#      that fails on a loaded host) instead of dying silently under
+#      set -e, and on a real failure says why and dumps the handle.
 #
 # Exit 0 iff every check passes.
 set -u
@@ -127,6 +130,59 @@ fi
 check "core-limit notice not counted; real ERROR + CRITICAL counted" 2 "$got"
 got=$( [ -f "$HERE/stress_helpers.sh" ] && . "$HERE/stress_helpers.sh" && count_log_errors "$WORK/absent.log" )
 check "missing log -> 0 errors" 0 "${got:-<error>}"
+
+echo "== stress_multi_worker against a stubbed stack"
+# The stack stub answers just what stress_multi_worker asks: the MI FIFO
+# exists, the broker lists consumer "mw", binds succeed, and
+# nats_consumer_list reports 0 deliveries on the first poll and
+# $MW_DELIVERED afterwards -- except poll number $MW_FAIL_AT, whose docker
+# exec fails outright.
+mkdir -p "$WORK/mwbin"
+cat > "$WORK/mwbin/docker" <<'STUB'
+#!/bin/sh
+[ "$1" = info ] && exit 0
+args=" $* "
+case "$args" in
+*" ps -q "*)        echo 0123456789ab; exit 0 ;;
+*" restart "*)      exit 0 ;;
+*" test -p "*)      exit 0 ;;
+*" consumer ls "*)  echo mw; exit 0 ;;
+esac
+body=""
+for a in "$@"; do case "$a" in BODY=*) body="${a#BODY=}" ;; esac; done
+case "$body" in
+*nats_consumer_list*)
+    n=$(( $(cat "$MW_STATE" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$MW_STATE"
+    [ "$n" = "${MW_FAIL_AT:-0}" ] && exit 1
+    d=0; [ "$n" -gt 1 ] && d="$MW_DELIVERED"
+    printf '{"jsonrpc":"2.0","result":{"handles":[{"id":"mw","msgs_delivered":%s,"redeliveries":%s}]},"id":1}' \
+        "$d" "$( [ "$n" -gt 1 ] && echo "${MW_REDELIVERED:-0}" || echo 0 )"
+    ;;
+*nats_consumer_bind*|*nats_consumer_unbind*)
+    printf '{"jsonrpc":"2.0","result":"OK","id":1}' ;;
+esac
+exit 0
+STUB
+chmod +x "$WORK/mwbin/docker"
+
+run_mw() {  # run_mw <fail_at> <redelivered> -> prints "<rc> <last line>"
+    local out rc
+    out=$(PATH="$WORK/mwbin:$PATH" MW_STATE="$WORK/mw.state.$1.$2" \
+        MW_FAIL_AT="$1" MW_REDELIVERED="$2" MW_DELIVERED=200 \
+        N_MESSAGES=200 timeout 60 "$HERE/stress_multi_worker.sh" 2>&1)
+    rc=$?
+    printf '%s\n' "$out" > "$WORK/mw.out.$1.$2"
+    printf '%s %s' "$rc" "$(printf '%s\n' "$out" | tail -1)"
+}
+r=$(run_mw 0 0)
+check "clean run passes" 0 "${r%% *}"
+r=$(run_mw 2 0)
+check "one failed MI poll mid-run is ridden out" 0 "${r%% *}"
+r=$(run_mw 0 3)
+check "redeliveries fail the run" 1 "${r%% *}"
+check "a redelivery failure dumps the handle" yes \
+    "$(grep -q '"redeliveries":3' "$WORK/mw.out.0.3" && echo yes || echo no)"
 
 echo "== docker build context"
 # The compose image rebuilds opensips from source inside the container, so

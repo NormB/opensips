@@ -111,7 +111,7 @@ jobs:
           # leg shares; LIBNATS_TLS=ON for dev-env parity.  The
           # container runs as root, so SUDO stays empty.
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libuv1-dev cmake wget
+            build-essential pkg-config libssl-dev libuv1-dev cmake wget python3
           LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
 
       - name: Lint — no unredacted URLs in log calls

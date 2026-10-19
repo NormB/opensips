@@ -39,7 +39,9 @@ total_rss_proc() {
 
 echo "== stress_multi_worker (short) leaves its handle behind"
 N_MESSAGES=200 "${HERE}/stress_multi_worker.sh" > /tmp/nc_selftest_mw.log 2>&1
-check "stress_multi_worker (N_MESSAGES=200) passes" 0 "$?"
+rc=$?
+check "stress_multi_worker (N_MESSAGES=200) passes" 0 "$rc"
+[ "$rc" -ne 0 ] && sed 's/^/    | /' /tmp/nc_selftest_mw.log | tail -15
 
 echo "== stress_churn right after it"
 DURATION=20 "${HERE}/stress_churn.sh" > /tmp/nc_selftest_churn.log 2>&1
