@@ -38,6 +38,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TREE_ROOT="$(cd "${HERE}/../../../.." && pwd)"
+NATS_PROBE="${TREE_ROOT}/lib/nats/tests/nats_probe.sh"
 
 OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
 OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
@@ -160,7 +161,7 @@ need nats; need awk; need nc
     exit 77
 }
 
-nats --server "$NATS_URL" server check connection >/dev/null 2>&1 || {
+"${NATS_PROBE}" "$NATS_URL" >/dev/null 2>&1 || {
     echo "NATS unreachable: $NATS_URL" >&2; exit 77;
 }
 

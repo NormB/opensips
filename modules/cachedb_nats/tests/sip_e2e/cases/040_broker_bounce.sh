@@ -36,8 +36,7 @@ mkdir -p "$BOUNCE_NATS_JS"
     > "$WORKDIR/bounce_nats.log" 2>&1 &
 BOUNCE_NATS_PID=$!
 for i in $(seq 1 10); do
-    nats --server "nats://127.0.0.1:${BOUNCE_NATS_PORT}" \
-        server check connection >/dev/null 2>&1 && break
+    "${NATS_PROBE}" "nats://127.0.0.1:${BOUNCE_NATS_PORT}" >/dev/null 2>&1 && break
     sleep 0.5
 done
 
@@ -123,7 +122,7 @@ fi
     > "$WORKDIR/bounce_nats.log" 2>&1 &
 BOUNCE_NATS_PID=$!
 for i in $(seq 1 10); do
-    nats --server "$BOUNCE_NATS_URL" server check connection \
+    "${NATS_PROBE}" "$BOUNCE_NATS_URL" \
         >/dev/null 2>&1 && break
     sleep 0.5
 done

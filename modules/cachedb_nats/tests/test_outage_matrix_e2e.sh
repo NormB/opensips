@@ -24,6 +24,7 @@
 #
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+NATS_PROBE="${HERE}/../../../lib/nats/tests/nats_probe.sh"
 . "${HERE}/../../../lib/nats/tests/nats_local_lib.sh"
 
 require_opensips_built
@@ -45,7 +46,7 @@ start_broker() {
     NS_PID=$!
     local i=0
     while [ $i -lt 20 ]; do
-        nats --server "${PRIV_URL}" server check connection >/dev/null 2>&1 && return 0
+        "${NATS_PROBE}" "${PRIV_URL}" >/dev/null 2>&1 && return 0
         sleep 0.5; i=$((i+1))
     done
     fail "private broker did not come up on :${PORT}"

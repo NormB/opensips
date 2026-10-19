@@ -15,6 +15,7 @@
 
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
+NATS_PROBE="${HERE}/../../../../lib/nats/tests/nats_probe.sh"
 
 # nats-server is commonly installed in sbin, off a user PATH.
 PATH="$PATH:/usr/sbin:/usr/local/sbin"
@@ -39,7 +40,7 @@ trap cleanup EXIT
 nats-server -p "$PORT" > "$WORKDIR/broker.log" 2>&1 &
 BROKER_PID=$!
 for i in $(seq 1 20); do
-    nats --server "nats://127.0.0.1:$PORT" server check connection \
+    "${NATS_PROBE}" "nats://127.0.0.1:$PORT" \
         >/dev/null 2>&1 && break
     sleep 0.25
 done

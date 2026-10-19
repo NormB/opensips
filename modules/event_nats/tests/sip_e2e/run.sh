@@ -28,6 +28,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # hosts -- and the suites assert on behavior, not on cores.
 ulimit -c 0
 TREE_ROOT="$(cd "${HERE}/../../../.." && pwd)"
+NATS_PROBE="${TREE_ROOT}/lib/nats/tests/nats_probe.sh"
 
 OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
 OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
@@ -73,7 +74,7 @@ if [ ! -d "$OPENSIPS_MODULES" ]; then
 fi
 
 # ─── ensure broker reachable ────────────────────────────────────
-if ! nats --server "$NATS_URL" server check connection \
+if ! "${NATS_PROBE}" "$NATS_URL" \
         > "$WORKDIR/conn.out" 2>&1; then
     need docker
     NATS_PORT="${NATS_URL##*:}"; NATS_PORT="${NATS_PORT%%/*}"
@@ -82,7 +83,7 @@ if ! nats --server "$NATS_URL" server check connection \
     docker run -d --rm --name "$DOCKER_NATS" \
         -p "${NATS_PORT}:4222" nats:2.11.10-alpine -js >/dev/null
     for i in $(seq 1 10); do
-        nats --server "$NATS_URL" server check connection \
+        "${NATS_PROBE}" "$NATS_URL" \
             >/dev/null 2>&1 && break
         sleep 1
     done

@@ -131,10 +131,11 @@ jobs:
       - name: Strict-gate selftest (skip-vs-fail contract)
         run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
 
-      - name: Harness self-tests (nats_consumer stress plumbing, TLS probe)
+      - name: Harness self-tests (nats_consumer stress plumbing, TLS probe, broker probe)
         run: |
           ./modules/nats_consumer/tests/selftest_harness.sh
           ./lib/nats/tests/selftest_tls_probe.sh
+          ./lib/nats/tests/selftest_nats_probe.sh
 
       - name: Docs — README format; drain examples fit their timer interval
         run: |

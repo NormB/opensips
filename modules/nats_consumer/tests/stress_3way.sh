@@ -38,6 +38,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/stress_helpers.sh"
 TREE_ROOT="$(cd "${HERE}/../../.." && pwd)"
+NATS_PROBE="${TREE_ROOT}/lib/nats/tests/nats_probe.sh"
 
 OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
 OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
@@ -108,7 +109,7 @@ need nats; need awk; need nc; need sipsak; need ps
 
 [ -x "$OPENSIPS_BIN" ] || { echo "no opensips: $OPENSIPS_BIN" >&2; exit 77; }
 [ -d "$OPENSIPS_MODULES" ] || { echo "no modules: $OPENSIPS_MODULES" >&2; exit 77; }
-nats --server "$NATS_URL" server check connection >/dev/null 2>&1 || \
+"${NATS_PROBE}" "$NATS_URL" >/dev/null 2>&1 || \
     { echo "NATS unreachable: $NATS_URL" >&2; exit 77; }
 
 # ---- 1. cfg ----------------------------------------------------------

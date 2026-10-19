@@ -29,6 +29,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # hosts -- and the suites assert on behavior, not on cores.
 ulimit -c 0
 TREE_ROOT="$(cd "${HERE}/../../../.." && pwd)"
+# shared broker probe, also used by lib/helpers.sh and the cases
+NATS_PROBE="${TREE_ROOT}/lib/nats/tests/nats_probe.sh"
 
 OPENSIPS_BIN="${OPENSIPS_BIN:-${TREE_ROOT}/opensips}"
 OPENSIPS_LIB_NATS="${OPENSIPS_LIB_NATS:-${TREE_ROOT}/lib/nats}"
@@ -94,7 +96,7 @@ if [ ! -d "$OPENSIPS_MODULES" ]; then
     skip "module directory not found at $OPENSIPS_MODULES"
 fi
 
-if ! nats --server "$NATS_URL" server check connection \
+if ! "${NATS_PROBE}" "$NATS_URL" \
         > "$WORKDIR/conn.out" 2>&1; then
     cat "$WORKDIR/conn.out"
     skip "NATS broker not reachable at $NATS_URL"

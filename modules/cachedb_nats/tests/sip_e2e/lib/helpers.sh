@@ -371,8 +371,7 @@ bounce_broker() {
         > "$WORKDIR/bounce_nats.log" 2>&1 &
     BOUNCE_NATS_PID=$!
     for i in $(seq 1 10); do
-        nats --server "nats://127.0.0.1:${BOUNCE_NATS_PORT}" \
-            server check connection >/dev/null 2>&1 && return 0
+        "${NATS_PROBE}" "nats://127.0.0.1:${BOUNCE_NATS_PORT}" >/dev/null 2>&1 && return 0
         sleep 0.5
     done
     return 1
