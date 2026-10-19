@@ -4999,8 +4999,11 @@ static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
 		memset(&val, 0, sizeof(pv_value_t));
 		val.flags = PV_VAL_STR;
 		val.rs = sdp_body;
-		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0)
-			LM_ERR("failed to set body pvar\n");
+		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0) {
+			LM_ERR("subscribe request: failed to set the body variable\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
 	}
 
 	/* extract to-tag (subscription identifier) from reply */
@@ -5013,8 +5016,11 @@ static int rtpengine_subscribe_request_f(struct sip_msg *msg, str *flags,
 		memset(&val, 0, sizeof(pv_value_t));
 		val.flags = PV_VAL_STR;
 		val.rs = to_tag;
-		if (pv_set_value(msg, tpvar, (int)EQ_T, &val) < 0)
-			LM_ERR("failed to set tag pvar\n");
+		if (pv_set_value(msg, tpvar, (int)EQ_T, &val) < 0) {
+			LM_ERR("subscribe request: failed to set the tag variable\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
 	}
 
 	bencode_buffer_free(&bencbuf);
@@ -5104,8 +5110,11 @@ static int rtpengine_publish_f(struct sip_msg *msg, str *flags,
 		memset(&val, 0, sizeof(pv_value_t));
 		val.flags = PV_VAL_STR;
 		val.rs = newbody;
-		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0)
-			LM_ERR("failed to set body pvar with answer SDP\n");
+		if (pv_set_value(msg, bpvar, (int)EQ_T, &val) < 0) {
+			LM_ERR("publish: failed to set the body variable\n");
+			bencode_buffer_free(&bencbuf);
+			return -1;
+		}
 	}
 
 	bencode_buffer_free(&bencbuf);
