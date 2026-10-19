@@ -75,7 +75,7 @@ jobs:
         run: |
           set -e
           make -j"$(nproc)" opensips
-          for m in signaling sl tm rr maxfwd sipmsgops proto_udp \
+          for m in signaling sl tm rr maxfwd sipmsgops proto_udp mi_datagram \
                    tls_mgm tls_openssl \
                    cachedb_nats cachedb_nats_fts event_nats nats_consumer; do
             make modules=modules/$m modules
