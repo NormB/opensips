@@ -37,9 +37,12 @@ when the [cachedb_nats_fts](../cachedb_nats_fts/README.md) module is
 loaded, JSON documents stored under keys that begin with
 [fts_json_prefix](#fts_json_prefix-string) are indexed in shared memory, and
 `cache_query` answers equality filters on their string fields from
-the index instead of scanning the bucket.  Without
-*cachedb_nats_fts* (the usual choice for usrloc), `cache_query` only
-serves primary-key lookups, which go straight to `kvStore_Get`.
+the index.  Primary-key lookups always go straight to `kvStore_Get`.
+Any other filter -- integer values, ranges (`<`, `<=`, `>`, `>=`), or
+every non-key filter when *cachedb_nats_fts* is not loaded (the usual
+choice for usrloc) -- is answered by one pass over the documents under
+[fts_json_prefix](#fts_json_prefix-string).  This is how usrloc's NAT
+pinging query (`aorhash` in a range) is served.
 - **Live KV watcher** —
 with [kv_watch](#kv_watch-string) set, a dedicated process watches the
 bucket, raises the [E_NATS_KV_CHANGE](#e_nats_kv_change) event for every
@@ -601,8 +604,9 @@ behaviour.
 
 Loading the optional *cachedb_nats_fts* module is the
 switch for the JSON search index.  Pure usrloc
-workloads simply do not load it — PK-only operation,
-no index SHM, no watcher-feed CPU.
+workloads simply do not load it — primary-key operation (other
+queries, such as NAT pinging, scan the bucket), no index SHM, no
+watcher-feed CPU.
 
 
 **Index size**
@@ -623,9 +627,8 @@ single primary-key equality condition on a string value, the
 query encodes the value into the KV key, prefixes it, calls
 `kvStore_Get`, parses the
 returned JSON, and returns one row.  No mutex
-acquired, no chain walk.  Falls through to the
-index path for any non-PK or multi-condition
-filter.
+acquired, no chain walk.  Any other filter goes to the index (string
+equalities, with *cachedb_nats_fts*) or to a bucket scan.
 
 
 Scaling guidance:
@@ -806,12 +809,14 @@ once a key passes revision 2 147 483 647.
 with this module's [kv_replicas](#kv_replicas-integer),
 [kv_history](#kv_history-integer) and [kv_ttl](#kv_ttl-integer)
 settings; pre-create a bucket that needs other settings.
-- **Filters:** without *cachedb_nats_fts*, only single primary-key
-equality filters are accepted; with it, only equality filters.
-- **usrloc NAT pinging does not work with this backend.**  In
-`full-sharing-cachedb` mode, nathelper asks usrloc for the contacts to
-ping with an `aorhash` range query, which this module rejects, so no
-contacts are returned for pinging.
+- **Queries the index cannot answer read the whole bucket.**  Each such
+`cache_query` is one pass over the documents under
+[fts_json_prefix](#fts_json_prefix-string).  usrloc NAT pinging in
+`full-sharing-cachedb` mode is one of them: nathelper queries once per
+second per `natping_partitions`, so pinging reads the bucket that often
+(e.g. 100 000 registrations of about 1 KB each are about 100 MB/s per
+partition).  `update` still accepts only primary-key filters without
+*cachedb_nats_fts*.
 - **A recreated bucket is not replayed.**  If the bucket is deleted
 and recreated while the KV watcher is disconnected, the watcher starts
 at the new bucket's end: changes made to the new bucket before the

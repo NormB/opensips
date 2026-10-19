@@ -38,7 +38,7 @@ wait_for 10 mi_ready
 # rebuilt; with ENABLE_INDEX=0 there is no rebuild because there
 # is no index, and the PK fast path serves directly from KV.
 if [ "${ENABLE_INDEX:-1}" = "0" ]; then
-    disabled=$(grep -c "cachedb_nats_fts not loaded; query/update accept PK-only" \
+    disabled=$(grep -c "cachedb_nats_fts not loaded; update accepts PK-only" \
         "$WORKDIR/opensips.log" 2>/dev/null || echo 0)
     check "restarted A skips index build when index is disabled" \
         $([ "$disabled" -ge 1 ] && echo ok || echo fail) \

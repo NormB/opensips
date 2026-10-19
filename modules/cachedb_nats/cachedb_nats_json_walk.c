@@ -159,7 +159,8 @@ const char *cdbn_skip_json_value(const char *p, const char *end)
 			}
 			p++;
 		}
-		return p;
+		/* ran out of input before the closing bracket: malformed */
+		return depth == 0 ? p : NULL;
 
 	default: /* number, bool, null — consume until delimiter */
 		while (p < end && *p != ',' && *p != '}' && *p != ']'

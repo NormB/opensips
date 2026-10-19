@@ -44,6 +44,7 @@
 #include "../../cachedb/cachedb.h"
 #include "../../lib/nats/nats_dl.h"   /* libnats function-pointer table */
 #include "../../lib/nats/nats_err.h"   /* NATS_ERR_TEXT */
+#include "../../lib/nats/nats_redact.h"   /* nats_redact_key */
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats.h"
@@ -51,6 +52,8 @@
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_json_internal.h"
 #include "cachedb_nats_expiry.h"
+#include "cachedb_nats_query_filter.h"   /* cdbn_doc_matches */
+#include "cachedb_nats_reap_enum.h"      /* one value-carrying pass */
 
 /* module parameters (defined in cachedb_nats.c) */
 extern char *fts_json_prefix;
@@ -168,6 +171,41 @@ static int query_pk_fast_path(nats_cachedb_con *ncon,
 	return 0;
 }
 
+/* Parse one stored document into a result row (the shape usrloc reads)
+ * and append it to @res.  A document that does not parse is skipped.
+ * Returns 0, or -1 on out of memory. */
+static int query_add_row(const char *key, const char *data, int data_len,
+	cdb_res_t *res)
+{
+	cdb_row_t *row;
+
+	row = pkg_malloc(sizeof *row);
+	if (!row) {
+		LM_ERR("no more pkg memory for cdb_row_t\n");
+		return -1;
+	}
+	if (cdbn_safe_json_to_dict(data, data_len, &row->dict) != 0) {
+		char _rk[NATS_REDACT_KEY_BUF];
+		nats_redact_key(key, _rk, sizeof(_rk));
+		LM_ERR("failed to parse JSON for key '%s'\n", _rk);
+		pkg_free(row);
+		return 0;
+	}
+	/* Widen each contact's last_mod back to int64
+	 * (the shared converter clamped it to int32). */
+	cdbn_row_patch_last_mod_int64(data, data_len, &row->dict);
+	/* Hand usrloc exactly {contacts, aorhash} —
+	 * strip the cachedb_nats-private row_exp/schema_version peers. */
+	cdbn_row_strip_private_keys(&row->dict);
+	/* Omit expired contacts (read-only) before usrloc
+	 * sees them; fail-closed on an unparseable expires. */
+	cdbn_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
+
+	res->count++;
+	list_add_tail(&row->list, &res->rows);
+	return 0;
+}
+
 /* Fetch the matched documents from the KV and append parsed rows to
  * @res.  Per-row fetch/parse problems skip the row (the KV is the
  * truth); only allocation failure is fatal (-1). */
@@ -176,7 +214,6 @@ static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 {
 	kvEntry *entry = NULL;
 	natsStatus s;
-	cdb_row_t *row;
 	int i;
 
 	/* Fetch full JSON documents and build result set */
@@ -231,40 +268,87 @@ static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
 			continue;
 		}
 
-		/* Build a cdb_row_t from the JSON document.
-		 * Use cdb_json_to_dict if available, otherwise build manually. */
-		row = pkg_malloc(sizeof *row);
-		if (!row) {
-			LM_ERR("no more pkg memory for cdb_row_t\n");
+		if (query_add_row(match_keys[i], data, data_len, res) < 0) {
 			nats_dl.kvEntry_Destroy(entry);
 			entry = NULL;
 			return -1;
 		}
 
-		if (cdbn_safe_json_to_dict(data, data_len, &row->dict) != 0) {
-			LM_ERR("failed to parse JSON for key '%s'\n", match_keys[i]);
-			pkg_free(row);
-			nats_dl.kvEntry_Destroy(entry);
-			entry = NULL;
-			continue;
-		}
-		/* Widen each contact's last_mod back to int64
-		 * (the shared converter clamped it to int32). */
-		cdbn_row_patch_last_mod_int64(data, data_len, &row->dict);
-		/* Hand usrloc exactly {contacts, aorhash} —
-		 * strip the cachedb_nats-private row_exp/schema_version peers. */
-		cdbn_row_strip_private_keys(&row->dict);
-		/* Omit expired contacts (read-only) before usrloc
-		 * sees them; fail-closed on an unparseable expires. */
-		cdbn_row_filter_expired_contacts(&row->dict, time(NULL), nats_reap_grace);
-
-		res->count++;
-		list_add_tail(&row->list, &res->rows);
-
 		nats_dl.kvEntry_Destroy(entry);
 		entry = NULL;
 	}
 	return 0;
+}
+
+/* rows the search index cannot select -- non-equality or integer
+ * filters (usrloc's NAT-pinging "aorhash in [min, max)"), or no
+ * cachedb_nats_fts loaded: one value-carrying pass over the documents
+ * under fts_json_prefix, each matched against the filters */
+struct query_scan_ctx {
+	const cdb_filter_t *filter;
+	cdb_res_t *res;
+	int prefix_len;
+};
+
+static int query_scan_entry(kvEntry *e, void *arg)
+{
+	struct query_scan_ctx *c = arg;
+	const char *key = nats_dl.kvEntry_Key(e);
+	const char *data;
+	int data_len;
+
+	if (!key)
+		return 0;
+	if (c->prefix_len && strncmp(key, fts_json_prefix, c->prefix_len) != 0)
+		return 0;
+	data = nats_dl.kvEntry_ValueString(e);
+	data_len = nats_dl.kvEntry_ValueLen(e);
+	if (cdbn_value_classify(data, data_len) != NATS_VAL_OBJECT)
+		return 0;   /* delete marker, or poison: the reaper alarms it */
+	if (!cdbn_doc_matches(data, data_len, c->filter))
+		return 0;
+	return query_add_row(key, data, data_len, c->res);
+}
+
+static int query_scan(nats_cachedb_con *ncon, const cdb_filter_t *filter,
+	cdb_res_t *res)
+{
+	static int noticed;
+	struct query_scan_ctx c;
+	int rc;
+
+	if (!noticed) {
+		noticed = 1;
+		LM_NOTICE("query: filters the search index cannot answer (e.g. "
+			"field '%.*s') are served by one pass over the bucket per "
+			"query\n", filter->key.name.len,
+			filter->key.name.s);   /* not PII: a field name */
+	}
+	c.filter = filter;
+	c.res = res;
+	c.prefix_len = (fts_json_prefix && *fts_json_prefix)
+		? fts_json_prefix_len : 0;
+	rc = nats_kv_enum_live_values(ncon->kv, NATS_KV_ENUM_NEXT_TIMEOUT_MS,
+		query_scan_entry, &c);
+	if (rc < 0) {
+		LM_ERR("query: bucket scan failed (%d)\n", rc);
+		cdb_free_rows(res);
+		return -1;
+	}
+	LM_DBG("query scan: %d document(s) visited, %d matched\n", rc,
+		res->count);
+	return 0;
+}
+
+/* the search index answers AND lists of string equalities only */
+static int query_index_can_answer(const cdb_filter_t *filter)
+{
+	const cdb_filter_t *f;
+
+	for (f = filter; f; f = f->next)
+		if (f->op != CDB_OP_EQ || !f->val.is_str)
+			return 0;
+	return 1;
 }
 
 /**
@@ -279,8 +363,10 @@ static int query_fetch_rows(nats_cachedb_con *ncon, char **match_keys,
  * cdbn_safe_json_to_dict() (which guards then calls cdb_json_to_dict()), and
  * appended to @res.
  *
- * Only CDB_OP_EQ with string values is supported.  Results may be capped
- * by the fts_max_results module parameter.
+ * The search index (cachedb_nats_fts) answers AND lists of string
+ * equalities, capped by its fts_max_results; any other filter (ranges,
+ * integer values) -- or every non-PK filter when the index is not loaded
+ * -- is served by one pass over the bucket (query_scan), uncapped.
  *
  * Returns 0 on success (even if zero rows match), -1 on error.
  */
@@ -339,14 +425,8 @@ int nats_cache_query(cachedb_con *con, const cdb_filter_t *filter,
 	    filter->val.is_str && filter->op == CDB_OP_EQ)
 		return query_pk_fast_path(ncon, filter, res);
 
-	if (!cdbn_fts_on) {
-		LM_ERR("query: non-PK filter rejected -- the search index "
-			"module (cachedb_nats_fts) is not loaded; only "
-			"single-condition is_pk=1 filters are accepted "
-			"(filter field '%.*s')\n",
-			filter->key.name.len, filter->key.name.s);
-		return -1;
-	}
+	if (!cdbn_fts_on || !query_index_can_answer(filter))
+		return query_scan(ncon, filter, res);
 
 	if (cdbn_fts.query_match_keys(filter, &match_keys, &match_count) < 0)
 		return -1;

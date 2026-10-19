@@ -33,9 +33,10 @@
  * Loading this module IS the enable switch (it replaces the former
  * enable_search_index modparam): cachedb_nats binds to it at startup via
  * cdbn_fts_bind() and, when bound, feeds the SHM index from its writer
- * and watcher paths and routes non-PK query() filters through
- * query_match_keys().  Without this module cachedb_nats is PK-only —
- * the flagship usrloc path never touches any of this.
+ * and watcher paths and routes non-PK string-equality query() filters
+ * through query_match_keys().  Without this module cachedb_nats answers
+ * primary-key queries directly and scans the bucket for any other
+ * filter -- the flagship usrloc path never touches any of this.
  *
  * The module owns: the SHM hash index (fts_index.c), the doc-key intern
  * table (fts_intern.c) and the non-PK filter walk (fts_query.c).  The

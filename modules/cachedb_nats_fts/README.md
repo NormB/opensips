@@ -41,11 +41,12 @@ several instances share the bucket.
 ### Limitations
 
 
-- Only equality filters are supported.
-- Only top-level string fields are indexed; numbers, booleans and
-nested values are skipped.  A filter condition with a non-string value
-is ignored: it does not narrow the result, and a filter made only of
-such conditions matches nothing.
+- The index answers AND lists of equality filters on string values.
+Only top-level string fields are indexed; numbers, booleans and nested
+values are skipped.  *cachedb_nats* sends any other query -- ranges or
+integer values, such as usrloc's NAT-pinging `aorhash` range -- to a
+scan of the bucket instead (see the
+[cachedb_nats limitations](../cachedb_nats/README.md#limitations)).
 - There is no script interface.  `cache_store`, `cache_fetch` and
 `cache_raw_query` do not consult the index; only modules calling the
 CacheDB `query()` and `update()` API use it.

@@ -49,7 +49,8 @@
 #include "../cachedb_nats_fts/cachedb_nats_fts_api.h"
 
 /* optional FTS module binds (defined in cachedb_nats.c).
- * cdbn_fts_on == 0 -> hooks are NULL, PK-only operation. */
+ * cdbn_fts_on == 0 -> hooks are NULL: primary-key queries go to the KV,
+ * any other filter to a bucket scan (query_scan). */
 extern cdbn_fts_api_t cdbn_fts;
 extern int cdbn_fts_on;
 

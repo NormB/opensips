@@ -732,8 +732,8 @@ static int init_services(void)
 	/* Bind the optional FTS/search-index module.  The
 	 * module owns the SHM index + intern table (allocated in ITS
 	 * mod_init, pre-fork); we only take its API here.  Without it,
-	 * query/update accept PK-only filters and the watcher serves the
-	 * E_NATS_KV_CHANGE event alone. */
+	 * update accepts PK-only filters, query answers other filters with
+	 * a bucket scan, and the watcher serves E_NATS_KV_CHANGE alone. */
 	{
 		cdbn_fts_bind_f bind_f =
 			(cdbn_fts_bind_f)find_export("cdbn_fts_bind", 0);
@@ -743,7 +743,8 @@ static int init_services(void)
 				"query filters ENABLED\n");
 		} else {
 			LM_INFO("cachedb_nats: cachedb_nats_fts not loaded; "
-				"query/update accept PK-only filters\n");
+				"update accepts PK-only filters, query scans the "
+				"bucket for others\n");
 		}
 	}
 
