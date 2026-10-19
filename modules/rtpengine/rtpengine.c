@@ -209,6 +209,7 @@ struct rtpe_ctx {
 
 struct ng_flags_parse {
 	int via, to, packetize, transport, directional, no_from_tag;
+	int source_selector; /* subscribe request: all, from-tags= or label= */
 	bencode_item_t *dict, *flags, *direction, *replace, *rtcp_mux;
 	str call_id, from_tag, to_tag, received_from;
 	str viabranch;
@@ -2550,6 +2551,10 @@ static int parse_flags(struct ng_flags_parse *ng_flags, struct sip_msg *msg,
 		}
 
 		/* we got here if we didn't match something specific */
+		if ((!val.s && str_eq(&key, "all")) ||
+				(val.s && (str_eq(&key, "from-tags") || str_eq(&key, "label"))))
+			ng_flags->source_selector = 1;
+
 		if (!val.s) {
 			bitem = bencode_str(bencode_item_buffer(ng_flags->flags), &key);
 			if (!bitem) {
@@ -2735,6 +2740,7 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 	bencode_item_t *item;
 	str viabranch;
 	int ret, flags_exist = 0, callid_exist = 0, from_tag_exist = 0, to_tag_exist = 0;
+	int from_tag_given, to_tag_given;
 	str flags_nt = {0,0};
 
 	if (bencode_buffer_init(bencbuf)) {
@@ -2785,6 +2791,8 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 		*err = "could not parse flags";
 		goto error;
 	}
+	from_tag_given = ng_flags->from_tag.len > 0;
+	to_tag_given = ng_flags->to_tag.len > 0;
 
 	if (!ng_flags->call_id.len &&
 			(get_callid(msg, &ng_flags->call_id) == -1 || ng_flags->call_id.len == 0)) {
@@ -2865,7 +2873,41 @@ static int rtpe_function_call_prepare(bencode_buffer_t *bencbuf, struct sip_msg 
 		}
 	}
 
-	if (op == OP_START_MEDIA || op == OP_STOP_MEDIA ||
+	if (!extra_dict && (op == OP_SUBSCRIBE_REQUEST || op == OP_SUBSCRIBE_ANSWER
+			|| op == OP_UNSUBSCRIBE || op == OP_PUBLISH)) {
+		/* script call: to-tag names the subscription and from-tag the
+		 * source (subscribe) or the publisher, so they never follow the
+		 * message direction -- a call leg's own tag sent here would rewire
+		 * or unsubscribe that leg's media */
+		switch (op) {
+		case OP_SUBSCRIBE_REQUEST:
+			/* the source defaults to the From tag, unless all, from-tags=
+			 * or label= select it; without to-tag=, rtpengine generates
+			 * the subscription tag */
+			if (from_tag_given || (!ng_flags->no_from_tag &&
+					!ng_flags->source_selector))
+				bencode_dictionary_add_str(ng_flags->dict, "from-tag",
+					&ng_flags->from_tag);
+			break;
+		case OP_SUBSCRIBE_ANSWER:
+		case OP_UNSUBSCRIBE:
+			if (!to_tag_given) {
+				*err = "the to-tag= flag (the subscription tag) is required";
+				goto error;
+			}
+			if (from_tag_given)
+				bencode_dictionary_add_str(ng_flags->dict, "from-tag",
+					&ng_flags->from_tag);
+			break;
+		default: /* OP_PUBLISH: the publisher defaults to the From tag */
+			if (!ng_flags->no_from_tag)
+				bencode_dictionary_add_str(ng_flags->dict, "from-tag",
+					&ng_flags->from_tag);
+			break;
+		}
+		if (to_tag_given)
+			bencode_dictionary_add_str(ng_flags->dict, "to-tag", &ng_flags->to_tag);
+	} else if (op == OP_START_MEDIA || op == OP_STOP_MEDIA ||
 			op == OP_BLOCK_MEDIA || op == OP_UNBLOCK_MEDIA ||
 			op == OP_BLOCK_DTMF || op == OP_UNBLOCK_DTMF ||
 			op == OP_START_FORWARD || op == OP_STOP_FORWARD) {
@@ -2916,6 +2958,34 @@ error:
 		pkg_free(flags_nt.s);
 	return -1;
 }
+
+#ifdef UNIT_TESTS
+int rtpe_test_build_request(bencode_buffer_t *buf, struct sip_msg *msg,
+		const char *cmd, str *flags, str *body, bencode_item_t **dict)
+{
+	struct ng_flags_parse ng_flags;
+	char *err = NULL;
+	int op;
+
+	for (op = 0; op < sizeof(command_strings)/sizeof(command_strings[0]); op++)
+		if (command_strings[op] && !strcmp(cmd, command_strings[op]))
+			break;
+	if (op == sizeof(command_strings)/sizeof(command_strings[0]))
+		return -1;
+
+	memset(&ng_flags, 0, sizeof ng_flags);
+	if (rtpe_function_call_prepare(buf, msg, op, &ng_flags, flags, body,
+			NULL, &err) < 0) {
+		if (err)
+			LM_DBG("request refused: %s\n", err);
+		bencode_buffer_free(buf);
+		return -1;
+	}
+
+	*dict = ng_flags.dict;
+	return 0;
+}
+#endif
 
 static bencode_item_t *rtpe_function_call(bencode_buffer_t *bencbuf, struct sip_msg *msg,
 	enum rtpe_operation op, str *flags_str, str *body_in, pv_spec_t *spvar,
