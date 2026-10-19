@@ -339,11 +339,15 @@ the operation, the value (for puts) and the revision;
 - updates the *cachedb_nats_fts* index, if that module is loaded.
 
 
-The watcher only reports changes made while it is subscribed.  After
-a disconnect it waits for the connection, re-subscribes and (with the
-index loaded) rebuilds the index, but changes made while it was
-disconnected do not raise *E_NATS_KV_CHANGE*; see
-[Limitations](#limitations).
+After a disconnect the watcher waits for the connection and resumes
+right after the last revision it delivered, so changes made while it
+was disconnected still raise *E_NATS_KV_CHANGE*, once each, after the
+reconnect.  With [kv_history](#kv_history-integer) set to 1 the bucket
+keeps only the newest value of a key, so a key changed several times
+during the outage is reported once, with its latest value.  If the
+bucket was deleted and recreated meanwhile, the watcher logs a warning
+and starts at the new bucket's end.  With the index loaded, the watcher
+also rebuilds it after a reconnect.
 
 
 ### Cluster Configuration
@@ -783,9 +787,10 @@ equality filters are accepted; with it, only equality filters.
 `full-sharing-cachedb` mode, nathelper asks usrloc for the contacts to
 ping with an `aorhash` range query, which this module rejects, so no
 contacts are returned for pinging.
-- **The KV watcher misses changes made during a disconnect.**  It
-re-subscribes for new changes only, so *E_NATS_KV_CHANGE* is not raised
-for keys changed while it was disconnected.  (The *cachedb_nats_fts*
+- **A recreated bucket is not replayed.**  If the bucket is deleted
+and recreated while the KV watcher is disconnected, the watcher starts
+at the new bucket's end: changes made to the new bucket before the
+reconnect do not raise *E_NATS_KV_CHANGE*.  (The *cachedb_nats_fts*
 index is rebuilt after a reconnect and is not affected.)
 - **TLS needs [nats_url](#nats_url-string).**  The server list derived
 from [cachedb_url](#cachedb_url-string) is always plaintext.
@@ -1219,15 +1224,13 @@ modparam("cachedb_nats", "cas_retries", 20)
 
 Whether the KV watcher rebuilds the in-memory search
 index in full after each reconnect to NATS.  The
-watcher subscribes with `UpdatesOnly`,
-so writes made by sibling instances while this process
-was disconnected are never delivered live.  The
-stale-entry self-heal in the query path
-only evicts index
-entries the KV store reports as gone; it cannot
-discover a key that was never indexed locally.  The
-default is therefore on, so the index always converges
-after an outage.
+watcher replays the changes it missed while disconnected
+(see [KV Watcher](#kv-watcher)), but not when the bucket
+was recreated meanwhile, and the stale-entry self-heal
+in the query path only evicts index entries the KV store
+reports as gone; it cannot discover a key that was never
+indexed locally.  The default is therefore on, so the
+index always converges after an outage.
 
 
 Set to **0** only in
@@ -1909,8 +1912,10 @@ cost: `reap_last_run` (epoch) /
 `_ms` / `_keys` /
 `_aors` / `_contacts` /
 `_active` / `_permanent` /
-`_due`.  These refresh every
-[reap_interval](#reap_interval-integer) seconds and are the
+`_due`.  These describe the last complete pass and refresh every
+[reap_interval](#reap_interval-integer) seconds; a pass whose bucket
+scan failed or stopped early keeps the previous values and increments
+the `reap_enum_failures` counter instead.  They are the
 recommended monitoring feed for registration counts (poll this, not
 [cachedb_nats:nats_reg_summary](#cachedb_natsnats_reg_summary), on large
 buckets).
@@ -1944,6 +1949,7 @@ opensips-cli -x mi cachedb_nats:nats_cdb_stats
     "reap_last_active": 3,
     "reap_last_permanent": 0,
     "reap_last_due": 0,
+    "reap_enum_failures": 0,
     "tbm_requested": 1,
     "tbm_probe_state": 2,
     "tbm_canary_verdict": 1,

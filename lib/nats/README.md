@@ -224,7 +224,7 @@ callbacks bump the epoch and set the stale flag.
 | Broker down at startup | OpenSIPS starts; each process connects in the background (`NATS pool: broker unreachable at startup; ...`). Operations fail fast until then. |
 | Connection lost mid-operation | The operation ends at its own timeout; the next one fails fast. A dead broker is detected in about 20 s (10 s pings, 2 outstanding). |
 | Broker down when an operation starts | Operations return an error immediately instead of blocking a SIP worker (table below). |
-| Broker comes back | KV handles are refreshed, consumer subscriptions are rebuilt (durables resume where they stopped), the KV watcher re-subscribes, and the async RPC inbox is re-created. No restart needed. |
+| Broker comes back | KV handles are refreshed, consumer subscriptions are rebuilt (durables resume where they stopped), the KV watcher resumes after the last change it delivered (so changes made during the outage still raise E_NATS_KV_CHANGE), and the async RPC inbox is re-created. No restart needed. |
 | Stream, consumer or bucket deleted on the server | Ephemeral consumers are re-created automatically. A durable consumer on a deleted stream stays failed until an operator unbinds it and binds it again after re-creating the stream. |
 
 Return values while disconnected:
