@@ -219,9 +219,8 @@ modparam("tls_mgm", "verify_cert", "[nats]1")
 loadmodule "${TREE_ROOT}/modules/tls_openssl/tls_openssl.so"
 
 # cachedb_nats with a tls:// URL pointing at our private TLS broker.
-# nats_url is used (not cachedb_url) so the tls:// scheme is preserved
-# verbatim into nats_pool_register; the cachedb_url path always
-# rewrites the scheme to nats://.
+# nats_url is used here; the cachedb_url-only form (?tls_domain=nats)
+# has its own scenario below.
 loadmodule "${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so"
 modparam("cachedb_nats", "nats_url", "tls://localhost:${NATS_PORT}")
 modparam("cachedb_nats", "cachedb_url", "nats:loc://localhost:${NATS_PORT}/")
@@ -474,6 +473,51 @@ if boot_scenario "skip_verify" "$SKIP_VERIFY_CFG" "NATS pool: connected to" 10; 
 else
     fail "positive: verify_cert=0 path did not connect"
     tail -15 "${WORKDIR}/skip_verify.log" 2>&1 | sed 's/^/  | /'
+fi
+
+# ----------------------------------------------------------------
+# Scenario: TLS asked for in cachedb_url only (no nats_url), the
+# cachedb_redis way: "?tls_domain=nats".  Two hosts, so each needs its
+# own tls:// scheme in the derived server list.
+# ----------------------------------------------------------------
+CDB_TLS_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"nats\")
+modparam(\"tls_mgm\", \"certificate\", \"[nats]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[nats]${WORKDIR}/client.key\")
+modparam(\"tls_mgm\", \"ca_list\", \"[nats]${WORKDIR}/ca.crt\")
+modparam(\"tls_mgm\", \"verify_cert\", \"[nats]1\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT},localhost:${NATS_PORT}/?tls_domain=nats\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_CDB_TLS\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+${FOOTER}"
+
+if boot_scenario "cdb_tls" "$CDB_TLS_CFG" "NATS pool: connected to" 10; then
+    pass "positive: cachedb_url ?tls_domain=nats connects over TLS (no nats_url)"
+else
+    fail "positive: cachedb_url ?tls_domain=nats did not connect"
+    tail -15 "${WORKDIR}/cdb_tls.log" 2>&1 | sed 's/^/  | /'
+fi
+
+CDB_BADDOM_CFG="${HEADER}
+loadmodule \"${TREE_ROOT}/modules/tls_mgm/tls_mgm.so\"
+modparam(\"tls_mgm\", \"client_domain\", \"nats\")
+modparam(\"tls_mgm\", \"certificate\", \"[nats]${WORKDIR}/client.crt\")
+modparam(\"tls_mgm\", \"private_key\", \"[nats]${WORKDIR}/client.key\")
+loadmodule \"${TREE_ROOT}/modules/tls_openssl/tls_openssl.so\"
+loadmodule \"${TREE_ROOT}/modules/cachedb_nats/cachedb_nats.so\"
+modparam(\"cachedb_nats\", \"cachedb_url\", \"nats:loc://localhost:${NATS_PORT}/?tls_domain=other\")
+modparam(\"cachedb_nats\", \"kv_bucket\", \"TEST_CDB_BADDOM\")
+modparam(\"cachedb_nats\", \"kv_replicas\", 1)
+${FOOTER}"
+
+if boot_scenario "cdb_baddom" "$CDB_BADDOM_CFG" "tls_domain must be" 10; then
+    pass "negative: cachedb_url with a tls_domain other than nats is refused at startup"
+else
+    fail "negative: tls_domain=other was not refused with the operator message"
+    tail -15 "${WORKDIR}/cdb_baddom.log" 2>&1 | sed 's/^/  | /'
 fi
 
 # ----------------------------------------------------------------

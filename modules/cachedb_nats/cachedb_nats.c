@@ -77,6 +77,7 @@
 #include "cachedb_nats_expiry.h"
 #include "cachedb_nats_reg.h"      /* registration MI + reap-pass gauges */
 #include "cachedb_nats_kvobs.h"    /* generic stream/KV introspection MI */
+#include "cachedb_nats_url.h"      /* cachedb_url -> server list */
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_redact.h"
 
@@ -600,9 +601,8 @@ static int init_pool(void)
 	 * them.  cachedb_nats still needs its own nats_url and TLS params so a
 	 * cachedb-only deployment can connect without another NATS module.
 	 *
-	 * If nats_url is set, use it directly. Otherwise, extract server
-	 * addresses from the cachedb_url (format: nats:group://host:port,.../)
-	 * and build a plain nats:// URL from the host:port portion.
+	 * If nats_url is set, use it directly. Otherwise, derive the server
+	 * list from the cachedb_url (cdbn_url_to_servers).
 	 */
 	{
 		const char *url_to_use = NULL;
@@ -613,34 +613,26 @@ static int init_pool(void)
 			url_to_use = nats_url;
 		} else if (nats_cdb_urls && nats_cdb_urls->url.s &&
 				nats_cdb_urls->url.len) {
-			/* extract host:port from cachedb_url
-			 * format: nats:group1://host1:4222,host2:4223/
-			 * we need: nats://host1:4222,nats://host2:4223 */
-			char *hosts_start;
-			/* skip past "://" — counted search: core
-			 * cachedb_store_url() does NOT NUL-terminate url.s,
-			 * so a libc strstr() here could read past the pkg
-			 * allocation when the URL lacks the separator */
-			hosts_start = str_strstr(&nats_cdb_urls->url,
-					_str("://"));
-			if (hosts_start) {
-				hosts_start += 3;
-				/* strip trailing slash */
-				int hlen = nats_cdb_urls->url.len -
-					(hosts_start - nats_cdb_urls->url.s);
-				while (hlen > 0 && hosts_start[hlen-1] == '/')
-					hlen--;
-				if (hlen > 0 && hlen < (int)sizeof(url_buf) - 8) {
-					snprintf(url_buf, sizeof(url_buf),
-						"nats://%.*s", hlen, hosts_start);
-					url_to_use = url_buf;
-				}
+			/* nats:group://[user:pass@]h1:p1,h2:p2/[?tls_domain=nats]
+			 * -> nats://[cred@]h1:p1,nats://[cred@]h2:p2 (tls:// with
+			 * tls_domain) -- see cachedb_nats_url.c */
+			int rc = cdbn_url_to_servers(nats_cdb_urls->url.s,
+				nats_cdb_urls->url.len, url_buf, sizeof(url_buf));
+
+			if (rc == CDBN_URL_TLS_DOMAIN) {
+				LM_ERR("cachedb_url: tls_domain must be \"%s\", the "
+					"tls_mgm client domain all NATS modules take "
+					"their TLS settings from\n", CDBN_TLS_DOMAIN);
+				return -1;
 			}
-			if (!url_to_use) {
-				LM_WARN("could not parse cachedb_url; "
-					"using nats://localhost:4222\n");
-				url_to_use = "nats://localhost:4222";
+			if (rc < 0) {
+				LM_ERR("cachedb_url: cannot derive the NATS servers "
+					"(expected nats:group://[user:pass@]host:port"
+					"[,host:port...]/[?tls_domain=%s]); set nats_url "
+					"or fix cachedb_url\n", CDBN_TLS_DOMAIN);
+				return -1;
 			}
+			url_to_use = url_buf;
 		} else {
 			LM_WARN("no nats_url or cachedb_url -- "
 				"using nats://localhost:4222\n");
@@ -673,8 +665,8 @@ static int init_pool(void)
 
 		/* TLS comes from the tls_mgm "nats" client domain at connect
 		 * time (apply_tls_from_mgm in lib/nats).  Operator switches to
-		 * TLS by writing tls:// in cachedb_url and defining the
-		 * tls_mgm domain. */
+		 * TLS with tls:// in nats_url, or ?tls_domain=nats in
+		 * cachedb_url, and defines the tls_mgm domain. */
 
 		if (nats_pool_register(url_to_use,
 				"cachedb_nats",

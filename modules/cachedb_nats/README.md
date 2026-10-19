@@ -69,10 +69,11 @@ own `tls_*` modparams.
 
 
 To use TLS, define a *tls_mgm* client
-domain named `"nats"` and set [nats_url](#nats_url-string) to
-`tls://` URLs.  The server list derived from
-[cachedb_url](#cachedb_url-string) is always plaintext, so it cannot be
-used for TLS.
+domain named `"nats"`, and either set [nats_url](#nats_url-string) to
+`tls://` URLs or, without a nats_url, add `?tls_domain=nats` to the
+[cachedb_url](#cachedb_url-string) (the *cachedb_redis* syntax).  All
+NATS modules share one connection, so `"nats"` is the only domain
+name accepted.
 
 
 ```opensips title="tls_mgm-driven NATS TLS"
@@ -88,6 +89,13 @@ loadmodule "tls_openssl.so"
 loadmodule "cachedb_nats.so"
 modparam("cachedb_nats", "cachedb_url", "nats://nats.example.org:4222/")
 modparam("cachedb_nats", "nats_url", "tls://nats.example.org:4222")
+```
+
+
+```opensips title="TLS from cachedb_url alone"
+loadmodule "cachedb_nats.so"
+modparam("cachedb_nats", "cachedb_url",
+    "nats://nats1.example.org:4222,nats2.example.org:4222/?tls_domain=nats")
 ```
 
 
@@ -811,8 +819,6 @@ reconnect do not raise *E_NATS_KV_CHANGE*.  (With
 [index_resync_on_reconnect](#index_resync_on_reconnect-integer) = 1, the
 default, the *cachedb_nats_fts* index is rebuilt after the reconnect and
 is not affected.)
-- **TLS needs [nats_url](#nats_url-string).**  The server list derived
-from [cachedb_url](#cachedb_url-string) is always plaintext.
 - **MI listings** return at most 200 rows;
 [cachedb_nats:nats_reg_list](#cachedb_natsnats_reg_list) scans at
 most 100 000 records and
@@ -836,8 +842,9 @@ below about 50 ms round-trip time.
 The following modules must be loaded before this module:
 
 
-- *tls_mgm* if [nats_url](#nats_url-string) holds a `tls://` URL (see
-[TLS](#tls)).  No other module is needed: the connection is provided by
+- *tls_mgm* if the connection uses TLS: `tls://` URLs in
+[nats_url](#nats_url-string), or `?tls_domain=nats` in
+[cachedb_url](#cachedb_url-string) (see [TLS](#tls)).  No other module is needed: the connection is provided by
 the shared NATS connection pool
 (*lib/nats/libnats_pool.so*, installed with the modules), which
 every NATS module uses.  See the
@@ -878,15 +885,16 @@ in the OpenSIPS script.  The URL format follows the standard OpenSIPS
 CacheDB convention:
 
 
-**nats[:`<group>`]://`<host>`:`<port>`/**
+**nats[:`<group>`]://[`<user>`:`<password>`@]`<host>`:`<port>`[,`<host>`:`<port>`...]/[?tls_domain=nats]**
 
 
 The optional `<group>` label (e.g.
 *nats:mycluster://*) distinguishes multiple cache
-namespaces in the same script.  When [nats_url](#nats_url-string) is
-also set it takes precedence over the host:port portion of this URL
-for the actual NATS connection; the URL is then used solely for group
-registration.
+namespaces in the same script.  Without a [nats_url](#nats_url-string),
+the first cachedb_url also gives the NATS servers: every host becomes a
+`nats://` URL (`tls://` with `?tls_domain=nats`), carrying the
+credentials if any.  When nats_url is set it takes precedence, and the
+URL is then used solely for group registration.
 
 
 This parameter may be set more than once to register multiple cache
@@ -925,12 +933,12 @@ Use DNS hostnames rather than IP addresses so that
 automatically following topology changes in the cluster.
 
 
-When this parameter is set it takes precedence over the host:port
-embedded in [cachedb_url](#cachedb_url-string).  When it is not set,
-the server list is the host:port part of the first
-[cachedb_url](#cachedb_url-string), as plain `nats://` URLs; if there
-is no cachedb_url or it cannot be parsed, `nats://localhost:4222` is
-used and a warning is logged.
+When this parameter is set it takes precedence over the hosts in
+[cachedb_url](#cachedb_url-string).  When it is not set, the server
+list comes from the first cachedb_url (see there); if that cannot be
+parsed, or names a `tls_domain` other than `"nats"`, OpenSIPS refuses to
+start.  With no cachedb_url at all, `nats://localhost:4222` is used and
+a warning is logged.
 
 
 *Default value is "NULL" (servers taken from the first cachedb_url).*

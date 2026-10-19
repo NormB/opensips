@@ -160,9 +160,13 @@ int main(void)
 		"plain URL passes through");
 	free(u);
 
-	/* 3. production wiring: counted search, not libc strstr */
-	ASSERT(file_contains("../cachedb_nats.c", "str_strstr"),
-		"cachedb_nats.c rewrites the URL via str_strstr");
+	/* 3. production wiring: the URL goes to cdbn_url_to_servers() with
+	 * its length (counted scan; behaviour in test_cdb_url_servers.c) */
+	ASSERT(file_contains("../cachedb_nats.c",
+			"nats_cdb_urls->url.len, url_buf"),
+		"cachedb_nats.c hands the URL to cdbn_url_to_servers with its length");
+	ASSERT(!file_contains("../cachedb_nats_url.c", "strstr("),
+		"cachedb_nats_url.c uses no libc strstr on the non-NUL URL");
 	ASSERT(!file_contains("../cachedb_nats.c", "strstr(p, \"://\")"),
 		"cachedb_nats.c no longer strstr()s the non-NUL URL");
 
