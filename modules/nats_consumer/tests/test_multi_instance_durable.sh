@@ -272,19 +272,26 @@ wait_for_connected() {
     return 1
 }
 
-# Pull requests currently waiting on the shared durable (0 if unknown).
-num_waiting() {
+# Pull requests the instance's consumer process has issued for the
+# handle (nats_consumer_list "pulls_requested"; 0 if unknown).
+pulls_requested() {
     local n
-    n="$(nats consumer info "$STREAM" "$DURABLE" --json 2>/dev/null \
-        | grep -oE '"num_waiting"[[:space:]]*:[[:space:]]*[0-9]+' \
+    n="$(printf '{"jsonrpc":"2.0","id":1,"method":"nats_consumer:nats_consumer_list"}' \
+        | nc -u -w 2 127.0.0.1 "$1" 2>/dev/null \
+        | grep -oE '"pulls_requested"[[:space:]]*:[[:space:]]*[0-9]+' \
         | grep -oE '[0-9]+$' | head -1)"
     echo "${n:-0}"
 }
 
+# Both instances are pulling from the durable.  Their pull requests
+# expire and are re-issued, so the broker's num_waiting only shows them
+# when two happen to overlap; each instance's own pull counter is the
+# stable signal.
 wait_for_pullers() {
-    local want="$1" deadline=$((SECONDS + WAIT_INIT_SECS))
+    local deadline=$((SECONDS + WAIT_INIT_SECS))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        [ "$(num_waiting)" -ge "$want" ] && return 0
+        [ "$(pulls_requested "$MI_PORT_A")" -ge 1 ] \
+            && [ "$(pulls_requested "$MI_PORT_B")" -ge 1 ] && return 0
         sleep 0.25
     done
     return 1
@@ -325,12 +332,12 @@ wait_for_connected "${WORKDIR}/B.log" \
     && pass "instance B connected" \
     || { fail "instance B never connected"; tail -20 "${WORKDIR}/B.log" | sed 's/^/  B| /'; exit 1; }
 
-# Publish only once BOTH instances have a pull request waiting on the
-# durable: "connected" does not mean subscribed, and a burst published
-# before B pulls all goes to A (seen once in the nightly: A=50 B=0).
-wait_for_pullers 2 \
+# Publish only once BOTH instances pull from the durable: "connected"
+# does not mean subscribed, and a burst published before B pulls all
+# goes to A (seen once in the nightly: A=50 B=0).
+wait_for_pullers \
     && pass "both instances are pulling from ${DURABLE}" \
-    || { fail "fewer than 2 pull requests waiting on ${DURABLE} (num_waiting=$(num_waiting))"; exit 1; }
+    || { fail "not both instances pull from ${DURABLE} (pulls_requested A=$(pulls_requested "$MI_PORT_A") B=$(pulls_requested "$MI_PORT_B"))"; exit 1; }
 
 info "publishing ${N_MESSAGES} messages to ${SUBJECT}"
 for i in $(seq 1 "$N_MESSAGES"); do
