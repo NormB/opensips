@@ -80,6 +80,7 @@ extern int index_resync_on_reconnect;
 
 #include "cachedb_nats_json.h"
 #include "cachedb_nats_watch.h"
+#include "cachedb_nats_watch_resume.h"
 #include "cachedb_nats_dbase.h"
 #include "cachedb_nats_stats.h"
 #include "../../lib/nats/nats_pool.h"
@@ -322,6 +323,32 @@ static enum watch_idx_action watch_index_action(int op, int val_len, char val0)
 	return WATCH_IDX_SKIP;
 }
 
+/* Last sequence of the bucket's stream (KV_<bucket>); 0 on success. */
+static int watch_stream_last_seq(uint64_t *last)
+{
+	char          sname[160];
+	jsCtx        *js;
+	jsStreamInfo *si = NULL;
+	jsErrCode     jerr = 0;
+	int           n;
+
+	js = nats_pool_get_js();
+	if (!js)
+		return -1;
+	n = snprintf(sname, sizeof sname, "KV_%s", kv_bucket);
+	if (n < 0 || n >= (int)sizeof sname)
+		return -1;
+	if (nats_dl.js_GetStreamInfo(&si, js, sname, NULL, &jerr) != NATS_OK
+			|| !si) {
+		if (si)
+			nats_dl.jsStreamInfo_Destroy(si);
+		return -1;
+	}
+	*last = si->State.LastSeq;
+	nats_dl.jsStreamInfo_Destroy(si);
+	return 0;
+}
+
 static void watcher_loop(void)
 {
 	kvEntry        *entry = NULL;
@@ -332,6 +359,9 @@ static void watcher_loop(void)
 	nats_epoch_t    watch_epoch;   /* tag of this build's KV */
 	int             prefix_len;
 	int             builds = 0;   /* successful watcher (re)builds so far */
+	struct watch_resume resume = {0};  /* next revision to deliver */
+	uint64_t        stream_last, start_rev;
+	int             have_last, reset;
 
 	prefix_len = fts_json_prefix_len;   /* cached */
 
@@ -361,8 +391,13 @@ static void watcher_loop(void)
 		}
 
 		/* ---- Create the kvWatcher BEFORE the snapshot rebuild ----
-		 * UpdatesOnly delivers only mutations from the subscribe point
-		 * onward.  Subscribing FIRST means any Put/Delete that lands during
+		 * The first build starts at the end of the bucket's stream (new
+		 * changes only); every rebuild resumes right after the last
+		 * revision delivered, so the changes made while the connection
+		 * was down -- and while this loop noticed the reconnect -- still
+		 * raise E_NATS_KV_CHANGE, and none is delivered twice.  Only when
+		 * the stream state cannot be read before the first build does it
+		 * fall back to UpdatesOnly.  Subscribing FIRST means any Put/Delete that lands during
 		 * the (potentially slow, O(N)) rebuild below is captured in the
 		 * watcher's pending queue and applied by the consume loop after the
 		 * index swap -- closing the (snapshot, subscribe) window that would
@@ -373,8 +408,19 @@ static void watcher_loop(void)
 		 *
 		 * Create into a local handle, then publish it atomically -- libnats
 		 * wants a plain kvWatcher**, so we cannot pass &_watcher (_Atomic). */
+		stream_last = 0;
+		have_last = (watch_stream_last_seq(&stream_last) == 0);
+		start_rev = watch_resume_start(&resume, have_last, stream_last,
+			&reset);
+		if (reset)
+			LM_WARN("watcher: KV bucket '%s' restarted at revision %llu "
+				"(bucket recreated?); changes before that are not "
+				"replayed\n", kv_bucket, (unsigned long long)stream_last);
 		nats_dl.kvWatchOptions_Init(&opts);
-		opts.UpdatesOnly = true;
+		if (start_rev)
+			opts.ResumeFromRevision = start_rev;
+		else
+			opts.UpdatesOnly = true;
 		w = NULL;
 		s = nats_dl.kvStore_WatchMulti(&w, kv,
 			_watch_patterns, _num_patterns, &opts);
@@ -409,8 +455,9 @@ static void watcher_loop(void)
 		if (builds++ > 0)
 			NATS_CDB_STATS_INC(watcher_restarts);
 
-		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d)\n",
-			_num_patterns, watch_epoch.seen);
+		LM_INFO("watcher: watching KV (%d pattern(s), epoch: %d, "
+			"from revision %llu)\n", _num_patterns, watch_epoch.seen,
+			(unsigned long long)start_rev);
 
 		/* ---- Event loop ----
 		 * Process live KV updates until a reconnect or disconnect
@@ -485,6 +532,12 @@ static void watcher_loop(void)
 						nats_dl.natsStatus_GetText(s));
 				break;
 			}
+
+			/* a resumed watcher signals "caught up" with no entry */
+			if (!entry)
+				continue;
+
+			watch_resume_seen(&resume, nats_dl.kvEntry_Revision(entry));
 
 			const char   *key = nats_dl.kvEntry_Key(entry);
 			kvOperation   op  = nats_dl.kvEntry_Operation(entry);

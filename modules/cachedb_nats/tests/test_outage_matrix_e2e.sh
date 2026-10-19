@@ -95,7 +95,7 @@ modparam("cachedb_nats", "kv_watch", ">")
 modparam("cachedb_nats", "kv_op_timeout_ms", 800)
 
 event_route[E_NATS_KV_CHANGE] {
-    xlog("L_NOTICE","[watch] op=\$param(op) key=\$param(key)\n");
+    xlog("L_NOTICE","[watch] op=\$param(operation) key=\$param(key)\n");
 }
 
 route {
@@ -239,7 +239,7 @@ check_phase p3 ok
 # ---------- watcher resumed after the restart? ----------
 nats --server "${PRIV_URL}" kv put "${BUCKET}" wkey wval >/dev/null 2>&1 \
     || fail "external post-restart kv put failed"
-if wait_for_log '\[watch\] op=.* key=wkey' 10; then
+if wait_for_log '\[watch\] op=[a-z]+ key=wkey' 10; then
     echo "  ok: watcher resumed post-restart (E_NATS_KV_CHANGE fired)"
     ok=$((ok+1))
 else
