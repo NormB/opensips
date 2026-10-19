@@ -28,9 +28,9 @@
  *   - Raw / native KV ops (w_nats_kv_*, raw_kv_purge) map a key DIRECTLY to a
  *     subject, so they must reject illegal tokens up front via
  *     validate_kv_key() (control chars, whitespace, wildcards, ':').
- *   - Map ops (build_map_key / nats_cache_map_get / nats_cache_map_remove,
- *     TODO #40) instead HEX-ESCAPE each component (nats_map_compose ->
- *     nats_map_encode): the structural '.' separator can never appear inside
+ *   - Map ops (nats_cache_map_get / _set / _remove) instead HEX-ESCAPE each
+ *     component (map_subject -> nats_map_encode): the structural '.'
+ *     separator can never appear inside
  *     an encoded component, so no byte can inject the separator or a
  *     wildcard -- a stronger, lossless guarantee than rejection, and it lets
  *     users put any character in a map key/field.
@@ -100,25 +100,25 @@ int main(void)
 		ASSERT(n >= 1, msg);
 	}
 
-	/* Map ops hex-escape each component instead -> nats_map_compose. */
+	/* Map ops hex-escape each component instead: every subject they use
+	 * is built by map_subject(), which encodes via nats_map_encode.  The
+	 * behaviour (no aliasing, no wildcard reach) is in test_map_ops.c. */
 	const char *encode_fns[] = {
-		"build_map_key",
 		"nats_cache_map_get",
+		"nats_cache_map_set",
 		"nats_cache_map_remove",
+		"map_delete",
 	};
 	for (i = 0; i < sizeof(encode_fns)/sizeof(encode_fns[0]); i++) {
-		int n = grep_in_function(native, encode_fns[i], "nats_map_compose");
+		int n = grep_in_function(native, encode_fns[i], "map_subject");
 		char msg[160];
 		snprintf(msg, sizeof(msg),
-			"%s hex-escapes its key/field (injection-proof)", encode_fns[i]);
+			"%s builds its subjects via map_subject (injection-proof)",
+			encode_fns[i]);
 		ASSERT(n >= 1, msg);
 	}
-
-	/* And the map ops must NOT silently fall back to raw ':' composition. */
-	ASSERT(grep_in_function(native, "build_map_key",
-			"NATS_MAP_SEP_LEGACY") == 0 ||
-		grep_in_function(native, "build_map_key", "nats_map_compose") >= 1,
-		"build_map_key composes via the encoder, not a raw separator");
+	ASSERT(grep_in_function(native, "map_subject", "nats_map_encode") >= 2,
+		"map_subject hex-escapes both components");
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

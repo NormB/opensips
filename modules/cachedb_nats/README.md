@@ -261,23 +261,36 @@ if ($var(n) > 5) {
 ### Map Operations
 
 
-The column-oriented CacheDB API functions (`map_get`, `map_set`,
-`map_remove`), used internally by OpenSIPS modules such as
-*b2b_entities* and *b2b_logic* when configured with a CacheDB backend,
-store a map as one KV entry per field.  A field lives under the key
-`enc(key).enc(field)`, where `enc()` escapes every byte that is not
-valid in a KV key; with a subkey the field part is
-`enc(subkey:field)`.
+The module implements the CacheDB map API (`map_get`, `map_set`,
+`map_remove`) with the semantics of *cachedb_redis*, so the modules
+that use it, *b2b_entities* and *b2b_logic* (their
+[cachedb_url](../b2b_entities/README.md#cachedb_url-str) parameter), keep
+their state in NATS and restore it at startup.
 
 
-- *map_get* - lists the keys under `enc(key).>` and returns one
-result row per field, holding the field name and its value.
-- *map_set* - writes each field-value pair as its own entry with a
-plain put (no read, merge or CAS); integer values are stored as
-decimal strings.
-- *map_remove* - with a subkey, deletes the single entry
-`enc(key).enc(subkey)`; without one, deletes every entry under
-`enc(key).>`.  Removing an entry that does not exist succeeds.
+A map is a set of fields (a row) under a map key.  Each field is
+stored as its own KV entry, `_map.enc(key).enc(field)`, and group
+membership as `_mapgrp.enc(group).enc(key)`; `enc()` hex-escapes every
+byte that is not valid in a KV key, so keys and fields may contain any
+byte.  Values keep their type: string (binary-safe), 32-bit integer or
+null.
+
+
+- *map_set(key, group, fields)* - writes each field (the other fields of
+the map are kept); with a group, also records the map as a member of
+it.
+- *map_get(key)* - returns one row per map: a single pair named after
+the map key, holding the fields.  Without a key it returns every map in
+the bucket (what b2b does at startup).
+- *map_remove(key)* deletes a map; *map_remove(key, group)* also drops
+its group membership; *map_remove(NULL, group)* deletes every map of the
+group.  Removing what does not exist succeeds.
+
+
+> [!NOTE]
+> b2b loads its state in `mod_init`, before OpenSIPS forks its
+> processes.  The NATS connection made for that is closed before the
+> fork, and every process then connects on its own.
 
 
 ### JSON Search Index

@@ -85,6 +85,11 @@ test_sink_emit_int: ../cachedb_nats_json_ser.c ../cachedb_nats_json_internal.h
 test_kv_epoch_refresh: EXTRA := $(CORE_DEFS) ../cachedb_nats_dbase.c ../../../lib/nats/nats_redact.c
 test_kv_epoch_refresh: ../cachedb_nats_dbase.c ../cachedb_nats.h
 
+# The CacheDB map API contract (map_get/map_set/map_remove, as b2b uses
+# it) against an in-memory KV.  Links ../cachedb_nats_native.c.
+test_map_ops: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c ../../../lib/nats/nats_redact.c
+test_map_ops: ../cachedb_nats_native.c ../cachedb_nats_native.h
+
 # Kv_put/kv_update fast-fail must not leak the pkg value copy;
 # kv_get must fail when the pvar write fails.  Links ../cachedb_nats_native.c.
 test_kv_put_fastfail_leak: EXTRA := $(CORE_DEFS) ../cachedb_nats_native.c ../../../lib/nats/nats_redact.c
@@ -135,7 +140,7 @@ TESTS_TSAN_SAFE = test_json_escape \
                   test_watcher_atomic_race test_watch_null_key_guard \
                   test_sink_emit_string test_json_parse_guard \
                   test_allops_fastfail test_watcher_pkg_mem test_json_tu_split test_query_res_init test_outparam_contracts \
-                  test_kv_key_validate test_row_exp_compute test_len_threading test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_watch_resume test_reap_gauges test_ttl_fetch_marker test_ttl_write_invariant test_remove_stub test_index_count test_schema_version_legacy test_kv_ttl_legacy_bucket test_index_add_idempotent
+                  test_kv_key_validate test_row_exp_compute test_len_threading test_reject_nul_field test_last_mod_int64 test_poison_value test_strip_private_keys test_write_hygiene_scope test_cseq_merge_ordering test_oversize_row test_read_expiry_filter test_ttl_cas_predicate test_ttl_errcode_classify test_ttl_delete_header test_ttl_dl_bindings test_kv_ttl_zero_guard test_ttl_key_subject test_reap_select test_reap_interval_zero_guard test_reap_project test_insecure_url_warn test_ttl_watch_marker test_watch_resume test_reap_gauges test_map_ops test_ttl_fetch_marker test_ttl_write_invariant test_remove_stub test_index_count test_schema_version_legacy test_kv_ttl_legacy_bucket test_index_add_idempotent
 
 # test_watcher_atomic_race is the canonical TSan target for the watcher
 # claim-once property -- it spawns threads racing atomic_exchange and is

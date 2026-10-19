@@ -141,10 +141,10 @@ int main(void)
 	/* ---- production wiring -------------------------------------- */
 	{
 		const char *n = "../cachedb_nats_native.c";
-		ASSERT(file_contains(n, "nats_map_compose"),
-			"map ops compose via nats_map_compose");
-		ASSERT(file_contains(n, "nats_map_decode(k + ep_len"),
-			"map_get extracts the field via decode of the post-prefix tail");
+		ASSERT(file_contains(n, "static int map_subject("),
+			"map ops compose their subjects via map_subject");
+		ASSERT(file_contains(n, "nats_map_decode(enc_field"),
+			"map_get extracts the field by decoding the post-key tail");
 		ASSERT(file_contains(n, "kvStore_KeysWithFilters"),
 			"map_get/remove use the server-side filtered list");
 	}

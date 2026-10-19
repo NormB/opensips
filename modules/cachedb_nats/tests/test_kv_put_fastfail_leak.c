@@ -118,6 +118,8 @@ mi_response_t *init_mi_error_extra(int code, const char *msg, int msg_len,
 { (void)code; (void)msg; (void)msg_len; (void)details; (void)details_len;
   return NULL; }
 void free_mi_response(mi_response_t *response) { (void)response; }
+/* map_get's out-of-memory path frees its partial result; never reached */
+void cdb_free_rows(cdb_res_t *res) { (void)res; }
 int add_mi_number(mi_item_t *to, char *name, int name_len, double value)
 { (void)to; (void)name; (void)name_len; (void)value; return 0; }
 

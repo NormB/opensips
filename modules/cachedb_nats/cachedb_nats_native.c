@@ -42,6 +42,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include "../../dprint.h"
 #include "../../mem/mem.h"
@@ -1202,146 +1203,202 @@ static int nats_map_decode(const char *in, int in_len, char *out, int out_size)
 	return pos;
 }
 
-/* nats_map_compose() — build the composed map subject enc(key)['.'enc(field)]
- * into out.  When field is NULL, only enc(key) is written (used to build the
- * "enc(key)." filter prefix by the caller).  Returns the composed length, or
- * -1 on encode/overflow error. */
-static int nats_map_compose(char *out, int out_size, const str *key,
-		const char *field, int field_len)
-{
-	int n, pos;
+/*
+ * The CacheDB map API, as cachedb_redis defines it and b2b_entities /
+ * b2b_logic use it:
+ *
+ *   map_set(key, subkey, pairs)  set the fields of the map at key (the
+ *                                others are kept); a subkey makes key a
+ *                                member of the group subkey
+ *   map_get(key, res)            one row per map: a single pair named after
+ *                                the map key (is_pk) whose value is a dict
+ *                                of the fields; key NULL returns every map
+ *   map_remove(key, NULL)        delete the map
+ *   map_remove(key, subkey)      delete the map and its group membership
+ *   map_remove(NULL, subkey)     delete every map of the group
+ *
+ * Layout in the bucket (both components hex-escaped, see nats_map_encode):
+ *
+ *   _map.enc(key).enc(field)       one entry per field, so map_set writes
+ *                                  fields independently (no read-modify-
+ *                                  write); the value is type-tagged:
+ *                                  'S' + bytes, 'I' + decimal int32, 'N'
+ *   _mapgrp.enc(subkey).enc(key)   group membership
+ */
+#define NATS_MAP_NS        "_map"
+#define NATS_MAP_GROUP_NS  "_mapgrp"
+#define NATS_MAP_VAL_STR   'S'
+#define NATS_MAP_VAL_INT32 'I'
+#define NATS_MAP_VAL_NULL  'N'
 
-	if (!key || key->len <= 0)
+/* map_subject() — "ns.enc(a)[.enc(b)]" into out; with b == NULL and
+ * wildcard set, "ns.enc(a).>" (or "ns.>" when a is NULL too).  Returns
+ * the length, or -1 on an empty component or overflow. */
+static int map_subject(char *out, int out_size, const char *ns,
+		const str *a, const char *b, int b_len, int wildcard)
+{
+	int pos, n;
+
+	pos = snprintf(out, out_size, "%s", ns);
+	if (pos < 0 || pos >= out_size)
 		return -1;
-	n = nats_map_encode(key->s, key->len, out, out_size);
-	if (n < 0)
-		return -1;
-	pos = n;
-	if (field) {
-		if (pos + 1 >= out_size)
+	if (a) {
+		if (a->len <= 0 || pos + 1 >= out_size)
 			return -1;
 		out[pos++] = NATS_MAP_SEP;
-		n = nats_map_encode(field, field_len, out + pos, out_size - pos);
+		n = nats_map_encode(a->s, a->len, out + pos, out_size - pos);
 		if (n < 0)
 			return -1;
 		pos += n;
 	}
+	if (b) {
+		if (b_len <= 0 || pos + 1 >= out_size)
+			return -1;
+		out[pos++] = NATS_MAP_SEP;
+		n = nats_map_encode(b, b_len, out + pos, out_size - pos);
+		if (n < 0)
+			return -1;
+		pos += n;
+	} else if (wildcard) {
+		if (pos + 2 >= out_size)
+			return -1;
+		out[pos++] = NATS_MAP_SEP;
+		out[pos++] = '>';
+	}
+	out[pos] = '\0';
 	return pos;
 }
 
-/**
- * build_map_key() — compose the new-format map subject enc(key).enc(subkey).
- *
- * Delegates to nats_map_compose(), which hex-escapes both components
- * (NATS_MAP_SEP = '.') so neither can contain a raw separator; the encoding
- * may expand each byte up to 3 chars, so the required buffer size is not a
- * simple key->len + subkey->len sum.
- *
- * If subkey is NULL or empty, only enc(key) is written.
- *
- * Returns: 0 on success, -1 if inputs are invalid or the buffer is too small.
- */
-static int build_map_key(char *buf, size_t buf_size,
-                         const str *key, const str *subkey)
+/* map_list() — the live keys matching filter.  NATS_NOT_FOUND (empty
+ * bucket) is an empty list.  Returns 0, or -1 on a listing error. */
+static int map_list(kvStore *kv, const char *filter, kvKeysList *keys)
 {
-	if (!key || !key->s || key->len <= 0) {
-		LM_ERR("null or empty map key\n");
-		return -1;
-	}
-
-	/* No char-level rejection needed: nats_map_encode hex-escapes every
-	 * byte outside the subject-safe set, so a SIP-derived key/subkey cannot
-	 * inject the separator (or a wildcard / control char) to alias another
-	 * map -- the structural '.' only ever appears between the two encoded
-	 * components. */
-	if (!subkey || !subkey->s || subkey->len <= 0)
-		return nats_map_compose(buf, (int)buf_size, key, NULL, 0) < 0 ? -1 : 0;
-
-	return nats_map_compose(buf, (int)buf_size, key,
-		subkey->s, subkey->len) < 0 ? -1 : 0;
-}
-
-/* map_add_row() — fetch full_key's value and append a result row whose
- * single pair is (field -> value).  Skips silently on a get / alloc
- * failure.  Returns 1 if a row was added, 0 otherwise. */
-static int map_add_row(cdb_res_t *res, kvStore *kv, const char *full_key,
-		const char *field, int field_len)
-{
-	kvEntry *entry = NULL;
-	cdb_row_t *row;
-	cdb_pair_t *pair;
-	const char *val_data;
-	int val_len;
+	const char *filters[1] = { filter };
 	natsStatus s;
 
-	s = nats_dl.kvStore_Get(&entry, kv, full_key);
-	if (s != NATS_OK) {
-		LM_DBG("map_get: skipping key '%s' (get failed)\n", full_key);
+	memset(keys, 0, sizeof(*keys));
+	s = nats_dl.kvStore_KeysWithFilters(keys, kv, filters, 1, NULL);
+	if (s == NATS_NOT_FOUND) {
+		memset(keys, 0, sizeof(*keys));
 		return 0;
 	}
-	val_data = nats_dl.kvEntry_ValueString(entry);
-	val_len  = nats_dl.kvEntry_ValueLen(entry);
-
-	row = pkg_malloc(sizeof(cdb_row_t));
-	if (!row) { nats_dl.kvEntry_Destroy(entry); return 0; }
-	memset(row, 0, sizeof(cdb_row_t));
-	INIT_LIST_HEAD(&row->dict);
-
-	pair = pkg_malloc(sizeof(cdb_pair_t));
-	if (!pair) { pkg_free(row); nats_dl.kvEntry_Destroy(entry); return 0; }
-	memset(pair, 0, sizeof(cdb_pair_t));
-	INIT_LIST_HEAD(&pair->list);
-
-	if (field_len > 0) {
-		pair->key.name.s = pkg_malloc(field_len);
-		if (!pair->key.name.s) {
-			LM_ERR("no more pkg memory for subkey name\n");
-			pkg_free(pair); pkg_free(row);
-			nats_dl.kvEntry_Destroy(entry);
-			return 0;
-		}
-		memcpy(pair->key.name.s, field, field_len);
-		pair->key.name.len = field_len;
+	if (s != NATS_OK) {
+		LM_ERR("map: listing '%s' failed: %s\n", filter, NATS_ERR_TEXT(s));
+		return -1;
 	}
+	return 0;
+}
 
-	pair->val.type = CDB_STR;
-	if (val_data && val_len > 0) {
-		pair->val.val.st.s = pkg_malloc(val_len);
-		if (pair->val.val.st.s) {
-			memcpy(pair->val.val.st.s, val_data, val_len);
-			pair->val.val.st.len = val_len;
+/* map_delete_keys() — delete every key matching filter. */
+static int map_delete_keys(kvStore *kv, const char *filter)
+{
+	kvKeysList keys;
+	natsStatus s;
+	int i, rc = 0;
+
+	if (map_list(kv, filter, &keys) < 0)
+		return -1;
+	for (i = 0; i < keys.Count; i++) {
+		s = nats_dl.kvStore_Delete(kv, keys.Keys[i]);
+		if (s != NATS_OK && s != NATS_NOT_FOUND) {
+			LM_ERR("map: failed to delete '%s': %s\n", keys.Keys[i],
+				NATS_ERR_TEXT(s));
+			rc = -1;
 		}
 	}
+	if (keys.Keys)
+		nats_dl.kvKeysList_Destroy(&keys);
+	return rc;
+}
 
-	list_add_tail(&pair->list, &row->dict);
-	list_add_tail(&row->list, &res->rows);
-	res->count++;
-	nats_dl.kvEntry_Destroy(entry);
-	return 1;
+/* map_delete() — delete every field of the map at key. */
+static int map_delete(kvStore *kv, const str *key)
+{
+	char filter[NATS_MAP_KEY_BUF];
+
+	if (map_subject(filter, sizeof(filter), NATS_MAP_NS, key, NULL, 0, 1) < 0) {
+		LM_ERR("map: key too long\n");
+		return -1;
+	}
+	return map_delete_keys(kv, filter);
+}
+
+static int map_keycmp(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* map_field_value() — decode a type-tagged field value into pair->val.
+ * Returns 0, or -1 if the value is not a map value (skip it). */
+static int map_field_value(cdb_pair_t *pair, const char *v, int len)
+{
+	str s;
+
+	if (len < 1)
+		return -1;
+	switch (v[0]) {
+	case NATS_MAP_VAL_NULL:
+		pair->val.type = CDB_NULL;
+		return 0;
+	case NATS_MAP_VAL_INT32:
+		/* 64-bit accumulator: str2sint() overflows on INT_MIN */
+		{
+			int64_t n = 0;
+			int i = 1, neg = 0;
+
+			if (i < len && v[i] == '-') {
+				neg = 1;
+				i++;
+			}
+			if (i >= len || len - i > 10)
+				return -1;
+			for (; i < len; i++) {
+				if (v[i] < '0' || v[i] > '9')
+					return -1;
+				n = n * 10 + (v[i] - '0');
+			}
+			if (neg)
+				n = -n;
+			if (n < INT32_MIN || n > INT32_MAX)
+				return -1;
+			pair->val.val.i32 = (int32_t)n;
+		}
+		pair->val.type = CDB_INT32;
+		return 0;
+	case NATS_MAP_VAL_STR:
+		s.s = (char *)v + 1;
+		s.len = len - 1;
+		if (pkg_str_dup(&pair->val.val.st, &s) < 0)
+			return -1;
+		pair->val.type = CDB_STR;
+		return 0;
+	}
+	return -1;
 }
 
 /**
- * nats_cache_map_get() — Retrieve all fields of a map.
+ * nats_cache_map_get() — the maps at key (key NULL: every map).
  *
- * New format: each field is stored under the subject "enc(key).enc(field)",
- * so a single server-side filtered list ("enc(key).>") returns exactly this
- * map's keys -- O(matches), not O(total bucket keys).  Each matched key's
- * suffix is decoded back to the field name.
+ * One row per map, holding a single CDB_DICT pair named after the map key.
+ * The listed keys are sorted so the fields of each map are consecutive.
  *
- *
- * Returns: 0 on success (even if no keys match), -1 on error.
+ * Returns: 0 on success (even if nothing matches), -1 on error.
  */
 int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 {
 	nats_cachedb_con *ncon;
+	char filter[NATS_MAP_KEY_BUF];
+	char mkey[NATS_MAP_KEY_BUF], field[NATS_MAP_KEY_BUF];
 	kvKeysList keys;
-	natsStatus s;
-	char enc_prefix[NATS_MAP_KEY_BUF];   /* "enc(key)." */
-	char filter[NATS_MAP_KEY_BUF];       /* "enc(key).>" */
-	const char *filters[1];
-	int ep_len, i;
+	cdb_pair_t *map = NULL, *pair;
+	cdb_row_t *row;
+	cdb_key_t ck;
+	kvEntry *entry;
+	const char *cur_enc = NULL;
+	int cur_enc_len = 0, ns_len = sizeof(NATS_MAP_NS) - 1;
+	int i, mlen, flen;
 
-	if (!con || !key || !res) {
+	if (!con || !res) {
 		LM_ERR("null parameter\n");
 		return -1;
 	}
@@ -1358,89 +1415,136 @@ int nats_cache_map_get(cachedb_con *con, const str *key, cdb_res_t *res)
 		LM_DBG("NATS unavailable — operation deferred (fast-fail)\n");
 		return -1;
 	}
-	if (key->len <= 0) {
-		LM_ERR("invalid map key length\n");
+	if (map_subject(filter, sizeof(filter), NATS_MAP_NS, key, NULL, 0, 1) < 0) {
+		LM_ERR("map_get: invalid or too long map key\n");
 		return -1;
 	}
-
-	/* ---- new format: server-side filtered list "enc(key).>" ---- */
-	ep_len = nats_map_compose(enc_prefix, (int)sizeof(enc_prefix) - 2,
-		key, NULL, 0);
-	if (ep_len < 0) {
-		LM_ERR("map_get: key encode failed (too long?)\n");
+	if (map_list(ncon->kv, filter, &keys) < 0)
 		return -1;
-	}
-	enc_prefix[ep_len++] = NATS_MAP_SEP;
-	enc_prefix[ep_len]   = '\0';
-	memcpy(filter, enc_prefix, ep_len);
-	filter[ep_len]     = '>';
-	filter[ep_len + 1] = '\0';
-	filters[0] = filter;
+	if (keys.Count > 1)
+		qsort(keys.Keys, keys.Count, sizeof(char *), map_keycmp);
 
-	memset(&keys, 0, sizeof(keys));
-	s = nats_dl.kvStore_KeysWithFilters(&keys, ncon->kv, filters, 1, NULL);
-	if (s == NATS_OK) {
-		for (i = 0; i < keys.Count; i++) {
-			const char *k = keys.Keys[i];
-			int klen = (int)strlen(k);
-			char field[NATS_MAP_KEY_BUF];
-			int flen;
+	for (i = 0; i < keys.Count; i++) {
+		const char *k = keys.Keys[i], *enc_key, *enc_field;
+		int enc_key_len;
 
-			if (klen <= ep_len || strncmp(k, enc_prefix, ep_len) != 0)
-				continue;   /* defensive; the filter already guarantees it */
-			flen = nats_map_decode(k + ep_len, klen - ep_len,
-				field, sizeof(field));
-			if (flen < 0) {
+		/* "_map." enc(key) "." enc(field) */
+		if (strncmp(k, NATS_MAP_NS, ns_len) || k[ns_len] != NATS_MAP_SEP)
+			continue;
+		enc_key = k + ns_len + 1;
+		enc_field = strchr(enc_key, NATS_MAP_SEP);
+		if (!enc_field || enc_field == enc_key || !enc_field[1])
+			continue;
+		enc_key_len = enc_field - enc_key;
+		enc_field++;
+
+		if (!map || enc_key_len != cur_enc_len ||
+				memcmp(enc_key, cur_enc, enc_key_len)) {
+			/* a new map: its row */
+			mlen = nats_map_decode(enc_key, enc_key_len, mkey, sizeof(mkey));
+			if (mlen <= 0) {
 				LM_WARN("map_get: undecodable key '%s' skipped\n", k);
 				continue;
 			}
-			map_add_row(res, ncon->kv, k, field, flen);
+			row = pkg_malloc(sizeof *row);
+			if (!row)
+				goto oom;
+			INIT_LIST_HEAD(&row->dict);
+			ck.name.s = mkey;
+			ck.name.len = mlen;
+			ck.is_pk = 1;
+			map = cdb_mk_pair(&ck, NULL);
+			if (!map) {
+				pkg_free(row);
+				goto oom;
+			}
+			map->val.type = CDB_DICT;
+			INIT_LIST_HEAD(&map->val.val.dict);
+			list_add_tail(&map->list, &row->dict);
+			list_add_tail(&row->list, &res->rows);
+			res->count++;
+			cur_enc = enc_key;
+			cur_enc_len = enc_key_len;
 		}
-		nats_dl.kvKeysList_Destroy(&keys);
-	} else if (s != NATS_NOT_FOUND) {
-		LM_ERR("map_get: KeysWithFilters failed: %s\n",
-			NATS_ERR_TEXT(s));
-		return -1;
-	}
 
-	LM_DBG("map_get for '%.*s': %d entries\n", key->len, key->s,
-		res->count);
+		flen = nats_map_decode(enc_field, strlen(enc_field), field,
+			sizeof(field));
+		if (flen <= 0) {
+			LM_WARN("map_get: undecodable field in '%s' skipped\n", k);
+			continue;
+		}
+		entry = NULL;
+		if (nats_dl.kvStore_Get(&entry, ncon->kv, k) != NATS_OK || !entry)
+			continue;   /* deleted since the listing */
+		ck.name.s = field;
+		ck.name.len = flen;
+		ck.is_pk = 0;
+		pair = cdb_mk_pair(&ck, NULL);
+		if (!pair) {
+			nats_dl.kvEntry_Destroy(entry);
+			goto oom;
+		}
+		if (map_field_value(pair, nats_dl.kvEntry_ValueString(entry),
+				nats_dl.kvEntry_ValueLen(entry)) < 0) {
+			LM_DBG("map_get: '%s' holds no map value, skipped\n", k);
+			pkg_free(pair);
+		} else {
+			list_add_tail(&pair->list, &map->val.val.dict);
+		}
+		nats_dl.kvEntry_Destroy(entry);
+	}
+	if (keys.Keys)
+		nats_dl.kvKeysList_Destroy(&keys);
+
+	LM_DBG("map_get: %d map(s)\n", res->count);
 	return 0;
+
+oom:
+	LM_ERR("no more pkg memory\n");
+	if (keys.Keys)
+		nats_dl.kvKeysList_Destroy(&keys);
+	cdb_free_rows(res);
+	return -1;
 }
 
 /**
- * nats_cache_map_set() — Store key-value pairs under composite keys.
+ * nats_cache_map_set() — set fields of the map at key; with a subkey,
+ * also record key as a member of the group subkey.
  *
- * Implements the cachedb map_set callback.  Each pair in the input dict
- * is stored as a separate NATS KV entry under a composed, hex-escaped
- * subject (nats_map_compose):
+ * Every value is checked first (string, int32 or null), so an unsupported
+ * one fails the call before anything is written.
  *
- *   - With subkey:    enc(key).enc("subkey:pair_name") = value
- *   - Without subkey: enc(key).enc(pair_name)          = value
- *
- * The ':' between subkey and pair name is preserved only as an escaped data
- * byte inside the encoded field, so map_get returns the identical field
- * name.  This composed layout gives hash-map semantics on top of flat NATS
- * KV.  Each pair is written unconditionally (kvStore_PutString — no read /
- * merge / CAS).  Values are converted to strings (CDB_STR used directly,
- * CDB_INT32 formatted via snprintf).
- *
- * Returns: 0 on success, -1 on error (including partial failures).
+ * Returns: 0 on success, -1 on error.
  */
 int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
                        const cdb_dict_t *pairs)
 {
 	nats_cachedb_con *ncon;
-	char map_key[NATS_MAP_KEY_BUF];
-	char val_buf[NATS_NATIVE_VAL_BUF];
-	uint64_t rev;
-	natsStatus s;
+	char subject[NATS_MAP_KEY_BUF];
+	char ibuf[INT2STR_MAX_LEN + 1];
 	cdb_pair_t *pair;
 	struct list_head *it;
+	natsStatus s;
+	char *val;
+	int len, n;
 
-	if (!con || !key || !pairs) {
-		LM_ERR("null parameter\n");
+	if (!con || !key || !pairs || key->len <= 0) {
+		LM_ERR("null parameter or empty map key\n");
 		return -1;
+	}
+	list_for_each(it, (struct list_head *)pairs) {
+		pair = list_entry(it, cdb_pair_t, list);
+		if (pair->key.name.len <= 0) {
+			LM_ERR("map_set: empty field name\n");
+			return -1;
+		}
+		if (pair->val.type != CDB_STR && pair->val.type != CDB_INT32 &&
+				pair->val.type != CDB_NULL) {
+			LM_ERR("map_set: unsupported type %d for field '%.*s'\n",
+				pair->val.type, pair->key.name.len,
+				pair->key.name.s);   /* not PII: a column name */
+			return -1;
+		}
 	}
 
 	ncon = (nats_cachedb_con *)con->data;
@@ -1456,116 +1560,66 @@ int nats_cache_map_set(cachedb_con *con, const str *key, const str *subkey,
 		return -1;
 	}
 
-	/* if subkey is provided, store each pair under
-	 * enc(key) '.' enc("subkey:pair_name") -- the ':' between subkey and
-	 * pair name is kept as a data byte (hex-escaped), so map_get returns
-	 * the identical "subkey:pair_name" field name as before. */
-	if (subkey && subkey->s && subkey->len > 0) {
-		list_for_each(it, (struct list_head *)pairs) {
-			char full_key[NATS_MAP_KEY_BUF];
-			char field[NATS_MAP_KEY_BUF];
-			int flen;
-
-			pair = list_entry(it, cdb_pair_t, list);
-			if (!pair->key.name.s || pair->key.name.len <= 0)
-				continue;
-
-			/* raw field = subkey ':' pair_name (the ':' is data
-			 * inside the field; nats_map_compose hex-escapes it) */
-			if ((size_t)(subkey->len + 1 + pair->key.name.len) >=
-					sizeof(field)) {
-				LM_ERR("composite map field too long\n");
-				return -1;
-			}
-			memcpy(field, subkey->s, subkey->len);
-			field[subkey->len] = ':';
-			memcpy(field + subkey->len + 1, pair->key.name.s,
-				pair->key.name.len);
-			flen = subkey->len + 1 + pair->key.name.len;
-
-			if (nats_map_compose(full_key, sizeof(full_key), key,
-					field, flen) < 0) {
-				LM_ERR("map_set: composite key encode failed\n");
-				return -1;
-			}
-
-			/* convert value to string */
-			if (pair->val.type == CDB_STR) {
-				if (nats_str_to_buf(&pair->val.val.st, val_buf,
-						sizeof(val_buf)) < 0)
-					return -1;
-			} else if (pair->val.type == CDB_INT32) {
-				snprintf(val_buf, sizeof(val_buf), "%d",
-					pair->val.val.i32);
-			} else {
-				LM_DBG("skipping unsupported value type %d\n",
-					pair->val.type);
-				continue;
-			}
-
-			s = nats_dl.kvStore_PutString(&rev, ncon->kv, full_key, val_buf);
-			if (s != NATS_OK) {
-				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					full_key, NATS_ERR_TEXT(s));
-				return -1;
-			}
-			LM_DBG("map_set: stored '%s' rev=%llu\n", full_key,
-				(unsigned long long)rev);
+	list_for_each(it, (struct list_head *)pairs) {
+		pair = list_entry(it, cdb_pair_t, list);
+		if (map_subject(subject, sizeof(subject), NATS_MAP_NS, key,
+				pair->key.name.s, pair->key.name.len, 0) < 0) {
+			LM_ERR("map_set: key or field too long\n");
+			return -1;
 		}
-	} else {
-		/* no subkey: store each pair as "key:pair_name" */
-		list_for_each(it, (struct list_head *)pairs) {
-			str pair_name;
-
-			pair = list_entry(it, cdb_pair_t, list);
-			if (!pair->key.name.s || pair->key.name.len <= 0)
-				continue;
-
-			pair_name = pair->key.name;
-			if (build_map_key(map_key, sizeof(map_key), key,
-					&pair_name) < 0)
-				return -1;
-
-			/* convert value to string */
-			if (pair->val.type == CDB_STR) {
-				if (nats_str_to_buf(&pair->val.val.st, val_buf,
-						sizeof(val_buf)) < 0)
-					return -1;
-			} else if (pair->val.type == CDB_INT32) {
-				snprintf(val_buf, sizeof(val_buf), "%d",
-					pair->val.val.i32);
-			} else {
-				LM_DBG("skipping unsupported value type %d\n",
-					pair->val.type);
-				continue;
-			}
-
-			s = nats_dl.kvStore_PutString(&rev, ncon->kv, map_key, val_buf);
-			if (s != NATS_OK) {
-				LM_ERR("kvStore_PutString failed for '%s': %s\n",
-					map_key, NATS_ERR_TEXT(s));
+		val = ibuf;
+		switch (pair->val.type) {
+		case CDB_STR:
+			len = pair->val.val.st.len + 1;
+			val = pkg_malloc(len);
+			if (!val) {
+				LM_ERR("no more pkg memory\n");
 				return -1;
 			}
-			LM_DBG("map_set: stored '%s' rev=%llu\n", map_key,
-				(unsigned long long)rev);
+			val[0] = NATS_MAP_VAL_STR;
+			if (pair->val.val.st.len)
+				memcpy(val + 1, pair->val.val.st.s, pair->val.val.st.len);
+			break;
+		case CDB_INT32:
+			n = snprintf(ibuf + 1, sizeof(ibuf) - 1, "%d", pair->val.val.i32);
+			ibuf[0] = NATS_MAP_VAL_INT32;
+			len = n + 1;
+			break;
+		default:   /* CDB_NULL */
+			ibuf[0] = NATS_MAP_VAL_NULL;
+			len = 1;
+			break;
+		}
+		s = nats_dl.kvStore_Put(NULL, ncon->kv, subject, val, len);
+		if (val != ibuf)
+			pkg_free(val);
+		if (s != NATS_OK) {
+			LM_ERR("map_set: put '%s' failed: %s\n", subject,
+				NATS_ERR_TEXT(s));
+			return -1;
 		}
 	}
 
+	if (subkey && subkey->len > 0) {
+		if (map_subject(subject, sizeof(subject), NATS_MAP_GROUP_NS, subkey,
+				key->s, key->len, 0) < 0) {
+			LM_ERR("map_set: group or key too long\n");
+			return -1;
+		}
+		s = nats_dl.kvStore_Put(NULL, ncon->kv, subject, "1", 1);
+		if (s != NATS_OK) {
+			LM_ERR("map_set: group put '%s' failed: %s\n", subject,
+				NATS_ERR_TEXT(s));
+			return -1;
+		}
+	}
 	return 0;
 }
 
 /**
- * nats_cache_map_remove() — Delete map entries by composite key.
- *
- * Implements the cachedb map_remove callback.  Two modes of operation:
- *
- *   - Single removal (subkey provided): deletes the entry
- *     enc(key).enc(subkey).
- *
- *   - Prefix removal (no subkey): a server-side filtered list "enc(key).>"
- *     deletes the entire map without scanning the whole bucket.
- *
- * Deletion of non-existent keys is treated as success (idempotent).
+ * nats_cache_map_remove() — delete the map at key, its membership of the
+ * group subkey, or (key NULL) every map of the group subkey.  Deleting
+ * what does not exist is not an error.
  *
  * Returns: 0 on success, -1 on error.
  */
@@ -1573,14 +1627,18 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
                           const str *subkey)
 {
 	nats_cachedb_con *ncon;
+	char subject[NATS_MAP_KEY_BUF], member[NATS_MAP_KEY_BUF];
+	kvKeysList keys;
 	natsStatus s;
-	char map_key[NATS_MAP_KEY_BUF];
+	str mkey;
+	int i, glen, rc = 0;
 
-	if (!con || !key) {
-		LM_ERR("null parameter\n");
+	if (subkey && subkey->len <= 0)
+		subkey = NULL;
+	if (!con || (!key && !subkey) || (key && key->len <= 0)) {
+		LM_ERR("null parameter or empty key\n");
 		return -1;
 	}
-
 	ncon = (nats_cachedb_con *)con->data;
 	if (!ncon) {
 		LM_ERR("null NATS connection\n");
@@ -1594,59 +1652,58 @@ int nats_cache_map_remove(cachedb_con *con, const str *key,
 		return -1;
 	}
 
-	if (subkey && subkey->s && subkey->len > 0) {
-		/* delete the single new-format enc(key).enc(subkey) ... */
-		if (build_map_key(map_key, sizeof(map_key), key, subkey) < 0)
+	if (!subkey)
+		return map_delete(ncon->kv, key);
+
+	if (key) {
+		/* the map, and its membership of the group */
+		if (map_subject(subject, sizeof(subject), NATS_MAP_GROUP_NS, subkey,
+				key->s, key->len, 0) < 0) {
+			LM_ERR("map_remove: group or key too long\n");
 			return -1;
-		s = nats_dl.kvStore_Delete(ncon->kv, map_key);
+		}
+		s = nats_dl.kvStore_Delete(ncon->kv, subject);
 		if (s != NATS_OK && s != NATS_NOT_FOUND) {
-			LM_ERR("kvStore_Delete failed for '%s': %s\n",
-				map_key, NATS_ERR_TEXT(s));
-			return -1;
-		}
-		LM_DBG("map_remove: deleted '%s'\n", map_key);
-	} else {
-		/* prefix remove: server-side filter "enc(key).>" */
-		kvKeysList keys;
-		char enc_prefix[NATS_MAP_KEY_BUF];
-		char filter[NATS_MAP_KEY_BUF];
-		const char *filters[1];
-		int ep_len, i;
-
-		if (key->len <= 0) {
-			LM_ERR("invalid map key length\n");
-			return -1;
-		}
-
-		ep_len = nats_map_compose(enc_prefix, (int)sizeof(enc_prefix) - 2,
-			key, NULL, 0);
-		if (ep_len < 0) {
-			LM_ERR("map_remove: key encode failed (too long?)\n");
-			return -1;
-		}
-		enc_prefix[ep_len++] = NATS_MAP_SEP;
-		enc_prefix[ep_len]   = '\0';
-		memcpy(filter, enc_prefix, ep_len);
-		filter[ep_len]     = '>';
-		filter[ep_len + 1] = '\0';
-		filters[0] = filter;
-
-		memset(&keys, 0, sizeof(keys));
-		s = nats_dl.kvStore_KeysWithFilters(&keys, ncon->kv, filters, 1, NULL);
-		if (s == NATS_OK) {
-			for (i = 0; i < keys.Count; i++) {
-				s = nats_dl.kvStore_Delete(ncon->kv, keys.Keys[i]);
-				if (s != NATS_OK && s != NATS_NOT_FOUND)
-					LM_WARN("map_remove: failed to delete '%s': %s\n",
-						keys.Keys[i], NATS_ERR_TEXT(s));
-			}
-			nats_dl.kvKeysList_Destroy(&keys);
-		} else if (s != NATS_NOT_FOUND) {
-			LM_ERR("map_remove: KeysWithFilters failed: %s\n",
+			LM_ERR("map_remove: delete '%s' failed: %s\n", subject,
 				NATS_ERR_TEXT(s));
+			rc = -1;
 		}
+		return map_delete(ncon->kv, key) < 0 ? -1 : rc;
 	}
 
-	return 0;
+	/* every map of the group, then the membership entries */
+	glen = map_subject(subject, sizeof(subject), NATS_MAP_GROUP_NS, subkey,
+		NULL, 0, 1);
+	if (glen < 0) {
+		LM_ERR("map_remove: group too long\n");
+		return -1;
+	}
+	if (map_list(ncon->kv, subject, &keys) < 0)
+		return -1;
+	glen -= 1;   /* "_mapgrp.enc(subkey)." -- the members follow */
+	for (i = 0; i < keys.Count; i++) {
+		const char *k = keys.Keys[i];
+
+		if ((int)strlen(k) <= glen || strncmp(k, subject, glen))
+			continue;
+		mkey.len = nats_map_decode(k + glen, strlen(k + glen), member,
+			sizeof(member));
+		if (mkey.len <= 0) {
+			LM_WARN("map_remove: undecodable member '%s' skipped\n", k);
+			continue;
+		}
+		mkey.s = member;
+		if (map_delete(ncon->kv, &mkey) < 0)
+			rc = -1;
+		s = nats_dl.kvStore_Delete(ncon->kv, k);
+		if (s != NATS_OK && s != NATS_NOT_FOUND) {
+			LM_ERR("map_remove: delete '%s' failed: %s\n", k,
+				NATS_ERR_TEXT(s));
+			rc = -1;
+		}
+	}
+	if (keys.Keys)
+		nats_dl.kvKeysList_Destroy(&keys);
+	return rc;
 }
 
