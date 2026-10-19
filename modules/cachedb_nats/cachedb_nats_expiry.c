@@ -55,6 +55,7 @@
 #include "cachedb_nats_watch.h"    /* proc guard + resync body */
 #include "cachedb_nats_reg.h"      /* cdbn_reg_row_scan (reaper due-check) */
 #include "cachedb_nats_stats.h"    /* NATS_CDB_STATS_* (reaper counters) */
+#include "cachedb_nats_reap_gauges.h"   /* reap_publish_pass */
 #include "cachedb_nats_expiry.h"
 #include "cachedb_nats_reap_enum.h"   /* value-carrying watch pass */
 #include "cachedb_nats_json_internal.h"   /* walkers, json_sink_t, _contact_*, cdbn_row_finalize_metadata */
@@ -643,8 +644,7 @@ struct reap_pass_ctx {
 	int slack;
 	int prefix_len;
 	int reaped;
-	/* pass gauges */
-	long g_keys, g_aors, g_contacts, g_active, g_perm, g_due;
+	struct reap_pass_gauges g;
 };
 
 /* One bucket entry of the watch pass: the DUE usrloc rows are either
@@ -667,7 +667,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 	/* only our usrloc rows; never touch another consumer's keys. */
 	if (c->prefix_len && strncmp(key, fts_json_prefix, c->prefix_len) != 0)
 		return 0;
-	c->g_keys++;
+	c->g.keys++;
 	val = nats_dl.kvEntry_ValueString(e);
 	vlen = nats_dl.kvEntry_ValueLen(e);
 	rev = nats_dl.kvEntry_Revision(e);
@@ -680,10 +680,10 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 		if (val && vlen > 0 &&
 		    cdbn_reg_row_scan(val, vlen, c->now, nats_reap_grace,
 				NULL, 0, NULL, 0, &g_ri) == 0) {
-			c->g_aors++;
-			c->g_contacts += g_ri.n_contacts;
-			c->g_active   += g_ri.n_active;
-			c->g_perm     += g_ri.n_perm;
+			c->g.aors++;
+			c->g.contacts += g_ri.n_contacts;
+			c->g.active   += g_ri.n_active;
+			c->g.perm     += g_ri.n_perm;
 			n_before = g_ri.n_contacts;
 		}
 	}
@@ -692,7 +692,7 @@ static int reap_pass_entry(kvEntry *e, void *arg)
 	 * full reprojection (row_exp == min contact expiry). */
 	if (cdbn_reap_row_due_json(val, vlen, c->now, c->slack) == 0)
 		return 0;
-	c->g_due++;
+	c->g.due++;
 	proj = cdbn_reap_project_survivors(val, vlen, c->now, c->slack,
 		&n_surv, &plen, &p_row_exp, &p_all_same);
 	if (!proj)
@@ -782,23 +782,16 @@ void nats_cdb_reaper_tick(unsigned int ticks, void *param)
 	if (rc < 0)
 		/* watch create failed or the pass ended early (broker stall):
 		 * whatever was visited is already handled; the reaper is
-		 * idempotent, the next tick simply rescans.  Gauges below
-		 * reflect the partial pass. */
+		 * idempotent, the next tick simply rescans.  The gauges keep
+		 * the last complete pass (see reap_publish_pass()). */
 		LM_DBG("reaper: enumeration ended early (%d); next tick rescans\n",
 			rc);
 
 	/* publish the pass gauges (single writer: this process) */
 	clock_gettime(CLOCK_MONOTONIC, &g_t1);
-	NATS_CDB_STATS_SET(reap_last_run, (unsigned long)time(NULL));
-	NATS_CDB_STATS_SET(reap_last_ms,
+	reap_publish_pass(rc, &c.g, (unsigned long)time(NULL),
 		(g_t1.tv_sec - g_t0.tv_sec) * 1000
 		+ (g_t1.tv_nsec - g_t0.tv_nsec) / 1000000);
-	NATS_CDB_STATS_SET(reap_last_keys, c.g_keys);
-	NATS_CDB_STATS_SET(reap_last_aors, c.g_aors);
-	NATS_CDB_STATS_SET(reap_last_contacts, c.g_contacts);
-	NATS_CDB_STATS_SET(reap_last_active, c.g_active);
-	NATS_CDB_STATS_SET(reap_last_permanent, c.g_perm);
-	NATS_CDB_STATS_SET(reap_last_due, c.g_due);
 
 	if (c.reaped)
 		LM_INFO("cachedb_nats reaper: reclaimed %d row(s) this pass\n",

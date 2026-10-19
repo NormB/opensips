@@ -160,6 +160,9 @@ mi_response_t *mi_nats_cdb_stats(const mi_params_t *params,
 	if (add_mi_number(resp_obj, MI_SSTR("reap_last_due"),
 		NATS_CDB_STATS_SUM(reap_last_due)) < 0)
 		goto error;
+	if (add_mi_number(resp_obj, MI_SSTR("reap_enum_failures"),
+		NATS_CDB_STATS_SUM(reap_enum_failures)) < 0)
+		goto error;
 	/* canary observability: requested comes straight
 	 * from the modparam; the rest are reaper-slot gauges/counter (see
 	 * cachedb_nats_stats.h for the value encodings). */

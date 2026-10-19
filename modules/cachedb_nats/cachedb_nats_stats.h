@@ -115,6 +115,9 @@ typedef struct _nats_cdb_stats {
 	_Atomic unsigned long reap_last_active;     /* would-be-served contacts */
 	_Atomic unsigned long reap_last_permanent;  /* permanent contacts       */
 	_Atomic unsigned long reap_last_due;        /* rows past their slack    */
+	/* passes whose enumeration failed or stopped early: they keep the
+	 * reap_last_* gauges of the last complete pass (counter) */
+	_Atomic unsigned long reap_enum_failures;
 	/* canary observability (single writer:
 	 * the reaper process' slot, like the reap_last_* gauges, so the
 	 * cross-slot SUM yields the plain value):
