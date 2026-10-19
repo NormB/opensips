@@ -272,6 +272,24 @@ wait_for_connected() {
     return 1
 }
 
+# Pull requests currently waiting on the shared durable (0 if unknown).
+num_waiting() {
+    local n
+    n="$(nats consumer info "$STREAM" "$DURABLE" --json 2>/dev/null \
+        | grep -oE '"num_waiting"[[:space:]]*:[[:space:]]*[0-9]+' \
+        | grep -oE '[0-9]+$' | head -1)"
+    echo "${n:-0}"
+}
+
+wait_for_pullers() {
+    local want="$1" deadline=$((SECONDS + WAIT_INIT_SECS))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        [ "$(num_waiting)" -ge "$want" ] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
 # Poll nats_consumer_list and emit "msgs_delivered acks" on stdout.
 poll_counters() {
     local port="$1"
@@ -307,9 +325,12 @@ wait_for_connected "${WORKDIR}/B.log" \
     && pass "instance B connected" \
     || { fail "instance B never connected"; tail -20 "${WORKDIR}/B.log" | sed 's/^/  B| /'; exit 1; }
 
-# Both instances need a moment for their startup_route to fire +
-# js_PullSubscribe to register on the broker before publishes land.
-sleep 1
+# Publish only once BOTH instances have a pull request waiting on the
+# durable: "connected" does not mean subscribed, and a burst published
+# before B pulls all goes to A (seen once in the nightly: A=50 B=0).
+wait_for_pullers 2 \
+    && pass "both instances are pulling from ${DURABLE}" \
+    || { fail "fewer than 2 pull requests waiting on ${DURABLE} (num_waiting=$(num_waiting))"; exit 1; }
 
 info "publishing ${N_MESSAGES} messages to ${SUBJECT}"
 for i in $(seq 1 "$N_MESSAGES"); do
