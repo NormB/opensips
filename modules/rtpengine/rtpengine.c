@@ -583,13 +583,13 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
 		ALL_ROUTES},
 	{"rtpengine_subscribe_answer", (cmd_function)rtpengine_subscribe_answer_f, {
-		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0},
 		{0,0,0}},
 		ALL_ROUTES},
 	{"rtpengine_unsubscribe", (cmd_function)rtpengine_unsubscribe_f, {
-		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_VAR | CMD_PARAM_OPT, 0, 0}, {0,0,0}},
 		ALL_ROUTES},
 	{"rtpengine_publish", (cmd_function)rtpengine_publish_f, {
