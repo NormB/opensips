@@ -107,7 +107,19 @@ mi_at() {
         params="${params}]"
     fi
     local payload="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\"${params}}"
-    printf '%s' "$payload" | timeout 3 nc -u -w 2 127.0.0.1 "$port"
+    # A 503 (JetStream briefly unavailable: a cluster leader election, a
+    # stalled listing) is retried; any other answer is returned at once.
+    # No answer is not retried: readiness pollers (mi_ready) expect it
+    # until opensips is up.  MI_RETRIES=1 turns this off.
+    local try out
+    for try in $(seq 1 "${MI_RETRIES:-3}"); do
+        out=$(printf '%s' "$payload" | timeout 3 nc -u -w 2 127.0.0.1 "$port")
+        case "$out" in
+        *'"code":503'*) [ "$try" -lt "${MI_RETRIES:-3}" ] && sleep "${MI_RETRY_DELAY:-1}" ;;
+        *) break ;;
+        esac
+    done
+    printf '%s' "$out"
 }
 
 mi() { mi_at "$MI_PORT_A" "$@"; }

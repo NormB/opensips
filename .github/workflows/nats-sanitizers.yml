@@ -128,8 +128,10 @@ jobs:
           sh ./lib/nats/tests/lint_private_refs.sh
           sh ./scripts/git-hooks/selftest_precommit.sh
 
-      - name: Strict-gate selftest (skip-vs-fail contract)
-        run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+      - name: sip_e2e harness selftests (skip-vs-fail contract, MI 503 retry)
+        run: |
+          ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+          ./modules/cachedb_nats/tests/sip_e2e/selftest_mi_retry.sh
 
       - name: Harness self-tests (nats_consumer stress plumbing, TLS probe, broker probe)
         run: |
