@@ -1,0 +1,71 @@
+#
+# pubsub_e2e: drives rtpengine_subscribe_request(), rtpengine_subscribe_answer(),
+# rtpengine_unsubscribe() and rtpengine_publish() from SIP MESSAGE requests.
+#
+#   X-Op:    subscribe-request | subscribe-answer | unsubscribe | publish
+#   X-Flags: the flags string passed to the function
+#   X-Sdp:   base64 SDP for the body variable (answer / publish)
+#
+# 200 replies carry X-Tag and X-Sdp (base64) where the function returns them;
+# 500 replies carry X-Err, the rtpengine error_pv.
+#
+
+log_level = 3
+stderror_enabled = yes
+syslog_enabled = no
+udp_workers = 2
+auto_aliases = no
+
+socket = udp:127.0.0.1:@PORT@
+
+mpath = "@TREE@/modules/"
+loadmodule "proto_udp.so"
+loadmodule "sl.so"
+loadmodule "sipmsgops.so"
+loadmodule "rtpengine.so"
+
+modparam("rtpengine", "rtpengine_sock", "udp:@NG@")
+modparam("rtpengine", "error_pv", "$var(rtpe_err)")
+
+route {
+	if (!is_method("MESSAGE")) {
+		sl_send_reply(405, "Method Not Allowed");
+		exit;
+	}
+
+	$var(rtpe_err) = "";
+	$var(tag) = "";
+	$var(sdp) = "";
+	if ($hdr(X-Sdp) != NULL)
+		$var(body) = $(hdr(X-Sdp){s.b64decode});
+	else
+		$var(body) = "";
+
+	if ($hdr(X-Op) == "subscribe-request") {
+		if (!rtpengine_subscribe_request("$hdr(X-Flags)", $var(sock), $var(sdp), $var(tag)))
+			route(failed);
+		append_to_reply("X-Tag: $var(tag)\r\nX-Sdp: $(var(sdp){s.b64encode})\r\n");
+	} else if ($hdr(X-Op) == "subscribe-answer") {
+		if (!rtpengine_subscribe_answer("$hdr(X-Flags)", $var(sock), $var(body)))
+			route(failed);
+	} else if ($hdr(X-Op) == "unsubscribe") {
+		if (!rtpengine_unsubscribe("$hdr(X-Flags)", $var(sock)))
+			route(failed);
+	} else if ($hdr(X-Op) == "publish") {
+		if (!rtpengine_publish("$hdr(X-Flags)", $var(sock), $var(body)))
+			route(failed);
+		append_to_reply("X-Sdp: $(var(body){s.b64encode})\r\n");
+	} else {
+		sl_send_reply(400, "Unknown X-Op");
+		exit;
+	}
+
+	sl_send_reply(200, "OK");
+	exit;
+}
+
+route[failed] {
+	append_to_reply("X-Err: $var(rtpe_err)\r\n");
+	sl_send_reply(500, "Failed");
+	exit;
+}
