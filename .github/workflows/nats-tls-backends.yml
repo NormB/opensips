@@ -66,11 +66,17 @@ jobs:
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
             autoconf automake libtool git \
-            nats-server
+            nats-server netcat-openbsd
           # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
           # NATS-over-TLS.
           SUDO=sudo LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
+      - name: Install nats CLI (pinned)
+        run: |
+          # the nats_consumer smoke creates its stream and publishes with it
+          wget -q https://github.com/nats-io/natscli/releases/download/v0.1.5/nats-0.1.5-amd64.deb
+          sudo dpkg -i nats-0.1.5-amd64.deb
+          nats --version
       - name: Build OpenSIPS core + tls_mgm + NATS modules
         run: |
           set -e
