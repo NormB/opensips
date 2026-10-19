@@ -1,6 +1,6 @@
 # 096 — the README's MI examples, validated 100%.
 #
-# Contract: EVERY `## opensips-cli -x mi ...` invocation in
+# Contract: EVERY `opensips-cli -x mi cachedb_nats:...` invocation in
 # modules/cachedb_nats/README.md is extracted MECHANICALLY and executed against
 # the live instance + broker; each must return a JSON-RPC result (never an
 # error).  A future README example is therefore tested the moment it is
@@ -36,7 +36,8 @@ check "documented population registered (alice x2, bob x1)" \
 wait_kv_count 2
 
 # ── mechanical sweep: run EVERY README MI example ──
-# Extraction emits one TAB-separated line per example: method, then args.
+# Extraction emits one TAB-separated line per example: method (module-
+# qualified, as documented and as sent), then args.
 # key=value tokens (no ';') become NAMED params, everything else positional
 # (exactly opensips-cli's convention).
 n_total=0
@@ -60,7 +61,7 @@ import re, shlex, sys
 
 doc, bucket = sys.argv[1], sys.argv[2]
 for line in open(doc):
-    m = re.match(r'^## opensips-cli -x mi (.+)$', line.strip())
+    m = re.match(r'^opensips-cli -x mi (.+)$', line.strip())
     if not m:
         continue
     # the suite bucket stands in for the documented default bucket name

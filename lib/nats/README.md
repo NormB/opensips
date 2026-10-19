@@ -89,7 +89,7 @@ The consumer binds to the stream `JOBS`, which must exist. Create it
 with the `nats` CLI or through OpenSIPS once it is running:
 
 ```bash title="Create the JOBS stream"
-opensips-cli -x mi nats_stream_create JOBS 'jobs.>'
+opensips-cli -x mi event_nats:nats_stream_create JOBS 'jobs.>'
 ```
 
 Until the stream exists the consumer logs a failed subscribe and keeps
@@ -98,7 +98,7 @@ retrying; it binds within a few seconds of the stream appearing.
 At startup OpenSIPS logs which libnats it loaded, and each process logs
 when it has connected:
 
-```bash title="Startup log"
+```text title="Startup log"
 INFO:core:nats_dl_load: nats_dl: loaded 'libnats.so'; 126 libnats symbols resolved
 INFO:core:nats_pool_register: NATS pool: registered by 'event_nats' with 1 server(s), TLS=no, reconnect_wait=2000ms, max_reconnect=60
 INFO:core:nats_pool_get: NATS pool: connected to nats://127.0.0.1:4222 (1 server(s) configured)
@@ -363,7 +363,7 @@ never the `*String` variants, which stop at the first NUL.
 | `modules/nats_consumer/tests/` | docker-compose functional and stress suites (`run_all.sh`, `stress_3way.sh`) |
 | `lib/nats/tests/test_three_module_e2e.sh` | shared-connection round trip across the modules |
 | `lib/nats/tests/test_tls_mgm_smoke.sh` | real TLS handshake through `tls_mgm`, plus failure cases |
-| `lib/nats/tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format |
+| `lib/nats/tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format and match the modules' export tables (`selftest_readme_format.sh` checks the checker) |
 
 The end-to-end tests start their own disposable `nats-server` (it must be
 in `PATH`) and never touch a broker already running on the host.

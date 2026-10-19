@@ -142,6 +142,7 @@ jobs:
       - name: Docs — README format; drain examples fit their timer interval
         run: |
           ./lib/nats/tests/test_readme_format.sh
+          ./lib/nats/tests/selftest_readme_format.sh
           ./modules/nats_consumer/tests/test_doc_drain_budget.sh
 
       - name: lib/nats unit tests

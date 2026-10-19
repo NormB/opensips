@@ -14,13 +14,13 @@ into a pull-mode
 [NATS](https://nats.io) JetStream consumer.
 A dedicated module process subscribes to JetStream streams,
 populates a per-handle SHM ring, and exposes the messages to
-OpenSIPS routing scripts via `nats_fetch()`
-and `nats_fetch_batch()`.  Acknowledgements
-(`nats_ack()`,
-`nats_ack_next()`,
-`nats_ack_progress()`,
-`nats_nak()`,
-`nats_term()`) travel back to the
+OpenSIPS routing scripts via [nats_fetch()](#nats_fetchid-timeout_ms)
+and [nats_fetch_batch()](#nats_fetch_batchid-opts).  Acknowledgements
+([nats_ack()](#nats_ack),
+[nats_ack_next()](#nats_ack_next),
+[nats_ack_progress()](#nats_ack_progress),
+[nats_nak()](#nats_nak),
+[nats_term()](#nats_term)) travel back to the
 consumer process over an IPC socket and are then relayed to
 NATS.
 
@@ -30,10 +30,12 @@ modules; see the [NATS family overview](../../lib/nats/README.md)
 for the others.
 
 
-Consumer handles are declared with the `bind` parameter, or added
-with the `nats_consumer_bind()` script function (from
-`startup_route`) or, at run time, the `nats_consumer_bind` MI
-command.  Only `bind`-declared handles come back after a restart.
+Consumer handles are declared with the [bind](#bind-string) parameter, or
+added with the [nats_consumer_bind()](#nats_consumer_bindconfig) script
+function (from `startup_route`) or, at run time, the
+[nats_consumer:nats_consumer_bind](#nats_consumernats_consumer_bind) MI
+command.  Only [bind](#bind-string)-declared handles come back after a
+restart.
 
 
 The module uses the connection shared by all NATS modules
@@ -48,17 +50,14 @@ connection whichever NATS modules are loaded.
 dedicated worker named `[NATS consumer]`
 whose only job is to drive the JetStream pull loop and
 hand messages to the SHM ring.  Acks travel back over a
-Unix-domain IPC socket
-(`nats_ack_ipc.c`).
+Unix-domain IPC socket.
 
 
 **If the consumer worker dies for
 any reason** (signal, segfault, OOM kill) the
 OpenSIPS core treats it as a fatal child death and
 shuts the entire instance down — exactly the same path
-a SIP UDP receiver crash takes
-(`signals.c`:`handle_sigs`,
-`SIGCHLD` branch).  There is
+a SIP UDP receiver crash takes.  There is
 *no per-process auto-restart*; the
 consumer is not registered with the
 `OSS_PROC_SELFEXIT` flag.
@@ -68,10 +67,10 @@ Operationally this means the supervisor that runs
 OpenSIPS (systemd, Kubernetes, etc.) is responsible for
 restarting the whole OpenSIPS instance after a consumer
 death.  Bound handles survive that restart only when
-declared via the `bind` parameter
-(see the modparam below); otherwise the registry must
+declared via the [bind](#bind-string) parameter;
+otherwise the registry must
 be repopulated by re-issuing
-`nats_consumer_bind`.  In-flight
+[nats_consumer_bind()](#nats_consumer_bindconfig).  In-flight
 messages whose ack didn't reach NATS before the
 restart will be re-delivered after
 `ack_wait`.
@@ -86,20 +85,20 @@ restart will be re-delivered after
 
 - you need explicit-ack JetStream pull-mode
 consumption from script
-(`nats_fetch`,
-`nats_ack`,
-`nats_nak`,
-`nats_term`,
-`nats_ack_progress`);
+([nats_fetch()](#nats_fetchid-timeout_ms),
+[nats_ack()](#nats_ack),
+[nats_nak()](#nats_nak),
+[nats_term()](#nats_term),
+[nats_ack_progress()](#nats_ack_progress));
 - you need durable consumers with bounded
 redelivery or replay semantics
 (`deliver_policy = by_start_seq`);
 - you need synchronous request/reply with NATS as
-a transport (`nats_request`)
+a transport ([nats_request()](#nats_requestsubject-payload-timeout_ms))
 from a non-request route;
 - you need fine-grained per-handle counters and a
 watchdog endpoint
-(`nats_consumer_health`).
+([nats_consumer:nats_consumer_health](#nats_consumernats_consumer_health)).
 
 
 **You don't need it when:**
@@ -107,7 +106,7 @@ plain fire-and-forget core-NATS subscription with
 `event_route[]` dispatch is
 sufficient — that path is handled by
 *event_nats*'s
-`subscribe` modparam.  The
+[subscribe](../event_nats/README.md#subscribe-string) modparam.  The
 *event_nats* subscribe path has no
 script-visible ack, no durable consumer state, no
 replay, and no per-message flow control, but is also
@@ -117,20 +116,160 @@ at-most-once-effective semantics from EVI dispatch,
 prefer that path.
 
 
+### Usage Patterns
+
+
+#### Durable Work Queue
+
+
+Two or more OpenSIPS instances binding the same durable
+name on the same stream load-balance deliveries via
+JetStream's consumer machinery.  No duplicates unless
+[nats_nak()](#nats_nak) or `ack_wait`
+expiry triggers a redelivery.
+
+
+```opensips title="startup_route + timer_route drain loop"
+startup_route {
+    nats_consumer_bind("id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5");
+}
+
+timer_route[drain, 1] {
+    # At most 100 messages x 5 ms wait = 500 ms, inside the 1 s
+    # interval; for higher rates use the nats_fetch_batch() pattern.
+    $var(n) = 0;
+    while ($var(n) < 100 && nats_fetch("jobs", 5)) {
+        xlog("L_INFO", "job $nats_seq: $nats_data\n");
+        nats_ack_next();
+        $var(n) = $var(n) + 1;
+    }
+}
+```
+
+
+#### Ephemeral Advisory Subscriber
+
+
+JetStream advisories
+(`$JS.EVENT.ADVISORY.>`) are a
+natural fit for an ephemeral consumer — the subscription
+lives only while OpenSIPS does, and
+`inactive_threshold` keeps the broker
+tidy if the process dies unexpectedly.  Script strings expand
+`$` variables, so the `$JS` subject prefix is written `$$JS`
+(`$$` is a literal `$`); in a [bind](#bind-string) modparam it is
+written as-is.
+
+
+```opensips title="Subscribe to max-delivery advisories"
+startup_route {
+    nats_consumer_bind("id=dlq;stream=_SYS_JS;ephemeral=1;filter=$$JS.EVENT.ADVISORY.MAX_DELIVERIES.>;inactive_threshold=5m");
+}
+
+timer_route[check_dlq, 5] {
+    # at most 40 x 100 ms = 4 s, inside the 5 s interval
+    $var(n) = 0;
+    while ($var(n) < 40 && nats_fetch("dlq", 100)) {
+        xlog("L_ALERT", "dead letter: $nats_subject $nats_data\n");
+        nats_ack();
+        $var(n) = $var(n) + 1;
+    }
+}
+```
+
+
+#### Request / Reply
+
+
+The responder side binds a durable consumer on a stream
+covering the request subject; the requester side calls
+[nats_request()](#nats_requestsubject-payload-timeout_ms) from a
+`timer_route` or
+`startup_route`.
+
+
+```opensips title="Two-route RPC on the same instance"
+startup_route {
+    nats_consumer_bind("id=rpc_srv;stream=RPC;durable=srv;filter=rpc.call;ack_wait=5s");
+}
+
+timer_route[rpc_srv, 1] {
+    # at most 50 requests x 10 ms wait = 500 ms, inside the 1 s interval
+    $var(n) = 0;
+    while ($var(n) < 50 && nats_fetch("rpc_srv", 10)) {
+        nats_hdr_set("X-Trace-Id", "$nats_hdr(X-Trace-Id)");
+        if (nats_reply("echo: $nats_data"))
+            nats_ack();
+        else
+            nats_nak();
+        $var(n) = $var(n) + 1;
+    }
+}
+
+timer_route[rpc_cli, 5] {
+    if (nats_request("rpc.call", "ping", 2000))
+        xlog("L_INFO", "reply: $nats_data\n");
+}
+```
+
+
+### Limitations
+
+
+- **At most 256 bound handles.**  Binding more fails: the
+[nats_consumer_bind()](#nats_consumer_bindconfig) script function returns
+-1 and the [nats_consumer:nats_consumer_bind](#nats_consumernats_consumer_bind)
+MI command answers with error 507.
+- **One consumer process.**  If it dies, OpenSIPS shuts down; there is
+no automatic restart of the process alone.
+- **Handles bound through MI are lost on restart.**  Only handles from
+the [bind](#bind-string) parameter and `startup_route` come back.
+- **Message size:** payloads over 16 384 bytes and subjects over 256
+bytes are terminated (`term`), not delivered.  Headers beyond 1024
+bytes are truncated.
+- **[nats_request()](#nats_requestsubject-payload-timeout_ms):** replies
+are truncated to 16 384 bytes, async request payloads over 16 384 bytes
+are rejected, and at most 16 headers can be staged per request.
+- **Fetch limits:** [nats_fetch_batch()](#nats_fetch_batchid-opts)
+returns at most 32 messages per call; [fetch_batch](#fetch_batch-integer)
+is limited to 1..4096 and [fetch_timeout_ms](#fetch_timeout_ms-integer)
+to 1..60 000.
+- **Ring size:** `ring_capacity` is at most 65 536; the default 128
+slots use about 2.3 MB of shared memory per handle.
+- **Async requests** are limited by [async_rpc_slots](#async_rpc_slots-integer)
+(64 by default, for the whole instance).
+- **Synchronous [nats_request()](#nats_requestsubject-payload-timeout_ms)
+blocks.**  It is refused in request, failure, branch and error routes
+unless [allow_sync_anywhere](#allow_sync_anywhere-integer) is set.
+A `failure_route` entered on `fr_timer` expiry has no non-blocking
+alternative.
+- **A durable consumer on a deleted stream** stays failed until an
+operator unbinds it and binds it again after re-creating the stream.
+- **Poison messages:** a message delivered more than
+[poison_max_deliver](#poison_max_deliver-integer) times (20 by default)
+is terminated.
+
+
 ### Dependencies
 
 
 #### OpenSIPS Modules
 
 
-- *None.*  The module configures its own servers (`nats_url`) and
-shares the connection with any other NATS module that is loaded, in
-any load order.
-- *tls_mgm* — only for `tls://` server URLs, with a client domain
-named `nats`.
+The following modules must be loaded before this module:
 
 
-#### External Libraries
+- *tls_mgm* if [nats_url](#nats_url-string) holds a `tls://` URL, with a
+client domain named `nats`.  No other module is needed: the module
+configures its own servers and shares the connection with any other
+NATS module that is loaded, in any load order.
+
+
+#### External Libraries or Applications
+
+
+The following libraries or applications must be installed before running
+OpenSIPS with this module loaded:
 
 
 - *libnats* (the [nats.c](https://github.com/nats-io/nats.c) client),
@@ -143,12 +282,12 @@ build time.  See the
 ### Exported Parameters
 
 
-#### bind (string, multiple)
+#### bind (string)
 
 
 Declarative handle bind.  Each value uses the same
 `key=value;key=value` config grammar as
-`nats_consumer_bind()` and is bound
+[nats_consumer_bind()](#nats_consumer_bindconfig) and is bound
 into the registry at module init, before any worker
 forks.  The parameter may be set multiple times, one
 handle per value.
@@ -158,13 +297,14 @@ A malformed value, an unknown key, or a duplicate
 `id` is a configuration error and
 aborts startup.  Handles bound at runtime through the
 MI command remain available but are ephemeral: after a
-restart only `bind`-declared handles
-exist.  (The former `persist_handles` /
-`persist_path` file-snapshot mechanism
-was removed in favour of this parameter.)
+restart only [bind](#bind-string)-declared handles
+exist.
 
 
-```opensips title="Declare handles in the configuration"
+*Default value is "NULL" (no handle).*
+
+
+```opensips title="Set bind parameter"
 ...
 modparam("nats_consumer", "bind",
     "id=jobs;stream=JOBS;filter=jobs.>;durable=jobs_worker")
@@ -191,9 +331,9 @@ consumer process issues against the broker (lower
 lower broker CPU per consumer).  The consumer process
 clamps the request to the ring's currently-free slot
 count before each `natsSubscription_Fetch`
-call, so a `fetch_batch` that
-exceeds the worker's transient drain rate no longer
-triggers ring-full defer-drops; the broker simply
+call, so a fetch batch that
+exceeds the worker's transient drain rate does not
+trigger ring-full defer-drops; the broker simply
 holds the un-fetched messages until the next loop
 iteration.  Pair with a generous
 `ring_capacity`
@@ -209,12 +349,12 @@ this knob alone.  Reference numbers, single-instance
 aarch64 loopback at N=100 000:
 
 
-- `nats_fetch`+`nats_ack`
+- [nats_fetch()](#nats_fetchid-timeout_ms) + [nats_ack()](#nats_ack)
 per-message: ~2 000 msgs/sec, gated by the
 OpenSIPS script-interpreter overhead.
-- `nats_fetch_batch`
-+`nats_batch_select`
-+`nats_ack` at
+- [nats_fetch_batch()](#nats_fetch_batchid-opts)
++ [nats_batch_select()](#nats_batch_selectidx)
++ [nats_ack()](#nats_ack) at
 `fetch_batch=10`:
 ~9 800 msgs/sec.
 - Same pattern at
@@ -225,9 +365,7 @@ OpenSIPS script-interpreter overhead.
 ~89 000 msgs/sec.
 
 
-See the README's "Choosing a drain pattern" and
-"Tuning `fetch_batch`" sections for
-the full trade-off matrix.  At very high batches
+At very high batches
 (>= 256) the broker's
 `max_ack_pending` becomes the next
 bottleneck; raising it (with
@@ -236,11 +374,10 @@ lifts the ceiling further at the cost of broker
 memory.
 
 
-*Default value:*
-`10`
+*Default value is "10".*
 
 
-```opensips title="High-throughput durable -- override fetch_batch + ring"
+```opensips title="Set fetch_batch parameter"
 modparam("nats_consumer", "fetch_batch", 32)
 
 startup_route {
@@ -270,11 +407,10 @@ idle CPU on streams that rarely have messages, at the
 cost of slower shutdown.
 
 
-*Default value:*
-`1000`
+*Default value is "1000".*
 
 
-```opensips title="Latency-sensitive RPC handle, short timeout"
+```opensips title="Set fetch_timeout_ms parameter"
 modparam("nats_consumer", "fetch_timeout_ms", 1000)
 
 startup_route {
@@ -298,8 +434,8 @@ consumer process terminates
 `NumDelivered` exceeds the cap, instead
 of pushing it to the worker ring, and bumps the
 per-handle `poisoned` counter (visible
-in `nats_consumer_list` and
-`nats_consumer_stats`).
+in [nats_consumer:nats_consumer_list](#nats_consumernats_consumer_list) and
+[nats_consumer:nats_consumer_stats](#nats_consumernats_consumer_stats)).
 
 
 This is a global backstop independent of any per-handle
@@ -310,13 +446,12 @@ mainly to bound redelivery for handles left at the
 unlimited default.
 
 
-*Default value:*
-`20`.  Set to `0` to
+*Default value is "20".  Set to "0" to
 disable the backstop (unlimited broker-paced
-redelivery).
+redelivery).*
 
 
-```opensips title="Dead-letter a message after 20 failed deliveries"
+```opensips title="Set poison_max_deliver parameter"
 modparam("nats_consumer", "poison_max_deliver", 20)
 ```
 
@@ -325,15 +460,15 @@ modparam("nats_consumer", "poison_max_deliver", 20)
 
 
 Opt-in switch that widens the route mask of the
-synchronous `nats_request` entry
-point so it may be called from SIP-worker contexts
+synchronous [nats_request()](#nats_requestsubject-payload-timeout_ms)
+entry point so it may be called from SIP-worker contexts
 (*REQUEST_ROUTE*,
 *FAILURE_ROUTE*,
 *BRANCH_ROUTE*,
 *ERROR_ROUTE*).  When unset (the
 default), the OpenSIPS parser rejects any call to
-bare `nats_request` from those
-routes with the diagnostic
+a synchronous [nats_request()](#nats_requestsubject-payload-timeout_ms)
+from those routes with the diagnostic
 "Command <nats_request> cannot be used
 in the block"; only
 *STARTUP_ROUTE*,
@@ -343,8 +478,7 @@ in the block"; only
 *ONREPLY_ROUTE* remain accepted.
 
 
-The guard exists because
-`natsConnection_RequestMsg`
+The guard exists because a synchronous request
 blocks the calling worker for up to
 `timeout_ms`.  A SIP UDP/TCP worker
 that blocks on the RPC cannot read its next packet
@@ -354,8 +488,8 @@ Operators who know their deployment can absorb the
 worst case (low RPS, a thin SIP gateway in front,
 generous worker pool sizing) may opt in to the
 simpler synchronous ergonomics by setting this to
-`1`; the setter callback widens the
-`nats_request` entry's flag word
+`1`; the setting widens the route mask of
+[nats_request()](#nats_requestsubject-payload-timeout_ms)
 to *ALL_ROUTES* at the moment the
 modparam directive is parsed, before any route block
 is checked.
@@ -363,114 +497,54 @@ is checked.
 
 *Per-route blocking consequences.*
 Each of the newly-opened routes has its own
-distinct operational blast radius (verified
-against the core invocation paths cited below).
-The setter callback emits an
-*LM_WARN* at config-parse time
+distinct operational blast radius.  A warning is logged
+at config-parse time
 spelling these out so an operator who flips the
 switch cannot miss them:
 
 
-- **REQUEST_ROUTE.**
-Runs on the SIP worker that received the
-request
-(`receive.c`:
-`run_top_route`(`sroutes->request[DEFAULT_RT]`)).
-The worker cannot read its next SIP packet for
-the duration; under sustained load the recv
+- *REQUEST_ROUTE* - runs on the SIP worker that received the
+request.  The worker cannot read its next SIP packet for
+the duration; under sustained load the receive
 backlog grows on this worker's interface.
-- **FAILURE_ROUTE.**
-Has two invocation paths with different blast
-radius and different async support:
+- *FAILURE_ROUTE* - has two invocation paths with different
+blast radius and different async support:
+  - *negative-reply trigger* - when an upstream branch returns a
+  final non-2xx, the SIP worker that received the reply runs the
+  failure route inline.  The blast radius is the same as
+  blocking in REQUEST_ROUTE on that worker; `async()` IS
+  available from this trigger path because a SIP worker has a
+  full reactor.
+  - *`fr_timer` / `fr_inv_timer` expiry* - the failure route
+  runs inline on the *timer ticker* process, the single-threaded
+  tick driver that fires the C-level timer callbacks of the core
+  and the modules (including the *tm* final-response timer) and
+  has no reactor.  Blocking it delays every other transaction's
+  fr_timer and every other module's tick callback
+  (retransmissions, watchdogs, etc.) until the block clears.  This
+  is a worse blast radius than blocking a single SIP worker, and
+  `async()` is *not* available from this trigger path because the
+  ticker has no reactor -- there is no non-blocking option in this
+  module for fr_timer-triggered failure_route.
+- *BRANCH_ROUTE* - runs on the SIP worker that is fanning out the
+transaction's outbound branches.  The per-branch INVITE/REGISTER
+send is delayed by up to `timeout_ms`; subsequent branches in the
+same transaction also wait.
+- *ERROR_ROUTE* - runs on the SIP worker that hit a parse error
+on an inbound request or that tripped an in-action error.
+Blocking delays the error response back to the peer.
 
 
-*Negative-reply trigger*
--- when an upstream branch returns a
-final non-2xx, the SIP worker that
-received the reply runs the failure
-route inline
-(`modules/tm/t_reply.c`:
-`run_failure_handlers`).
-Blast radius identical to
-REQUEST_ROUTE blocking on that worker;
-`async()` IS
-available from this trigger path
-because a SIP worker has a full
-reactor.
-
-
-*`fr_timer` /
-`fr_inv_timer` expiry*
--- the failure route runs inline on
-the *timer ticker*
-process, which is the
-single-threaded process forked by
-`start_timer_processes`
-in `timer.c`
-(loop body:
-`run_timer_process`,
-a bare
-`select(0,0,0,0,&tv)`
-tick driver with no reactor).  This
-process exists solely to fire the
-C-level callbacks registered via
-`register_timer()`
--- including TM's
-`final_response_handler`,
-which in turn calls
-`fake_reply` ->
-`relay_reply`
-->
-`run_failure_handlers`
-inline.  Blocking it queues every
-other transaction's fr_timer fire,
-every other module's tick callback
-(retransmissions, watchdogs, etc.)
-until the block clears.  Worse blast
-radius than blocking a single SIP
-worker, and
-`async()` is
-*not* available
-from this trigger path because the
-ticker has no reactor -- there is no
-non-blocking option in this module
-for fr_timer-triggered failure_route
-today.
-- **BRANCH_ROUTE.**
-Runs on the SIP worker that is fanning out the
-transaction's outbound branches
-(`modules/tm/t_fwd.c`:
-`pre_print_uac_request`).
-The per-branch INVITE/REGISTER send is delayed
-by up to `timeout_ms`;
-subsequent branches in the same transaction
-also wait.
-- **ERROR_ROUTE.**
-Runs on the SIP worker that hit a parse error
-on an inbound request
-(`receive.c`) or that
-tripped an in-action error
-(`action.c`:
-`run_error_route`).
-Blocking delays the error response back to the
-peer.
-
-
-*Note:*
-`timer_route { ... }` blocks (not
-to be confused with the C-level
-`register_timer()` callbacks
-described under FAILURE_ROUTE above) execute on a
-separate *Timer handler*
-process that has a full reactor and supports
-`async()`.  Calls to bare
-`nats_request` from
-`timer_route` are accepted by
-the default mask (TIMER_ROUTE is in the safe
-allow-list) and async() works there too.  The
-ticker-process limitation discussed under
-FAILURE_ROUTE / fr_timer is a different process
-and a different code path.
+> [!NOTE]
+> `timer_route { ... }` blocks (not to be confused with the C-level
+> timer callbacks described under FAILURE_ROUTE above) execute on a
+> separate *Timer handler* process that has a full reactor and
+> supports `async()`.  Synchronous
+> [nats_request()](#nats_requestsubject-payload-timeout_ms) calls from
+> `timer_route` are accepted by the default mask (TIMER_ROUTE is in
+> the safe allow-list) and `async()` works there too.  The
+> ticker-process limitation discussed under FAILURE_ROUTE / fr_timer
+> is a different process and a different code path.
 
 
 *The recommended pattern for any worker
@@ -499,12 +573,11 @@ onreply_route, and the reply-triggered branch of
 failure_route.  The only worker-blocking
 situation without a non-blocking alternative is
 failure_route entered through fr_timer /
-fr_inv_timer expiry; lifting that requires an
-upstream change in *tm* that
+fr_inv_timer expiry; lifting that requires a
+change in *tm* that
 dispatches fr_timer expiry through a Timer
 handler instead of running it inline on the
-ticker.  See `nats_request`
-below.
+ticker.  See [nats_request()](#nats_requestsubject-payload-timeout_ms).
 
 
 Range: `0` (default, safer) or
@@ -513,11 +586,10 @@ other value is rejected at config-parse time so a
 typo cannot silently disarm the guard.
 
 
-*Default value:*
-`0`
+*Default value is "0".*
 
 
-```opensips title="Opt in -- low-RPS deployment that prefers sync ergonomics"
+```opensips title="Set allow_sync_anywhere parameter"
 modparam("nats_consumer", "allow_sync_anywhere", 1)
 
 route {
@@ -556,11 +628,10 @@ route[got_reply] {
 
 
 Outbound header name used to carry the per-call
-*UUIDv7* correlation id auto-
-minted by both the sync and async
-`nats_request` start paths.
+*UUIDv7* correlation id auto-minted by both the sync and async
+[nats_request()](#nats_requestsubject-payload-timeout_ms) start paths.
 The id is also exposed to the script via the
-`$nats_request_id` pvar and
+[$nats_request_id](#nats_request_id) pseudo-variable and
 persists across an
 `async()` yield so the resume
 route can read it back for log / trace
@@ -571,7 +642,7 @@ correlation.
 `clock_gettime(CLOCK_REALTIME)`
 + one `getrandom(GRND_NONBLOCK)`
 of 10 bytes per request, plus a 36-byte snprintf.
-Measured at roughly 200 ns on aarch64; below
+Measured at roughly 200 ns on aarch64; below
 the noise floor of the libnats round-trip.
 
 
@@ -586,12 +657,13 @@ the NATS subject to the responder's logs.
 
 *Auto-stage behaviour.* When the
 modparam is non-empty, every
-`nats_request` call stages
+[nats_request()](#nats_requestsubject-payload-timeout_ms) call stages
 `<header-name>: <uuid>`
 onto the outbound natsMsg
 *iff* the script has not
 already staged the same header explicitly via
-`nats_hdr_set`.  A deliberate
+[nats_hdr_set()](#nats_hdr_setname-value).  A header staged that way
+wins -- the auto-stage observes the existing entry and steps aside:
 
 
 ```opensips title="Stage the request id header yourself"
@@ -602,16 +674,12 @@ timer_route[rpc_tick, 5] {
 ```
 
 
-wins -- the auto-stage observes the existing entry
-and steps aside.
-
-
 *Disabling the header.* Setting
 the modparam to the empty string
 (`""`) suppresses the auto-stage
 without affecting the mint: the id is still
 generated and the
-`$nats_request_id` pvar still
+[$nats_request_id](#nats_request_id) pseudo-variable still
 works, but no header is added to the outbound
 msg.  Use this when you want client-side
 correlation but the responder cannot accept (or
@@ -627,11 +695,10 @@ vendor-prefixed
 `X-MyOrg-Request-Id`.
 
 
-*Default value:*
-`"X-Request-Id"`
+*Default value is "X-Request-Id".*
 
 
-```opensips title="End-to-end correlation: script -- broker -- responder"
+```opensips title="Set request_id_header parameter"
 modparam("nats_consumer", "request_id_header", "X-Request-Id")
 
 route {
@@ -700,8 +767,8 @@ modparam("nats_consumer", "nats_url", "nats://nats-1:4222,nats://nats-2:4222")
 
 
 Size of the SHM slot pool that backs in-flight
-`async`
-`nats_request()` calls across all SIP
+asynchronous [nats_request()](#nats_requestsubject-payload-timeout_ms-1)
+calls across all SIP
 workers.  Each concurrent async RPC occupies one slot for its
 lifetime; when the pool is exhausted a new call fails (-5) and
 the script can retry or shed load.  Clamped to the range
@@ -711,12 +778,20 @@ the script can retry or shed load.  Clamped to the range
 *Default value is "64".*
 
 
+```opensips title="Set async_rpc_slots parameter"
+...
+modparam("nats_consumer", "async_rpc_slots", 256)
+...
+```
+
+
 #### async_rpc_poll_ms (integer)
 
 
 Tick interval, in milliseconds, of the per-call
-worker-private guard timerfd behind an async
-`nats_request()`.  The reply itself does
+worker-private guard timerfd behind an asynchronous
+[nats_request()](#nats_requestsubject-payload-timeout_ms-1).  The reply
+itself does
 not wait for this timer: the consumer process signals the
 calling worker over OpenSIPS IPC the moment the reply is
 delivered (or the call is abandoned), so the resume runs at
@@ -725,8 +800,14 @@ request timeout - or a lost wake signal - is noticed; the
 value is clamped to the range 1..1000.
 
 
-*Default value is "100"
-(milliseconds).*
+*Default value is "100" (milliseconds).*
+
+
+```opensips title="Set async_rpc_poll_ms parameter"
+...
+modparam("nats_consumer", "async_rpc_poll_ms", 50)
+...
+```
 
 
 #### reconnect_wait_ms (integer)
@@ -739,6 +820,13 @@ shared default (2000 ms).
 
 
 *Default value is "0" (use the shared default).*
+
+
+```opensips title="Set reconnect_wait_ms parameter"
+...
+modparam("nats_consumer", "reconnect_wait_ms", 1000)
+...
+```
 
 
 #### max_reconnect (integer)
@@ -754,6 +842,13 @@ wins.  A value of **0** keeps the shared default (60).
 *Default value is "0" (use the shared default).*
 
 
+```opensips title="Set max_reconnect parameter"
+...
+modparam("nats_consumer", "max_reconnect", 30)
+...
+```
+
+
 ### Exported Functions
 
 
@@ -766,61 +861,47 @@ per-worker `$nats_*` pseudo-variables
 with the delivered message's subject, data, sequence,
 delivery count, pending count, reply subject, and
 headers.  Does not acknowledge the message — call
-`nats_ack()`,
-`nats_nak()`, or
-`nats_term()` explicitly.
+[nats_ack()](#nats_ack),
+[nats_nak()](#nats_nak), or
+[nats_term()](#nats_term) explicitly.
 
 
-- *id* (string) — a previously-
-bound consumer handle id.
-- *timeout_ms* (integer, optional)
-— block up to this many milliseconds waiting for a
-message.  Default `0` = non-blocking.
+Meaning of the parameters is as follows:
+
+
+- *id* (string) - a previously-bound consumer handle id.
+- *timeout_ms* (integer, optional) - block up to this many
+milliseconds waiting for a message.  Default `0` = non-blocking.
 
 
 Return values (no path returns `0` — a
-0 return from a script-callable cmd terminates the
-calling route via *ACT_FL_EXIT*):
-`1` on success,
-`-1` when no message arrived within the
-budget (not an error; script may retry),
-`-2` when the underlying NATS connection
-is down (the consumer process surfaces this so scripts
-can distinguish transport failure from empty ring; call
-`nats_last_error()` for the human
-string),
-`-3` when the handle id is not found or
-is retiring,
-`-6` on internal error.
+0 return from a script function terminates the
+calling route):
 
 
-Also exported as an async command; see
-[async nats_fetch()](#async-nats_fetchid-timeout_ms).
+- **1** - a message was fetched.
+- **-1** - no message arrived within the budget (not an error; the
+script may retry).
+- **-2** - the NATS connection is down: the ring is empty and the
+shared connection reports disconnected, so the call returns at once
+instead of waiting out *timeout_ms*; the script can tell a transport
+failure from an empty ring and back off.
+- **-3** - the handle id is not found or is retiring.
+- **-6** - internal error.
 
 
-#### async nats_fetch(id, [timeout_ms])
+This function can be used from any route.  The asynchronous flavor is
+[nats_fetch()](#nats_fetchid-timeout_ms-1).
 
 
-Non-blocking variant of `nats_fetch()`
-for use inside `async(...)` launcher
-statements.  The worker yields immediately after the
-call; a worker-private timerfd registered with the
-reactor polls the ring on each tick and resumes the
-worker when a message arrives, or once the per-call
-*timeout_ms* deadline expires.
-
-
-```opensips title="Async fetch + ack in a request route"
-route[PROCESS] {
-    async(nats_fetch("orders", 5000), ON_MSG);
-}
-
-route[ON_MSG] {
-    if ($retcode == 1) {
-        xlog("L_INFO", "got $nats_subject: $nats_data\n");
+```opensips title="nats_fetch usage"
+timer_route[jobs_drain, 1] {
+    # at most 100 messages x 5 ms wait = 500 ms, inside the 1 s interval
+    $var(n) = 0;
+    while ($var(n) < 100 && nats_fetch("jobs", 5)) {
+        xlog("L_INFO", "job $nats_seq: $nats_data\n");
         nats_ack();
-    } else {
-        xlog("L_WARN", "no message, rc=$retcode\n");
+        $var(n) = $var(n) + 1;
     }
 }
 ```
@@ -832,11 +913,15 @@ route[ON_MSG] {
 Drain up to *count* messages in a
 single call.  The fetched messages are staged in a
 per-worker batch buffer.  Use
-`nats_batch_select(i)` to activate
+[nats_batch_select()](#nats_batch_selectidx) to activate
 each one, then ack / nak / term it before moving on.
 
 
-*opts* is a semicolon-separated
+Meaning of the parameters is as follows:
+
+
+- *id* (string) - a previously-bound consumer handle id.
+- *opts* (string, optional) - a semicolon-separated
 `k=v` string recognizing
 `count` (default 1),
 `expires` (duration, default 0 =
@@ -852,7 +937,8 @@ and `no_wait` (bool, default 0).
 
 Returns the number of messages staged in
 `$retcode`, or a negative error
-code identical to `nats_fetch()`.
+code identical to [nats_fetch()](#nats_fetchid-timeout_ms)
+(-1 when nothing arrived within the budget).
 The OpenSIPS script does not allow direct
 assignment of a function return to a
 `$var()`; capture
@@ -862,7 +948,7 @@ call.
 
 When `expires` is positive, the
 call blocks on the cross-process ring futex
-(`nats_ring_wait`) in slices of up
+in slices of up
 to 100 ms until the requested
 `count` is reached or the deadline
 expires.  This wait is bounded by the
@@ -871,7 +957,11 @@ set `expires` longer than the
 request a route is meant to take.
 
 
-```opensips title="High-throughput batch drain pattern"
+This function can be used from any route.  The asynchronous flavor is
+[nats_fetch_batch()](#nats_fetch_batchid-opts-1).
+
+
+```opensips title="nats_fetch_batch usage"
 timer_route[drain, 1] {
     # A fetch waits up to expires_ms for its batch to fill, so while
     # messages keep trickling in every call can take the full wait.
@@ -901,82 +991,243 @@ timer_route[drain, 1] {
 Activate the *idx*-th message in the
 worker's current batch so subsequent
 `$nats_*` reads and
-`nats_ack()` /
-`nats_nak()` /
-`nats_term()` calls target it.  Valid
-indices are `0 .. n-1` where
-*n* is the return of the most recent
-`nats_fetch_batch()`.  Calling
-`nats_batch_select()` twice with the
-same index after acknowledging is a no-op and returns
-`-1`.
+[nats_ack()](#nats_ack) /
+[nats_nak()](#nats_nak) /
+[nats_term()](#nats_term) calls target it.
 
 
-#### Acknowledgement functions
+Selecting an index whose message was already acknowledged succeeds,
+but the slot no longer holds a message: a following ack / nak / term
+is a no-op that returns -1.
 
 
-- `nats_ack()`
-— acknowledge the current message successfully.
-- `nats_ack_next()`
-— ack the current message and immediately
-request another delivery (reduces round-trips
-when tight-looping a durable consumer).
-- `nats_ack_progress()`
-— refresh the broker's ack timer without
-terminating the delivery.  Use when a handler
-must exceed the handle's
-`ack_wait` without triggering
-a redelivery.
-- `nats_nak()`
-— negative-ack the current message; the broker
-schedules redelivery using the consumer's
+Meaning of the parameters is as follows:
+
+
+- *idx* (integer) - the message index, `0 .. n-1` where *n* is the
+return of the most recent [nats_fetch_batch()](#nats_fetch_batchid-opts).
+
+
+Returns 1 on success, -1 when there is no current batch or *idx* is
+out of range.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_batch_select usage"
+nats_fetch_batch("jobs", "count=10");
+$var(rc) = $retcode;
+$var(i) = 0;
+while ($var(i) < $var(rc)) {
+    nats_batch_select($var(i));
+    xlog("L_INFO", "job $nats_seq: $nats_data\n");
+    nats_ack();
+    $var(i) = $var(i) + 1;
+}
+```
+
+
+#### nats_ack()
+
+
+Acknowledge the current message successfully.
+
+
+Returns 1 on success, -1 when there is no current message (or its
+ack token has already been consumed), -2 when the ack could not be
+queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_ack usage"
+if (nats_fetch("jobs", 0))
+    nats_ack();
+```
+
+
+#### nats_ack_next()
+
+
+Ack the current message and immediately request another delivery
+(reduces round-trips when tight-looping a durable consumer).
+
+
+Returns 1 on success, -1 when there is no current message, -2 when
+the ack could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_ack_next usage"
+if (nats_fetch("jobs", 0))
+    nats_ack_next();
+```
+
+
+#### nats_ack_progress()
+
+
+Refresh the broker's ack timer to keep the current delivery alive
+past the handle's `ack_wait`, without triggering a redelivery.  The
+current message stays selected, so a following
+[nats_ack()](#nats_ack) / [nats_nak()](#nats_nak) /
+[nats_term()](#nats_term) still targets it.  This is the same function
+as [nats_in_progress()](#nats_in_progress).
+
+
+Returns 1 on success, -1 when there is no current message, -2 when
+the request could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_ack_progress usage"
+if (nats_fetch("jobs", 0)) {
+    nats_ack_progress();
+    # ... long-running work ...
+    nats_ack();
+}
+```
+
+
+#### nats_nak()
+
+
+Negative-ack the current message; the broker schedules redelivery
+using the consumer's `ack_wait`.
+
+
+Returns 1 on success, -1 when there is no current message, -2 when
+the nak could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_nak usage"
+if (nats_fetch("jobs", 0))
+    nats_nak();
+```
+
+
+#### nats_nak_delay(delay_ms)
+
+
+Same as [nats_nak()](#nats_nak) but the broker schedules redelivery for
+*delay_ms* milliseconds in the future instead of using the consumer's
 `ack_wait`.
-- `nats_nak_delay(delay_ms)`
-— same as `nats_nak()` but the
-broker schedules redelivery for
-*delay_ms* milliseconds in the
-future instead of using the consumer's
-`ack_wait`.
-- `nats_term()`
-— terminate the delivery with no retry.
-`max_deliver`-style advisory
+
+
+Meaning of the parameters is as follows:
+
+
+- *delay_ms* (integer) - redelivery delay in milliseconds; a value of
+0 or less redelivers without delay.
+
+
+Returns 1 on success, -1 when there is no current message, -2 when
+the nak could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_nak_delay usage"
+if (nats_fetch("jobs", 0))
+    nats_nak_delay(5000);
+```
+
+
+#### nats_term()
+
+
+Terminate the delivery with no retry.  `max_deliver`-style advisory
 semantics still apply on the server side.
-- `nats_in_progress()`
-— like `nats_ack_progress()`,
-refresh the broker's ack timer to keep the
-current delivery alive past
-`ack_wait`, but
-*without* clearing the
-worker's current-message state.  Subsequent
-`nats_ack()` /
-`nats_nak()` /
-`nats_term()` calls still
-target the same delivery.  Use when a long
-handler will continue to poll progress and
-eventually finalise with one of the standard
-acks.
 
 
-All seven return `1` on success or
-`-1` when there is no current message
-(or the worker's ack token has already been consumed).
+Returns 1 on success, -1 when there is no current message, -2 when
+the request could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_term usage"
+if (nats_fetch("jobs", 0) && $nats_delivered > 3)
+    nats_term();
+```
+
+
+#### nats_in_progress()
+
+
+Refresh the broker's ack timer to keep the current delivery alive
+past `ack_wait`, *without* clearing the worker's current-message
+state.  Subsequent [nats_ack()](#nats_ack) /
+[nats_nak()](#nats_nak) / [nats_term()](#nats_term) calls still
+target the same delivery.  Use when a long handler will continue to
+poll progress and eventually finalise with one of the standard acks.
+
+
+Returns 1 on success, -1 when there is no current message, -2 when
+the request could not be queued to the consumer process.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_in_progress usage"
+if (nats_fetch("jobs", 0)) {
+    nats_in_progress();
+    # ... long-running work ...
+    nats_ack();
+}
+```
 
 
 #### nats_hdr_set(name, value)
 
 
 Stage a header on the worker-local outgoing header
-buffer.  The next `nats_reply()` or
-`nats_request()` flushes the staged
-headers onto the outbound NATS message.  Up to 16
-headers can be staged per worker; attempts to add more
+buffer.  The next [nats_reply()](#nats_replypayload) or
+[nats_request()](#nats_requestsubject-payload-timeout_ms) flushes the
+staged headers onto the outbound NATS message.  Staging a name that is
+already staged (compared case-insensitively) replaces its value.  Up to
+16 headers can be staged per worker; attempts to add more
 return `-1`.
 
 
 Staged headers are cleared after every
-`nats_reply()` or
-`nats_request()` regardless of
+[nats_reply()](#nats_replypayload) or
+[nats_request()](#nats_requestsubject-payload-timeout_ms) regardless of
 outcome.
+
+
+Meaning of the parameters is as follows:
+
+
+- *name* (string) - the header name.
+- *value* (string) - the header value.
+
+
+Returns 1 on success, -1 on an empty name, a full header table or an
+allocation failure.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_hdr_set usage"
+timer_route[rpc_lookup, 5] {
+    nats_hdr_set("X-Trace-Id", "lookup-$Ts");
+    nats_request("rpc.lookup", "ping", 200);
+}
+```
 
 
 #### nats_reply(payload)
@@ -985,44 +1236,47 @@ outcome.
 Publish *payload* to the current
 message's `reply_to` subject.  Useful
 as the responder side of a request/reply exchange.
-Returns `1` on success,
-`-1` when there is no current message,
-no `reply_to`, or the publish failed.
+
+
+Meaning of the parameters is as follows:
+
+
+- *payload* (string) - the reply payload.
+
+
+Return values:
+
+
+- **1** - the reply was published.
+- **-1** - there is no current message.
+- **-2** - the current message has no `reply_to` subject.
+- **-3** - there is no NATS connection.
+- **-4** - the `reply_to` subject is invalid, or the message could
+not be created or published.
+
+
+This function can be used from any route.
+
+
+```opensips title="nats_reply usage"
+if (nats_fetch("rpc_srv", 10)) {
+    if (nats_reply("echo: $nats_data"))
+        nats_ack();
+    else
+        nats_nak();
+}
+```
 
 
 #### nats_request(subject, payload, timeout_ms)
 
 
-NATS request/reply.  Publishes
+Synchronous NATS request/reply.  Publishes
 *payload* to
 *subject* and waits for a reply on
-a per-call inbox.  Two call shapes:
-
-
-- **Sync:**
-nats_request("rpc.x", $var(p), 200);
-Blocks the calling worker for up to
-*timeout_ms* milliseconds.
-Default route mask permits
-`STARTUP_ROUTE`,
-`TIMER_ROUTE`,
-`LOCAL_ROUTE`,
-`EVENT_ROUTE`,
-`ONREPLY_ROUTE` only;
-`request_route` /
-`failure_route` /
-`branch_route` /
-`error_route` are reachable
-only after setting
-`allow_sync_anywhere=1`.
-- **Async:**
-async(nats_request("rpc.x", $var(p), 200), on_reply);
-Yields the worker to the reactor on a per-call
-eventfd.  A libnats subscription thread receives
-the reply on the worker's persistent inbox
-subscription and signals the eventfd; the
-resume route runs with the per-worker
-current-message state populated.
+a per-call inbox, blocking the calling worker for up to
+*timeout_ms* milliseconds.  The non-blocking form is the asynchronous
+flavor, [nats_request()](#nats_requestsubject-payload-timeout_ms-1).
 
 
 On success the reply populates the script-visible
@@ -1030,72 +1284,203 @@ state: `$nats_data`,
 `$nats_subject`,
 `$nats_hdr(Name)`,
 `$nats_reply_to`.  The
-`$nats_request_id` pvar holds the
-UUIDv7 used as the correlation id and is also
-staged as the
-`X-Request-Id` outbound header
-(modparam-configurable; can be overridden by the
-script).
+[$nats_request_id](#nats_request_id) pseudo-variable holds the
+UUIDv7 used as the correlation id, which is also
+staged as the outbound header named by
+[request_id_header](#request_id_header-string) (`X-Request-Id` by
+default; the script can override it).
 
 
-*Return codes.*
-No path returns `0` -- a 0 return
-from a script-callable cmd sets
-*ACT_FL_EXIT* in
-`run_action_list`
-(`action.c`:196) and silently
+Meaning of the parameters is as follows:
+
+
+- *subject* (string) - the request subject.
+- *payload* (string) - the request payload.
+- *timeout_ms* (integer) - how long to wait for the reply, in
+milliseconds.
+
+
+Return codes.  No path returns `0` -- a 0 return
+from a script function silently
 terminates the calling route, which is never
 correct for an RPC result.  Every outcome is
 therefore a positive success code or a negative
 error / non-result code:
 
 
-- `1` — reply delivered.
-- `-1` — timeout: the broker
+- **1** - reply delivered.
+- **-1** - timeout: the broker
 is still reachable but the responder did not
 reply within
-`timeout_ms`.  Script may
+*timeout_ms*.  Script may
 retry with a longer timeout.
-- `-2` —
-**connection lost
-mid-flight.**  Async only.  The pool
-reconnect epoch advanced or
-`nats_pool_is_connected`
-went false during the call.  This is distinct
-from a timeout: the script should treat
+- **-2** - asynchronous flavor only: the NATS connection is down
+when the call is issued, or is lost while it is in flight (the pool
+reconnect epoch advanced or the shared connection went down).  This is
+distinct from a timeout: the script should treat
 `-2` as broker-down (alert,
 circuit-break, surface 503) rather than
-retry-with-longer-tmo.
-*Latency note.*  The resume
+retry-with-longer-timeout.  The resume
 function checks the connection epoch on every
 guard tick, so a mid-flight disconnect surfaces
 `-2` on the next guard tick --
-worst case one `async_rpc_poll_ms`
+worst case one [async_rpc_poll_ms](#async_rpc_poll_ms-integer)
 interval (100 ms default) after the pool notices
 the loss, independent of the script's
-`timeout_ms`.  A reply that is
+*timeout_ms*.  A reply that is
 already being delivered when the disconnect is
 detected still wins: the cancel uses the same
 atomic claim as the timeout path and backs off
 if the consumer got there first.
-- `-3` — NATS unavailable at
+- **-3** - synchronous form only: NATS unavailable at
 issue time (no pool connection).  Returned
 before any publish attempt; the script can
 short-circuit without paying the
-`timeout_ms` wait.
-- `-4` — request error
-(subject empty / too long, msg create
+*timeout_ms* wait.
+- **-4** - request error
+(subject empty, too long or invalid, payload too long, msg create
 failed, publish or sync-request failed).
-- `-5` — per-worker in-flight
-cap reached.  Async only.  Default cap is
-4096 simultaneous in-flight calls per worker;
-callers should implement back-pressure when
-this surfaces.
-- `-6` — internal error
+- **-5** - asynchronous flavor only: no free slot in the
+[async_rpc_slots](#async_rpc_slots-integer) pool, or the request could
+not be queued to the consumer process.  Callers should implement
+back-pressure when this surfaces.
+- **-6** - asynchronous flavor only: internal error
 (oom, format failure, missing eventfd, etc.).
 
 
-```opensips title="Async request with full error-branch handling"
+This function can be used from STARTUP_ROUTE, TIMER_ROUTE,
+LOCAL_ROUTE, EVENT_ROUTE and ONREPLY_ROUTE; with
+[allow_sync_anywhere](#allow_sync_anywhere-integer) set, from any route.
+
+
+```opensips title="nats_request usage"
+timer_route[rpc_cli, 5] {
+    if (nats_request("rpc.call", "ping", 2000))
+        xlog("L_INFO", "reply: $nats_data\n");
+    else
+        xlog("L_WARN", "rpc id=$nats_request_id failed rc=$retcode\n");
+}
+```
+
+
+#### nats_consumer_bind(config)
+
+
+Bind a consumer handle from the script, before the workers start,
+like one declared with the [bind](#bind-string) parameter.  The
+`startup_route` runs at every start, so a handle bound there is bound
+again after a restart.
+
+
+Meaning of the parameters is as follows:
+
+
+- *config* (string) - the handle configuration, a semicolon-separated
+`k=v` string with the same keys as the
+[nats_consumer:nats_consumer_bind](#nats_consumernats_consumer_bind) MI
+command.  Script strings expand `$` variables, so a literal `$`
+(as in the `$JS` subject prefix) is written `$$`.
+
+
+Returns 1 on success, -1 when the configuration is malformed, has an
+unknown key or a duplicate id, or the handle limit is reached (the
+reason is logged).
+
+
+This function can be used from STARTUP_ROUTE.
+
+
+```opensips title="nats_consumer_bind usage"
+startup_route {
+    nats_consumer_bind("id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5");
+}
+```
+
+
+### Exported Asynchronous Functions
+
+
+#### nats_fetch(id, [timeout_ms])
+
+
+The asynchronous flavor of the [nats_fetch()](#nats_fetchid-timeout_ms)
+function. It receives the same parameters, with the same meanings.
+
+
+The worker yields immediately after the
+call; a worker-private timerfd registered with the
+reactor polls the ring on each tick and resumes the
+worker when a message arrives, or once the per-call
+*timeout_ms* deadline expires.  When a message is already waiting,
+the call completes without yielding.
+
+
+```opensips title="async nats_fetch usage"
+route[PROCESS] {
+    async(nats_fetch("orders", 5000), ON_MSG);
+}
+
+route[ON_MSG] {
+    if ($retcode == 1) {
+        xlog("L_INFO", "got $nats_subject: $nats_data\n");
+        nats_ack();
+    } else {
+        xlog("L_WARN", "no message, rc=$retcode\n");
+    }
+}
+```
+
+
+#### nats_fetch_batch(id, [opts])
+
+
+The asynchronous flavor of the
+[nats_fetch_batch()](#nats_fetch_batchid-opts)
+function. It receives the same parameters, with the same meanings.
+
+
+The worker yields while the batch fills; the resume route sees the
+number of staged messages (or -1 / -2 when none arrived) in
+`$retcode`.
+
+
+```opensips title="async nats_fetch_batch usage"
+route[PROCESS] {
+    async(nats_fetch_batch("jobs", "count=10;expires=500ms"), ON_BATCH);
+}
+
+route[ON_BATCH] {
+    $var(rc) = $retcode;
+    $var(i) = 0;
+    while ($var(i) < $var(rc)) {
+        nats_batch_select($var(i));
+        nats_ack();
+        $var(i) = $var(i) + 1;
+    }
+}
+```
+
+
+#### nats_request(subject, payload, timeout_ms)
+
+
+The asynchronous flavor of the
+[nats_request()](#nats_requestsubject-payload-timeout_ms)
+function. It receives the same parameters, with the same meanings.
+
+
+It yields the worker to the reactor on a per-call
+eventfd.  A libnats subscription thread receives
+the reply on the worker's persistent inbox
+subscription and signals the eventfd; the
+resume route runs with the per-worker
+current-message state populated.  It is accepted from every route
+that supports `async()`, whatever
+[allow_sync_anywhere](#allow_sync_anywhere-integer) is set to.  Each
+call in flight holds one of the [async_rpc_slots](#async_rpc_slots-integer).
+
+
+```opensips title="async nats_request usage"
 route {
     async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
 }
@@ -1111,7 +1496,7 @@ route[on_reply] {
         xlog("L_ERR", "rpc id=$nats_request_id connection lost\n");
         sl_send_reply(503, "Service Unavailable");
     } else {
-        # -3 / -4 / -5 / -6: configuration / publish / capacity / internal
+        # -4 / -5 / -6: request / capacity / internal
         xlog("L_ERR", "rpc id=$nats_request_id failed rc=$retcode\n");
         sl_send_reply(500, "Internal Server Error");
     }
@@ -1119,131 +1504,20 @@ route[on_reply] {
 ```
 
 
-### Exported Pseudo-Variables
-
-
-- `$nats_subject` — NATS subject the
-current message was delivered on.
-- `$nats_data` — message payload.
-- `$nats_reply_to` — reply subject
-(empty string when the publisher did not request a
-reply).
-- `$nats_seq` — JetStream stream
-sequence number.
-- `$nats_consumer_seq` — JetStream
-consumer-side sequence number.
-- `$nats_delivered` — broker's
-delivered counter (1 on first delivery, bumps on
-each redelivery).
-- `$nats_pending` — broker's
-estimate of messages still waiting on the stream
-after this one.
-- `$nats_token` — opaque ack token
-encoding (handle_idx, slot_idx, generation).
-- `$nats_hdr(Name)` — read a header
-from the current message.  Lookup is
-case-insensitive.  *Name* must be
-a literal; dynamic
-`$nats_hdr($var(x))` forms are not
-supported.
-- `$nats_request_id`
-(**read/write**)
-— UUIDv7 correlation id of the most recent
-`nats_request` issued by
-this worker.  Minted automatically by both the
-sync and async start paths at call time and
-stashed in per-worker process memory so it is
-readable
-**before** the
-call returns (sync),
-**across the
-`async()` yield**,
-and inside the resume route.  Returns
-`NULL` on workers that have
-not yet issued any `nats_request`
-call and have no pending script assignment.
-Same value is auto-staged as the
-`X-Request-Id` outbound header
-(header name configurable via the
-`request_id_header`
-modparam); responders that echo the header on
-the reply get end-to-end correlation across
-logs and traces.  Set the modparam to an empty
-string to mint but not stage.
-**Caller-set override.**
-Assigning to the pvar before a
-`nats_request` call swaps
-the auto-minted UUIDv7 for the script-supplied
-value on that one call (consume-once
-semantics): subsequent calls with no further
-assignment revert to minting fresh.  Useful
-for propagating an inbound trace id (e.g. from
-a SIP header, an upstream tracing context, or
-a callee-specific correlation token) into the
-NATS request so the entire trace shares one
-id end-to-end.
-Validation: 1..63 bytes, no CR/LF (would
-inject pseudo-headers into the NATS wire
-format).  Out-of-range assignments are
-rejected, an
-*LM_WARN* is logged
-explaining why, and the next call falls
-back to minting a fresh UUIDv7.
-*Clearing the override.*
-Both `$nats_request_id = NULL`
-and `$nats_request_id = ""`
-clear the pending override and the stash.
-The NULL form is handled by the pvar setter's
-early-return fast path; the empty-string
-form falls through to the same clear routine
-via the
-*len <= 0* branch.
-After a clear, `$nats_request_id`
-reads NULL until the next
-`nats_request` mints
-fresh.
-
-```opensips title="Correlate an async RPC across log lines"
-route {
-    xlog("L_INFO", "issuing rpc id=$nats_request_id\n");
-    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
-}
-route[on_reply] {
-    if ($retcode == 1) {
-        xlog("L_INFO", "rpc id=$nats_request_id reply=$nats_data()\n");
-    } else if ($retcode == -1) {
-        xlog("L_WARN", "rpc id=$nats_request_id timed out\n");
-    }
-}
-```
-
-```opensips title="Propagate an inbound SIP X-Trace-Id into the NATS RPC"
-route {
-    # Reuse the upstream caller's trace id (if present) so the
-    # NATS responder logs the same id the SIP gateway logged.
-    if ($hdr(X-Trace-Id) != null) {
-        $nats_request_id = $hdr(X-Trace-Id);
-    }
-    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
-}
-route[on_reply] {
-    # $nats_request_id still holds the id used on this call --
-    # the consume-once flag was cleared when nats_request fired,
-    # but the stash still reflects the value that went out.
-    xlog("L_INFO", "rpc trace=$nats_request_id reply=$nats_data()\n");
-}
-```
-
-
 ### Exported MI Functions
 
 
-#### nats_consumer_bind
+#### nats_consumer:nats_consumer_bind
 
 
-Register a consumer handle.  Takes a single
-`config` parameter: a
-semicolon-separated `k=v` string.
+Register a consumer handle.  Unknown keys are rejected as
+configuration errors.
+
+
+Parameters:
+
+
+- *config* - a semicolon-separated `k=v` string.
 Required keys: `id`,
 `stream`, and either
 `durable=<name>` or
@@ -1265,16 +1539,13 @@ the full JetStream pull-consumer matrix:
 `ring_capacity`.
 
 
-Unknown keys are rejected as configuration errors.
-
-
-```bash title="Register a durable work-queue consumer"
-opensips-cli -x mi nats_consumer_bind \
+```bash
+opensips-cli -x mi nats_consumer:nats_consumer_bind \
   'id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5'
 ```
 
 
-#### nats_consumer_unbind
+#### nats_consumer:nats_consumer_unbind
 
 
 Remove a handle by id.  The handle is marked
@@ -1282,17 +1553,23 @@ Remove a handle by id.  The handle is marked
 lookups miss; the consumer process tears down the
 JetStream subscription on its next iteration, and the
 registry reaper frees the handle once all in-flight ack
-operations drain.  `nats_consumer_unbind`
+operations drain.  The command
 always returns promptly — the deferred teardown is
 invisible to the caller.
 
 
-```bash title="Unbind a handle"
-opensips-cli -x mi nats_consumer_unbind id=jobs
+Parameters:
+
+
+- *id* - the handle id.
+
+
+```bash
+opensips-cli -x mi nats_consumer:nats_consumer_unbind id=jobs
 ```
 
 
-#### nats_consumer_list
+#### nats_consumer:nats_consumer_list
 
 
 List all registered handles with their bind-time
@@ -1302,15 +1579,17 @@ redeliveries, poisoned, fetch_skips_full,
 backpressure_drops, fetch_errors, ring_depth).
 
 
+Parameters: *none*
+
+
 Each handle entry also carries two backoff-state
-fields that surface the worker's
-`ensure_subscription_for_handle()`
-retry budget:
+fields that surface the consumer process's
+subscription retry budget:
 
 
-- **ensure_failures** —
-consecutive ensure-subscription failures.  Zero on
-a healthy handle; non-zero while the worker is in
+- *ensure_failures* - consecutive failures to (re)create the
+handle's subscription.  Zero on
+a healthy handle; non-zero while the consumer process is in
 backoff after the broker rejected
 `js_AddConsumer` /
 `js_PullSubscribe` (e.g. the
@@ -1319,9 +1598,8 @@ OpenSIPS, or the underlying stream is missing).
 The next failed retry would push the value to
 seven, at which point the backoff saturates at
 the 60 s cap and a one-shot WARN names the handle.
-- **ensure_next_retry_at** —
-unix timestamp (CLOCK_REALTIME seconds) before
-which the worker will skip this handle's reconcile
+- *ensure_next_retry_at* - unix timestamp (CLOCK_REALTIME seconds)
+before which the consumer process will skip this handle's reconcile
 tick.  Zero means "retry on the next tick".
 
 
@@ -1332,7 +1610,12 @@ edge so log forwarders can tell wedge from recovery
 without polling.
 
 
-#### nats_consumer_health
+```bash
+opensips-cli -x mi nats_consumer:nats_consumer_list
+```
+
+
+#### nats_consumer:nats_consumer_health
 
 
 Liveness snapshot of the dedicated consumer process.
@@ -1343,25 +1626,30 @@ per-handle SHM ring's eventfd with no other observable
 signal.
 
 
+Parameters: *none*
+
+
 Returns a JSON object:
 
 
-- **tick** — monotonic
+- *tick* - monotonic
 loop-iteration counter incremented once per
 consumer-loop pass.
-- **consumer_pid** —
-PID of the consumer process.
-- **last_tick_ms_ago** —
-Milliseconds since the last tick (CLOCK_MONOTONIC).
-- **stale** —
-*"true"* when
+- *consumer_pid* - PID of the consumer process.
+- *last_tick_ms_ago* - milliseconds since the last tick
+(CLOCK_MONOTONIC).
+- *stale* - *"true"* when
 `last_tick_ms_ago` exceeds 5000 ms
 (more than five times the loop's 1 s upper-wait
 bound) or no tick has been observed yet.
 
 
-```bash title="Poll consumer health from opensips-cli"
-$ opensips-cli -x mi nats_consumer_health
+```bash
+opensips-cli -x mi nats_consumer:nats_consumer_health
+```
+
+
+```json
 {
     "tick": 12943,
     "consumer_pid": 4711,
@@ -1371,7 +1659,7 @@ $ opensips-cli -x mi nats_consumer_health
 ```
 
 
-#### nats_consumer_stats
+#### nats_consumer:nats_consumer_stats
 
 
 One flat JSON object aggregating the observability
@@ -1380,50 +1668,41 @@ IPC saturation.  Safe to call from the attendant/MI
 process: the counters live in SHM allocated pre-fork.
 
 
-- **handles**,
-**ring_depth** /
-**ring_capacity** —
-bound handle count and ring occupancy summed across
-handles.
-- **msgs_delivered**,
-**pulls_requested**,
-**acks**,
-**naks**,
-**terms**,
-**redeliveries**,
-**poisoned** —
-lifetime delivery/ack totals (poisoned counts
-messages terminated by the
-`poison_max_deliver` backstop).
-- **fetch_skips_full** —
-Fetches skipped because a ring was full (flow
-control, no data loss);
-**backpressure_drops** —
-messages fetched but deferred (the broker
-redelivers);
-**fetch_errors** —
-Fetch calls returning a hard error.
-- **ack_ipc_depth /
-ack_ipc_enqueued / ack_ipc_drained /
-ack_ipc_dropped** — the worker-to-consumer
+Parameters: *none*
+
+
+- *handles*, *ring_depth* / *ring_capacity* - bound handle count
+and ring occupancy summed across handles.
+- *msgs_delivered*, *pulls_requested*, *acks*, *naks*, *terms*,
+*redeliveries*, *poisoned* - lifetime delivery/ack totals (poisoned
+counts messages terminated by the
+[poison_max_deliver](#poison_max_deliver-integer) backstop).
+- *fetch_skips_full* - Fetches skipped because a ring was full (flow
+control, no data loss); *backpressure_drops* - messages fetched but
+deferred (the broker redelivers); *fetch_errors* - Fetch calls
+returning a hard error.
+- *ack_ipc_depth* / *ack_ipc_enqueued* / *ack_ipc_drained* /
+*ack_ipc_dropped* - the worker-to-consumer
 ack queue: current depth plus lifetime totals.  A
 climbing depth or any drops mean the consumer
 process is not draining acks fast enough.
-- **rpc_ipc_depth /
-rpc_ipc_enqueued / rpc_ipc_drained /
-rpc_ipc_dropped** — same fields for the
+- *rpc_ipc_depth* / *rpc_ipc_enqueued* / *rpc_ipc_drained* /
+*rpc_ipc_dropped* - same fields for the
 async-RPC request queue, plus
-**rpc_slot_orphans_reaped**
+*rpc_slot_orphans_reaped*
 (slots reclaimed after their worker died).
-- **rpc_slots_inflight /
-rpc_slots_total** — async-RPC slot-pool
-occupancy; inflight pinned at total means new
-`nats_request` calls return
+- *rpc_slots_inflight* / *rpc_slots_total* - async-RPC slot-pool
+occupancy; inflight pinned at total means new asynchronous
+[nats_request()](#nats_requestsubject-payload-timeout_ms-1) calls return
 `-5` (pool full).
 
 
-```bash title="Poll aggregate consumer stats"
-$ opensips-cli -x mi nats_consumer_stats
+```bash
+opensips-cli -x mi nats_consumer:nats_consumer_stats
+```
+
+
+```json
 {
     "handles": 2,
     "ring_depth": 0,
@@ -1453,132 +1732,157 @@ $ opensips-cli -x mi nats_consumer_stats
 ```
 
 
-### Usage Patterns
+### Exported Pseudo-Variables
 
 
-#### Durable Work Queue
+#### $nats_subject
 
 
-Two or more OpenSIPS instances binding the same durable
-name on the same stream load-balance deliveries via
-JetStream's consumer machinery.  No duplicates unless
-`nats_nak()`/`ack_wait`
-expiry triggers a redelivery.
+NATS subject the current message was delivered on.
 
 
-```opensips title="startup_route + timer_route drain loop"
-startup_route {
-    nats_consumer_bind("id=jobs;stream=WORK;durable=jobs_worker;filter=work.jobs;ack_wait=30s;max_deliver=5");
+#### $nats_data
+
+
+Message payload.
+
+
+#### $nats_reply_to
+
+
+Reply subject (empty string when the publisher did not request a
+reply).
+
+
+#### $nats_seq
+
+
+JetStream stream sequence number.
+
+
+#### $nats_consumer_seq
+
+
+JetStream consumer-side sequence number.
+
+
+#### $nats_delivered
+
+
+Broker's delivered counter (1 on first delivery, bumps on each
+redelivery).
+
+
+#### $nats_pending
+
+
+Broker's estimate of messages still waiting on the stream after this
+one.
+
+
+#### $nats_token
+
+
+Opaque ack token encoding (handle_idx, slot_idx, generation).
+
+
+#### $nats_hdr(name)
+
+
+Read a header from the current message.  Lookup is
+case-insensitive.  *name* must be
+a literal; dynamic
+`$nats_hdr($var(x))` forms are not
+supported.
+
+
+#### $nats_request_id
+
+
+Read/write.  UUIDv7 correlation id of the most recent
+[nats_request()](#nats_requestsubject-payload-timeout_ms) issued by
+this worker.  Minted automatically by both the
+sync and async start paths at call time and
+stashed in per-worker process memory so it is
+readable
+**before** the
+call returns (sync),
+**across the
+`async()` yield**,
+and inside the resume route.  Returns
+`NULL` on workers that have
+not yet issued any request
+call and have no pending script assignment.
+The same value is auto-staged as the
+`X-Request-Id` outbound header
+(header name configurable via the
+[request_id_header](#request_id_header-string)
+modparam); responders that echo the header on
+the reply get end-to-end correlation across
+logs and traces.  Set the modparam to an empty
+string to mint but not stage.
+
+
+*Caller-set override.*
+Assigning to the pseudo-variable before a
+request call swaps
+the auto-minted UUIDv7 for the script-supplied
+value on that one call (consume-once
+semantics): subsequent calls with no further
+assignment revert to minting fresh.  Useful
+for propagating an inbound trace id (e.g. from
+a SIP header, an upstream tracing context, or
+a callee-specific correlation token) into the
+NATS request so the entire trace shares one
+id end-to-end.
+Validation: 1..63 bytes, no CR/LF (would
+inject pseudo-headers into the NATS wire
+format).  Out-of-range assignments are
+rejected, a warning is logged
+explaining why, and the next call falls
+back to minting a fresh UUIDv7.
+
+
+*Clearing the override.*
+Both `$nats_request_id = NULL`
+and `$nats_request_id = ""`
+clear the pending override and the stash.
+After a clear, `$nats_request_id`
+reads NULL until the next
+request mints fresh.
+
+
+```opensips title="Correlate an async RPC across log lines"
+route {
+    xlog("L_INFO", "issuing rpc id=$nats_request_id\n");
+    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
 }
-
-timer_route[drain, 1] {
-    # At most 100 messages x 5 ms wait = 500 ms, inside the 1 s
-    # interval; for higher rates use the nats_fetch_batch() pattern.
-    $var(n) = 0;
-    while ($var(n) < 100 && nats_fetch("jobs", 5)) {
-        xlog("L_INFO", "job $nats_seq: $nats_data\n");
-        nats_ack_next();
-        $var(n) = $var(n) + 1;
+route[on_reply] {
+    if ($retcode == 1) {
+        xlog("L_INFO", "rpc id=$nats_request_id reply=$nats_data()\n");
+    } else if ($retcode == -1) {
+        xlog("L_WARN", "rpc id=$nats_request_id timed out\n");
     }
 }
 ```
 
 
-#### Ephemeral Advisory Subscriber
-
-
-JetStream advisories
-(`$JS.EVENT.ADVISORY.>`) are a
-natural fit for an ephemeral consumer — the subscription
-lives only while OpenSIPS does, and
-`inactive_threshold` keeps the broker
-tidy if the process dies unexpectedly.  Script strings expand
-`$` variables, so the `$JS` subject prefix is written `$$JS`
-(`$$` is a literal `$`); in a `bind` modparam it is written
-as-is.
-
-
-```opensips title="Subscribe to max-delivery advisories"
-startup_route {
-    nats_consumer_bind("id=dlq;stream=_SYS_JS;ephemeral=1;filter=$$JS.EVENT.ADVISORY.MAX_DELIVERIES.>;inactive_threshold=5m");
-}
-
-timer_route[check_dlq, 5] {
-    # at most 40 x 100 ms = 4 s, inside the 5 s interval
-    $var(n) = 0;
-    while ($var(n) < 40 && nats_fetch("dlq", 100)) {
-        xlog("L_ALERT", "dead letter: $nats_subject $nats_data\n");
-        nats_ack();
-        $var(n) = $var(n) + 1;
+```opensips title="Propagate an inbound SIP X-Trace-Id into the NATS RPC"
+route {
+    # Reuse the upstream caller's trace id (if present) so the
+    # NATS responder logs the same id the SIP gateway logged.
+    if ($hdr(X-Trace-Id) != null) {
+        $nats_request_id = $hdr(X-Trace-Id);
     }
+    async(nats_request("rpc.lookup", $var(payload), 200), on_reply);
+}
+route[on_reply] {
+    # $nats_request_id still holds the id used on this call --
+    # the consume-once flag was cleared when nats_request fired,
+    # but the stash still reflects the value that went out.
+    xlog("L_INFO", "rpc trace=$nats_request_id reply=$nats_data()\n");
 }
 ```
-
-
-#### Request / Reply
-
-
-The responder side binds a durable consumer on a stream
-covering the request subject; the requester side calls
-`nats_request()` from a
-`timer_route` or
-`startup_route`.
-
-
-```opensips title="Two-route RPC on the same instance"
-startup_route {
-    nats_consumer_bind("id=rpc_srv;stream=RPC;durable=srv;filter=rpc.call;ack_wait=5s");
-}
-
-timer_route[rpc_srv, 1] {
-    # at most 50 requests x 10 ms wait = 500 ms, inside the 1 s interval
-    $var(n) = 0;
-    while ($var(n) < 50 && nats_fetch("rpc_srv", 10)) {
-        nats_hdr_set("X-Trace-Id", "$nats_hdr(X-Trace-Id)");
-        if (nats_reply("echo: $nats_data"))
-            nats_ack();
-        else
-            nats_nak();
-        $var(n) = $var(n) + 1;
-    }
-}
-
-timer_route[rpc_cli, 5] {
-    if (nats_request("rpc.call", "ping", 2000))
-        xlog("L_INFO", "reply: $nats_data\n");
-}
-```
-### Limitations
-
-
-- **At most 256 bound handles.**  Binding more fails with -3.
-- **One consumer process.**  If it dies, OpenSIPS shuts down; there is
-no automatic restart of the process alone.
-- **Handles bound through MI are lost on restart.**  Only handles from
-the `bind` parameter and `startup_route` come back.
-- **Message size:** payloads over 16 384 bytes and subjects over 256
-bytes are terminated (`term`), not delivered.  Headers beyond 1024
-bytes are truncated.
-- **`nats_request`:** replies are truncated to 16 384 bytes, async
-request payloads over 16 384 bytes are rejected, and at most 16
-headers can be staged per request.
-- **Fetch limits:** `nats_fetch_batch` returns at most 32 messages per
-call; `fetch_batch` is limited to 1..4096 and `fetch_timeout_ms` to
-1..60 000.
-- **Ring size:** `ring_capacity` is at most 65 536; the default 128
-slots use about 2.3 MB of shared memory per handle.
-- **Async requests** are limited by `async_rpc_slots` (64 by default,
-for the whole instance).
-- **Synchronous `nats_request` blocks.**  It is refused in request,
-failure, branch and error routes unless `allow_sync_anywhere` is set.
-A `failure_route` entered on `fr_timer` expiry has no non-blocking
-alternative.
-- **A durable consumer on a deleted stream** stays failed until an
-operator unbinds it and binds it again after re-creating the stream.
-- **Poison messages:** a message delivered more than
-`poison_max_deliver` times (20 by default) is terminated.
-
-
 <!-- CONTRIBUTORS -->
 
 ### License
