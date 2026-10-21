@@ -208,8 +208,9 @@ forks. Registrations merge:
 - DNS SRV URLs (`nats+srv://domain`, `tls+srv://domain`) are resolved
   by libnats, so a registration that contains one fails unless the
   loaded libnats exports `nats_SupportsSRV()` and it returns true
-  (`nats_dl_supports_srv()`): another libnats would connect to the
-  domain name as a host. An SRV URL with a port or a path is corrected
+  (`nats_dl_supports_srv()`; nats.c configured with
+  `-DNATS_BUILD_WITH_SRV_LOOKUP=ON`, off by default): another libnats
+  would connect to the domain name as a host. An SRV URL with a port or a path is corrected
   (both dropped) with a warning, since libnats would reject the whole
   server list; one without a usable domain name is left out with a
   warning, and if no server is left, startup goes on without NATS;

@@ -974,9 +974,11 @@ domain has three labels or more: `nats-1.example.com` is used for
 `example.com`, `nats-1.example.net` is ignored.
 
 
-SRV URLs need a libnats with DNS SRV support (one that exports
-`nats_SupportsSRV()`).  With any other libnats, OpenSIPS refuses to
-start: such a libnats would connect to the domain name as a host.
+SRV URLs need a libnats built with DNS SRV support: a nats.c with
+SRV support configured with `-DNATS_BUILD_WITH_SRV_LOOKUP=ON` (it is
+off by default), for which `nats_SupportsSRV()` returns true.  With
+any other libnats, OpenSIPS refuses to start: such a libnats would
+connect to the domain name as a host, or reject the URL.
 
 
 *Default value is "NULL" (servers taken from the first cachedb_url).*
