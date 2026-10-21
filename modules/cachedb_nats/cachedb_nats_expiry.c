@@ -947,6 +947,7 @@ void nats_cdb_reaper_proc_main(int rank)
 
 	for (;;) {
 		sleep(1);
+		nats_cdb_deferred_boot_checks();
 		ttl_canary_check(time(NULL));
 		nats_cdb_proc_sched_due(&sc, time(NULL), nats_reap_interval,
 			resync_iv, &run_reap, &run_resync);

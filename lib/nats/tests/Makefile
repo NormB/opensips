@@ -135,10 +135,16 @@ test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.
 		-I/usr/local/include -o $@ test_pool_fork.c \
 		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
+# Pure header-inline helpers (the implicit rule would not know about the
+# header).
+test_url_scheme: test_url_scheme.c ../nats_url_scheme.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_url_scheme.c
+
 # Behavioural: connect-time options of the shared pool (no_randomize,
 # SRV URLs gated on the libnats capability).  Links the REAL ../nats_pool.c
 # against a fake libnats table, like test_pool_fork.
-test_pool_connect_opts: test_pool_connect_opts.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def
+test_pool_connect_opts: test_pool_connect_opts.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def \
+		../nats_url_scheme.h
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_connect_opts.c \
 		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread

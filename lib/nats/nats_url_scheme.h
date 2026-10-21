@@ -30,6 +30,7 @@
 #ifndef NATS_URL_SCHEME_H
 #define NATS_URL_SCHEME_H
 
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -101,13 +102,16 @@ static inline int nats_url_srv_domain_ok(const char *d, int n)
 /* Correct the SRV URL token [tok, tok+len) (nats_url_is_srv() true) into
  * @out, which has room for len + 1 bytes.  libnats takes the domain after
  * the last '@' and accepts no port and no path, so:
- *   1: the URL is fine, @out is a copy of it;
- *   2: a port, path, query or fragment was dropped: @out is
- *      scheme://[credentials@]domain;
- *   0: there is no usable domain name (@out undefined). */
+ *   1: the URL is fine;
+ *   2: a port, path, query or fragment was dropped;
+ *   0: there is no usable domain name (@out undefined).
+ * For 1 and 2, @out is scheme://[credentials@]domain in its normal form:
+ * the scheme in lower case, no trailing '/' or '.', as libnats reads it --
+ * so the pool sees that two spellings are the same server. */
 static inline int nats_url_srv_correct(const char *tok, int len, char *out)
 {
 	const char *end = tok + len, *auth, *d, *dend, *p;
+	char *o = out;
 	int n;
 
 	auth = tok;
@@ -127,15 +131,39 @@ static inline int nats_url_srv_correct(const char *tok, int len, char *out)
 	if (!nats_url_srv_domain_ok(d, (int)(dend - d)))
 		return 0;
 
-	if (dend == end || (dend + 1 == end && *dend == '/')) {
-		memcpy(out, tok, len);
-		out[len] = '\0';
-		return 1;
-	}
-	n = (int)(dend - tok);
-	memcpy(out, tok, n);
-	out[n] = '\0';
-	return 2;
+	for (p = tok; p < auth; p++)
+		*o++ = (*p >= 'A' && *p <= 'Z') ? (char)(*p - 'A' + 'a') : *p;
+	n = (int)(dend - auth);
+	if (dend[-1] == '.')
+		n--;
+	memcpy(o, auth, n);
+	o[n] = '\0';
+
+	return (dend == end || (dend + 1 == end && *dend == '/')) ? 1 : 2;
+}
+
+/* Write the SRV URL @url to @out (@size bytes, always NUL-terminated if
+ * @size > 0) with its credentials masked, for logging.  libnats takes all
+ * that comes before the LAST '@' of an SRV URL as credentials (it has no
+ * path), so all of it is masked -- nats_redact_url() stops at a '/', which
+ * a password may contain. */
+static inline void nats_url_srv_redact(const char *url, char *out, size_t size)
+{
+	const char *auth, *at;
+
+	if (size == 0)
+		return;
+	out[0] = '\0';
+	if (!url)
+		return;
+
+	auth = strstr(url, "://");
+	auth = auth ? auth + 3 : url;
+	at = strrchr(auth, '@');
+	if (!at)
+		snprintf(out, size, "%s", url);
+	else
+		snprintf(out, size, "%.*s[redacted]%s", (int)(auth - url), url, at);
 }
 
 #endif /* NATS_URL_SCHEME_H */

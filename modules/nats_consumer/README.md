@@ -911,6 +911,14 @@ connection keeps the configured order.  A value other than `0` or
 `1` refuses startup.
 
 
+When several NATS modules set their own [nats_url](#nats_url-string),
+their servers are merged into one list, in module initialization
+order.  To control the order, list all the servers in the
+[nats_url](#nats_url-string) of one module and leave it unset in the
+others: a module without it adds no server of its own when another
+one configures servers.
+
+
 *Default value is "0" (randomized).*
 
 

@@ -570,9 +570,9 @@ static int mod_init(void)
 	 * event_nats / cachedb_nats (those previously had to register first;
 	 * loaded alone the consumer process aborted at nats_pool_get()).  The
 	 * lib/nats pool merges registrations, so this is safe alongside them.
-	 * When nats_url is unset, contribute the localhost default only if no
-	 * other module has already registered, to avoid injecting a spurious
-	 * server into a co-loaded module's pool. */
+	 * When nats_url is unset, register the localhost default: the pool
+	 * uses it only if no module configures servers, whatever the module
+	 * load order. */
 	if (nats_url) {
 		if (nats_pool_register(nats_url, "nats_consumer",
 				nats_reconnect_wait_ms, nats_max_reconnect) < 0) {
@@ -580,10 +580,12 @@ static int mod_init(void)
 			return -1;
 		}
 		_pool_registered = 1;
-	} else if (!nats_pool_is_registered()) {
-		LM_WARN("nats_consumer: no nats_url set and no other NATS module "
-			"registered a pool; defaulting to nats://localhost:4222\n");
-		if (nats_pool_register("nats://localhost:4222", "nats_consumer",
+	} else {
+		if (!nats_pool_is_registered())
+			LM_WARN("nats_consumer: no nats_url set; defaulting to "
+				"nats://localhost:4222 unless another NATS module "
+				"configures servers\n");
+		if (nats_pool_register_default("nats://localhost:4222", "nats_consumer",
 				nats_reconnect_wait_ms, nats_max_reconnect) < 0) {
 			LM_ERR("nats_consumer: NATS pool registration failed\n");
 			return -1;

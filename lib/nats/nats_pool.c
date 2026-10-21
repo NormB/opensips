@@ -120,7 +120,8 @@
 typedef struct nats_pool_cfg {
 	char *servers[NATS_POOL_MAX_SERVERS]; /* shm-allocated URL strings */
 	int   server_cnt;
-	int   use_tls;                        /* 1 if any URL starts with tls:// */
+	int   use_tls;                        /* 1 if any URL is TLS (tls://, tls+srv://) */
+	int   default_only;                   /* servers[] is a module's default URL */
 
 	int   reconnect_wait;                 /* ms */
 	int   max_reconnect;
@@ -353,7 +354,7 @@ static int pool_append_server_urls(const char *url, int hard_overflow,
 			if (r == 0) {
 				memcpy(srv, tok, len);
 				srv[len] = '\0';
-				nats_redact_url(srv, redacted, sizeof(redacted));
+				nats_url_srv_redact(srv, redacted, sizeof(redacted));
 				LM_WARN("NATS pool: ignoring DNS SRV server URL '%s': "
 					"it has no usable domain name\n", redacted);
 				shm_free(srv);
@@ -362,7 +363,7 @@ static int pool_append_server_urls(const char *url, int hard_overflow,
 				continue;
 			}
 			if (r == 2) {
-				nats_redact_url(srv, redacted, sizeof(redacted));
+				nats_url_srv_redact(srv, redacted, sizeof(redacted));
 				LM_WARN("NATS pool: a DNS SRV server URL takes no port "
 					"and no path (the SRV records give the port); "
 					"using '%s'\n", redacted);
@@ -404,7 +405,7 @@ static int pool_append_server_urls(const char *url, int hard_overflow,
 
 /*
  * Parse comma-separated URL string into pool_cfg->servers[] (initial
- * registration).  Sets pool_cfg->use_tls if any URL starts with "tls://".
+ * registration).  Sets pool_cfg->use_tls if any URL is TLS (tls://, tls+srv://).
  *
  * @param url  Comma-separated URL string (e.g. "nats://h1:4222,nats://h2:4222").
  * @return     0 on success, -1 on error (empty string, too many servers, OOM).
@@ -660,9 +661,25 @@ static void pool_js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
  *
  * Thread safety: Must only be called from mod_init (single-threaded).
  */
-int nats_pool_register(const char *url, const char *module,
-                       int reconnect_wait, int max_reconnect)
+/* Drop the servers of the config (a module's default URL), before the
+ * configured ones replace them. */
+static void pool_clear_servers(void)
 {
+	int i;
+
+	for (i = 0; i < pool_cfg->server_cnt; i++) {
+		shm_free(pool_cfg->servers[i]);
+		pool_cfg->servers[i] = NULL;
+	}
+	pool_cfg->server_cnt = 0;
+	pool_cfg->use_tls = 0;
+}
+
+static int pool_register(const char *url, const char *module,
+                         int reconnect_wait, int max_reconnect, int is_default)
+{
+	int first;
+
 	if (!url || !*url) {
 		LM_ERR("[%s] empty NATS URL\n", module ? module : "?");
 		return -1;
@@ -697,7 +714,8 @@ int nats_pool_register(const char *url, const char *module,
 	}
 
 	/* First registration — allocate the shared config */
-	if (!pool_cfg) {
+	first = !pool_cfg;
+	if (first) {
 		pool_cfg = shm_malloc(sizeof(nats_pool_cfg));
 		if (!pool_cfg) {
 			LM_ERR("shm_malloc for pool_cfg failed\n");
@@ -711,6 +729,7 @@ int nats_pool_register(const char *url, const char *module,
 			pool_cfg = NULL;
 			return -1;
 		}
+		pool_cfg->default_only = is_default;
 
 		/* TLS configuration (cert/CA/key/verify) is sourced from the
 		 * tls_mgm "nats" client domain at connect time -- see
@@ -729,6 +748,20 @@ int nats_pool_register(const char *url, const char *module,
 			pool_cfg->use_tls ? "yes" : "no",
 			pool_cfg->reconnect_wait,
 			pool_cfg->max_reconnect);
+	} else if (is_default) {
+		/* A module with no URL of its own: it uses the servers the pool
+		 * already has. */
+		LM_INFO("NATS pool: additional registration by '%s' (no URL "
+			"of its own)\n", module ? module : "?");
+	} else if (pool_cfg->default_only) {
+		/* The first servers configured: they replace the default URL
+		 * another module registered, instead of joining it. */
+		LM_INFO("NATS pool: servers configured by '%s' replace the "
+			"default URL\n", module ? module : "?");
+		pool_clear_servers();
+		if (parse_urls(url) < 0)
+			return -1;
+		pool_cfg->default_only = 0;
 	} else {
 		/* Subsequent registration — merge in any new servers (soft
 		 * overflow: extra URLs past the cap are warn-skipped). */
@@ -743,7 +776,9 @@ int nats_pool_register(const char *url, const char *module,
 		if (added > 0)
 			LM_INFO("NATS pool: merged %d new server(s) from '%s'\n",
 				added, module ? module : "?");
+	}
 
+	if (!first) {
 		/* TLS config conflicts no longer possible: every NATS
 		 * module reads from the same tls_mgm "nats" domain, so
 		 * there's nothing to conflict over. */
@@ -759,6 +794,18 @@ int nats_pool_register(const char *url, const char *module,
 
 	_register_count++;
 	return 0;
+}
+
+int nats_pool_register(const char *url, const char *module,
+                       int reconnect_wait, int max_reconnect)
+{
+	return pool_register(url, module, reconnect_wait, max_reconnect, 0);
+}
+
+int nats_pool_register_default(const char *url, const char *module,
+                               int reconnect_wait, int max_reconnect)
+{
+	return pool_register(url, module, reconnect_wait, max_reconnect, 1);
 }
 
 /**
@@ -930,12 +977,10 @@ natsConnection *nats_pool_get(void)
 		return NULL;
 	}
 
+	/* only unusable SRV URLs were configured: parse_urls() warned about
+	 * it once, before the processes were forked */
 	if (pool_cfg->server_cnt == 0) {
-		static int _warned = 0;
-		if (!_warned) {
-			LM_ERR("NATS pool: no usable NATS server URL configured\n");
-			_warned = 1;
-		}
+		LM_DBG("NATS pool: no usable NATS server URL configured\n");
 		return NULL;
 	}
 
@@ -1694,6 +1739,12 @@ void nats_pool_destroy(void)
 	_register_count = 0;
 }
 
+/* See nats_pool.h.  pool_cfg is set pre-fork and read-only after. */
+int nats_pool_has_servers(void)
+{
+	return (pool_cfg && pool_cfg->server_cnt > 0) ? 1 : 0;
+}
+
 /**
  * Check if the pool is currently connected.
  *
@@ -1702,11 +1753,6 @@ void nats_pool_destroy(void)
  * Thread safety: Safe to call from any context.  Uses atomic_load
  * on _connected which is set by callbacks on the nats.c I/O thread.
  */
-int nats_pool_has_servers(void)
-{
-	return (pool_cfg && pool_cfg->server_cnt > 0) ? 1 : 0;
-}
-
 int nats_pool_is_connected(void)
 {
 	return atomic_load(&_connected) ? 1 : 0;

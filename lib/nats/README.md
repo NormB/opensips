@@ -202,8 +202,9 @@ forks. Registrations merge:
   (any case) turns TLS on;
 - the `no_randomize` parameter (event_nats, cachedb_nats,
   nats_consumer) sets one value for the shared connection: if any
-  module sets it to 1, every process tries the servers in the
-  configured order instead of a shuffled one;
+  module sets it to 1, every process tries the servers in the order of
+  the merged list (module initialization order) instead of a shuffled
+  one;
 - DNS SRV URLs (`nats+srv://domain`, `tls+srv://domain`) are resolved
   by libnats, so a registration that contains one fails unless the
   loaded libnats exports `nats_SupportsSRV()` and it returns true
@@ -213,12 +214,16 @@ forks. Registrations merge:
   server list; one without a usable domain name is left out with a
   warning, and if no server is left, startup goes on without NATS;
 
-`event_nats` and `cachedb_nats` always register; `cachedb_nats_fts`
-has no connection of its own. `nats_consumer` registers too, with its
-own `nats_url` parameter; if that is unset and no other NATS module has
-registered, it falls back to `nats://localhost:4222`. It never adds that fallback to a
-pool another module has already configured. `tests/test_pool_merge.c`
-covers these rules.
+`event_nats`, `cachedb_nats` and `nats_consumer` always register;
+`cachedb_nats_fts` has no connection of its own. A module whose
+`nats_url` is unset registers its localhost default with
+`nats_pool_register_default()`: the pool uses it only if no module
+configures servers, whatever the module load order. Configured
+servers registered after it replace it, and it is never added to
+them -- with a DNS SRV URL whose lookups fail, a localhost default
+would otherwise be the only server. `tests/test_pool_merge.c`,
+`tests/test_pool_connect_opts.c` and `tests/test_default_url_e2e.sh`
+cover these rules.
 
 After the fork, each process opens its own connection on first use
 (`nats_pool_get()`, `nats_pool_get_js()` for JetStream). SIP workers,

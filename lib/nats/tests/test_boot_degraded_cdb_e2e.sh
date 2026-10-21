@@ -8,6 +8,8 @@
 #     come up without a KV handle; cache operations fail cleanly
 #   - once the broker appears, operations get the KV handle themselves
 #     (no restart)
+#   - the startup checks skipped at boot -- the search index build and
+#     the bucket MaxAge check -- run once the broker appears
 #   - require_usrloc_safe_bucket=1 (strict) still refuses: the bucket
 #     cannot be checked
 #
@@ -47,6 +49,8 @@ cleanup_all() {
 }
 trap cleanup_all EXIT
 
+KV_WATCH='modparam("cachedb_nats", "kv_watch", ">")'
+
 # $1 nats_url, $2 extra modparam lines
 write_cfg() {
 cat > "${WORK}/test.cfg" <<EOF
@@ -74,7 +78,7 @@ modparam("cachedb_nats", "cachedb_url", "nats://127.0.0.1:${PORT}/")
 modparam("cachedb_nats", "nats_url", "$1")
 modparam("cachedb_nats", "kv_bucket", "${BUCKET}")
 modparam("cachedb_nats", "kv_replicas", 1)
-modparam("cachedb_nats", "kv_watch", ">")
+${KV_WATCH}
 $2
 
 route {
@@ -147,6 +151,36 @@ expect '! log_contains "segfault in process"' "no segfault"
 stop_opensips
 nats --server "${PRIV_URL}" kv del -f "${BUCKET}" >/dev/null 2>&1 || true
 
+# ---------- 1b: the startup checks run once the broker appears ----------
+# Without a kv_watch pattern, nothing else builds the search index: the
+# build skipped at boot must still happen, or index queries return nothing
+# for the keys already in the bucket until a restart.  Likewise the
+# warning about a bucket that expires its keys (MaxAge).
+echo "startup checks deferred until the broker appears:"
+SAVED_BUCKET="${BUCKET}"
+BUCKET="bdfts$$"
+nats --server "${PRIV_URL}" kv add "${BUCKET}" --ttl 1h --replicas 1 >/dev/null 2>&1
+for d in a b c; do
+    nats --server "${PRIV_URL}" kv put "${BUCKET}" "json_$d" "{\"user\":\"$d\"}" >/dev/null 2>&1
+done
+kill "${NS_PID}" 2>/dev/null; wait "${NS_PID}" 2>/dev/null; NS_PID=""
+: > "${OPS_LOG}"
+KV_WATCH=""
+write_cfg "${PRIV_URL}" 'loadmodule "cachedb_nats_fts.so"'
+start_opensips "${WORK}/test.cfg"
+sleep 3
+expect 'log_contains "starting degraded"' "cachedb_nats starts degraded"
+start_broker
+expect 'wait_for_log "search index (built: 3 documents|rebuilt: 3 docs)" 25' \
+    "the search index is built from the bucket once the broker appears"
+expect 'wait_for_log "non-zero backing-stream MaxAge" 10' \
+    "the bucket MaxAge check runs once the broker appears"
+expect 'kill -0 "${OPS_PID}" 2>/dev/null' "opensips still up"
+stop_opensips
+nats --server "${PRIV_URL}" kv del -f "${BUCKET}" >/dev/null 2>&1 || true
+BUCKET="${SAVED_BUCKET}"
+KV_WATCH='modparam("cachedb_nats", "kv_watch", ">")'
+
 # ---------- 2: the only server URL is unusable ----------
 LIBNATS="${NATS_DL_LIBNATS_PATH:-$(ldconfig -p 2>/dev/null | awk '/libnats\.so /{print $NF; exit}')}"
 if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_SupportsSRV"; then
@@ -186,6 +220,19 @@ expect '! kill -0 "${OPS_PID}" 2>/dev/null' \
     "strict mode refuses to start without the bucket"
 expect 'log_contains "require_usrloc_safe_bucket=1"' \
     "the refusal names require_usrloc_safe_bucket"
+
+if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_SupportsSRV"; then
+    echo "require_usrloc_safe_bucket=1, no usable server URL:"
+    : > "${OPS_LOG}"
+    write_cfg "nats+srv://exa%41mple.test" 'modparam("cachedb_nats", "require_usrloc_safe_bucket", 1)'
+    "${OPENSIPS_BIN}" -F -f "${WORK}/test.cfg" >"${OPS_LOG}" 2>&1 &
+    OPS_PID=$!
+    sleep 6
+    expect '! kill -0 "${OPS_PID}" 2>/dev/null' \
+        "strict mode refuses to start without a usable server"
+    expect 'log_contains "no usable NATS server URL is configured and require_usrloc_safe_bucket=1"' \
+        "the refusal says no usable server URL is configured"
+fi
 
 # ---------- 4: a configuration error is not "NATS unavailable" ----------
 # A tls:// URL without tls_mgm loaded: the pool cannot even set the

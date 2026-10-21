@@ -75,10 +75,13 @@ int main(void)
 		"false first-registrant-wins claim is gone");
 	ASSERT(strstr(readme, "merge") != NULL,
 		"README documents the merge-union registration semantics");
-	ASSERT(strstr(readme, "`nats_consumer` registers too") != NULL,
+	ASSERT(strstr(readme, "`nats_consumer` always register") != NULL,
 		"README states nats_consumer registers with the pool");
-	ASSERT(strstr(readme, "`cachedb_nats_fts`\nhas no connection of its own") != NULL,
+	ASSERT(strstr(readme, "`cachedb_nats_fts` has no connection of its own") != NULL,
 		"README does not claim cachedb_nats_fts registers");
+	ASSERT(strstr(readme, "`nats_pool_register_default()`") != NULL &&
+	       strstr(readme, "it is never added to") != NULL,
+		"README states a module default URL never joins configured servers");
 	ASSERT(strstr(readme, "nats_dl.c") != NULL &&
 	       strstr(readme, "nats_ca_dir.c") != NULL &&
 	       strstr(readme, "nats_str.h") != NULL &&

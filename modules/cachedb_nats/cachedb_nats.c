@@ -269,6 +269,14 @@ int   nats_cdb_max_reconnect     = 60;
 struct kv_watch_entry *kv_watch_list = NULL;
 int kv_watch_count = 0;
 
+/* The startup checks of rank 1 -- the bucket checks and the search index
+ * build -- in SHM: done, or deferred to the reaper process because NATS
+ * was unavailable at startup (see nats_cdb_deferred_boot_checks()). */
+#define CDBN_BOOT_PENDING   0
+#define CDBN_BOOT_DONE      1
+#define CDBN_BOOT_DEFERRED  2
+static int *cdbn_boot_state;
+
 static int set_connection(unsigned int type, void *val)
 {
 	return cachedb_store_url(&nats_cdb_urls, (char *)val);
@@ -612,6 +620,7 @@ static int init_pool(void)
 	{
 		const char *url_to_use = NULL;
 		static char url_buf[1024];
+		int is_default = 0;
 
 		if (nats_url && *nats_url) {
 			/* explicit nats_url param takes precedence */
@@ -639,9 +648,11 @@ static int init_pool(void)
 			}
 			url_to_use = url_buf;
 		} else {
-			LM_WARN("no nats_url or cachedb_url -- "
-				"using nats://localhost:4222\n");
+			LM_WARN("no nats_url or cachedb_url -- using "
+				"nats://localhost:4222 unless another NATS module "
+				"configures servers\n");
 			url_to_use = "nats://localhost:4222";
+			is_default = 1;
 		}
 
 		/* The registration bucket is a PII / LI-relevant
@@ -673,7 +684,8 @@ static int init_pool(void)
 		 * TLS with tls:// in nats_url, or ?tls_domain=nats in
 		 * cachedb_url, and defines the tls_mgm domain. */
 
-		if (nats_pool_register(url_to_use,
+		if ((is_default ? nats_pool_register_default :
+				nats_pool_register)(url_to_use,
 				"cachedb_nats",
 				nats_cdb_reconnect_wait_ms,
 				nats_cdb_max_reconnect) < 0) {
@@ -825,6 +837,14 @@ static int mod_init(void)
 	 * nats_cdb_parent_gone() in cachedb_nats_watch.c. */
 	nats_cdb_parent_pid = getpid();
 
+	/* shared by rank 1 and the reaper process, so allocated pre-fork */
+	cdbn_boot_state = shm_malloc(sizeof(*cdbn_boot_state));
+	if (!cdbn_boot_state) {
+		LM_ERR("no more shm memory\n");
+		return -1;
+	}
+	*cdbn_boot_state = CDBN_BOOT_PENDING;
+
 	if (init_check_params() < 0 || init_pool() < 0 ||
 	    init_engine() < 0 || init_services() < 0)
 		return -1;
@@ -884,6 +904,104 @@ static int cdbn_open_connections(void)
 	return 0;
 }
 
+/* Checks of the bound bucket, once (rank 1 at startup, or the reaper
+ * process once NATS is up).  Returns -1 if require_usrloc_safe_bucket=1
+ * must refuse the bucket. */
+static int cdbn_bucket_checks(void)
+{
+	int64_t maxage_ns = 0;
+
+	/* A PRE-EXISTING bucket may already carry a non-zero
+	 * backing-stream MaxAge (older deployment / another tool).  The kv_ttl
+	 * modparam guard (mod_init) only stops US from creating one; binding to an
+	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
+	 * (expires==0).  Detect it once and WARN loudly with the
+	 * remediation -- the documented migration policy, never a silent expiry.
+	 * WARN (not refuse) by default so a generic cachedb_nats TTL-cache user
+	 * is not broken; require_usrloc_safe_bucket=1 makes it fail closed --
+	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
+	if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
+			cdbn_kv_legacy_bucket_maxage_warn(maxage_ns)) {
+		if (require_usrloc_safe_bucket) {
+			LM_ERR("cachedb_nats: bound bucket '%s' has a non-zero "
+				"backing-stream MaxAge (%lld ns) and "
+				"require_usrloc_safe_bucket=1 -- refusing to start "
+				"(it would SILENTLY EXPIRE permanent contacts). "
+				"Recreate the bucket with MaxAge=0 (kv_ttl=0) and "
+				"migrate.\n",
+				kv_bucket, (long long)maxage_ns);
+			return -1;
+		}
+		LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
+			"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
+			"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
+			"recreate it with MaxAge=0 (kv_ttl=0) and migrate.\n",
+			kv_bucket, (long long)maxage_ns);
+	}
+	/* Reaper-only expiry: a history-keeping bucket is fine
+	 * for nats_kv_history() consumers; no per-message TTL exists to
+	 * misbehave on it, so nothing to surface beyond the MaxAge
+	 * check above. */
+
+	/* surface the probe outcome once.  The
+	 * probe ran inside nats_pool_get_kv() (create carried
+	 * the flag / bind read the stream config); UNSUPPORTED
+	 * already WARNed at the latch site. */
+	if (kv_ttl_below_marker) {
+		switch (nats_pool_kv_ttl_below_marker_state()) {
+		case 1:
+			LM_INFO("cachedb_nats: bucket '%s' honors per-key "
+				"TTLs below the marker TTL "
+				"(allow_msg_ttl_below_marker)\n", kv_bucket);
+			break;
+		case 0:
+			LM_INFO("cachedb_nats: kv_ttl_below_marker requested "
+				"but not available (see WARN above); expiry "
+				"stays reaper-only\n");
+			break;
+		default:
+			LM_INFO("cachedb_nats: kv_ttl_below_marker support "
+				"not probed yet\n");
+			break;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Called by the reaper process on every pass of its loop: runs the startup
+ * checks that rank 1 skipped because NATS was unavailable at startup, once
+ * the connection is up.  Without it, a degraded start would never build
+ * the search index when no watcher rebuilds it, and never check the
+ * bucket.  The reaper is the single process that runs it (one instance).
+ */
+void nats_cdb_deferred_boot_checks(void)
+{
+	kvStore *kv;
+
+	if (!cdbn_boot_state || *cdbn_boot_state != CDBN_BOOT_DEFERRED ||
+			!nats_pool_is_connected())
+		return;
+
+	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
+		(int64_t)kv_ttl);
+	if (!kv)
+		return;   /* next pass */
+
+	LM_INFO("cachedb_nats: NATS is up; running the startup checks of "
+		"bucket '%s' skipped at startup\n", kv_bucket);
+	(void)cdbn_bucket_checks();   /* strict mode never starts degraded */
+
+	/* The watcher rebuilds the index when it first connects, if it runs
+	 * and index_resync_on_reconnect is on; otherwise build it here. */
+	if (cdbn_fts_on && !(kv_watch_count > 0 && index_resync_on_reconnect) &&
+			cdbn_fts.rebuild(kv, fts_json_prefix) < 0)
+		LM_WARN("failed to build the search index; queries may return "
+			"empty results until it is rebuilt\n");
+
+	*cdbn_boot_state = CDBN_BOOT_DONE;
+}
+
 static int child_init(int rank)
 {
 	natsConnection *nc;
@@ -907,16 +1025,24 @@ static int child_init(int rank)
 	}
 	if (!nc || !nats_pool_is_connected()) {
 		if (require_usrloc_safe_bucket) {
-			LM_ERR("cachedb_nats: NATS is unavailable at startup and "
-				"require_usrloc_safe_bucket=1 -- refusing to start "
-				"without checking bucket '%s'\n", kv_bucket);
+			if (!nc)
+				LM_ERR("cachedb_nats: no usable NATS server URL is "
+					"configured and require_usrloc_safe_bucket=1 -- "
+					"refusing to start without checking bucket "
+					"'%s'\n", kv_bucket);
+			else
+				LM_ERR("cachedb_nats: NATS is unavailable at startup and "
+					"require_usrloc_safe_bucket=1 -- refusing to start "
+					"without checking bucket '%s'\n", kv_bucket);
 			return -1;
 		}
-		if (rank == 1)
+		if (rank == 1) {
 			LM_WARN("cachedb_nats: NATS is unavailable at startup; "
 				"starting degraded: cache operations fail until it "
-				"connects, and the checks of bucket '%s' are "
-				"skipped\n", kv_bucket);
+				"connects; the checks of bucket '%s'%s run then\n",
+				kv_bucket, cdbn_fts_on ? " and the search index build" : "");
+			*cdbn_boot_state = CDBN_BOOT_DEFERRED;
+		}
 		return cdbn_open_connections();
 	}
 
@@ -928,64 +1054,9 @@ static int child_init(int rank)
 		return -1;
 	}
 
-	/* A PRE-EXISTING bucket may already carry a non-zero
-	 * backing-stream MaxAge (older deployment / another tool).  The kv_ttl
-	 * modparam guard (mod_init) only stops US from creating one; binding to an
-	 * existing MaxAge!=0 bucket would SILENTLY expire permanent contacts
-	 * (expires==0).  Detect it once (rank 1) and WARN loudly with the
-	 * remediation -- the documented migration policy, never a silent expiry.
-	 * WARN (not refuse) by default so a generic cachedb_nats TTL-cache user
-	 * is not broken; require_usrloc_safe_bucket=1 makes it fail closed --
-	 * a usrloc deployment must recreate the bucket with MaxAge=0. */
-	if (rank == 1) {
-		int64_t maxage_ns = 0, mmps = 0;
-		if (nats_pool_bucket_maxage_ns(kv_bucket, &maxage_ns) == 0 &&
-				cdbn_kv_legacy_bucket_maxage_warn(maxage_ns)) {
-			if (require_usrloc_safe_bucket) {
-				LM_ERR("cachedb_nats: bound bucket '%s' has a non-zero "
-					"backing-stream MaxAge (%lld ns) and "
-					"require_usrloc_safe_bucket=1 -- refusing to start "
-					"(it would SILENTLY EXPIRE permanent contacts). "
-					"Recreate the bucket with MaxAge=0 (kv_ttl=0) and "
-					"migrate.\n",
-					kv_bucket, (long long)maxage_ns);
-				return -1;
-			}
-			LM_WARN("cachedb_nats: bound bucket '%s' has a non-zero backing-stream "
-				"MaxAge (%lld ns) -- it will SILENTLY EXPIRE ALL keys including "
-				"PERMANENT contacts (expires==0). If this bucket backs usrloc, "
-				"recreate it with MaxAge=0 (kv_ttl=0) and migrate.\n",
-				kv_bucket, (long long)maxage_ns);
-		}
-		/* Reaper-only expiry: a history-keeping bucket is fine
-		 * for nats_kv_history() consumers; no per-message TTL exists to
-		 * misbehave on it, so nothing to surface beyond the MaxAge
-		 * check above. */
-		(void)mmps;
-
-		/* surface the probe outcome once.  The
-		 * probe ran inside nats_pool_get_kv() above (create carried
-		 * the flag / bind read the stream config); UNSUPPORTED
-		 * already WARNed at the latch site. */
-		if (kv_ttl_below_marker) {
-			switch (nats_pool_kv_ttl_below_marker_state()) {
-			case 1:
-				LM_INFO("cachedb_nats: bucket '%s' honors per-key "
-					"TTLs below the marker TTL "
-					"(allow_msg_ttl_below_marker)\n", kv_bucket);
-				break;
-			case 0:
-				LM_INFO("cachedb_nats: kv_ttl_below_marker requested "
-					"but not available (see WARN above); expiry "
-					"stays reaper-only\n");
-				break;
-			default:
-				LM_INFO("cachedb_nats: kv_ttl_below_marker support "
-					"not probed yet\n");
-				break;
-			}
-		}
-	}
+	/* bucket checks, once (rank 1) */
+	if (rank == 1 && cdbn_bucket_checks() < 0)
+		return -1;
 
 	/* The JSON search index is now SHM-backed and was allocated in
 	 * mod_init pre-fork; every worker dereferences the same g_idx.
@@ -1001,6 +1072,8 @@ static int child_init(int rank)
 		LM_WARN("failed to build initial search index; "
 			"queries may return empty results until index is rebuilt\n");
 	}
+	if (rank == 1)
+		*cdbn_boot_state = CDBN_BOOT_DONE;
 
 	/* Live index updates come from the dedicated watcher process
 	 * (exports.procs, attached in mod_init when kv_watch patterns

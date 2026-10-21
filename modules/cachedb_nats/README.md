@@ -413,8 +413,10 @@ Without NATS at startup -- the broker is unreachable, or no usable
 server URL is configured -- *cachedb_nats* starts degraded with a
 warning (`cachedb_nats: NATS is unavailable at startup; starting
 degraded`): cache operations fail until the connection is up, then
-work without a restart, and the startup checks of the bucket are
-skipped.  With [require_usrloc_safe_bucket](#require_usrloc_safe_bucket-integer)
+work without a restart.  The startup checks of the bucket -- and the
+build of the [cachedb_nats_fts](../cachedb_nats_fts/README.md) search
+index -- run in the reaper process once the connection is up.  With
+[require_usrloc_safe_bucket](#require_usrloc_safe_bucket-integer)
 set to `1`, the module refuses to start instead.
 
 
@@ -951,8 +953,9 @@ When this parameter is set it takes precedence over the hosts in
 [cachedb_url](#cachedb_url-string).  When it is not set, the server
 list comes from the first cachedb_url (see there); if that cannot be
 parsed, or names a `tls_domain` other than `"nats"`, OpenSIPS refuses to
-start.  With no cachedb_url at all, `nats://localhost:4222` is used and
-a warning is logged.
+start.  With no cachedb_url at all, `nats://localhost:4222` is used
+(unless another NATS module configures servers) and a warning is
+logged.
 
 
 A server can also be given as a DNS domain whose SRV records list
@@ -1420,6 +1423,14 @@ The setting is shared by *event_nats*, *cachedb_nats* and
 *nats_consumer*: if any of them sets it to `1`, the shared
 connection keeps the configured order.  A value other than `0` or
 `1` refuses startup.
+
+
+When several NATS modules set their own [nats_url](#nats_url-string),
+their servers are merged into one list, in module initialization
+order.  To control the order, list all the servers in the
+[nats_url](#nats_url-string) of one module and leave it unset in the
+others: a module without it adds no server of its own when another
+one configures servers.
 
 
 *Default value is "0" (randomized).*

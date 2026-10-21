@@ -28,7 +28,9 @@
  * localhost) so it works standalone; the lib/nats pool merges
  * registrations when several NATS modules are loaded.  To avoid injecting
  * a spurious localhost server into another module's pool, the default is
- * only registered when nats_pool_is_registered() reports nothing else has.
+ * registered with nats_pool_register_default(): the pool uses it only if
+ * no module configures servers, whatever the load order (the behaviour is
+ * tested in lib/nats/tests/test_pool_connect_opts.c).
  *
  * Source-pattern test; run from the tests/ directory.
  *
@@ -94,8 +96,8 @@ int main(void)
 
 	ASSERT(grep_in_function(src, "mod_init", "nats_pool_register") >= 1,
 		"nats_consumer mod_init registers its own NATS pool");
-	ASSERT(grep_in_function(src, "mod_init", "nats_pool_is_registered") >= 1,
-		"mod_init only defaults the URL when no pool is already registered");
+	ASSERT(grep_in_function(src, "mod_init", "nats_pool_register_default") >= 1,
+		"mod_init registers the localhost URL as a default only");
 	ASSERT(file_contains(src, "\"nats_url\""),
 		"nats_consumer exposes a nats_url modparam");
 

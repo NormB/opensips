@@ -69,6 +69,9 @@ int process_no = 0;
 
 int dp_my_pid(void) { return 0; }
 
+/* how many times the refresh failure was logged */
+static int refresh_err_logs = 0;
+
 void dprint(int level, int facility, const char *module, const char *func,
 	char *stderr_fmt, char *syslog_fmt, char *format, ...)
 {
@@ -77,6 +80,8 @@ void dprint(int level, int facility, const char *module, const char *func,
 	(void)syslog_fmt; (void)format;
 	if (!stderr_fmt)
 		return;
+	if (strstr(stderr_fmt, "failed to refresh KV handle"))
+		refresh_err_logs++;
 	va_start(ap, format);
 	vfprintf(stderr, stderr_fmt, ap);
 	va_end(ap);
@@ -207,6 +212,20 @@ int main(void)
 	ASSERT(rc == -1 || con.kv != NULL,
 		"persistent failure: NEVER 0 with NULL handle");
 	ASSERT(rc == -1, "persistent failure: second call still -1");
+
+	/* 6. a failure that lasts (no JetStream, the bucket refused) is
+	 * met by every cache operation of every worker: it is logged at
+	 * most once per 30 s, not once per operation */
+	{
+		int i, all_failed = 1;
+
+		for (i = 0; i < 50; i++)
+			if (nats_con_refresh_kv(&con) != -1)
+				all_failed = 0;
+		ASSERT(all_failed, "persistent failure: every call still -1");
+		ASSERT(refresh_err_logs == 1,
+			"persistent failure: logged once, not per call");
+	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",
 		g_fails == 0 ? "ALL PASS" : "FAILURES", g_fails);

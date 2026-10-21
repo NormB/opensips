@@ -50,16 +50,23 @@ int log_facility = 0;
 char ctime_buf[256];
 int process_no = 0;
 int dp_my_pid(void) { return getpid(); }
+/* everything logged by the scenario (each runs in its own child) */
+static char g_log[8192];
 void dprint(int level, int facility, const char *module, const char *func,
 	char *stderr_fmt, char *syslog_fmt, char *format, ...)
 {
-	va_list ap;
+	va_list ap, ap2;
+	size_t used;
 	(void)level; (void)facility; (void)module; (void)func;
 	(void)syslog_fmt; (void)format;
 	if (!stderr_fmt)
 		return;
 	va_start(ap, format);
+	va_copy(ap2, ap);
 	vfprintf(stderr, stderr_fmt, ap);
+	used = strlen(g_log);
+	vsnprintf(g_log + used, sizeof(g_log) - used, stderr_fmt, ap2);
+	va_end(ap2);
 	va_end(ap);
 }
 
@@ -321,6 +328,19 @@ static int s_srv_corrected_dedup(void)
 		&& strcmp(last_servers, "nats+srv://example.test") == 0;
 }
 
+static int s_srv_spellings_dedup(void)
+{
+	/* spellings libnats takes for the same SRV URL: listed once */
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats+srv://example.test/,NATS+SRV://example.test.",
+	    "test", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats+srv://example.test", "second", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+}
+
 static int s_srv_unusable_skipped(void)
 {
 	/* no usable domain: skipped with a warning, the other servers stay */
@@ -340,6 +360,118 @@ static int s_srv_unusable_only(void)
 		return 0;
 	n_connect = 0;
 	return nats_pool_get() == NULL && nats_pool_get() == NULL && n_connect == 0;
+}
+
+static int s_srv_warn_corrected_redacted(void)
+{
+	/* libnats takes all before the last '@' as credentials: none of it
+	 * may reach the log, even past a '/' */
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats+srv://u:s3cr3t@b/t41l@example.test:4222",
+	    "test", 2000, 3) != 0)
+		return 0;
+	return strstr(g_log, "nats+srv://[redacted]@example.test") != NULL
+		&& !strstr(g_log, "s3cr3t") && !strstr(g_log, "t41l");
+}
+
+static int s_srv_warn_unusable_redacted(void)
+{
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats://127.0.0.1:4222,nats+srv://u:s3cr3t@b/t41l@bad dom",
+	    "test", 2000, 3) != 0)
+		return 0;
+	return strstr(g_log, "[redacted]@bad dom") != NULL
+		&& !strstr(g_log, "s3cr3t") && !strstr(g_log, "t41l");
+}
+
+static int s_srv_unusable_only_quiet(void)
+{
+	/* warned once before forking: the processes asking for the
+	 * connection afterwards do not log it again */
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats+srv://exa%41mple.test", "test", 2000, 3) != 0)
+		return 0;
+	if (!strstr(g_log, "no usable NATS server URL"))
+		return 0;
+	g_log[0] = '\0';
+	return nats_pool_get() == NULL && g_log[0] == '\0';
+}
+
+/* ── module defaults ────────────────────────────────────────────── */
+
+/* A module whose nats_url is not set contributes its default URL only if
+ * no module configures servers, whatever the module load order: a
+ * localhost server must not join (or, if the DNS lookups fail, replace)
+ * the servers another module configured. */
+
+static int s_default_then_explicit(void)
+{
+	fake_supports_srv = 1;
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats+srv://example.test", "cachedb_nats", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+}
+
+static int s_explicit_then_default(void)
+{
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats+srv://example.test", "cachedb_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+}
+
+static int s_defaults_only(void)
+{
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register_default("nats://localhost:4222", "nats_consumer", 2000, 3) != 0)
+		return 0;
+	return nats_pool_is_registered()
+		&& nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://127.0.0.1:4222") == 0;
+}
+
+static int s_default_explicit_default(void)
+{
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats://n1:4222,nats://n2:4222", "cachedb_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register_default("nats://localhost:4222", "nats_consumer", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://n1:4222,nats://n2:4222") == 0;
+}
+
+static int s_explicits_merge_after_default(void)
+{
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats://n1:4222", "cachedb_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats://n2:4222,nats://n1:4222", "nats_consumer", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://n1:4222,nats://n2:4222") == 0;
+}
+
+static int s_default_then_unusable_explicit(void)
+{
+	/* the configured URL is unusable: NATS stays unavailable, the
+	 * default does not stand in for it */
+	fake_supports_srv = 1;
+	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats+srv://exa mple.test", "cachedb_nats", 2000, 3) != 0)
+		return 0;
+	n_connect = 0;
+	return nats_pool_get() == NULL && n_connect == 0 && !nats_pool_has_servers();
 }
 
 static int s_has_servers(void)
@@ -395,10 +527,30 @@ int main(void)
 	run("corrected SRV URL among other servers", s_srv_corrected_in_list);
 	run("corrected SRV URL in a later registration", s_srv_corrected_merge);
 	run("corrected SRV URL that duplicates another is merged", s_srv_corrected_dedup);
+	run("spellings of the same SRV URL are merged", s_srv_spellings_dedup);
 	run("SRV URL without a usable domain skipped, others kept", s_srv_unusable_skipped);
 	run("only unusable SRV URLs: startup goes on, no connection", s_srv_unusable_only);
+	run("only unusable SRV URLs: warned once, not per process",
+		s_srv_unusable_only_quiet);
+	run("corrected SRV URL warning: no part of the password logged",
+		s_srv_warn_corrected_redacted);
+	run("skipped SRV URL warning: no part of the password logged",
+		s_srv_warn_unusable_redacted);
 	run("nats_pool_has_servers(): servers configured", s_has_servers);
 	run("nats_pool_has_servers(): none usable", s_has_no_servers);
+
+	fprintf(stderr, "module defaults:\n");
+	run("a default, then configured servers: the default is dropped",
+		s_default_then_explicit);
+	run("configured servers, then a default: the default is not added",
+		s_explicit_then_default);
+	run("defaults only: the first one is used", s_defaults_only);
+	run("default, configured, default: the configured servers only",
+		s_default_explicit_default);
+	run("configured servers of several modules still merge",
+		s_explicits_merge_after_default);
+	run("an unusable configured URL is not replaced by the default",
+		s_default_then_unusable_explicit);
 
 	fprintf(stderr, "\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED",
 		g_fails, g_fails == 1 ? "" : "s");

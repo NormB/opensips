@@ -191,11 +191,17 @@ int nats_con_refresh_kv(nats_cachedb_con *ncon)
 		kv_replicas, kv_history, (int64_t)kv_ttl);
 
 	if (!ncon->kv) {
+		/* rate-limited: a failure that lasts (no JetStream, bucket
+		 * refused by the broker) meets every cache operation */
+		static time_t rl_refresh;
+
 		/* Do NOT adopt the epoch on failure: a transient pool failure
 		 * right after a reconnect would otherwise latch epoch with
 		 * kv == NULL, short-circuiting every subsequent call until the
 		 * NEXT reconnect — a permanent per-worker outage. */
-		LM_ERR("failed to refresh KV handle after reconnect\n");
+		if (nats_rl_pass(&rl_refresh, time(NULL), 30))
+			LM_ERR("failed to refresh KV handle after reconnect "
+				"(repeats suppressed for 30s)\n");
 		NATS_CDB_STATS_INC(fastfail_rejected);
 		return -1;
 	}

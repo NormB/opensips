@@ -96,7 +96,8 @@ static int w_nats_publish(struct sip_msg *msg, str *subject, str *payload);
 static void nats_evi_js_ack_cb(int success);
 
 /* module parameters (non-static, accessed by nats_stats.c) */
-char *nats_url = NATS_DEFAULT_URL;
+char *nats_url = NULL;   /* unset: NATS_DEFAULT_URL, unless another
+                          * NATS module configures servers */
 int nats_jetstream = 0;
 int nats_reconnect_wait = 2000;   /* ms */
 int nats_max_reconnect = 60;
@@ -320,8 +321,11 @@ static int mod_init(void)
 	 * isn't defined. */
 	nats_pool_bind_tls("event_nats");
 
-	if (nats_pool_register(nats_url, "event_nats",
-			nats_reconnect_wait, nats_max_reconnect) < 0) {
+	if ((nats_url ?
+			nats_pool_register(nats_url, "event_nats",
+				nats_reconnect_wait, nats_max_reconnect) :
+			nats_pool_register_default(NATS_DEFAULT_URL, "event_nats",
+				nats_reconnect_wait, nats_max_reconnect)) < 0) {
 		LM_ERR("cannot register with NATS connection pool\n");
 		return -1;
 	}
@@ -331,11 +335,15 @@ static int mod_init(void)
 	 * via atomic_fetch_add. */
 	nats_pool_set_pub_ack_cb(nats_evi_js_ack_cb);
 
-	{
+	if (nats_url) {
 		char redacted[512];
 		nats_redact_url(nats_url, redacted, sizeof(redacted));
 		LM_INFO("NATS URL: %s, JetStream: %s\n",
 			redacted,
+			nats_jetstream ? "enabled" : "disabled");
+	} else {
+		LM_INFO("NATS URL: not set (%s unless another NATS module "
+			"configures servers), JetStream: %s\n", NATS_DEFAULT_URL,
 			nats_jetstream ? "enabled" : "disabled");
 	}
 

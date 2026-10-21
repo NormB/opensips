@@ -132,6 +132,17 @@ int nats_pool_register(const char *url, const char *module,
                        int reconnect_wait, int max_reconnect);
 
 /*
+ * Register for a module that has no URL configured, with its default @url.
+ * The default is used only if no module configures servers, whatever the
+ * order the modules register in: registered after configured servers, it
+ * adds none; the first configured servers registered after it replace it.
+ * Otherwise as nats_pool_register() (the reconnect values merge, the
+ * registration counts for nats_pool_unregister()).
+ */
+int nats_pool_register_default(const char *url, const char *module,
+                               int reconnect_wait, int max_reconnect);
+
+/*
  * Hand the OpenSIPS tls_mgm bind table to lib/nats.
  *
  * @binds  pointer to a populated `struct tls_mgm_binds` from

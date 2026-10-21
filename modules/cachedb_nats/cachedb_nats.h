@@ -54,6 +54,12 @@
 extern cdbn_fts_api_t cdbn_fts;
 extern int cdbn_fts_on;
 
+/* Runs the startup checks skipped by a degraded start (NATS unavailable
+ * at startup), once NATS is up: the bucket checks and the search index
+ * build.  Called by the reaper process on each pass of its loop; a no-op
+ * once done.  Defined in cachedb_nats.c. */
+void nats_cdb_deferred_boot_checks(void);
+
 /*
  * CacheDB connection wrapper for NATS JetStream KV.
  *

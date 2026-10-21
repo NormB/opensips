@@ -400,7 +400,8 @@ SRV URLs need a libnats with DNS SRV support (one that exports
 start: such a libnats would connect to the domain name as a host.
 
 
-*Default value is "nats://127.0.0.1:4222".*
+*Default value is "NULL" (use the servers configured by other NATS
+modules, or `nats://127.0.0.1:4222`).*
 
 
 ```opensips title="Set nats_url parameter"
@@ -578,6 +579,14 @@ The setting is shared by *event_nats*, *cachedb_nats* and
 *nats_consumer*: if any of them sets it to `1`, the shared
 connection keeps the configured order.  A value other than `0` or
 `1` refuses startup.
+
+
+When several NATS modules set their own [nats_url](#nats_url-string),
+their servers are merged into one list, in module initialization
+order.  To control the order, list all the servers in the
+[nats_url](#nats_url-string) of one module and leave it unset in the
+others: a module without it adds no server of its own when another
+one configures servers.
 
 
 *Default value is "0" (randomized).*
