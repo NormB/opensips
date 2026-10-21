@@ -122,6 +122,10 @@ static const param_export_t mod_params[] = {
 	      (void *)nats_pool_drain_timeout_setter},
 	{"nats_drain_timeout_ms", INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
+	/* Server order of the shared connection (ONE pool value; see
+	 * nats_pool_no_randomize_decide for the merge contract). */
+	{"no_randomize",        INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_no_randomize_setter},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
 	{0,0,0}

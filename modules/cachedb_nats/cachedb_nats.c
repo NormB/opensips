@@ -79,6 +79,7 @@
 #include "cachedb_nats_kvobs.h"    /* generic stream/KV introspection MI */
 #include "cachedb_nats_url.h"      /* cachedb_url -> server list */
 #include "../../lib/nats/nats_pool.h"
+#include "../../lib/nats/nats_url_scheme.h"
 #include "../../lib/nats/nats_redact.h"
 
 #include "../../evi/evi.h"
@@ -314,6 +315,10 @@ static const param_export_t params[] = {
 	      (void *)nats_pool_drain_timeout_setter},
 	{"cdb_drain_timeout_ms",        INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_drain_timeout_setter},
+	/* Server order of the shared connection (ONE pool value; see
+	 * nats_pool_no_randomize_decide for the merge contract). */
+	{"no_randomize",                INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_no_randomize_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	/* canonical names (the redundant nats_ prefix inside a
@@ -516,7 +521,7 @@ struct module_exports exports = {
  * @return  0 on success, -1 on error (aborts module loading).
  */
 /* Is the effective connection URL insecure for a PII store?
- * Returns 1 when the WARN must fire: not tls://, OR no "user[:pass]@" in the
+ * Returns 1 when the WARN must fire: not TLS (tls://, tls+srv://), OR no "user[:pass]@" in the
  * authority (between "://" and the first '/').  Credentials in a path/query do
  * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
 static int nats_url_insecure(const char *url)
@@ -529,7 +534,7 @@ static int nats_url_insecure(const char *url)
 	sep = strstr(url, "://");
 	if (!sep)
 		return 1;
-	is_tls = (sep - url == 3) && (strncmp(url, "tls", 3) == 0);
+	is_tls = nats_url_is_tls(url);
 	authority = sep + 3;
 	slash = strchr(authority, '/');
 	at = strchr(authority, '@');

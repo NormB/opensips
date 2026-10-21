@@ -68,7 +68,8 @@ test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 # nats_dl.c — lib/nats/Makefile compiles it normally.
 # Cannot run under ASan: ASan and dlopen of libnats together produce
 # false-positive "leak" reports for libnats's internal allocator state.
-test_nats_dl: test_nats_dl.c ../nats_dl.c fake_libnats_ok.so fake_libnats_bump.so fake_libnats_nover.so
+test_nats_dl: test_nats_dl.c ../nats_dl.c fake_libnats_ok.so fake_libnats_bump.so fake_libnats_nover.so \
+		fake_libnats_srv.so fake_libnats_nosrv.so
 	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
 		-o $@ test_nats_dl.c ../nats_dl.c -ldl
 
@@ -81,6 +82,10 @@ fake_libnats_bump.so: fake_libnats_version.c
 	$(FAKE_LIBNATS_CC) -DFAKE_BUMP_MINOR
 fake_libnats_nover.so: fake_libnats_version.c
 	$(FAKE_LIBNATS_CC) -DFAKE_NO_VERSION
+fake_libnats_srv.so: fake_libnats_version.c
+	$(FAKE_LIBNATS_CC) -DFAKE_SRV_TRUE
+fake_libnats_nosrv.so: fake_libnats_version.c
+	$(FAKE_LIBNATS_CC) -DFAKE_SRV_FALSE
 
 # nats_load_ca_directory: libc-only directory walker; no OpenSIPS
 # runtime needed.  ASan-clean.
@@ -128,6 +133,14 @@ CORE_DEFS := -fPIC -DPIC -DHAVE_STDATOMIC -DHAVE_GENERICS -D__SMP_yes \
 test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_fork.c \
+		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
+
+# Behavioural: connect-time options of the shared pool (no_randomize,
+# SRV URLs gated on the libnats capability).  Links the REAL ../nats_pool.c
+# against a fake libnats table, like test_pool_fork.
+test_pool_connect_opts: test_pool_connect_opts.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def
+	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
+		-I/usr/local/include -o $@ test_pool_connect_opts.c \
 		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural refcount model + source-pattern: the pool is torn down only

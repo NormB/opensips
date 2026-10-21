@@ -90,6 +90,8 @@ void shm_event_raise(long used, long size, long perc)
 cmd_function find_export(const char *name, int flags)
 { (void)name; (void)flags; return NULL; }
 int nats_dl_load(const char *path) { (void)path; return 0; }
+int nats_dl_supports_srv(void) { return 0; }
+const char *nats_dl_path(void) { return "fake"; }
 
 /* ── fake libnats: counters, fake handles ────────────────────────── */
 
@@ -146,6 +148,7 @@ int main(void)
 	nats_dl.natsOptions_SetReconnectedCB = (void *)f_ok_cb;
 	nats_dl.natsOptions_SetMaxPingsOut = (void *)f_ok_int;
 	nats_dl.natsOptions_SetMaxReconnect = (void *)f_ok_int;
+	nats_dl.natsOptions_SetNoRandomize = (void *)f_ok_bool;
 	nats_dl.natsOptions_SetPingInterval = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectWait = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectJitter = (void *)f_jitter;

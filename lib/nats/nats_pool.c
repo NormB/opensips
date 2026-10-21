@@ -79,6 +79,7 @@
 #include "../../mem/mem.h"
 #include "../../ut.h"
 #include "../../globals.h"   /* process_no */
+#include "nats_url_scheme.h"
 #include "nats_pool.h"
 #include "nats_js_opts.h"
 #include "nats_redact.h"
@@ -244,6 +245,36 @@ int nats_pool_drain_timeout_setter(modparam_t type, void *val)
 	return 0;
 }
 
+/* See nats_pool.h — server order of the shared connection. */
+int nats_pool_no_randomize = 0;
+
+/* no_randomize modparam setter shared by event_nats, cachedb_nats and
+ * nats_consumer; the merge contract is nats_pool_no_randomize_decide()
+ * (nats_pool.h): any module asking for the configured order gets it. */
+int nats_pool_no_randomize_setter(modparam_t type, void *val)
+{
+	static int _explicit_off = 0;
+	int v;
+
+	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
+		LM_ERR("no_randomize: must be an integer\n");
+		return -1;
+	}
+	v = (int)(long)val;
+	if (v != 0 && v != 1) {
+		LM_ERR("no_randomize: %d is neither 0 nor 1\n", v);
+		return -1;
+	}
+	if ((v == 0 && nats_pool_no_randomize) || (v == 1 && _explicit_off))
+		LM_WARN("no_randomize: NATS modules disagree; the shared "
+			"connection keeps the configured server order\n");
+	if (v == 0)
+		_explicit_off = 1;
+	nats_pool_no_randomize = nats_pool_no_randomize_decide(
+		nats_pool_no_randomize, v);
+	return 0;
+}
+
 /* See nats_pool.h — module-tunable JetStream/KV op timeout, ms.  0 keeps
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
  * like usrloc so a slow-but-connected broker can't block a SIP worker for
@@ -265,21 +296,25 @@ int nats_pool_kv_op_timeout_ms = 1000;
 /**
  * Tokenize a comma-separated URL string and append each unique server (one
  * not already in pool_cfg->servers[]) to the config, trimming surrounding
- * whitespace/commas and detecting "tls://".  Shared by the initial parse and
+ * whitespace/commas and detecting TLS (tls://, tls+srv://).  Shared by the initial parse and
  * the subsequent-registration merge so the tokenizer lives in one place.
  *
  * @param url            Comma-separated URL string.
  * @param hard_overflow  If non-zero, exceeding NATS_POOL_MAX_SERVERS is a
  *                       hard error (-1); otherwise the extra URL is
  *                       warn-skipped (merge semantics).
+ * @param skipped        If not NULL, incremented for each DNS SRV URL left
+ *                       out for lack of a usable domain name.
  * @return  number of servers added, or -1 on OOM / hard overflow.  On -1 the
  *          caller owns any partial additions.
  *
  * Thread safety: Called only during mod_init (single-threaded, pre-fork).
  */
-static int pool_append_server_urls(const char *url, int hard_overflow)
+static int pool_append_server_urls(const char *url, int hard_overflow,
+	int *skipped)
 {
 	const char *p = url, *tok;
+	char *srv;
 	int len, i, added = 0;
 
 	while (*p) {
@@ -300,16 +335,52 @@ static int pool_append_server_urls(const char *url, int hard_overflow)
 		if (len <= 0)
 			continue;
 
+		srv = shm_malloc(len + 1);
+		if (!srv) {
+			LM_ERR("shm_malloc for server URL failed\n");
+			return -1;
+		}
+		if (!nats_url_is_srv(tok)) {
+			memcpy(srv, tok, len);
+			srv[len] = '\0';
+		} else {
+			/* libnats rejects an SRV URL with a port or a path, which
+			 * would leave the whole connection without servers: drop
+			 * them, or skip a URL that has no usable domain. */
+			int r = nats_url_srv_correct(tok, len, srv);
+			char redacted[256];
+
+			if (r == 0) {
+				memcpy(srv, tok, len);
+				srv[len] = '\0';
+				nats_redact_url(srv, redacted, sizeof(redacted));
+				LM_WARN("NATS pool: ignoring DNS SRV server URL '%s': "
+					"it has no usable domain name\n", redacted);
+				shm_free(srv);
+				if (skipped)
+					(*skipped)++;
+				continue;
+			}
+			if (r == 2) {
+				nats_redact_url(srv, redacted, sizeof(redacted));
+				LM_WARN("NATS pool: a DNS SRV server URL takes no port "
+					"and no path (the SRV records give the port); "
+					"using '%s'\n", redacted);
+			}
+		}
+
 		/* skip a URL already in the list (a duplicate within this string
 		 * or one a previous registration already added) */
 		for (i = 0; i < pool_cfg->server_cnt; i++)
-			if ((int)strlen(pool_cfg->servers[i]) == len &&
-			    strncmp(pool_cfg->servers[i], tok, len) == 0)
+			if (strcmp(pool_cfg->servers[i], srv) == 0)
 				break;
-		if (i < pool_cfg->server_cnt)
+		if (i < pool_cfg->server_cnt) {
+			shm_free(srv);
 			continue;
+		}
 
 		if (pool_cfg->server_cnt >= NATS_POOL_MAX_SERVERS) {
+			shm_free(srv);
 			if (hard_overflow) {
 				LM_ERR("too many NATS servers (max %d)\n",
 					NATS_POOL_MAX_SERVERS);
@@ -320,16 +391,9 @@ static int pool_append_server_urls(const char *url, int hard_overflow)
 			continue;
 		}
 
-		pool_cfg->servers[pool_cfg->server_cnt] = shm_malloc(len + 1);
-		if (!pool_cfg->servers[pool_cfg->server_cnt]) {
-			LM_ERR("shm_malloc for server URL failed\n");
-			return -1;
-		}
-		memcpy(pool_cfg->servers[pool_cfg->server_cnt], tok, len);
-		pool_cfg->servers[pool_cfg->server_cnt][len] = '\0';
+		pool_cfg->servers[pool_cfg->server_cnt] = srv;
 
-		if (len >= 6 &&
-		    strncmp(pool_cfg->servers[pool_cfg->server_cnt], "tls://", 6) == 0)
+		if (nats_url_is_tls(pool_cfg->servers[pool_cfg->server_cnt]))
 			pool_cfg->use_tls = 1;
 
 		pool_cfg->server_cnt++;
@@ -349,14 +413,23 @@ static int pool_append_server_urls(const char *url, int hard_overflow)
  */
 static int parse_urls(const char *url)
 {
+	int skipped = 0;
+
 	if (!url || !*url) {
 		LM_ERR("empty URL string\n");
 		return -1;
 	}
 
-	if (pool_append_server_urls(url, 1 /* hard overflow */) < 0)
+	if (pool_append_server_urls(url, 1 /* hard overflow */, &skipped) < 0)
 		goto err_free_partial;
 
+	if (pool_cfg->server_cnt == 0 && skipped > 0) {
+		/* only unusable SRV URLs (warned above): start anyway, without
+		 * a NATS server -- nats_pool_get() then fails */
+		LM_WARN("NATS pool: no usable NATS server URL; NATS stays "
+			"unavailable\n");
+		return 0;
+	}
 	if (pool_cfg->server_cnt == 0) {
 		char redacted[256];
 		nats_redact_url(url, redacted, sizeof(redacted));
@@ -611,6 +684,18 @@ int nats_pool_register(const char *url, const char *module,
 		return -1;
 	}
 
+	/* nats+srv:// and tls+srv:// are resolved by libnats (DNS SRV).  A
+	 * libnats without that support would take the domain for a host
+	 * and dial it, so refuse to start instead. */
+	if (nats_url_list_has_srv(url) && !nats_dl_supports_srv()) {
+		LM_ERR("[%s] a NATS server URL uses DNS SRV discovery "
+		       "(nats+srv:// or tls+srv://), but the loaded libnats "
+		       "'%s' does not support it; load a libnats with SRV "
+		       "support or list the servers explicitly\n",
+		       module ? module : "?", nats_dl_path());
+		return -1;
+	}
+
 	/* First registration — allocate the shared config */
 	if (!pool_cfg) {
 		pool_cfg = shm_malloc(sizeof(nats_pool_cfg));
@@ -652,7 +737,7 @@ int nats_pool_register(const char *url, const char *module,
 		LM_INFO("NATS pool: additional registration by '%s'\n",
 			module ? module : "?");
 
-		added = pool_append_server_urls(url, 0 /* soft overflow */);
+		added = pool_append_server_urls(url, 0 /* soft overflow */, NULL);
 		if (added < 0)
 			return -1;
 		if (added > 0)
@@ -845,6 +930,15 @@ natsConnection *nats_pool_get(void)
 		return NULL;
 	}
 
+	if (pool_cfg->server_cnt == 0) {
+		static int _warned = 0;
+		if (!_warned) {
+			LM_ERR("NATS pool: no usable NATS server URL configured\n");
+			_warned = 1;
+		}
+		return NULL;
+	}
+
 	/* Initialize nats.c library — once per process.
 	 * -1 lets nats.c pick default lock spin count. */
 	if (!_lib_initialized) {
@@ -942,6 +1036,16 @@ natsConnection *nats_pool_get(void)
 	 * reconnect_wait window (TLS uses the same). */
 	nats_dl.natsOptions_SetReconnectJitter(opts,
 		(int64_t)pool_cfg->reconnect_wait, (int64_t)pool_cfg->reconnect_wait);
+	/* Server order: by default libnats shuffles the server list, so the
+	 * worker processes spread over the servers; no_randomize=1 makes every
+	 * process try them in the configured order (primary / backup). */
+	s = nats_dl.natsOptions_SetNoRandomize(opts,
+		nats_pool_no_randomize ? true : false);
+	if (s != NATS_OK) {
+		LM_ERR("NATS pool: natsOptions_SetNoRandomize failed: %s\n",
+			nats_dl.natsStatus_GetText(s));
+		goto error;
+	}
 	/* Liveness probing.  Publishes run inline in SIP workers; a black-holed
 	 * broker (network drop with no RST) leaves the socket writable until
 	 * cnats's ping mechanism declares the connection DISCONNECTED.  The

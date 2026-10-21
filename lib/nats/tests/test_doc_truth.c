@@ -88,6 +88,11 @@ int main(void)
 	ASSERT(strstr(readme, "nats_pool_register(const char *url, "
 			"const char *module") != NULL,
 		"README shows the real nats_pool_register signature");
+	ASSERT(strstr(readme, "| `nats_url_scheme.h` |") != NULL,
+		"file table covers the URL scheme helpers");
+	ASSERT(strstr(readme, "`no_randomize`") != NULL &&
+	       strstr(readme, "nats_SupportsSRV()") != NULL,
+		"README states the no_randomize and SRV URL rules of the pool");
 
 	/* ── the allocator & string policy lives in the README ──────── */
 	ASSERT(strstr(readme, "Allocator policy") != NULL ||

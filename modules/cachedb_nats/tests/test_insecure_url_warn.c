@@ -38,6 +38,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../../../lib/nats/nats_url_scheme.h"
+
 /* ─── carried copy of the production helper (cachedb_nats.c) ─────── */
 static int nats_url_insecure(const char *url)
 {
@@ -50,7 +52,7 @@ static int nats_url_insecure(const char *url)
 	if (!url) return 1;
 	sep = strstr(url, "://");
 	if (!sep) return 1;                       /* malformed => warn */
-	is_tls = (sep - url == 3) && (strncmp(url, "tls", 3) == 0);
+	is_tls = nats_url_is_tls(url);
 	authority = sep + 3;
 	slash = strchr(authority, '/');           /* authority ends at first '/' */
 	at = strchr(authority, '@');
@@ -82,6 +84,14 @@ int main(void)
 	CHECK(nats_url_insecure("tls://user:pass@host:4222") == 0, "tls + user:pass => no WARN");
 	CHECK(nats_url_insecure("tls://user@host:4222") == 0, "tls + user@ (creds present) => no WARN");
 	CHECK(nats_url_insecure("tls://u:p@host:4222/path") == 0, "tls + creds + path => no WARN");
+
+	printf("DNS SRV URLs are classified by their transport:\n");
+	CHECK(nats_url_insecure("tls+srv://user:pass@example.com") == 0, "tls+srv + creds => no WARN");
+	CHECK(nats_url_insecure("TLS+SRV://user@example.com") == 0, "TLS+SRV (any case) + creds => no WARN");
+	CHECK(nats_url_insecure("tls+srv://example.com") == 1, "tls+srv but NO creds => WARN");
+	CHECK(nats_url_insecure("nats+srv://user:pass@example.com") == 1, "nats+srv WITH creds => WARN (no TLS)");
+	CHECK(nats_url_insecure("TLS://user:pass@host:4222") == 0, "TLS:// (any case) + creds => no WARN");
+	CHECK(nats_url_insecure("tlsx://user:pass@host:4222") == 1, "tlsx:// is not TLS => WARN");
 
 	printf("adversarial: '@' in the path is NOT a credential:\n");
 	CHECK(nats_url_insecure("tls://host:4222/a@b") == 1, "'@' only in path => no creds => WARN");

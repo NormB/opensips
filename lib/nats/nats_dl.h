@@ -180,6 +180,25 @@ int  nats_dl_is_loaded(void);
 const char *nats_dl_path(void);
 
 /**
+ * nats_dl_supports_srv -- can the loaded libnats resolve DNS SRV server
+ * URLs (nats+srv:// and tls+srv://)?
+ *
+ * Looked up by hand (not in nats_dl_table.def): libnats only has
+ * nats_SupportsSRV() from the release that added SRV lookups, and an older
+ * libnats would treat nats+srv://example.com as the host example.com.
+ *
+ * @return 1 if libnats exports nats_SupportsSRV() and it returns true,
+ *         0 otherwise (including when nothing is loaded).
+ *
+ * Allocation: none.  Locking: none.
+ * Context: any process after nats_dl_load() returned 0.
+ */
+int nats_dl_supports_srv(void);
+
+/* nats_dl_supports_srv() for a given dlopen() handle (NULL: 0). */
+int nats_dl_handle_supports_srv(void *handle);
+
+/**
  * nats_dl_version_compatible -- can code compiled against libnats headers
  * @compiled run against a libnats reporting @runtime?  Both are
  * NATS_VERSION_NUMBER-encoded ((major << 16) | (minor << 8) | patch).

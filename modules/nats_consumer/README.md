@@ -754,6 +754,27 @@ server, the module uses `nats://localhost:4222`.  TLS settings come
 from the *tls_mgm* client domain named `nats`.
 
 
+A server can also be given as a DNS domain whose SRV records list
+the servers: `nats+srv://example.com` (`tls+srv://example.com` for
+TLS) looks up the SRV records of `_nats._tcp.example.com` and uses
+their targets, lowest priority first (see
+[no_randomize](#no_randomize-integer)).  Credentials are written as
+usual (`nats+srv://user:password@example.com`) and apply to every
+target; there is no port (the records provide it) and no path: a
+port or a path is dropped with a warning, and an SRV URL without a
+usable domain name is ignored with a warning.  The records
+are looked up again each time a reconnect attempt has tried every
+known server, so DNS changes apply without a restart.  For safety,
+a target must be in the domain, or in its parent domain when the
+domain has three labels or more: `nats-1.example.com` is used for
+`example.com`, `nats-1.example.net` is ignored.
+
+
+SRV URLs need a libnats with DNS SRV support (one that exports
+`nats_SupportsSRV()`).  With any other libnats, OpenSIPS refuses to
+start: such a libnats would connect to the domain name as a host.
+
+
 *Default value is "NULL" (use the servers configured by other NATS
 modules, or `nats://localhost:4222`).*
 
@@ -761,6 +782,13 @@ modules, or `nats://localhost:4222`).*
 ```opensips title="Set nats_url parameter"
 ...
 modparam("nats_consumer", "nats_url", "nats://nats-1:4222,nats://nats-2:4222")
+...
+```
+
+
+```opensips title="Set nats_url parameter to a DNS SRV domain"
+...
+modparam("nats_consumer", "nats_url", "nats+srv://example.com")
 ...
 ```
 
@@ -853,6 +881,39 @@ unless this module registers servers with the pool.
 ```opensips title="Set max_reconnect parameter"
 ...
 modparam("nats_consumer", "max_reconnect", 30)
+...
+```
+
+
+#### no_randomize (integer)
+
+
+Server order of the connection shared by all NATS modules.  With
+`0` (the default) libnats shuffles the configured servers, so the
+OpenSIPS processes, each with its own connection, spread over them.
+With `1`, every process tries the servers in the order they are
+configured in [nats_url](#nats_url-string): the first reachable
+server takes all the connections and the others are backups.
+
+
+libnats then also stops shuffling the addresses of a hostname that
+resolves to several IPs, and orders the targets of a DNS SRV URL by
+priority, then by decreasing weight, instead of a weighted random
+choice among the targets of the same priority.
+
+
+The setting is shared by *event_nats*, *cachedb_nats* and
+*nats_consumer*: if any of them sets it to `1`, the shared
+connection keeps the configured order.  A value other than `0` or
+`1` refuses startup.
+
+
+*Default value is "0" (randomized).*
+
+
+```opensips title="Set no_randomize parameter"
+...
+modparam("nats_consumer", "no_randomize", 1)
 ...
 ```
 

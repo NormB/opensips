@@ -404,6 +404,28 @@ static inline int nats_pool_drain_timeout_decide(int current_ms,
 int nats_pool_drain_timeout_setter(unsigned int type, void *val);
 
 /*
+ * Server order for the shared connection.  0 (the default): libnats
+ * shuffles the configured server list, so the worker processes spread
+ * over the servers.  1: every process tries the servers in the order they
+ * are configured (primary / backup).  Set pre-fork by the `no_randomize`
+ * modparam of the NATS modules, read at connect time.
+ */
+extern int nats_pool_no_randomize;
+
+/* Merge decision for no_randomize, pure and header-inline so the contract
+ * is unit-testable: the modules share one connection, so any module that
+ * asks for the configured order gets it; a 0 never turns it back off. */
+static inline int nats_pool_no_randomize_decide(int current, int proposed)
+{
+	return (current || proposed) ? 1 : 0;
+}
+
+/* Shared modparam setter for `no_randomize` (INT_PARAM|USE_FUNC_PARAM in
+ * event_nats, cachedb_nats and nats_consumer).  Accepts 0 or 1.  `type`
+ * is modparam_t, spelled out as for nats_pool_drain_timeout_setter(). */
+int nats_pool_no_randomize_setter(unsigned int type, void *val);
+
+/*
  * Module-tunable per-operation timeout (ms) for JetStream / KV requests,
  * plumbed into jsOptions.Wait.  0 keeps cnats's 5 s default; set a smaller
  * value (e.g. cachedb_nats "kv_op_timeout_ms") on hot paths.

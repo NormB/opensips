@@ -232,6 +232,50 @@ int main(void)
 		            "is_loaded stays false after a version refusal");
 	}
 
+	/* DNS SRV capability.  nats_SupportsSRV() is not in the table (an
+	 * older libnats lacks it), so it is probed by hand: absent or false
+	 * means a nats+srv:// URL must be refused. */
+	{
+		void *h;
+
+		h = dlopen("./fake_libnats_ok.so", RTLD_NOW | RTLD_LOCAL);
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_handle_supports_srv(h), 0,
+			              "libnats without nats_SupportsSRV: no SRV support");
+			dlclose(h);
+		}
+		h = dlopen("./fake_libnats_srv.so", RTLD_NOW | RTLD_LOCAL);
+		ASSERT_NOT_NULL(h, "fake libnats (SRV supported) opens");
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_handle_supports_srv(h), 1,
+			              "nats_SupportsSRV() true: SRV support");
+			dlclose(h);
+		}
+		h = dlopen("./fake_libnats_nosrv.so", RTLD_NOW | RTLD_LOCAL);
+		ASSERT_NOT_NULL(h, "fake libnats (SRV not supported) opens");
+		if (h) {
+			ASSERT_EQ_INT(nats_dl_handle_supports_srv(h), 0,
+			              "nats_SupportsSRV() false: no SRV support");
+			dlclose(h);
+		}
+		ASSERT_EQ_INT(nats_dl_handle_supports_srv(NULL), 0,
+		              "no library: no SRV support");
+		ASSERT_EQ_INT(nats_dl_supports_srv(), 0,
+		              "nothing loaded: no SRV support");
+
+		/* the loaded library answers for itself */
+		if (nats_dl_load(NULL) == 0) {
+			h = dlopen(nats_dl_path(), RTLD_NOW | RTLD_LOCAL);
+			if (h) {
+				ASSERT_EQ_INT(nats_dl_supports_srv(),
+				              nats_dl_handle_supports_srv(h),
+				              "loaded libnats: same answer as its own probe");
+				dlclose(h);
+			}
+			nats_dl_unload();
+		}
+	}
+
 	fprintf(stderr, "==== %s (failures: %d) ====\n",
 	        g_fails == 0 ? "ALL PASS" : "SOME FAIL", g_fails);
 	return g_fails == 0 ? 0 : 1;

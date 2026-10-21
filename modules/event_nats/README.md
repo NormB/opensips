@@ -224,6 +224,13 @@ once at connection time and will not reflect infrastructure
 changes.
 
 
+Where the servers are published as DNS SRV records, a
+`nats+srv://` URL (see [nats_url](#nats_url-string)) goes further:
+the list of servers itself comes from DNS and is looked up again
+when every known server has failed, so servers can be added,
+removed or moved by updating the `_nats._tcp` records only.
+
+
 ```opensips title="Three-node JetStream cluster configuration"
 # opensips.cfg
 loadmodule "event_nats.so"
@@ -372,6 +379,27 @@ different IP if the original server has been replaced or
 renumbered.
 
 
+A server can also be given as a DNS domain whose SRV records list
+the servers: `nats+srv://example.com` (`tls+srv://example.com` for
+TLS) looks up the SRV records of `_nats._tcp.example.com` and uses
+their targets, lowest priority first (see
+[no_randomize](#no_randomize-integer)).  Credentials are written as
+usual (`nats+srv://user:password@example.com`) and apply to every
+target; there is no port (the records provide it) and no path: a
+port or a path is dropped with a warning, and an SRV URL without a
+usable domain name is ignored with a warning.  The records
+are looked up again each time a reconnect attempt has tried every
+known server, so DNS changes apply without a restart.  For safety,
+a target must be in the domain, or in its parent domain when the
+domain has three labels or more: `nats-1.example.com` is used for
+`example.com`, `nats-1.example.net` is ignored.
+
+
+SRV URLs need a libnats with DNS SRV support (one that exports
+`nats_SupportsSRV()`).  With any other libnats, OpenSIPS refuses to
+start: such a libnats would connect to the domain name as a host.
+
+
 *Default value is "nats://127.0.0.1:4222".*
 
 
@@ -386,6 +414,13 @@ modparam("event_nats", "nats_url", "nats://127.0.0.1:4222")
 ...
 modparam("event_nats", "nats_url",
     "nats://nats-1.example.com:4222,nats://nats-2.example.com:4222,nats://nats-3.example.com:4222")
+...
+```
+
+
+```opensips title="Set nats_url parameter to a DNS SRV domain"
+...
+modparam("event_nats", "nats_url", "nats+srv://example.com")
 ...
 ```
 
@@ -515,6 +550,39 @@ that the largest value wins.  A negative value refuses startup.
 ```opensips title="Set drain_timeout_ms parameter"
 ...
 modparam("event_nats", "drain_timeout_ms", 15000)
+...
+```
+
+
+#### no_randomize (integer)
+
+
+Server order of the connection shared by all NATS modules.  With
+`0` (the default) libnats shuffles the configured servers, so the
+OpenSIPS processes, each with its own connection, spread over them.
+With `1`, every process tries the servers in the order they are
+configured in [nats_url](#nats_url-string): the first reachable
+server takes all the connections and the others are backups.
+
+
+libnats then also stops shuffling the addresses of a hostname that
+resolves to several IPs, and orders the targets of a DNS SRV URL by
+priority, then by decreasing weight, instead of a weighted random
+choice among the targets of the same priority.
+
+
+The setting is shared by *event_nats*, *cachedb_nats* and
+*nats_consumer*: if any of them sets it to `1`, the shared
+connection keeps the configured order.  A value other than `0` or
+`1` refuses startup.
+
+
+*Default value is "0" (randomized).*
+
+
+```opensips title="Set no_randomize parameter"
+...
+modparam("event_nats", "no_randomize", 1)
 ...
 ```
 

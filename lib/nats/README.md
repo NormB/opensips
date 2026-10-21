@@ -198,7 +198,20 @@ forks. Registrations merge:
 - for the reconnect settings, the larger value wins, whatever the module
   load order;
 - TLS settings are not registration parameters; they come from
-  `tls_mgm` (`nats_pool_bind_tls()`).
+  `tls_mgm` (`nats_pool_bind_tls()`). A `tls://` or `tls+srv://` URL
+  (any case) turns TLS on;
+- the `no_randomize` parameter (event_nats, cachedb_nats,
+  nats_consumer) sets one value for the shared connection: if any
+  module sets it to 1, every process tries the servers in the
+  configured order instead of a shuffled one;
+- DNS SRV URLs (`nats+srv://domain`, `tls+srv://domain`) are resolved
+  by libnats, so a registration that contains one fails unless the
+  loaded libnats exports `nats_SupportsSRV()` and it returns true
+  (`nats_dl_supports_srv()`): another libnats would connect to the
+  domain name as a host. An SRV URL with a port or a path is corrected
+  (both dropped) with a warning, since libnats would reject the whole
+  server list; one without a usable domain name is left out with a
+  warning, and if no server is left, startup goes on without NATS;
 
 `event_nats` and `cachedb_nats` always register; `cachedb_nats_fts`
 has no connection of its own. `nats_consumer` registers too, with its
@@ -323,6 +336,7 @@ These apply to the whole family. Each module's README lists its own.
 | `nats_rank.c` | `nats_pool_should_init()`: which process ranks connect |
 | `nats_redact.c/.h` | Credential redaction for logged URLs |
 | `nats_rl.h` | Once-per-interval log gate used by the outage logging policy |
+| `nats_url_scheme.h` | Classifies the configured server URLs: TLS (`tls://`, `tls+srv://`) and DNS SRV (`nats+srv://`, `tls+srv://`) |
 | `nats_str.h` | `str` → bounded NUL-terminated buffer for the libnats C-string edge (keys, subjects); rejects embedded NUL |
 | `nats_validate.c/.h` | Subject and KV-key validator used by every publish and KV path |
 | `nats_js_opts.h` | Shared JetStream publish options (async queue limits) |

@@ -458,6 +458,10 @@ static const param_export_t params[] = {
 	{ "nats_url",          STR_PARAM, &nats_url },
 	{ "reconnect_wait_ms", INT_PARAM, &nats_reconnect_wait_ms },
 	{ "max_reconnect",     INT_PARAM, &nats_max_reconnect },
+	/* server order of the shared connection (ONE pool value; see
+	 * nats_pool_no_randomize_decide for the merge contract) */
+	{ "no_randomize",      INT_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_no_randomize_setter },
 	{ "bind",              STR_PARAM|USE_FUNC_PARAM,
 	                       (void *)set_bind_param },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },
