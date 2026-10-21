@@ -1702,6 +1702,11 @@ void nats_pool_destroy(void)
  * Thread safety: Safe to call from any context.  Uses atomic_load
  * on _connected which is set by callbacks on the nats.c I/O thread.
  */
+int nats_pool_has_servers(void)
+{
+	return (pool_cfg && pool_cfg->server_cnt > 0) ? 1 : 0;
+}
+
 int nats_pool_is_connected(void)
 {
 	return atomic_load(&_connected) ? 1 : 0;

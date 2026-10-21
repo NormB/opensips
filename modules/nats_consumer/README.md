@@ -865,9 +865,12 @@ modparam("nats_consumer", "reconnect_wait_ms", 1000)
 
 
 Number of connection attempts made at startup for failures other
-than an unreachable broker (which starts the process at once without
-a connection, retrying in the background) or a TLS, authentication or
-URL error (which fails startup at once).  Once connected,
+than an unreachable broker, which starts the process at once without
+a connection, retrying in the background.  A broker that refuses the
+connection (authentication, TLS handshake) looks the same, since the
+first connect is asynchronous, and a connection that cannot be set up
+with the configured servers (a `tls://` URL without *tls_mgm*, for
+instance) leaves the module without NATS; both are logged.  Once connected,
 reconnection after an outage is not limited.  When several NATS
 modules set this value, the largest wins.  A value of **0** keeps the
 shared default (60).  As with

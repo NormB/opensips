@@ -886,6 +886,7 @@ static int cdbn_open_connections(void)
 
 static int child_init(int rank)
 {
+	natsConnection *nc;
 	kvStore *kv;
 
 	if (!nats_pool_should_init(rank))
@@ -895,8 +896,16 @@ static int child_init(int rank)
 	 * or no usable server URL is configured): start degraded instead of
 	 * keeping OpenSIPS from starting.  The cachedb operations fail until
 	 * the connection is up, then get the KV handle themselves
-	 * (nats_con_refresh_kv()). */
-	if (!nats_pool_get() || !nats_pool_is_connected()) {
+	 * (nats_con_refresh_kv()).  A connection that cannot be set up with
+	 * the configured servers is a configuration error, though: no waiting
+	 * fixes it. */
+	nc = nats_pool_get();
+	if (!nc && nats_pool_has_servers()) {
+		LM_ERR("cachedb_nats: cannot use the configured NATS servers "
+			"(see the error above)\n");
+		return -1;
+	}
+	if (!nc || !nats_pool_is_connected()) {
 		if (require_usrloc_safe_bucket) {
 			LM_ERR("cachedb_nats: NATS is unavailable at startup and "
 				"require_usrloc_safe_bucket=1 -- refusing to start "

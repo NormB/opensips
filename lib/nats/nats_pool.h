@@ -298,6 +298,14 @@ void nats_pool_kv_ttl_below_marker_mark_broken(void);
 int nats_pool_is_registered(void);
 
 /*
+ * Returns non-zero if the pool has at least one usable server URL.  Lets a
+ * module tell "no usable server configured" (a nats_pool_get() failure it
+ * can start degraded on) from a connection that could not be set up with
+ * the configured servers (a configuration error).
+ */
+int nats_pool_has_servers(void);
+
+/*
  * Get a human-readable list of discovered NATS server URLs.
  *
  * Intended for MI status reporting.  Returns a comma-separated string

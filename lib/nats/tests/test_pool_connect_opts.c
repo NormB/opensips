@@ -342,6 +342,26 @@ static int s_srv_unusable_only(void)
 	return nats_pool_get() == NULL && nats_pool_get() == NULL && n_connect == 0;
 }
 
+static int s_has_servers(void)
+{
+	/* lets a module tell "no usable server configured" (degraded start)
+	 * from a connect error with servers configured (TLS, auth: fatal) */
+	fake_supports_srv = 1;
+	if (nats_pool_has_servers())
+		return 0;               /* nothing registered yet */
+	if (nats_pool_register("nats://127.0.0.1:4222", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_has_servers() == 1;
+}
+
+static int s_has_no_servers(void)
+{
+	fake_supports_srv = 1;
+	if (nats_pool_register("nats+srv://exa%41mple.test", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_has_servers() == 0;
+}
+
 static int s_not_srv_needs_nothing(void)
 {
 	fake_supports_srv = 0;
@@ -377,6 +397,8 @@ int main(void)
 	run("corrected SRV URL that duplicates another is merged", s_srv_corrected_dedup);
 	run("SRV URL without a usable domain skipped, others kept", s_srv_unusable_skipped);
 	run("only unusable SRV URLs: startup goes on, no connection", s_srv_unusable_only);
+	run("nats_pool_has_servers(): servers configured", s_has_servers);
+	run("nats_pool_has_servers(): none usable", s_has_no_servers);
 
 	fprintf(stderr, "\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED",
 		g_fails, g_fails == 1 ? "" : "s");

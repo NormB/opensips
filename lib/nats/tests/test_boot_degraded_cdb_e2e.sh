@@ -187,6 +187,25 @@ expect '! kill -0 "${OPS_PID}" 2>/dev/null' \
 expect 'log_contains "require_usrloc_safe_bucket=1"' \
     "the refusal names require_usrloc_safe_bucket"
 
+# ---------- 4: a configuration error is not "NATS unavailable" ----------
+# A tls:// URL without tls_mgm loaded: the pool cannot even set the
+# connection up, which no waiting fixes -- startup must still fail.
+# (An authentication or TLS handshake refusal by a reachable broker shows
+# up like an unreachable broker -- the first connect is asynchronous --
+# so it starts degraded, like the other NATS modules.)
+echo "tls:// URL without tls_mgm:"
+: > "${OPS_LOG}"
+write_cfg "tls://127.0.0.1:${PORT}" ""
+"${OPENSIPS_BIN}" -F -f "${WORK}/test.cfg" >"${OPS_LOG}" 2>&1 &
+OPS_PID=$!
+sleep 6
+expect '! kill -0 "${OPS_PID}" 2>/dev/null' \
+    "a configuration error still refuses startup"
+expect 'log_contains "cannot use the configured NATS servers"' \
+    "the refusal says why"
+expect '! log_contains "starting degraded"' \
+    "no degraded start on a configuration error"
+
 [ "${ok}" = "${total}" ] || fail "only ${ok}/${total} checks passed; log tail:
 $(tail -30 "${OPS_LOG}")"
-pass "cachedb_nats boot-degraded green (broker down, unusable URL, strict refusal)"
+pass "cachedb_nats boot-degraded green (broker down, unusable URL, strict + config-error refusals)"

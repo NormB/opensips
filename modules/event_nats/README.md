@@ -499,9 +499,12 @@ state, keeps connecting in the background, and the OpenSIPS worker
 boots and routes calls normally while NATS publishes fail cleanly
 and are counted in the `failed` statistic of
 [event_nats:nats_stats](#event_natsnats_stats) until the broker
-becomes reachable.  TLS, authentication and URL errors fail startup
-at once.  The pool is shared, so the largest value set by any NATS
-module wins.
+becomes reachable.  A broker that refuses the connection
+(authentication, TLS handshake) looks the same, since the first
+connect is asynchronous, and so does a connection that cannot be set
+up with the configured servers (a `tls://` URL without *tls_mgm*, for
+instance): event_nats starts degraded and logs why.  The pool is
+shared, so the largest value set by any NATS module wins.
 
 
 This limit applies only to the *startup*

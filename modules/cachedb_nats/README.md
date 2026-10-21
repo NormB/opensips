@@ -1459,8 +1459,12 @@ modparam("cachedb_nats", "reconnect_wait_ms", 1000)
 Maximum number of connection attempts made during `child_init`
 for failures other than the ones below.  A broker that is
 unreachable at startup counts no attempts: the process starts
-degraded and keeps connecting in the background.  TLS,
-authentication and URL errors fail startup at once.  Once connected,
+degraded and keeps connecting in the background.  A broker that
+refuses the connection (authentication, TLS handshake) looks the same,
+since the first connect is asynchronous: the process starts degraded
+and the broker logs why.  A connection that cannot be set up with the
+configured servers (a `tls://` URL without *tls_mgm*, for instance)
+fails startup at once.  Once connected,
 the nats.c library reconnects with no limit.  The pool is shared, so
 the largest value set by any NATS module wins.
 
