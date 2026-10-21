@@ -47,7 +47,11 @@ on:
 jobs:
   sanitize:
     name: ${{ matrix.variant }}
-    runs-on: ubuntu-latest
+    # Pinned: the container shares the host kernel, and on the
+    # ubuntu-26.04 host image ThreadSanitizer aborts every test binary at
+    # start ("unexpected memory mapping", host ASLR it cannot handle),
+    # which a container cannot change.
+    runs-on: ubuntu-24.04
     container:
       image: ubuntu:24.04
     strategy:
