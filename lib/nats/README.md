@@ -250,7 +250,7 @@ a degraded start) sets it and bumps the epoch.
 
 | Situation | What happens |
 | --------- | ------------ |
-| Broker down at startup | OpenSIPS starts; each process connects in the background (`NATS pool: broker unreachable at startup; ...`). Operations fail fast until then. |
+| Broker down at startup | OpenSIPS starts; each process connects in the background (`NATS pool: broker unreachable at startup; ...`). Operations fail fast until then. cachedb_nats starts degraded too, unless `require_usrloc_safe_bucket=1`. |
 | Connection lost mid-operation | The operation ends at its own timeout; the next one fails fast. A dead broker is detected in about 20 s (10 s pings, 2 outstanding). |
 | Broker down when an operation starts | Operations return an error immediately instead of blocking a SIP worker (table below). |
 | Broker comes back | KV handles are refreshed, consumer subscriptions are rebuilt (durables resume where they stopped), the KV watcher resumes after the last change it delivered (so changes made during the outage still raise E_NATS_KV_CHANGE), and the async RPC inbox is re-created. No restart needed. |

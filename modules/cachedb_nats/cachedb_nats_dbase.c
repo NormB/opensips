@@ -118,6 +118,15 @@ static nats_cachedb_con *nats_new_connection(struct cachedb_id *id)
 	con->ref = 1;
 	con->bucket_name = kv_bucket;
 
+	/* Without a NATS connection (degraded start, see child_init), the
+	 * connection is created without a KV handle: the operations get it
+	 * once connected (nats_con_refresh_kv()). */
+	if (!nats_pool_is_connected()) {
+		LM_DBG("NATS unavailable; KV handle for bucket '%s' deferred\n",
+			kv_bucket);
+		return con;
+	}
+
 	/* get/create KV store handle from the shared pool */
 	con->kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
 		(int64_t)kv_ttl);

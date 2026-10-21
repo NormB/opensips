@@ -752,10 +752,13 @@ int nats_cdb_dedicated_proc_guard(const char *who)
 		return -1;
 	}
 
-	if (!nats_pool_get()) {
-		LM_ERR("%s proc: NATS connection unavailable, exiting\n", who);
-		return -1;
-	}
+	/* No NATS connection (no usable server configured): keep the
+	 * process running, degraded, rather than take the daemon down.  Its
+	 * loop gets the pool and the KV handle on every pass and skips the
+	 * work while they are unavailable. */
+	if (!nats_pool_get())
+		LM_WARN("%s proc: NATS connection unavailable, running "
+			"degraded\n", who);
 	return 0;
 }
 

@@ -853,14 +853,63 @@ static int mod_init(void)
  * @param rank  OpenSIPS process rank (1-based for SIP workers).
  * @return      0 on success, -1 on error (kills the child process).
  */
-static int child_init(int rank)
+/* Open the cachedb connections of the configured URLs (child_init). */
+static int cdbn_open_connections(void)
 {
 	struct cachedb_url *it;
 	cachedb_con *con;
+
+	/* open cachedb connections for each configured URL */
+	for (it = nats_cdb_urls; it; it = it->next) {
+		char _redacted[512];
+		char _tmp[512];
+		int _n = it->url.len < (int)sizeof(_tmp) - 1
+			? it->url.len : (int)sizeof(_tmp) - 1;
+		memcpy(_tmp, it->url.s, _n);
+		_tmp[_n] = '\0';
+		nats_redact_url(_tmp, _redacted, sizeof(_redacted));
+		LM_DBG("opening cachedb_nats connection for [%s]\n", _redacted);
+		con = nats_cachedb_init(&it->url);
+		if (con == NULL) {
+			LM_ERR("failed to open cachedb_nats connection\n");
+			return -1;
+		}
+		if (cachedb_put_connection(&cache_mod_name, con) < 0) {
+			LM_ERR("failed to insert cachedb_nats connection\n");
+			return -1;
+		}
+	}
+
+	cachedb_free_url(nats_cdb_urls);
+	return 0;
+}
+
+static int child_init(int rank)
+{
 	kvStore *kv;
 
 	if (!nats_pool_should_init(rank))
 		return 0;
+
+	/* No NATS server to talk to at startup (the broker is unreachable,
+	 * or no usable server URL is configured): start degraded instead of
+	 * keeping OpenSIPS from starting.  The cachedb operations fail until
+	 * the connection is up, then get the KV handle themselves
+	 * (nats_con_refresh_kv()). */
+	if (!nats_pool_get() || !nats_pool_is_connected()) {
+		if (require_usrloc_safe_bucket) {
+			LM_ERR("cachedb_nats: NATS is unavailable at startup and "
+				"require_usrloc_safe_bucket=1 -- refusing to start "
+				"without checking bucket '%s'\n", kv_bucket);
+			return -1;
+		}
+		if (rank == 1)
+			LM_WARN("cachedb_nats: NATS is unavailable at startup; "
+				"starting degraded: cache operations fail until it "
+				"connects, and the checks of bucket '%s' are "
+				"skipped\n", kv_bucket);
+		return cdbn_open_connections();
+	}
 
 	/* ensure KV bucket exists via the shared pool */
 	kv = nats_pool_get_kv(kv_bucket, kv_replicas, kv_history,
@@ -952,29 +1001,7 @@ static int child_init(int rank)
 	 * pool's single-threaded KV-handle cache (use-after-free under
 	 * broker flap). */
 
-	/* open cachedb connections for each configured URL */
-	for (it = nats_cdb_urls; it; it = it->next) {
-		char _redacted[512];
-		char _tmp[512];
-		int _n = it->url.len < (int)sizeof(_tmp) - 1
-			? it->url.len : (int)sizeof(_tmp) - 1;
-		memcpy(_tmp, it->url.s, _n);
-		_tmp[_n] = '\0';
-		nats_redact_url(_tmp, _redacted, sizeof(_redacted));
-		LM_DBG("opening cachedb_nats connection for [%s]\n", _redacted);
-		con = nats_cachedb_init(&it->url);
-		if (con == NULL) {
-			LM_ERR("failed to open cachedb_nats connection\n");
-			return -1;
-		}
-		if (cachedb_put_connection(&cache_mod_name, con) < 0) {
-			LM_ERR("failed to insert cachedb_nats connection\n");
-			return -1;
-		}
-	}
-
-	cachedb_free_url(nats_cdb_urls);
-	return 0;
+	return cdbn_open_connections();
 }
 
 /**

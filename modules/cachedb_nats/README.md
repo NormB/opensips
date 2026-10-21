@@ -409,6 +409,15 @@ connection attempts in `child_init`; a broker unreachable at startup
 does not use it up (the process starts degraded).
 
 
+Without NATS at startup -- the broker is unreachable, or no usable
+server URL is configured -- *cachedb_nats* starts degraded with a
+warning (`cachedb_nats: NATS is unavailable at startup; starting
+degraded`): cache operations fail until the connection is up, then
+work without a restart, and the startup checks of the bucket are
+skipped.  With [require_usrloc_safe_bucket](#require_usrloc_safe_bucket-integer)
+set to `1`, the module refuses to start instead.
+
+
 ```opensips title="Three-node cluster configuration"
 ...
 loadmodule "cachedb_nats.so"
@@ -1190,6 +1199,10 @@ this set to `1` the module *refuses to
 start* instead -- recreate the bucket with
 `MaxAge=0` ([kv_ttl](#kv_ttl-integer) = 0) and
 migrate the data.
+
+
+It also refuses to start when NATS is unavailable at startup: the
+bucket cannot be checked then.
 
 
 *Default value is "0" (warn only).*
