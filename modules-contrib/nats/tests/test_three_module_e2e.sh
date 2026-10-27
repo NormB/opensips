@@ -36,7 +36,8 @@ cleanup_resources() {
     nats --server "${NATS_URL}" kv del "${BUCKET}" --force >/dev/null 2>&1 || true
     nats --server "${NATS_URL}" stream rm "${STREAM}" --force >/dev/null 2>&1 || true
 }
-trap 'stop_opensips; cleanup_resources; cleanup_workdir' EXIT
+SUB_PID=""
+trap 'stop_opensips; [ -n "${SUB_PID}" ] && kill "${SUB_PID}" 2>/dev/null; cleanup_resources; cleanup_workdir' EXIT
 cleanup_resources  # belt+braces
 
 # Pre-create the JetStream stream that nats_consumer will bind against.
@@ -50,8 +51,10 @@ nats --server "${NATS_URL}" stream add "${STREAM}" \
 
 # Subscribe to the event_nats fan-out subject from outside opensips.
 SUB_LOG="${WORK}/sub.log"
-( nats --server "${NATS_URL}" sub 'x8.event.>' --raw --no-context \
-    >"${SUB_LOG}" 2>&1 ) &
+# (no subshell: SUB_PID must be the nats process itself, so the
+# EXIT trap stops it on every path)
+nats --server "${NATS_URL}" sub 'x8.event.>' --raw --no-context \
+    >"${SUB_LOG}" 2>&1 &
 SUB_PID=$!
 
 cat > "${WORK}/test.cfg" <<EOF
@@ -136,7 +139,7 @@ start_opensips "${WORK}/test.cfg"
 # Wait for ALL THREE modules to register against the shared pool.
 # Whichever module loads first is the registrant; the other two log
 # "NATS pool: connected" with the original registrant's URL/TLS.
-wait_for_log "nats_pool_register: NATS pool: registered by"           5  || fail "pool not registered"
+wait_for_log "NATS pool: registered by"           5  || fail "pool not registered"
 wait_for_log "NATS pool: KV bucket '${BUCKET}' created"               8  || fail "cachedb_nats not ready"
 wait_for_log "nats_consumer_proc: pool ready"                          5  || fail "nats_consumer not ready"
 wait_for_log "evi_publish_event: Registered event <E_NATS_KV_CHANGE"   3  || fail "event registration not seen"
@@ -177,12 +180,13 @@ done
 # Stop the external subscriber and check it caught the fan-out publish.
 kill ${SUB_PID} 2>/dev/null || true
 wait ${SUB_PID} 2>/dev/null || true
+SUB_PID=
 sub_count=$(grep -c "three-mods" "${SUB_LOG}" || echo 0)
 [ "${sub_count}" -ge 1 ] || fail "external subscriber missed event_nats publish"
 echo "    external subscriber caught: ${sub_count} message(s)"
 
 # Confirm the shared pool: only ONE registrant line in the log.
-reg_count=$(grep -c "nats_pool_register: NATS pool: registered by" "${OPS_LOG}" || echo 0)
+reg_count=$(grep -c "NATS pool: registered by" "${OPS_LOG}" || echo 0)
 [ "${reg_count}" = "1" ] || fail "expected exactly 1 pool registrant, saw ${reg_count}"
 
 # Single-owner MI: with all three modules co-loaded, the JS
