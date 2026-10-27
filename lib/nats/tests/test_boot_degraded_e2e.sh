@@ -5,8 +5,11 @@
 # unreachable while every OpenSIPS process runs child_init.  The
 # The hardening requires:
 #
-#   - event_nats: child_init logs + returns 0 (degraded), publish
-#     fails cleanly while down (no crash, no abort)
+#   - event_nats: child_init logs + returns 0 (degraded); a publish while
+#     down returns 1 -- the message waits in the libnats reconnect buffer
+#     (reconnect_buf_size) and is sent once the connection is up; the
+#     delivery itself is tested by event_nats test_publish_during_disconnect.sh
+#     (no crash, no abort, no stall)
 #   - nats_consumer: the consumer proc loop-retries the pool instead
 #     of exiting
 #   - lib/nats: RetryOnFailedConnect + reconnect handling pick the
@@ -14,7 +17,7 @@
 #
 # Phases:
 #   boot     broker down -> opensips must come up (degraded)
-#   degraded publish fails cleanly, process alive
+#   degraded publish is buffered (returns 1), process alive
 #   late     broker starts -> publish succeeds, consumer subscribes
 #
 set -u
@@ -128,12 +131,12 @@ Content-Length: 0\r
 
 # ---------- phase: degraded publish ----------
 send_phase down
-expect 'wait_for_log "\\[down\\] publish=fail" 8' \
-    "publish fails cleanly while the broker is down"
+expect 'wait_for_log "\\[down\\] publish=ok" 8' \
+    "publish while the broker is down is buffered (returns 1)"
 expect 'wait_for_log "\\[down\\] phase-done" 8' \
     "route completes (no stall) while the broker is down"
 expect 'kill -0 "${OPS_PID}" 2>/dev/null' \
-    "opensips still alive after the failed publish"
+    "opensips still alive after the buffered publish"
 
 # ---------- phase: the broker arrives LATE ----------
 start_broker
@@ -157,4 +160,4 @@ expect 'wait_for_log "subscribed id=.${HANDLE}." 30' \
 
 [ "${ok}" = "${total}" ] || fail "only ${ok}/${total} checks passed; log tail:
 $(tail -30 "${OPS_LOG}")"
-pass "boot-degraded matrix green (boot=degraded-ok, down=clean-fail, late broker=full recovery)"
+pass "boot-degraded matrix green (boot=degraded-ok, down=buffered, late broker=full recovery)"
