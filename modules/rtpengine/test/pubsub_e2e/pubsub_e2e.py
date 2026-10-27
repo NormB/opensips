@@ -217,6 +217,11 @@ def main():
     s_port, p_port = s_sock.getsockname()[1], p_sock.getsockname()[1]
     rtp_a, rtp_b, rtp_s = Rtp(a_sock, 0x1111), Rtp(b_sock, 0x2222), Rtp(s_sock, 0x3333)
 
+    def relay_port(port):
+        # any port of rtpengine's own range (its port-min/port-max are
+        # configurable), i.e. not one of this test's endpoints
+        return 0 < port < 65536 and port not in (a_port, b_port, s_port, p_port)
+
     try:
         print("== call set-up over ng (offer + answer)")
         off = ng.cmd({"command": "offer", "call-id": call_id,
@@ -251,7 +256,7 @@ def main():
               "subscription tag is not a call leg's tag (got %r)" % tag)
         check("a=sendonly" in offer_sdp, "subscription offer is sendonly")
         fork_src = sdp_media(offer_sdp)
-        check(fork_src is not None and 30000 <= fork_src[1] <= 40000,
+        check(fork_src is not None and relay_port(fork_src[1]),
               "subscription offer has an rtpengine port (%r)" % (fork_src,))
 
         print("== subscribe answer (from the same in-dialog context)")
@@ -290,7 +295,7 @@ def main():
         pub_ans = base64.b64decode(h.get("x-sdp", "")).decode(errors="replace")
         check("a=recvonly" in pub_ans, "publish answer is recvonly")
         pm = sdp_media(pub_ans)
-        check(pm is not None and 30000 <= pm[1] <= 40000,
+        check(pm is not None and relay_port(pm[1]),
               "publish answer has an rtpengine port (%r)" % (pm,))
 
         print("== refused requests")
