@@ -523,6 +523,20 @@ int nats_pool_auth_configured(void);
 #endif
 
 /*
+ * DNS SRV discovery (nats_srv.h).  A nats+srv:// or tls+srv:// server URL
+ * is resolved by the nats module in each process when it connects: the SRV
+ * records of _nats._tcp.<domain> become plain URLs in RFC 2782 order, so
+ * libnats needs no SRV support.  When the lookups leave no server, the
+ * process continues without NATS (nats_pool_has_servers() returns 0) and
+ * looks up again at most every nats_pool_srv_retry_s seconds.
+ * nats_pool_set_srv_resolver() replaces the resolver (the OpenSIPS core
+ * one by default); the unit tests pass a fake.
+ */
+#include "nats_srv.h"
+extern int nats_pool_srv_retry_s;
+void nats_pool_set_srv_resolver(nats_srv_resolve_f fn, void *ctx);
+
+/*
  * Module-tunable per-operation timeout (ms) for JetStream / KV requests,
  * plumbed into jsOptions.Wait.  0 keeps cnats's 5 s default; set a smaller
  * value (e.g. cachedb_nats "kv_op_timeout_ms") on hot paths.

@@ -90,7 +90,6 @@ void shm_event_raise(long used, long size, long perc)
 cmd_function find_export(const char *name, int flags)
 { (void)name; (void)flags; return NULL; }
 int nats_dl_load(const char *path) { (void)path; return 0; }
-int nats_dl_supports_srv(void) { return 0; }
 const char *nats_dl_path(void) { return "fake"; }
 
 /* ── fake libnats: counters, fake handles ────────────────────────── */

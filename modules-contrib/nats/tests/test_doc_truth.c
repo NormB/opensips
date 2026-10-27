@@ -94,8 +94,12 @@ int main(void)
 	ASSERT(strstr(readme, "| `nats_url_scheme.h` |") != NULL,
 		"file table covers the URL scheme helpers");
 	ASSERT(strstr(readme, "#### no_randomize (integer)") != NULL &&
-	       strstr(readme, "nats_SupportsSRV()") != NULL,
+	       strstr(readme, "by the nats module, not libnats") != NULL &&
+	       strstr(readme, "| `nats_srv.c/.h` |") != NULL,
 		"README states the no_randomize and SRV URL rules of the pool");
+	ASSERT(strstr(readme, "nats_SupportsSRV") == NULL &&
+	       strstr(readme, "NATS_BUILD_WITH_SRV_LOOKUP") == NULL,
+		"README no longer asks for a libnats with SRV support");
 
 	/* ── the allocator & string policy lives in the README ──────── */
 	ASSERT(strstr(readme, "Allocator policy") != NULL ||

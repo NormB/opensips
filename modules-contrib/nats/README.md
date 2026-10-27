@@ -244,15 +244,18 @@ forks. Registrations merge:
   *tls_mgm* (`nats_pool_bind_tls()`). A `tls://` or `tls+srv://` URL
   (any case) turns TLS on;
 - DNS SRV URLs (`nats+srv://domain`, `tls+srv://domain`) are resolved
-  by libnats, so a registration that contains one fails unless the
-  loaded libnats exports `nats_SupportsSRV()` and it returns true
-  (`nats_dl_supports_srv()`; nats.c configured with
-  `-DNATS_BUILD_WITH_SRV_LOOKUP=ON`, off by default): another libnats
-  would connect to the domain name as a host. An SRV URL with a port or
-  a path is corrected (both dropped) with a warning, since libnats would
-  reject the whole server list; one without a usable domain name is left
-  out with a warning, and if no server is left, startup goes on without
-  NATS.
+  by the nats module, not libnats, so any libnats takes them: in each
+  process, at connect time, the SRV records of `_nats._tcp.<domain>`
+  (looked up with the OpenSIPS core resolver, `nats_srv_core.c`) are put
+  in RFC 2782 order and become plain `nats://` / `tls://` URLs in place
+  of the SRV URL (`nats_srv.c`, `nats_srv_expand()`), at most 16 servers
+  in all; libnats is then told to keep the list order
+  (`natsOptions_SetNoRandomize()`), so the priorities hold. An SRV URL
+  with a port or a path is corrected (both dropped) with a warning; one
+  without a usable domain name is left out with a warning. A lookup that
+  gives no server is warned about; when no server is left the process
+  goes on without NATS (`nats_pool_has_servers()` returns 0) and looks
+  up again at most every `nats_pool_srv_retry_s` (5) seconds.
 
 The settings of the shared connection are the parameters of this
 module: [no_randomize](#no_randomize-integer),
@@ -377,6 +380,8 @@ connection itself uses the real URL. The credential parameters
 | `nats_validate.c/.h` | Subject and KV-key validator used by every publish and KV path |
 | `nats_js_opts.h` | Shared JetStream publish options (async queue limits) |
 | `nats_js_retry.h` + `nats_js_retry.c` | JetStream async publish retry policy (which ack errors are resent, how often) and the table counting the resends of each message |
+| `nats_srv.c/.h` | DNS SRV server discovery: RFC 2782 order, target URLs, server-list expansion (pure, unit-tested by `tests/test_srv_order.c`) |
+| `nats_srv_core.c` | The SRV lookup through the OpenSIPS core resolver (`get_record()`) |
 | `nats_auth.h` | Credential parameters of the shared connection: merge, validation, which method; the URL user-info and insecure-URL rules |
 | `Makefile.nats` | `pkg-config` probe that gates the module builds on libnats, plus a compile probe for `kvConfig.AllowMsgTTLBelowMarker` |
 
@@ -474,6 +479,7 @@ never the `*String` variants, which stop at the first NUL.
 | `modules-contrib/event_nats/tests/test_publish_during_disconnect.sh` | publishing through a broker restart, and a full reconnect buffer |
 | `tests/test_auth_e2e.sh` | user/password, token, NKey, creds file and TLS client certificate against a real server, plus refusals |
 | `tests/test_no_randomize_e2e.sh` | [no_randomize](#no_randomize-integer) set to 1: every process connects to the first configured server |
+| `tests/test_srv_e2e.sh` | `nats+srv://` against a DNS responder (`nats_srv_dns.py`) and two real servers, in private namespaces: priority order, failover, a domain without records |
 | `tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format and match the modules' export tables (`selftest_readme_format.sh` checks the checker) |
 
 The end-to-end tests start their own disposable `nats-server` (it must be

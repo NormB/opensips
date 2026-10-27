@@ -85,6 +85,9 @@
 #include "nats_js_opts.h"
 #include "nats_js_retry.h"
 #include "nats_auth.h"
+#include "nats_srv.h"
+#include "nats_rl.h"
+#include <time.h>
 #include "nats_redact.h"
 #include "nats_server_info.h"
 #include "nats_ca_dir.h"
@@ -901,17 +904,9 @@ static int pool_register(const char *url, const char *module,
 		return -1;
 	}
 
-	/* nats+srv:// and tls+srv:// are resolved by libnats (DNS SRV).  A
-	 * libnats without that support would take the domain for a host
-	 * and dial it, so refuse to start instead. */
-	if (nats_url_list_has_srv(url) && !nats_dl_supports_srv()) {
-		LM_ERR("[%s] a NATS server URL uses DNS SRV discovery "
-		       "(nats+srv:// or tls+srv://), but the loaded libnats "
-		       "'%s' does not support it; load a libnats with SRV "
-		       "support or list the servers explicitly\n",
-		       module ? module : "?", nats_dl_path());
-		return -1;
-	}
+	/* nats+srv:// and tls+srv:// are resolved here, in the nats module, at
+	 * connect time (pool_expand_servers()): libnats only ever gets plain
+	 * URLs, so any libnats works. */
 
 	/* Credentials as modparams and inside a URL: libnats would use the
 	 * URL's for that server and the modparams' for the others. */
@@ -1164,6 +1159,118 @@ static int apply_tls_from_mgm(natsOptions *opts)
 	return 0;
 }
 
+/* ----------------------------------------------------------------
+ * DNS SRV discovery (nats_srv.h)
+ * ---------------------------------------------------------------- */
+
+/* The OpenSIPS core resolver (nats_srv_core.c, linked into
+ * nats.so).  Weak, so the unit tests that link this file without
+ * the core run on their own resolver (nats_pool_set_srv_resolver()). */
+int nats_srv_core_resolve(const char *qname, nats_srv_rec *out, int max,
+	void *ctx) __attribute__((weak));
+
+static nats_srv_resolve_f _srv_resolve = NULL;
+static void *_srv_resolve_ctx = NULL;
+
+void nats_pool_set_srv_resolver(nats_srv_resolve_f fn, void *ctx)
+{
+	_srv_resolve = fn;
+	_srv_resolve_ctx = ctx;
+}
+
+/* See nats_pool.h. */
+int nats_pool_srv_retry_s = 5;
+
+/* Process-local: the expanded server list handed to libnats, when the
+ * lookups left no server (has_servers() then says "none usable", so the
+ * modules start degraded), and when they last did. */
+static char  *_servers[NATS_POOL_MAX_SERVERS];
+static int    _servers_cnt = 0;
+static int    _srv_none = 0;
+static time_t _srv_failed_at = 0;
+
+static unsigned int pool_srv_rand(void *ctx)
+{
+	static pid_t seeded_for = 0;
+
+	(void)ctx;
+	if (seeded_for != getpid()) {
+		seeded_for = getpid();
+		srandom((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
+	}
+	return ((unsigned int)random() << 16) ^ (unsigned int)random();
+}
+
+/* any nats+srv:// / tls+srv:// URL among the configured servers? */
+static int pool_cfg_has_srv(void)
+{
+	int i;
+
+	for (i = 0; i < pool_cfg->server_cnt; i++)
+		if (nats_url_is_srv(pool_cfg->servers[i]))
+			return 1;
+	return 0;
+}
+
+static void pool_free_servers(void)
+{
+	nats_srv_free_list(_servers, _servers_cnt);
+	_servers_cnt = 0;
+}
+
+/* Build _servers from pool_cfg->servers: each nats+srv:// / tls+srv://
+ * URL becomes the plain URLs of its SRV targets (RFC 2782 order, see
+ * nats_srv_order()), the other URLs are copied.  Returns 0, or -1 when no
+ * server is left (each failed lookup is warned about, rate-limited). */
+static int pool_expand_servers(void)
+{
+	nats_srv_resolve_f res = _srv_resolve ? _srv_resolve :
+		nats_srv_core_resolve;
+	void *rctx = _srv_resolve ? _srv_resolve_ctx : NULL;
+	time_t now = time(NULL);
+	int i, got, capped, failed, total_capped = 0;
+	static time_t rl_fail, rl_cap, rl_none;
+
+	if (_srv_none && now - _srv_failed_at < nats_pool_srv_retry_s) {
+		LM_DBG("NATS pool: DNS SRV lookups failed %ds ago; retrying "
+			"after %ds\n", (int)(now - _srv_failed_at), nats_pool_srv_retry_s);
+		return -1;
+	}
+
+	pool_free_servers();
+	for (i = 0; i < pool_cfg->server_cnt; i++) {
+		got = nats_srv_expand(&pool_cfg->servers[i], 1,
+			_servers + _servers_cnt, NATS_POOL_MAX_SERVERS - _servers_cnt,
+			nats_pool_no_randomize, res, rctx, pool_srv_rand, NULL,
+			&capped, &failed);
+		_servers_cnt += got;
+		total_capped += capped;
+		if (failed && nats_rl_pass(&rl_fail, now, 30)) {
+			char redacted[512];
+			nats_url_srv_redact(pool_cfg->servers[i], redacted,
+				sizeof(redacted));
+			LM_WARN("NATS pool: the DNS SRV lookup of %s gave no server "
+				"(no answer, no record, or no service); repeats "
+				"suppressed for 30s\n", redacted);
+		}
+	}
+	if (total_capped && nats_rl_pass(&rl_cap, now, 30))
+		LM_WARN("NATS pool: %d server(s) from DNS SRV records left out: "
+			"at most %d servers\n", total_capped, NATS_POOL_MAX_SERVERS);
+
+	if (_servers_cnt == 0) {
+		_srv_none = 1;
+		_srv_failed_at = now;
+		if (nats_rl_pass(&rl_none, now, 30))
+			LM_WARN("NATS pool: no NATS server left after the DNS SRV "
+				"lookups; continuing without NATS, lookups retried "
+				"every %ds\n", nats_pool_srv_retry_s);
+		return -1;
+	}
+	_srv_none = 0;
+	return 0;
+}
+
 natsConnection *nats_pool_get(void)
 {
 	natsOptions *opts = NULL;
@@ -1194,6 +1301,10 @@ natsConnection *nats_pool_get(void)
 		LM_DBG("NATS pool: no usable NATS server URL configured\n");
 		return NULL;
 	}
+
+	/* resolve the DNS SRV URLs of this process (after the fork) */
+	if (pool_expand_servers() < 0)
+		return NULL;
 
 	/* Initialize nats.c library — once per process.
 	 * -1 lets nats.c pick default lock spin count. */
@@ -1237,8 +1348,7 @@ natsConnection *nats_pool_get(void)
 
 			if (nats_dl.natsOptions_Create(&probe) == NATS_OK) {
 				if (nats_dl.natsOptions_SetServers(probe,
-				    (const char **)pool_cfg->servers,
-				    pool_cfg->server_cnt) == NATS_OK)
+				    (const char **)_servers, _servers_cnt) == NATS_OK)
 					tls_ok = 1;
 				nats_dl.natsOptions_Destroy(probe);
 			}
@@ -1264,9 +1374,10 @@ natsConnection *nats_pool_get(void)
 		return NULL;
 	}
 
-	/* Set server list (URLs now guaranteed compatible with nats.c) */
+	/* Set server list: the configured URLs with the DNS SRV URLs
+	 * replaced by their targets (pool_expand_servers()) */
 	s = nats_dl.natsOptions_SetServers(opts,
-		(const char **)pool_cfg->servers, pool_cfg->server_cnt);
+		(const char **)_servers, _servers_cnt);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_SetServers failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
@@ -1306,8 +1417,12 @@ natsConnection *nats_pool_get(void)
 	/* Server order: by default libnats shuffles the server list, so the
 	 * worker processes spread over the servers; no_randomize=1 makes every
 	 * process try them in the configured order (primary / backup). */
+	/* With a DNS SRV URL in the list the order is already the RFC 2782
+	 * one (priority first, a weighted random choice inside a priority,
+	 * pool_expand_servers()): a libnats shuffle would lose the priority
+	 * order, so libnats keeps the list as given. */
 	s = nats_dl.natsOptions_SetNoRandomize(opts,
-		nats_pool_no_randomize ? true : false);
+		(nats_pool_no_randomize || pool_cfg_has_srv()) ? true : false);
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_SetNoRandomize failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
@@ -1974,7 +2089,7 @@ void nats_pool_destroy(void)
 /* See nats_pool.h.  pool_cfg is set pre-fork and read-only after. */
 int nats_pool_has_servers(void)
 {
-	return (pool_cfg && pool_cfg->server_cnt > 0) ? 1 : 0;
+	return (pool_cfg && pool_cfg->server_cnt > 0 && !_srv_none) ? 1 : 0;
 }
 
 /**

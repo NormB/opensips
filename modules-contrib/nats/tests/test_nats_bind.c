@@ -93,7 +93,6 @@ nats_dl_funcs_t nats_dl;
 static nats_dl_funcs_t *const real_dl = &nats_dl;   /* before nats_bind.h */
 int nats_dl_load(const char *path) { (void)path; return 0; }
 const char *nats_dl_path(void) { return "fake"; }
-int nats_dl_supports_srv(void) { return 0; }
 
 /* find_export(): what the core finds when nats.so is (not) loaded */
 extern struct module_exports exports;   /* ../nats.c */

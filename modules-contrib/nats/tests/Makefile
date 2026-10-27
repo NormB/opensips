@@ -68,8 +68,7 @@ test_validate_subject_cache: test_validate_subject_cache.c ../nats_validate.o
 # nats_dl.c — modules-contrib/nats/Makefile compiles it normally.
 # Cannot run under ASan: ASan and dlopen of libnats together produce
 # false-positive "leak" reports for libnats's internal allocator state.
-test_nats_dl: test_nats_dl.c ../nats_dl.c fake_libnats_ok.so fake_libnats_bump.so fake_libnats_nover.so \
-		fake_libnats_srv.so fake_libnats_nosrv.so
+test_nats_dl: test_nats_dl.c ../nats_dl.c fake_libnats_ok.so fake_libnats_bump.so fake_libnats_nover.so
 	$(CC) $(CFLAGS) -DNO_LOG -DNO_DEBUG -I.. -I/usr/local/include \
 		-o $@ test_nats_dl.c ../nats_dl.c -ldl
 
@@ -82,10 +81,6 @@ fake_libnats_bump.so: fake_libnats_version.c
 	$(FAKE_LIBNATS_CC) -DFAKE_BUMP_MINOR
 fake_libnats_nover.so: fake_libnats_version.c
 	$(FAKE_LIBNATS_CC) -DFAKE_NO_VERSION
-fake_libnats_srv.so: fake_libnats_version.c
-	$(FAKE_LIBNATS_CC) -DFAKE_SRV_TRUE
-fake_libnats_nosrv.so: fake_libnats_version.c
-	$(FAKE_LIBNATS_CC) -DFAKE_SRV_FALSE
 
 # nats_load_ca_directory: libc-only directory walker; no OpenSIPS
 # runtime needed.  ASan-clean.
@@ -134,7 +129,7 @@ test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.
 		../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_fork.c \
-		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_srv.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural (ASan): the JetStream async publish retry policy
 # (nats_js_retry.h) and the table of the messages being retried
@@ -150,7 +145,7 @@ test_pool_js_ack: test_pool_js_ack.c ../nats_pool.c ../nats_pool.h ../nats_dl_ta
 		../nats_js_retry.h ../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_js_ack.c \
-		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_srv.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural: the credentials the shared pool hands libnats (user,
 # password, token, creds_file, nkey, nkey_seed_file).  Links the REAL
@@ -159,7 +154,7 @@ test_pool_auth_opts: test_pool_auth_opts.c ../nats_pool.c ../nats_pool.h ../nats
 		../nats_auth.h ../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_auth_opts.c \
-		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_srv.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural: binding the nats module API the way the NATS modules do
 # (nats_bind_mod.h): nats.so not loaded, every API member set, the
@@ -167,15 +162,21 @@ test_pool_auth_opts: test_pool_auth_opts.c ../nats_pool.c ../nats_pool.h ../nats
 # REAL ../nats.c and ../nats_pool.c, like test_pool_fork.
 test_nats_bind: test_nats_bind.c ../nats.c ../nats_api.h ../nats_api_types.h \
 		../nats_bind.h ../nats_bind_mod.h ../nats_pool.c ../nats_pool.h \
-		../nats_js_retry.c ../nats_validate.c ../nats_rank.c
+		../nats_js_retry.c ../nats_srv.c ../nats_validate.c ../nats_rank.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_nats_bind.c ../nats.c \
-		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c \
-		../nats_validate.c ../nats_rank.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_srv.c ../nats_redact.c \
+		../nats_ca_dir.c ../nats_validate.c ../nats_rank.c -pthread
 
 # Pure header-inline credential rules of the shared connection.
 test_nats_auth: test_nats_auth.c ../nats_auth.h ../nats_url_scheme.h
 	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_nats_auth.c
+
+# Behavioural (ASan): DNS SRV discovery in the nats module (nats_srv.c) -- RFC
+# 2782 order, query name, target URLs, list expansion with a fake
+# resolver and random source.
+test_srv_order: test_srv_order.c ../nats_srv.c ../nats_srv.h
+	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_srv_order.c ../nats_srv.c
 
 # Pure header-inline helpers (the implicit rule would not know about the
 # header).
@@ -189,7 +190,7 @@ test_pool_connect_opts: test_pool_connect_opts.c ../nats_pool.c ../nats_pool.h .
 		../nats_url_scheme.h ../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_connect_opts.c \
-		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_srv.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural refcount model + source-pattern: the pool is torn down only
 # on the last unregister, waits for async publishes before jsCtx_Destroy,

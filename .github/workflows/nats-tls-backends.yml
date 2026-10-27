@@ -117,12 +117,14 @@ jobs:
               exit 1
             fi
           done
-      - name: Run the modules-contrib/nats module, credential and server-order e2e tests
+      - name: Run the modules-contrib/nats module, credential, server-order and DNS SRV e2e tests
         run: |
           # each NATS module requires nats.so; user/password, token, NKey,
           # creds file, TLS client certificate against a private
-          # nats-server.  Exit 77 is a failure here.
-          for t in test_nats_module_required_e2e.sh test_auth_e2e.sh test_no_randomize_e2e.sh; do
+          # nats-server; DNS SRV discovery; boot without a broker.  Exit 77
+          # is a failure here.
+          for t in test_nats_module_required_e2e.sh test_auth_e2e.sh test_no_randomize_e2e.sh \
+                   test_srv_e2e.sh test_boot_degraded_cdb_e2e.sh test_boot_degraded_e2e.sh; do
             rc=0
             bash "modules-contrib/nats/tests/$t" || rc=$?
             if [ "$rc" -ne 0 ]; then

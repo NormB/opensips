@@ -232,20 +232,3 @@ const char *nats_dl_path(void)
 {
 	return _path;
 }
-
-int nats_dl_handle_supports_srv(void *handle)
-{
-	bool (*supports_srv)(void);
-
-	if (!handle)
-		return 0;
-	/* Not in nats_dl_table.def: an older libnats lacks it, which only
-	 * means no SRV support. */
-	supports_srv = (bool (*)(void)) dlsym(handle, "nats_SupportsSRV");
-	return (supports_srv && supports_srv()) ? 1 : 0;
-}
-
-int nats_dl_supports_srv(void)
-{
-	return nats_dl_handle_supports_srv(_handle);
-}

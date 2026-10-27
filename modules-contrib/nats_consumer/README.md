@@ -758,25 +758,28 @@ from the *tls_mgm* client domain named `nats`.
 
 A server can also be given as a DNS domain whose SRV records list
 the servers: `nats+srv://example.com` (`tls+srv://example.com` for
-TLS) looks up the SRV records of `_nats._tcp.example.com` and uses
-their targets, lowest priority first (see
-[no_randomize](#no_randomize-integer)).  Credentials are written as
-usual (`nats+srv://user:password@example.com`) and apply to every
-target; there is no port (the records provide it) and no path: a
-port or a path is dropped with a warning, and an SRV URL without a
-usable domain name is ignored with a warning.  The records
-are looked up again each time a reconnect attempt has tried every
-known server, so DNS changes apply without a restart.  For safety,
-a target must be in the domain, or in its parent domain when the
-domain has three labels or more: `nats-1.example.com` is used for
-`example.com`, `nats-1.example.net` is ignored.
-
-
-SRV URLs need a libnats built with DNS SRV support: a nats.c with
-SRV support configured with `-DNATS_BUILD_WITH_SRV_LOOKUP=ON` (it is
-off by default), for which `nats_SupportsSRV()` returns true.  With
-any other libnats, OpenSIPS refuses to start: such a libnats would
-connect to the domain name as a host, or reject the URL.
+TLS).  OpenSIPS looks up the SRV records of `_nats._tcp.example.com`
+(RFC 2782) through its own resolver, so any libnats works, and gives
+libnats one `nats://` (or `tls://`) URL per target, `host:port`, in
+place of the SRV URL: lowest priority first and, inside a priority, a
+random choice weighted by the record weights (with
+[no_randomize](#no_randomize-integer), decreasing weight, then target
+name).  So that the priorities hold, libnats keeps the order of the
+server list whenever it contains an SRV URL, as with
+[no_randomize](#no_randomize-integer) set to `1`: other servers listed
+next to it are tried in the configured order.  Credentials are written
+as usual (`nats+srv://user:password@example.com`) and apply to every
+target;
+there is no port (the records provide it) and no path: a port or a
+path is dropped with a warning, and an SRV URL without a usable domain
+name is ignored with a warning.  Each OpenSIPS process looks up the
+records once, when it connects; servers added to the cluster later
+are learned from the cluster (see above), and a target removed from
+DNS stays in the process's list until it restarts.  A lookup that
+gives no server (no answer, no record, or a target of `.`) is warned
+about; when no server is left, the process continues without NATS and
+looks up again at most every 5 seconds.  At most 16 servers are used
+in all; the targets past that are left out with a warning.
 
 
 *Default value is "NULL" (use the servers configured by other NATS

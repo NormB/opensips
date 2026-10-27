@@ -183,8 +183,8 @@ BUCKET="${SAVED_BUCKET}"
 KV_WATCH='modparam("cachedb_nats", "kv_watch", ">")'
 
 # ---------- 2: the only server URL is unusable ----------
-LIBNATS="${NATS_DL_LIBNATS_PATH:-$(ldconfig -p 2>/dev/null | awk '/libnats\.so /{print $NF; exit}')}"
-if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_SupportsSRV"; then
+# (the nats module resolves SRV URLs itself: any libnats takes them)
+{
     echo "only an unusable SRV URL:"
     : > "${OPS_LOG}"
     write_cfg "nats+srv://exa%41mple.test" ""
@@ -204,9 +204,23 @@ if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_Supp
     expect 'wait_for_log "\\[nosrv\\] cache=fail" 8' \
         "cache operation fails cleanly without a server"
     stop_opensips
-else
-    echo "  (skipped: the loaded libnats has no SRV support)"
-fi
+}
+
+# ---------- 2b: an SRV domain that has no records ----------
+# .invalid never resolves (RFC 6761): the lookup gives no server, which
+# is a degraded start too, not a configuration error.
+echo "an SRV URL whose lookup gives no server:"
+: > "${OPS_LOG}"
+write_cfg "nats+srv://nats.example.invalid" ""
+start_opensips "${WORK}/test.cfg"
+sleep 5
+expect 'kill -0 "${OPS_PID}" 2>/dev/null' \
+    "opensips alive when the SRV lookup gives no server (degraded start)"
+expect 'log_contains "DNS SRV lookup of nats\\+srv://nats.example.invalid gave no server"' \
+    "warning names the SRV URL"
+expect 'log_contains "starting degraded"' \
+    "cachedb_nats warns that it starts degraded"
+stop_opensips
 
 # ---------- 3: strict mode still refuses ----------
 echo "require_usrloc_safe_bucket=1, broker down:"
@@ -222,7 +236,7 @@ expect '! kill -0 "${OPS_PID}" 2>/dev/null' \
 expect 'log_contains "require_usrloc_safe_bucket=1"' \
     "the refusal names require_usrloc_safe_bucket"
 
-if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_SupportsSRV"; then
+{
     echo "require_usrloc_safe_bucket=1, no usable server URL:"
     : > "${OPS_LOG}"
     write_cfg "nats+srv://exa%41mple.test" 'modparam("cachedb_nats", "require_usrloc_safe_bucket", 1)'
@@ -233,7 +247,7 @@ if [ -n "${LIBNATS}" ] && nm -D "${LIBNATS}" 2>/dev/null | grep -q " T nats_Supp
         "strict mode refuses to start without a usable server"
     expect 'log_contains "no usable NATS server URL is configured and require_usrloc_safe_bucket=1"' \
         "the refusal says no usable server URL is configured"
-fi
+}
 
 # ---------- 4: a configuration error is not "NATS unavailable" ----------
 # A tls:// URL without tls_mgm loaded: the pool cannot even set the

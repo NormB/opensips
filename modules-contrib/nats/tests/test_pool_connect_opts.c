@@ -18,10 +18,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * test_pool_connect_opts.c -- what the shared pool asks libnats for at
- * connect time: the no_randomize modparam (server order) and DNS SRV
- * server URLs (nats+srv:// and tls+srv://), which are refused unless the
- * loaded libnats can resolve them -- a libnats without SRV support would
- * dial the domain itself.
+ * connect time: the no_randomize modparam (server order), the reconnect
+ * buffer, and DNS SRV server URLs (nats+srv:// and tls+srv://), which
+ * the nats module resolves itself (a fake resolver here), so libnats only gets
+ * the plain URLs of the SRV targets.
  *
  * Links the REAL ../nats_pool.c against a fake libnats table that
  * records the options it receives.
@@ -40,6 +40,7 @@
 #include "../../../sr_module.h"
 #include "../nats_dl.h"
 #include "../nats_pool.h"
+#include "../nats_srv.h"
 
 /* ── core seams ─────────────────────────────────────────────────── */
 
@@ -95,8 +96,6 @@ int nats_dl_load(const char *path) { (void)path; return 0; }
 const char *nats_dl_path(void) { return "fake"; }
 
 /* the libnats capability probe, controlled per scenario */
-static int fake_supports_srv;
-int nats_dl_supports_srv(void) { return fake_supports_srv; }
 
 /* ── fake libnats: records what the connect path asked for ───────── */
 
@@ -273,121 +272,186 @@ static int s_reconnect_buf_merge(void)
 
 /* ── SRV URLs ───────────────────────────────────────────────────── */
 
-static int s_srv_unsupported(void)
+/* the nats module resolves SRV URLs itself (nats_srv.c): the fake resolver
+ * answers _nats._tcp.example.test with two targets of two priorities,
+ * fails for broken.test; libnats only ever sees plain URLs. */
+static int n_srv_queries;
+static int fake_resolve(const char *qname, nats_srv_rec *out, int max, void *ctx)
 {
-	fake_supports_srv = 0;
-	return nats_pool_register("nats+srv://example.test", "test", 2000, 3) == -1;
+	(void)ctx;
+	n_srv_queries++;
+	if (!strcmp(qname, "_nats._tcp.example.test") && max >= 2) {
+		out[0].priority = 20; out[0].weight = 10; out[0].port = 4223;
+		snprintf(out[0].target, sizeof out[0].target, "n2.example.test.");
+		out[1].priority = 10; out[1].weight = 10; out[1].port = 4222;
+		snprintf(out[1].target, sizeof out[1].target, "n1.example.test.");
+		return 2;
+	}
+	return -1;
 }
+#define EXP_NATS "nats://n1.example.test:4222,nats://n2.example.test:4223"
 
-static int s_srv_unsupported_any_case(void)
+static int s_srv_any_libnats(void)
 {
-	fake_supports_srv = 0;
-	return nats_pool_register("NATS+SRV://example.test", "test", 2000, 3) == -1;
-}
-
-static int s_srv_unsupported_in_list(void)
-{
-	fake_supports_srv = 0;
-	return nats_pool_register("nats://127.0.0.1:4222, tls+srv://example.test",
-		"test", 2000, 3) == -1;
-}
-
-static int s_srv_unsupported_merge(void)
-{
-	fake_supports_srv = 0;
-	if (nats_pool_register("nats://127.0.0.1:4222", "first", 2000, 3) != 0)
-		return 0;
-	return nats_pool_register("nats+srv://example.test", "second", 2000, 3) == -1;
-}
-
-static int s_srv_supported(void)
-{
-	fake_supports_srv = 1;
+	/* no libnats SRV capability is needed any more */
 	if (nats_pool_register("nats+srv://example.test", "test", 2000, 3) != 0)
 		return 0;
 	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://example.test") == 0
+		&& strcmp(last_servers, EXP_NATS) == 0
 		&& last_secure == -1;
+}
+
+static int s_srv_any_case(void)
+{
+	if (nats_pool_register("NATS+SRV://example.test", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && strcmp(last_servers, EXP_NATS) == 0;
+}
+
+static int s_srv_in_list(void)
+{
+	/* expanded in place, after the plain URL listed before it */
+	if (nats_pool_register("nats://127.0.0.1:4222, nats+srv://example.test",
+	    "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://127.0.0.1:4222," EXP_NATS) == 0;
+}
+
+static int s_srv_merge(void)
+{
+	if (nats_pool_register("nats://127.0.0.1:4222", "first", 2000, 3) != 0)
+		return 0;
+	if (nats_pool_register("nats+srv://example.test", "second", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://127.0.0.1:4222," EXP_NATS) == 0;
 }
 
 static int s_tls_srv_is_tls(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register("tls+srv://example.test", "test", 2000, 3) != 0)
 		return 0;
 	/* no tls_mgm in this harness: the connect fails after SetSecure */
 	(void)nats_pool_get();
-	return last_secure == 1;
+	return last_secure == 1
+		&& strcmp(last_servers, "tls://n1.example.test:4222,tls://n2.example.test:4223") == 0;
 }
 
 static int s_tls_srv_upper_is_tls(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register("TLS+SRV://example.test", "test", 2000, 3) != 0)
 		return 0;
 	(void)nats_pool_get();
 	return last_secure == 1;
 }
 
-static int s_srv_port_corrected(void)
+static int s_srv_userinfo_kept(void)
 {
-	/* a port or path is dropped with a warning, startup goes on */
-	fake_supports_srv = 1;
+	/* a port or path is dropped with a warning; the user information
+	 * goes to every target */
 	if (nats_pool_register("nats+srv://u:p@example.test:4222/x", "test", 2000, 3) != 0)
 		return 0;
-	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://u:p@example.test") == 0;
-}
-
-static int s_srv_corrected_in_list(void)
-{
-	fake_supports_srv = 1;
-	if (nats_pool_register("nats://127.0.0.1:4222,tls+srv://example.test/x",
-	    "test", 2000, 3) != 0)
-		return 0;
-	(void)nats_pool_get();
-	return strcmp(last_servers, "nats://127.0.0.1:4222,tls+srv://example.test") == 0;
-}
-
-static int s_srv_corrected_merge(void)
-{
-	fake_supports_srv = 1;
-	if (nats_pool_register("nats://127.0.0.1:4222", "first", 2000, 3) != 0)
-		return 0;
-	if (nats_pool_register("nats+srv://example.test:1", "second", 2000, 3) != 0)
-		return 0;
-	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats://127.0.0.1:4222,nats+srv://example.test") == 0;
+	return nats_pool_get() != NULL && strcmp(last_servers,
+		"nats://u:p@n1.example.test:4222,nats://u:p@n2.example.test:4223") == 0;
 }
 
 static int s_srv_corrected_dedup(void)
 {
-	/* the corrected URL is a duplicate of one already listed */
-	fake_supports_srv = 1;
+	/* the corrected URL is a duplicate of one already listed: one lookup */
+	n_srv_queries = 0;
 	if (nats_pool_register("nats+srv://example.test,nats+srv://example.test:4222",
 	    "test", 2000, 3) != 0)
 		return 0;
 	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+		&& strcmp(last_servers, EXP_NATS) == 0 && n_srv_queries == 1;
 }
 
 static int s_srv_spellings_dedup(void)
 {
-	/* spellings libnats takes for the same SRV URL: listed once */
-	fake_supports_srv = 1;
+	n_srv_queries = 0;
 	if (nats_pool_register("nats+srv://example.test/,NATS+SRV://example.test.",
 	    "test", 2000, 3) != 0)
 		return 0;
 	if (nats_pool_register("nats+srv://example.test", "second", 2000, 3) != 0)
 		return 0;
 	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+		&& strcmp(last_servers, EXP_NATS) == 0 && n_srv_queries == 1;
+}
+
+static int s_srv_lookup_fails_plain_stays(void)
+{
+	if (nats_pool_register("nats+srv://broken.test,nats://127.0.0.1:4222",
+	    "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL
+		&& strcmp(last_servers, "nats://127.0.0.1:4222") == 0
+		&& strstr(g_log, "nats+srv://broken.test") != NULL;
+}
+
+static int s_srv_lookup_fails_degraded(void)
+{
+	/* nothing resolvable: no connection, and has_servers() says "no
+	 * usable server" so cachedb_nats starts degraded instead of failing */
+	n_connect = 0;
+	if (nats_pool_register("nats+srv://u:s3cr3t@broken.test", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() == NULL && n_connect == 0
+		&& nats_pool_has_servers() == 0
+		&& strstr(g_log, "[redacted]@broken.test") != NULL
+		&& strstr(g_log, "s3cr3t") == NULL;
+}
+
+static int s_srv_lookup_retry_bounded(void)
+{
+	/* a failed lookup is not repeated on every call, only after the
+	 * retry interval */
+	n_srv_queries = 0;
+	if (nats_pool_register("nats+srv://broken.test", "test", 2000, 3) != 0)
+		return 0;
+	(void)nats_pool_get();
+	(void)nats_pool_get();
+	(void)nats_pool_get();
+	if (n_srv_queries != 1)
+		return 0;
+	nats_pool_srv_retry_s = 0;
+	(void)nats_pool_get();
+	return n_srv_queries == 2;
+}
+
+static int s_srv_keeps_rfc_order(void)
+{
+	/* libnats would shuffle the list and lose the RFC 2782 priority
+	 * order: with an SRV URL in the list it is told to keep the order
+	 * (the weighted choice already spread the processes) */
+	if (nats_pool_register("nats+srv://example.test", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && last_no_randomize == 1;
+}
+
+static int s_plain_still_randomized(void)
+{
+	/* the negative control: plain URLs only, no_randomize unset */
+	if (nats_pool_register("nats://127.0.0.1:4222,nats://127.0.0.1:4223",
+	    "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && last_no_randomize == 0;
+}
+
+static int s_srv_no_randomize(void)
+{
+	/* the order handed to libnats follows nats_srv_order() */
+	if (nats_pool_no_randomize_setter(INT_PARAM, (void *)(long)1) != 0)
+		return 0;
+	if (nats_pool_register("nats+srv://example.test", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && strcmp(last_servers, EXP_NATS) == 0
+		&& last_no_randomize == 1;
 }
 
 static int s_srv_unusable_skipped(void)
 {
 	/* no usable domain: skipped with a warning, the other servers stay */
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats://127.0.0.1:4222,nats+srv://exa mple.test",
 	    "test", 2000, 3) != 0)
 		return 0;
@@ -398,7 +462,6 @@ static int s_srv_unusable_skipped(void)
 static int s_srv_unusable_only(void)
 {
 	/* nothing usable left: startup goes on, NATS stays unavailable */
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats+srv://exa%41mple.test", "test", 2000, 3) != 0)
 		return 0;
 	n_connect = 0;
@@ -409,7 +472,6 @@ static int s_srv_warn_corrected_redacted(void)
 {
 	/* libnats takes all before the last '@' as credentials: none of it
 	 * may reach the log, even past a '/' */
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats+srv://u:s3cr3t@b/t41l@example.test:4222",
 	    "test", 2000, 3) != 0)
 		return 0;
@@ -419,7 +481,6 @@ static int s_srv_warn_corrected_redacted(void)
 
 static int s_srv_warn_unusable_redacted(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats://127.0.0.1:4222,nats+srv://u:s3cr3t@b/t41l@bad dom",
 	    "test", 2000, 3) != 0)
 		return 0;
@@ -431,7 +492,6 @@ static int s_srv_unusable_only_quiet(void)
 {
 	/* warned once before forking: the processes asking for the
 	 * connection afterwards do not log it again */
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats+srv://exa%41mple.test", "test", 2000, 3) != 0)
 		return 0;
 	if (!strstr(g_log, "no usable NATS server URL"))
@@ -449,24 +509,22 @@ static int s_srv_unusable_only_quiet(void)
 
 static int s_default_then_explicit(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
 		return 0;
 	if (nats_pool_register("nats+srv://example.test", "cachedb_nats", 2000, 3) != 0)
 		return 0;
 	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+		&& strcmp(last_servers, EXP_NATS) == 0;
 }
 
 static int s_explicit_then_default(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats+srv://example.test", "cachedb_nats", 2000, 3) != 0)
 		return 0;
 	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
 		return 0;
 	return nats_pool_get() != NULL
-		&& strcmp(last_servers, "nats+srv://example.test") == 0;
+		&& strcmp(last_servers, EXP_NATS) == 0;
 }
 
 static int s_defaults_only(void)
@@ -508,7 +566,6 @@ static int s_default_then_unusable_explicit(void)
 {
 	/* the configured URL is unusable: NATS stays unavailable, the
 	 * default does not stand in for it */
-	fake_supports_srv = 1;
 	if (nats_pool_register_default("nats://127.0.0.1:4222", "event_nats", 2000, 3) != 0)
 		return 0;
 	if (nats_pool_register("nats+srv://exa mple.test", "cachedb_nats", 2000, 3) != 0)
@@ -521,7 +578,6 @@ static int s_has_servers(void)
 {
 	/* lets a module tell "no usable server configured" (degraded start)
 	 * from a connect error with servers configured (TLS, auth: fatal) */
-	fake_supports_srv = 1;
 	if (nats_pool_has_servers())
 		return 0;               /* nothing registered yet */
 	if (nats_pool_register("nats://127.0.0.1:4222", "test", 2000, 3) != 0)
@@ -531,7 +587,6 @@ static int s_has_servers(void)
 
 static int s_has_no_servers(void)
 {
-	fake_supports_srv = 1;
 	if (nats_pool_register("nats+srv://exa%41mple.test", "test", 2000, 3) != 0)
 		return 0;
 	return nats_pool_has_servers() == 0;
@@ -539,7 +594,6 @@ static int s_has_no_servers(void)
 
 static int s_not_srv_needs_nothing(void)
 {
-	fake_supports_srv = 0;
 	if (nats_pool_register("nats+srvx://example.test:4222,tls+srv:/x", "test",
 	    2000, 3) != 0)
 		return 0;
@@ -564,19 +618,23 @@ int main(void)
 	run("first explicit value replaces the default, then the max wins", s_reconnect_buf_merge);
 
 	fprintf(stderr, "SRV URLs:\n");
-	run("nats+srv:// refused when libnats lacks SRV support", s_srv_unsupported);
-	run("the scheme check is case-insensitive", s_srv_unsupported_any_case);
-	run("an SRV URL anywhere in the list is refused", s_srv_unsupported_in_list);
-	run("an SRV URL in a later registration is refused", s_srv_unsupported_merge);
-	run("nats+srv:// passed to libnats when supported", s_srv_supported);
-	run("tls+srv:// turns TLS on", s_tls_srv_is_tls);
-	run("TLS+SRV:// turns TLS on", s_tls_srv_upper_is_tls);
+	nats_pool_set_srv_resolver(fake_resolve, NULL);
+	run("nats+srv:// works with any libnats (resolved in the nats module)", s_srv_any_libnats);
+	run("the scheme check is case-insensitive", s_srv_any_case);
+	run("an SRV URL in a list is expanded in place", s_srv_in_list);
+	run("an SRV URL from a later module is expanded too", s_srv_merge);
+	run("tls+srv:// turns TLS on and gives tls:// targets", s_tls_srv_is_tls);
+	run("TLS+SRV:// in upper case too", s_tls_srv_upper_is_tls);
+	run("port and path dropped; user information kept on every target", s_srv_userinfo_kept);
+	run("a corrected duplicate is looked up once", s_srv_corrected_dedup);
+	run("spellings of one SRV URL are looked up once", s_srv_spellings_dedup);
+	run("a failed lookup leaves the other servers", s_srv_lookup_fails_plain_stays);
+	run("only failed lookups: degraded start, URL redacted in the log", s_srv_lookup_fails_degraded);
+	run("a failed lookup is retried after the interval, not on every call", s_srv_lookup_retry_bounded);
+	run("no_randomize: the deterministic RFC 2782 order", s_srv_no_randomize);
+	run("an SRV URL in the list: libnats keeps the RFC 2782 order", s_srv_keeps_rfc_order);
+	run("plain URLs only: libnats still shuffles them", s_plain_still_randomized);
 	run("look-alike schemes are not SRV URLs", s_not_srv_needs_nothing);
-	run("port / path of an SRV URL dropped, startup goes on", s_srv_port_corrected);
-	run("corrected SRV URL among other servers", s_srv_corrected_in_list);
-	run("corrected SRV URL in a later registration", s_srv_corrected_merge);
-	run("corrected SRV URL that duplicates another is merged", s_srv_corrected_dedup);
-	run("spellings of the same SRV URL are merged", s_srv_spellings_dedup);
 	run("SRV URL without a usable domain skipped, others kept", s_srv_unusable_skipped);
 	run("only unusable SRV URLs: startup goes on, no connection", s_srv_unusable_only);
 	run("only unusable SRV URLs: warned once, not per process",

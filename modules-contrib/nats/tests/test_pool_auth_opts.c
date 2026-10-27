@@ -96,8 +96,6 @@ int nats_dl_load(const char *path) { (void)path; return 0; }
 const char *nats_dl_path(void) { return "fake"; }
 
 /* the libnats capability probe, controlled per scenario */
-static int fake_supports_srv;
-int nats_dl_supports_srv(void) { return fake_supports_srv; }
 
 /* ── fake libnats: records what the connect path asked for ───────── */
 
