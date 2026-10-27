@@ -88,7 +88,9 @@ start_opensips "${WORK}/test.cfg"
 sleep 1
 assert_opensips_alive
 
-sipp -sn uas -i 127.0.0.1 -p "${UAS_PORT}" -m 1 -bg -trace_err \
+# not -bg: a daemonized sipp is not $!, so the EXIT trap could not stop
+# it, and after a failed run it kept the UAS port for every later run
+sipp -sn uas -i 127.0.0.1 -p "${UAS_PORT}" -m 1 -trace_err -nostdin \
     -error_file "${WORK}/uas_err.log" > "${WORK}/uas.out" 2>&1 &
 UAS_PID=$!
 sleep 0.5
