@@ -23,6 +23,7 @@
 
 #include "../../../dprint.h"
 #include "../../../parser/msg_parser.h"
+#include "../../../mem/mem.h"
 #include "../rtpengine_bracket.h"
 #include "../rtpengine.h"
 
@@ -369,10 +370,7 @@ static char *ps_build(bencode_buffer_t *buf, enum ps_msg_kind kind,
 		b.len = strlen(body);
 		bp = &b;
 	}
-	if (bencode_buffer_init(buf) != 0) {
-		free_sip_msg(&msg);
-		return NULL;
-	}
+	/* rtpe_test_build_request() initializes @buf */
 	if (rtpe_test_build_request(buf, &msg, cmd, fp, bp, &dict) < 0) {
 		free_sip_msg(&msg);
 		return NULL;
@@ -546,9 +544,35 @@ static void test_pubsub_tags(void)
 	PS_REFUSED(PS_REINVITE, "unsubscribe", "", 0, "empty flags");
 }
 
+/* building a request, and freeing it or having it refused, must return all
+ * of its pkg memory */
+static void test_pubsub_no_leak(void)
+{
+#ifdef PKG_MALLOC
+	unsigned long before;
+	int i;
+
+	/* first round outside the measurement */
+	PS_CASE(PS_200_OK, "subscribe answer", "to-tag=sub-1", PS_SDP,
+		"leak check warm-up", {});
+
+	before = PKG_GET_USED();
+	for (i = 0; i < 10; i++) {
+		PS_CASE(PS_200_OK, "subscribe answer", "to-tag=sub-1", PS_SDP,
+			"leak check", {});
+		/* refused after the flags were copied and parsed */
+		PS_REFUSED(PS_REINVITE, "unsubscribe", "from-tag=x", -1, "leak check");
+	}
+	ok(PKG_GET_USED() == before,
+		"pubsub: 10 built and 10 refused requests leave pkg usage unchanged "
+		"(%lu -> %lu)", before, (unsigned long)PKG_GET_USED());
+#endif
+}
+
 void mod_tests(void)
 {
 	test_pubsub_tags();
+	test_pubsub_no_leak();
 	test_bracket_lists();
 	test_bracket_dicts();
 	test_bracket_nested();
