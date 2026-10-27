@@ -152,6 +152,7 @@ int main(void)
 	nats_dl.natsOptions_SetPingInterval = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectWait = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectJitter = (void *)f_jitter;
+	nats_dl.natsOptions_SetReconnectBufSize = (void *)f_ok_int;
 	nats_dl.natsOptions_SetRetryOnFailedConnect = (void *)f_retry;
 	nats_dl.natsOptions_SetSecure = (void *)f_ok_bool;
 	nats_dl.natsOptions_SetServers = (void *)f_servers;

@@ -931,6 +931,32 @@ modparam("nats_consumer", "no_randomize", 1)
 ```
 
 
+#### reconnect_buf_size (integer)
+
+
+Size, in bytes, of the buffer that keeps what is sent on the connection
+shared by the NATS modules while it is reconnecting; it is sent once
+the connection is back, and a send that the full buffer refuses fails.
+Each OpenSIPS process has its own connection, so each has its own
+buffer.
+
+
+The setting is shared by *event_nats*, *cachedb_nats* and
+*nats_consumer*: the first value set replaces the default, and if
+several modules set it, the largest wins.  A value below `1` refuses
+startup.
+
+
+*Default value is "8388608" (8 MB, the libnats default).*
+
+
+```opensips title="Set reconnect_buf_size parameter"
+...
+modparam("nats_consumer", "reconnect_buf_size", 33554432)
+...
+```
+
+
 ### Exported Functions
 
 

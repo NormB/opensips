@@ -102,6 +102,7 @@ int nats_dl_supports_srv(void) { return fake_supports_srv; }
 
 static int fake_obj;   /* any non-NULL address */
 static int last_no_randomize = -1;   /* -1: SetNoRandomize not called */
+static int last_reconnect_buf = -1;   /* -1: SetReconnectBufSize not called */
 static int last_secure = -1;         /* -1: SetSecure not called */
 static char last_servers[512];
 
@@ -113,6 +114,7 @@ static natsStatus f_ok_int(natsOptions *o, int v) { (void)o; (void)v; return NAT
 static natsStatus f_ok_i64(natsOptions *o, int64_t v) { (void)o; (void)v; return NATS_OK; }
 static natsStatus f_secure(natsOptions *o, bool v) { (void)o; last_secure = v ? 1 : 0; return NATS_OK; }
 static natsStatus f_no_randomize(natsOptions *o, bool v) { (void)o; last_no_randomize = v ? 1 : 0; return NATS_OK; }
+static natsStatus f_reconnect_buf(natsOptions *o, int v) { (void)o; last_reconnect_buf = v; return NATS_OK; }
 static natsStatus f_retry(natsOptions *o, bool r, void *cb, void *cl)
 { (void)o; (void)r; (void)cb; (void)cl; return NATS_OK; }
 static natsStatus f_jitter(natsOptions *o, int64_t a, int64_t b)
@@ -157,6 +159,7 @@ static void fill_table(void)
 	nats_dl.natsOptions_SetPingInterval = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectWait = (void *)f_ok_i64;
 	nats_dl.natsOptions_SetReconnectJitter = (void *)f_jitter;
+	nats_dl.natsOptions_SetReconnectBufSize = (void *)f_reconnect_buf;
 	nats_dl.natsOptions_SetRetryOnFailedConnect = (void *)f_retry;
 	nats_dl.natsOptions_SetSecure = (void *)f_secure;
 	nats_dl.natsOptions_SetServers = (void *)f_servers;
@@ -226,6 +229,46 @@ static int s_no_randomize_or_merge(void)
 	return nats_pool_no_randomize_setter(INT_PARAM, (void *)(long)1) == 0
 		&& nats_pool_no_randomize_setter(INT_PARAM, (void *)(long)0) == 0
 		&& nats_pool_no_randomize == 1;
+}
+
+/* ── reconnect_buf_size ─────────────────────────────────────────── */
+
+static int s_reconnect_buf_default(void)
+{
+	/* the libnats default, passed explicitly */
+	if (nats_pool_register("nats://127.0.0.1:4222", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && last_reconnect_buf == 8 * 1024 * 1024;
+}
+
+static int s_reconnect_buf_set(void)
+{
+	if (nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)4096) != 0)
+		return 0;
+	if (nats_pool_register("nats://127.0.0.1:4222", "test", 2000, 3) != 0)
+		return 0;
+	return nats_pool_get() != NULL && last_reconnect_buf == 4096;
+}
+
+static int s_reconnect_buf_rejects(void)
+{
+	/* 0 would mean "libnats default" to libnats: refused, not passed */
+	return nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)0) == -1
+		&& nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)-5) == -1
+		&& nats_pool_reconnect_buf_size_setter(STR_PARAM, (void *)"4096") == -1
+		&& nats_pool_reconnect_buf_size == 8 * 1024 * 1024;
+}
+
+static int s_reconnect_buf_merge(void)
+{
+	/* the first explicit value replaces the default (below it too);
+	 * then the largest wins, in either order */
+	return nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)1000) == 0
+		&& nats_pool_reconnect_buf_size == 1000
+		&& nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)5000) == 0
+		&& nats_pool_reconnect_buf_size == 5000
+		&& nats_pool_reconnect_buf_size_setter(INT_PARAM, (void *)(long)2000) == 0
+		&& nats_pool_reconnect_buf_size == 5000;
 }
 
 /* ── SRV URLs ───────────────────────────────────────────────────── */
@@ -513,6 +556,12 @@ int main(void)
 	run("no_randomize=0: randomized", s_no_randomize_zero);
 	run("values other than 0/1 and non-integers are rejected", s_no_randomize_rejects);
 	run("any module asking for it turns it on (OR merge)", s_no_randomize_or_merge);
+
+	fprintf(stderr, "reconnect_buf_size:\n");
+	run("default: the libnats 8 MB buffer, passed explicitly", s_reconnect_buf_default);
+	run("reconnect_buf_size=4096 reaches libnats", s_reconnect_buf_set);
+	run("values below 1 and non-integers are rejected", s_reconnect_buf_rejects);
+	run("first explicit value replaces the default, then the max wins", s_reconnect_buf_merge);
 
 	fprintf(stderr, "SRV URLs:\n");
 	run("nats+srv:// refused when libnats lacks SRV support", s_srv_unsupported);

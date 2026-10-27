@@ -20,7 +20,7 @@ name and all associated parameters.
 
 
 In addition to the EVI transport, the module exports the
-[nats_publish()](#nats_publishsubject-payload) script function for direct
+[nats_publish()](#nats_publishsubject-payload-msg_id) script function for direct
 publishing from `opensips.cfg` routing blocks.
 This allows arbitrary JSON (or other text) payloads to be pushed
 to any NATS subject at any point in call processing, independent
@@ -30,9 +30,24 @@ of the event system.
 Optional *JetStream* support is available via
 the [jetstream](#jetstream-integer) module parameter.  When enabled,
 both EVI and script publishes use the nats.c asynchronous JetStream
-publish API: the server acknowledges each message into a stream, and
-failed acknowledgements are counted in the module statistics.  The
-script sees only whether the message was queued.
+publish API: the server acknowledges each message into a stream.  Every
+message carries a `Nats-Msg-Id` header, so the server stores a message
+published twice (within the stream's duplicate window) only once: the
+id comes from the event parameters named by [msg_id](#msg_id-string),
+from the third parameter of
+[nats_publish()](#nats_publishsubject-payload-msg_id), or is generated.
+A message whose acknowledgement does not arrive within
+[js_ack_timeout_ms](#js_ack_timeout_ms-integer), or that no JetStream
+server answers, is resent with the same id up to
+[js_publish_retries](#js_publish_retries-integer) times.  The script
+sees only whether the message was queued; the outcome of each
+acknowledgement is counted in the module statistics.
+
+
+While the connection is down, what the module publishes waits in the
+reconnect buffer of the connection ([reconnect_buf_size](#reconnect_buf_size-integer))
+and is sent once the connection is back.  A publish that the full buffer
+refuses returns `-1` and is counted.
 
 
 NATS connections are managed by the shared
@@ -299,9 +314,26 @@ tcp_workers = 4       # 4 TCP SIP workers (rank >= 1) — NATS initialized
 while no subscriber is listening is lost.
 - **JetStream publishes are asynchronous.**  A return value of 1 means
 the message was queued; a stream covering the subject must already
-exist, and failed acknowledgements are only counted in the statistics.
-- **Messages published while disconnected are dropped.**  The call
-returns -1 immediately and the message is counted as failed.
+exist.  A message without an acknowledgement after
+[js_publish_retries](#js_publish_retries-integer) resends is counted in
+*js_ack_failed*; it may still have been stored (only its acknowledgements
+were lost).
+- **A resend is stored once only inside the stream's duplicate
+window.**  A message is resent up to
+([js_publish_retries](#js_publish_retries-integer) + 1) ×
+[js_ack_timeout_ms](#js_ack_timeout_ms-integer) after its first publish
+(20 seconds with the defaults); the duplicate window of every target
+stream (2 minutes by default) must be at least that long.  A resent
+message is stored after the messages published meanwhile.
+- **Messages published while disconnected wait in the reconnect
+buffer.**  [reconnect_buf_size](#reconnect_buf_size-integer) bytes (8 MB
+by default) per process; once it is full, a publish returns `-1` and
+is counted in *failed* and *reconnect_buf_dropped*.  A JetStream
+publish also waits for its acknowledgement: at most 4096 per process,
+after which a publish returns `-1` and is counted in *failed* and
+*js_pending_dropped*.  Core NATS messages written to the socket just
+before the connection breaks can be lost without any error (core
+publishes are not acknowledged).
 - **Subjects** are at most 511 bytes and must not contain wildcards,
 whitespace, control characters or empty tokens.
 - **[subscribe](#subscribe-string)** allows at most 32 core-NATS
@@ -432,7 +464,7 @@ modparam("event_nats", "nats_url", "nats+srv://example.com")
 
 
 Enable JetStream async publish for both EVI events and
-[nats_publish()](#nats_publishsubject-payload) script calls.
+[nats_publish()](#nats_publishsubject-payload-msg_id) script calls.
 
 
 When set to `1`, publishes use the
@@ -601,6 +633,121 @@ modparam("event_nats", "no_randomize", 1)
 ```
 
 
+#### reconnect_buf_size (integer)
+
+
+Size, in bytes, of the buffer that keeps what the module publishes while
+the connection is reconnecting; it is sent once the connection is back.
+Each OpenSIPS process has its own connection, so each has its own
+buffer.  Once the buffer is full, [nats_publish()](#nats_publishsubject-payload-msg_id)
+returns `-1` and an EVI publish fails; both are counted in *failed* and
+*reconnect_buf_dropped* of
+[event_nats:nats_stats](#event_natsnats_stats).  The bound is checked
+before each message is added, so the buffer can exceed it by one
+message.
+
+
+The setting is shared by *event_nats*, *cachedb_nats* and
+*nats_consumer*: the first value set replaces the default, and if
+several modules set it, the largest wins.  A value below `1` refuses
+startup.
+
+
+*Default value is "8388608" (8 MB, the libnats default).*
+
+
+```opensips title="Set reconnect_buf_size parameter"
+...
+modparam("event_nats", "reconnect_buf_size", 33554432)
+...
+```
+
+
+#### msg_id (string)
+
+
+Names the event parameters that form the `Nats-Msg-Id` of an event's
+JetStream publishes (used only when [jetstream](#jetstream-integer) is
+`1`), in the form `"EVENT: param, param, ..."`.  The id is the event
+name followed by the value of each named parameter, separated by `:`:
+for the rule below, a dialog of hash entry 1234 and hash id 5678
+entering state 4 publishes with the id `E_DLG_STATE_CHANGED:1234:5678:4`.
+In string values, `:`, `%`, spaces, control characters and non-ASCII
+bytes are written as `%XX`, so different values never give the same id.
+The server stores only the first message of an id within the stream's
+duplicate window: raising the same event twice, for example from two
+servers, stores it once.
+
+
+Set the parameter once per event (at most 32 events, 8 parameters
+each).  An event without a rule, an event raised without one of its
+rule's parameters (logged as a warning), or an id longer than 255
+bytes is published with a generated id: 16 hexadecimal digits that
+identify the OpenSIPS process, `-`, and a sequence number.
+
+
+*Default value is "NULL" (generated ids).*
+
+
+```opensips title="Set msg_id parameter"
+...
+modparam("event_nats", "msg_id",
+    "E_DLG_STATE_CHANGED: hash_entry, hash_id, new_state")
+modparam("event_nats", "msg_id", "E_UL_CONTACT_INSERT: aor, callid")
+...
+```
+
+
+#### js_ack_timeout_ms (integer)
+
+
+How long a JetStream publish waits for its acknowledgement, in
+milliseconds.  A message without an acknowledgement in that time is
+resent (see [js_publish_retries](#js_publish_retries-integer)).  Values
+from `100` to `60000`; any other value refuses startup.
+
+
+*Default value is "5000" (5 seconds).*
+
+
+```opensips title="Set js_ack_timeout_ms parameter"
+...
+modparam("event_nats", "js_ack_timeout_ms", 2000)
+...
+```
+
+
+#### js_publish_retries (integer)
+
+
+How many times a JetStream message is resent when its acknowledgement
+does not arrive within [js_ack_timeout_ms](#js_ack_timeout_ms-integer),
+or when no JetStream server answers or JetStream reports that it is
+temporarily unavailable.  Any other error (no stream for the subject,
+message too large, ...) is not retried.  The resend carries the same
+`Nats-Msg-Id`, so the server acknowledges it as a duplicate if the
+first copy was stored after all.  Each resend is counted in
+*js_retried*; a message still without an acknowledgement after the last
+resend is counted in *js_ack_failed*.  `0` disables the resends.
+Values from `0` to `10`; any other value refuses startup.
+
+
+Every resend must reach the server within the duplicate window of the
+target stream (2 minutes by default): ([js_publish_retries](#js_publish_retries-integer)
++ 1) × [js_ack_timeout_ms](#js_ack_timeout_ms-integer) must not exceed it.
+OpenSIPS warns at startup when that product exceeds 2 minutes.
+
+
+*Default value is "3".*
+
+
+```opensips title="Set js_publish_retries parameter"
+...
+modparam("event_nats", "js_publish_retries", 5)
+...
+```
+
+
 #### subscribe (string)
 
 
@@ -671,7 +818,7 @@ event_route[E_NATS_JOB] {
 ### Exported Functions
 
 
-#### nats_publish(subject, payload)
+#### nats_publish(subject, payload[, msg_id])
 
 
 Publish a message to a NATS subject directly from an
@@ -697,11 +844,11 @@ embedded NUL;
 trailing, or consecutive dots).
 
 
-Additionally, when the underlying NATS connection pool
-is in disconnected state, the function fast-fails with
-`-1` rather than blocking the worker
-up to the cnats internal-buffer timeout.  Lost messages
-are counted in the `failed` statistic of
+While the connection is down, the message waits in the
+reconnect buffer ([reconnect_buf_size](#reconnect_buf_size-integer))
+and is sent once the connection is back; the function returns `1`.
+When the buffer is full the function returns `-1`, and the message is
+counted in the *failed* and *reconnect_buf_dropped* statistics of
 [event_nats:nats_stats](#event_natsnats_stats).
 
 
@@ -713,9 +860,10 @@ text content is valid; an empty payload returns `-1`.
 When the [jetstream](#jetstream-integer) module parameter is
 `1`, the publish uses the nats.c
 JetStream async API
-(`js_PublishAsync()`); otherwise core NATS
+(`js_PublishAsync()`), with *msg_id* (or a
+generated id) as its `Nats-Msg-Id` header; otherwise core NATS
 publish (`natsConnection_Publish()`) is
-used.
+used and *msg_id* is not sent.
 
 
 Both *subject* and
@@ -730,6 +878,11 @@ Meaning of the parameters is as follows:
 to publish to.  Maximum 511 bytes.
 - *payload* (string) - Message
 payload.  Typically a JSON object.
+- *msg_id* (string, optional) - The
+`Nats-Msg-Id` of a JetStream publish: 1 to 255 printable ASCII
+characters, without spaces.  The server stores only the first message
+of an id within the stream's duplicate window.  Without it, the
+message gets a generated id.
 
 
 Return values:
@@ -738,8 +891,9 @@ Return values:
 - **1** - publish succeeded (message
 handed to nats.c; for JetStream, ack is tracked
 asynchronously).
-- **-1** - publish failed (invalid subject,
-missing parameter, no connection, or nats.c error).
+- **-1** - publish failed (invalid subject or
+*msg_id*, missing parameter, no connection, reconnect buffer full, or
+nats.c error).
 
 
 This function can be used from any route.
@@ -766,6 +920,17 @@ route[CALL_SETUP] {
     if (!nats_publish("sip.calls.setup", $var(evt))) {
         xlog("L_WARN", "NATS publish failed for call $ci\n");
     }
+}
+```
+
+
+```opensips title="nats_publish usage with a message id"
+modparam("event_nats", "jetstream", 1)
+
+route[CALL_ANSWERED] {
+    # one id per call and state: a second publish is stored once
+    $var(evt) = "{\"call_id\":\"" + $ci + "\"}";
+    nats_publish("sip.calls.answered", $var(evt), "$ci:answered");
 }
 ```
 
@@ -884,23 +1049,37 @@ published successfully (EVI + script combined).
 - *evi_published* - messages published
 via the EVI transport (from event subscriptions).
 - *script_published* - messages
-published via [nats_publish()](#nats_publishsubject-payload)
+published via [nats_publish()](#nats_publishsubject-payload-msg_id)
 script calls.
 - *failed* - publish attempts that
-returned an error from nats.c, plus messages dropped because the
-connection was down.  Subjects rejected as invalid or too long are
+returned an error from nats.c, including the ones refused by a full
+reconnect buffer or by too many publishes waiting for an
+acknowledgement.  Subjects rejected as invalid or too long are
 not counted.
 - *reconnects* - number of times the connection was re-established,
 as seen by the process serving the MI command (a per-process value,
 not a sum across workers); the first connect after a degraded start
 counts as one.
-- *js_ack_ok* - JetStream acks received
-with a success status (only meaningful when
+- *js_ack_ok* - JetStream messages
+acknowledged as stored, duplicates included (only meaningful when
 [jetstream](#jetstream-integer) is 1).
-- *js_ack_failed* - JetStream acks
-received with an error status (only meaningful when
-[jetstream](#jetstream-integer) is 1).  Publishes carry no ack
-timeout, so an ack that never arrives is not counted.
+- *js_ack_failed* - JetStream messages
+without an acknowledgement after their last resend, or refused by the
+server with an error that is not retried (only meaningful when
+[jetstream](#jetstream-integer) is 1).
+- *js_retried* - JetStream resends after an acknowledgement that did
+not arrive within [js_ack_timeout_ms](#js_ack_timeout_ms-integer) or
+reported a temporary error (see
+[js_publish_retries](#js_publish_retries-integer)).
+- *js_duplicate* - JetStream messages that the server acknowledged as
+a duplicate of a stored one (a resend, or the same `Nats-Msg-Id`
+published again); also counted in *js_ack_ok*.
+- *reconnect_buf_dropped* - publishes and resends refused because the
+reconnect buffer was full (see
+[reconnect_buf_size](#reconnect_buf_size-integer)).
+- *js_pending_dropped* - JetStream publishes and resends refused because
+4096 messages of the process were already waiting for an
+acknowledgement.
 - *inbound_dropped_oversize* - inbound [subscribe](#subscribe-string)
 messages dropped for exceeding 1 MiB.
 - *inbound_dropped_backpressure* - inbound messages dropped because
@@ -923,6 +1102,10 @@ opensips-cli -x mi event_nats:nats_stats
     "reconnects": 1,
     "js_ack_ok": 14820,
     "js_ack_failed": 3,
+    "js_retried": 5,
+    "js_duplicate": 2,
+    "reconnect_buf_dropped": 0,
+    "js_pending_dropped": 0,
     "inbound_dropped_oversize": 0,
     "inbound_dropped_backpressure": 0,
     "inbound_inflight": 0

@@ -462,6 +462,10 @@ static const param_export_t params[] = {
 	 * nats_pool_no_randomize_decide for the merge contract) */
 	{ "no_randomize",      INT_PARAM|USE_FUNC_PARAM,
 	                       (void *)nats_pool_no_randomize_setter },
+	/* reconnect buffer of the shared connection (ONE pool value; see
+	 * nats_pool_reconnect_buf_size_decide for the merge contract) */
+	{ "reconnect_buf_size", INT_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_reconnect_buf_size_setter },
 	{ "bind",              STR_PARAM|USE_FUNC_PARAM,
 	                       (void *)set_bind_param },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },

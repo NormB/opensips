@@ -17,17 +17,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Regression test: hot-path NATS calls (nats_evi_raise,
- * w_nats_publish) must check nats_pool_is_connected()
- * before invoking the cnats blocking call.  The pool's nats_pool_get()
- * returns a live natsConnection pointer even when the underlying
- * connection is disconnected -- cnats lets the request hang until
- * reconnect or timeout, which is "head-of-line" blocking on a SIP
- * worker.
+ * Source test of the event_nats publish path while disconnected.
  *
- * The fix: each hot-path function calls nats_pool_is_connected() and
- * returns -1 immediately if the pool is not connected.  Test asserts
- * the call is present at every relevant site.
+ * A request (request/reply) on a disconnected connection waits for the
+ * reconnect or its timeout, so the request paths fast-fail on
+ * nats_pool_is_connected() (nats_consumer's test_request_fastfail).
+ * A publish does not wait: while libnats reconnects it appends the
+ * message to its reconnect buffer and returns, and sends the buffer
+ * after the reconnect; a full buffer refuses the publish with
+ * NATS_INSUFFICIENT_BUFFER, which the producer counts.  So the event_nats
+ * publish path must NOT drop a message because the pool is disconnected
+ * -- that dropped every event published during an outage.  The
+ * behaviour is tested end to end by
+ * modules/event_nats/tests/test_publish_during_disconnect.sh.
  *
  * Build:
  *   gcc -g -O0 -Wall -o test_disconnected_fastfail test_disconnected_fastfail.c
@@ -98,14 +100,14 @@ int main(void)
 	 * test_request_fastfail.) */
 
 	/* nats_evi_raise and w_nats_publish share the publish path via
-	 * nats_publish_checked(), which does the connection fast-fail.  Assert
-	 * the check lives in the helper and that both callers route through it. */
+	 * nats_publish_checked().  Assert it does not drop on a disconnected
+	 * pool and that both callers route through it. */
 	n = grep_in_function(
 		"../../event_nats/event_nats.c",
 		"nats_publish_checked",
 		"nats_pool_is_connected");
-	ASSERT(n >= 1,
-		"nats_publish_checked checks nats_pool_is_connected before publish");
+	ASSERT(n == 0,
+		"nats_publish_checked does not drop a publish while disconnected");
 
 	n = grep_in_function(
 		"../../event_nats/event_nats.c",

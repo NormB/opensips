@@ -61,6 +61,12 @@ test_inbound_backpressure: test_inbound_backpressure.c
 test_inbound_drop_stats: test_inbound_drop_stats.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Behavioural (ASan): the Nats-Msg-Id of a JetStream publish -- the
+# msg_id rules, the id built from the event parameters, the id check of
+# nats_publish(), the generated id (links the real ../nats_msg_id.c).
+test_msg_id: test_msg_id.c ../nats_msg_id.c ../nats_msg_id.h
+	$(CC) $(CFLAGS) $(ASAN) -o $@ test_msg_id.c ../nats_msg_id.c
+
 check: all
 	./test_partial_alloc
 	./test_seq_cast_guard
@@ -70,6 +76,7 @@ check: all
 	./test_mi_command_collision
 	./test_inbound_backpressure
 	./test_inbound_drop_stats
+	./test_msg_id
 
 # Run only the TSan-compatible subset.  Used by .github/workflows/nats-sanitizers.yml.
 check-tsan: $(TESTS_TSAN_SAFE)

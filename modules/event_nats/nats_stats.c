@@ -156,7 +156,8 @@ error:
  *
  * Returns a JSON object with all publish/fail counters: published,
  * evi_published, script_published, failed, reconnects, js_ack_ok,
- * and js_ack_failed.
+ * js_ack_failed, js_retried, js_duplicate, reconnect_buf_dropped and
+ * js_pending_dropped.
  *
  * @param params    MI parameters (unused).
  * @param async_hdl MI async handler (unused).
@@ -200,6 +201,18 @@ mi_response_t *mi_nats_stats(const mi_params_t *params,
         goto error;
     if (add_mi_number(resp_obj, MI_SSTR("js_ack_failed"),
             NATS_STATS_SUM(js_ack_failed)) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("js_retried"),
+            NATS_STATS_SUM(js_retried)) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("js_duplicate"),
+            NATS_STATS_SUM(js_duplicate)) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("reconnect_buf_dropped"),
+            NATS_STATS_SUM(reconnect_buf_dropped)) < 0)
+        goto error;
+    if (add_mi_number(resp_obj, MI_SSTR("js_pending_dropped"),
+            NATS_STATS_SUM(js_pending_dropped)) < 0)
         goto error;
 
     /* Inbound (subscribe-side) backpressure: events shed under a publish

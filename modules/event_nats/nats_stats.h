@@ -61,9 +61,9 @@
 /* Per-process upper bound for the SHM stats table.
  *
  * Allocated once in mod_init (pre-fork), sized once and forever.
- * 512 slots × 64 bytes each = 32 KB total — trivial SHM cost in
- * exchange for keeping every worker's counter increments on its
- * own cacheline.
+ * 512 slots × 128 bytes each (ten counters, padded to two 64-byte
+ * cachelines) = 64 KB total — trivial SHM cost in exchange for keeping
+ * every worker's counter increments off the other workers' cachelines.
  *
  * If a deployment ever runs more than 512 OpenSIPS processes,
  * bumps from process_no >= NATS_STATS_MAX_PROCS are silently
@@ -74,7 +74,8 @@
 
 /* Per-process counter slot, indexed by process_no.  Most counters have
  * a single writer (the owning OpenSIPS process), but that is NOT true
- * for the JetStream ack counters (js_ack_ok / js_ack_failed): the
+ * for the JetStream ack counters (js_ack_ok / js_ack_failed / js_retried /
+ * js_duplicate, and the drop counters a refused resend bumps): the
  * cnats AckHandler runs on a libnats internal thread that shares the
  * owning process's process_no, so it writes the SAME slot the OpenSIPS
  * main thread writes published/evi_published into — two concurrent
@@ -83,7 +84,7 @@
  * plain increments on the assumption of a single writer.  MI reads use
  * relaxed atomic loads to avoid torn reads.
  *
- * One cacheline per slot keeps the bump path off any other
+ * A cacheline-aligned slot keeps the bump path off any other
  * worker's hot lines. */
 typedef struct _nats_stats {
     _Atomic unsigned long published;
@@ -92,6 +93,10 @@ typedef struct _nats_stats {
     _Atomic unsigned long script_published;
     _Atomic unsigned long js_ack_ok;
     _Atomic unsigned long js_ack_failed;
+    _Atomic unsigned long js_retried;            /* resends after a failed ack */
+    _Atomic unsigned long js_duplicate;          /* acks flagged duplicate */
+    _Atomic unsigned long reconnect_buf_dropped; /* refused: reconnect buffer full */
+    _Atomic unsigned long js_pending_dropped;    /* refused: MaxPending acks waiting */
 } __attribute__((aligned(64))) nats_stats_t;
 
 /* Pointer to the SHM array of NATS_STATS_MAX_PROCS slots.  Workers

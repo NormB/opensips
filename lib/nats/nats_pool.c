@@ -82,6 +82,7 @@
 #include "nats_url_scheme.h"
 #include "nats_pool.h"
 #include "nats_js_opts.h"
+#include "nats_js_retry.h"
 #include "nats_redact.h"
 #include "nats_server_info.h"
 #include "nats_ca_dir.h"
@@ -275,6 +276,42 @@ int nats_pool_no_randomize_setter(modparam_t type, void *val)
 		nats_pool_no_randomize, v);
 	return 0;
 }
+
+/* See nats_pool.h — the reconnect buffer of the shared connection. */
+int nats_pool_reconnect_buf_size = NATS_POOL_RECONNECT_BUF_SIZE_DEFAULT;
+
+/* reconnect_buf_size modparam setter shared by event_nats, cachedb_nats
+ * and nats_consumer; the merge contract is
+ * nats_pool_reconnect_buf_size_decide() (nats_pool.h). */
+int nats_pool_reconnect_buf_size_setter(modparam_t type, void *val)
+{
+	static int _explicit = 0;
+	int v, merged;
+
+	if ((type & PARAM_TYPE_MASK(INT_PARAM)) == 0) {
+		LM_ERR("reconnect_buf_size: must be an integer\n");
+		return -1;
+	}
+	v = (int)(long)val;
+	if (v < 1) {
+		LM_ERR("reconnect_buf_size: %d is below 1 byte\n", v);
+		return -1;
+	}
+	merged = nats_pool_reconnect_buf_size_decide(nats_pool_reconnect_buf_size,
+		_explicit, v);
+	if (_explicit && merged != v)
+		LM_WARN("reconnect_buf_size=%d is below another module's %d; the "
+			"shared connection keeps the larger buffer\n",
+			v, nats_pool_reconnect_buf_size);
+	nats_pool_reconnect_buf_size = merged;
+	_explicit = 1;
+	return 0;
+}
+
+/* See nats_pool.h / nats_js_retry.h — JetStream async publish ack wait and
+ * retries, set by event_nats. */
+int nats_pool_js_ack_timeout_ms = NATS_JS_ACK_TIMEOUT_MS_DEFAULT;
+int nats_pool_js_publish_retries = NATS_JS_PUBLISH_RETRIES_DEFAULT;
 
 /* See nats_pool.h — module-tunable JetStream/KV op timeout, ms.  0 keeps
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
@@ -592,45 +629,96 @@ static void pool_reconnected_cb(natsConnection *nc, void *closure)
  * - pa and pae are STACK-ALLOCATED by nats.c — do NOT call nats_dl.jsPubAck_Destroy().
  *   nats.c calls _freePubAck() after this callback returns.
  * - msg (the original published message) IS our responsibility to destroy.
- *   nats.c sets pmsg=NULL after calling us (js.c:719).
+ *   nats.c sets pmsg=NULL after calling us (js.c:719).  A resend with
+ *   js_PublishMsgAsync() hands it back to libnats and clears our pointer
+ *   (the pattern the jsPubAckHandler documentation gives).
+ * - an ack that does not arrive within jsPubOptions.MaxWait reaches this
+ *   handler as pae->Err == NATS_TIMEOUT (libnats's publish-async timer).
  *
- * @param js       JetStream context (unused).
- * @param msg      Original published message — MUST be destroyed by us.
+ * @param js       JetStream context (used for a resend).
+ * @param msg      Original published message — destroyed here unless resent.
  * @param pa       Publish ack (stack-allocated by nats.c — do NOT destroy).
  * @param pae      Publish ack error, or NULL on success (stack-allocated).
  * @param closure  User closure (NULL, unused).
  */
-/* Optional caller-registered hook to report JS ack outcomes.
- * Read on the cnats thread, set once pre-fork via
- * nats_pool_set_pub_ack_cb().  Always called with success=1 (acked)
- * or success=0 (error). */
-static void (*_pub_ack_cb)(int success) = NULL;
+/* Optional caller-registered hook to report JS ack outcomes
+ * (nats_pub_ack_outcome, nats_js_retry.h).  Read on the cnats thread,
+ * set once pre-fork via nats_pool_set_pub_ack_cb(). */
+static void (*_pub_ack_cb)(int outcome) = NULL;
 
-void nats_pool_set_pub_ack_cb(void (*cb)(int success))
+void nats_pool_set_pub_ack_cb(void (*cb)(int outcome))
 {
 	_pub_ack_cb = cb;
+}
+
+static void pool_js_ack_log_error(const jsPubAckErr *pae)
+{
+	char buf[256];
+	int len = snprintf(buf, sizeof(buf),
+		"NATS JetStream async publish error: %s\n",
+		pae->ErrText ? pae->ErrText : "unknown");
+	/* snprintf returns the length it WOULD have written; a
+	 * broker-controlled ErrText longer than buf makes len exceed
+	 * sizeof(buf), so the write() below would read past the stack
+	 * buffer and leak adjacent stack.  Clamp to the buffer. */
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+	if (len > 0)
+		nats_pool_unsafe_log(buf, (size_t)len);
+}
+
+/*
+ * A failed ack: resend the message when the error is transient and the
+ * message has retries left (nats_js_retry.h).  The resend is the same
+ * natsMsg, so it keeps its Nats-Msg-Id header: if the first copy was
+ * stored after all, the server acks the resend as a duplicate instead
+ * of storing it twice.  Returns the outcome; on NATS_PUB_ACK_RETRIED
+ * libnats owns the message again and *msg is NULL.
+ */
+static int pool_js_ack_retry(jsCtx *js, natsMsg **msg, const jsPubAckErr *pae)
+{
+	jsPubOptions po;
+	natsStatus s;
+	int done;
+
+	if (!nats_js_ack_retryable(pae->Err, (int)pae->ErrCode) ||
+	    nats_pool_js_publish_retries <= 0)
+		return NATS_PUB_ACK_FAILED;
+
+	done = nats_js_retry_track(*msg);
+	if (!nats_js_ack_should_retry(pae->Err, (int)pae->ErrCode, done,
+	    nats_pool_js_publish_retries))
+		return NATS_PUB_ACK_FAILED;
+
+	/* no MsgId here: the header set by the first publish stays */
+	nats_dl.jsPubOptions_Init(&po);
+	po.MaxWait = nats_pool_js_ack_timeout_ms;
+	s = nats_dl.js_PublishMsgAsync(js, msg, &po);
+	if (s == NATS_OK)
+		return NATS_PUB_ACK_RETRIED;
+	return nats_js_resend_failed_outcome(s);
 }
 
 static void pool_js_pub_ack_handler(jsCtx *js, natsMsg *msg, jsPubAck *pa,
                                  jsPubAckErr *pae, void *closure)
 {
-	int success = (pae == NULL || pae->ErrText == NULL);
-	if (!success) {
-		char buf[256];
-		int len = snprintf(buf, sizeof(buf),
-			"NATS JetStream async publish error: %s\n",
-			pae->ErrText);
-		/* snprintf returns the length it WOULD have written; a
-		 * broker-controlled ErrText longer than buf makes len exceed
-		 * sizeof(buf), so the write() below would read past the stack
-		 * buffer and leak adjacent stack.  Clamp to the buffer. */
-		if (len >= (int)sizeof(buf))
-			len = (int)sizeof(buf) - 1;
-		if (len > 0)
-			nats_pool_unsafe_log(buf, (size_t)len);
+	int outcome;
+
+	if (pae == NULL || pae->ErrText == NULL) {
+		outcome = (pa && pa->Duplicate) ? NATS_PUB_ACK_DUPLICATE :
+			NATS_PUB_ACK_OK;
+	} else {
+		pool_js_ack_log_error(pae);
+		outcome = msg ? pool_js_ack_retry(js, &msg, pae) :
+			NATS_PUB_ACK_FAILED;
 	}
+	/* the last outcome of this message: drop its retry count before the
+	 * natsMsg is freed (the pointer may be reused by the next message) */
+	if (outcome != NATS_PUB_ACK_RETRIED && msg)
+		nats_js_retry_forget(msg);
 	if (_pub_ack_cb)
-		_pub_ack_cb(success);
+		_pub_ack_cb(outcome);
+	/* NULL after a resend: libnats owns it again */
 	if (msg)
 		nats_dl.natsMsg_Destroy(msg);
 }
@@ -1089,6 +1177,16 @@ natsConnection *nats_pool_get(void)
 	if (s != NATS_OK) {
 		LM_ERR("NATS pool: natsOptions_SetNoRandomize failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
+		goto error;
+	}
+	/* What is published while the connection is down waits in this
+	 * buffer and is sent after the reconnect; once it is full a publish
+	 * fails with NATS_INSUFFICIENT_BUFFER, counted by the module. */
+	s = nats_dl.natsOptions_SetReconnectBufSize(opts,
+		nats_pool_reconnect_buf_size);
+	if (s != NATS_OK) {
+		LM_ERR("NATS pool: natsOptions_SetReconnectBufSize(%d) failed: %s\n",
+			nats_pool_reconnect_buf_size, nats_dl.natsStatus_GetText(s));
 		goto error;
 	}
 	/* Liveness probing.  Publishes run inline in SIP workers; a black-holed

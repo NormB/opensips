@@ -130,10 +130,27 @@ CORE_DEFS := -fPIC -DPIC -DHAVE_STDATOMIC -DHAVE_GENERICS -D__SMP_yes \
              -DUSE_MCAST -DDISABLE_NAGLE -DSTATISTICS -DHAVE_RESOLV_RES
 # (-Wno-cast-function-type: modules/tls_mgm/api.h, included by nats_pool.c,
 # casts cmd_function -- a header the NATS code does not own.)
-test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def
+test_pool_fork: test_pool_fork.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def \
+		../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_fork.c \
-		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+
+# Behavioural (ASan): the JetStream async publish retry policy
+# (nats_js_retry.h) and the table of the messages being retried
+# (nats_js_retry.c).
+test_js_retry_policy: test_js_retry_policy.c ../nats_js_retry.h ../nats_js_retry.c
+	$(CC) $(CFLAGS) $(ASAN) -I.. -I/usr/local/include -o $@ test_js_retry_policy.c \
+		../nats_js_retry.c -pthread
+
+# Behavioural: the shared pool's JetStream ack handler (stored, duplicate,
+# resent within js_publish_retries, refused resend).  Links the REAL
+# ../nats_pool.c against a fake libnats table, like test_pool_fork.
+test_pool_js_ack: test_pool_js_ack.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def \
+		../nats_js_retry.h ../nats_js_retry.c
+	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
+		-I/usr/local/include -o $@ test_pool_js_ack.c \
+		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Pure header-inline helpers (the implicit rule would not know about the
 # header).
@@ -144,10 +161,10 @@ test_url_scheme: test_url_scheme.c ../nats_url_scheme.h
 # SRV URLs gated on the libnats capability).  Links the REAL ../nats_pool.c
 # against a fake libnats table, like test_pool_fork.
 test_pool_connect_opts: test_pool_connect_opts.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def \
-		../nats_url_scheme.h
+		../nats_url_scheme.h ../nats_js_retry.c
 	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
 		-I/usr/local/include -o $@ test_pool_connect_opts.c \
-		../nats_pool.c ../nats_redact.c ../nats_ca_dir.c -pthread
+		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
 # Behavioural refcount model + source-pattern: the pool is torn down only
 # on the last unregister, waits for async publishes before jsCtx_Destroy,

@@ -205,6 +205,11 @@ forks. Registrations merge:
   module sets it to 1, every process tries the servers in the order of
   the merged list (module initialization order) instead of a shuffled
   one;
+- the `reconnect_buf_size` parameter (event_nats, cachedb_nats,
+  nats_consumer) sizes the libnats buffer that keeps what is sent while
+  the connection reconnects (8 MB by default,
+  `natsOptions_SetReconnectBufSize()`): the first value set replaces the
+  default, and of several, the largest wins;
 - DNS SRV URLs (`nats+srv://domain`, `tls+srv://domain`) are resolved
   by libnats, so a registration that contains one fails unless the
   loaded libnats exports `nats_SupportsSRV()` and it returns true
@@ -258,6 +263,7 @@ a degraded start) sets it and bumps the epoch.
 | --------- | ------------ |
 | Broker down at startup | OpenSIPS starts; each process connects in the background (`NATS pool: broker unreachable at startup; ...`). Operations fail fast until then. cachedb_nats starts degraded too, unless `require_usrloc_safe_bucket=1`. |
 | Connection lost mid-operation | The operation ends at its own timeout; the next one fails fast. A dead broker is detected in about 20 s (10 s pings, 2 outstanding). |
+| JetStream publish (event_nats) without an ack | The ack wait (`js_ack_timeout_ms`) expires and the pool's ack handler resends the message with its `Nats-Msg-Id`, at most `js_publish_retries` times (`nats_js_retry.h`); the server drops a resend whose first copy was stored. `tests/test_pool_js_ack.c` and `modules/event_nats/tests/test_js_ack_retry_e2e.sh` cover it. |
 | Broker down when an operation starts | Operations return an error immediately instead of blocking a SIP worker (table below). |
 | Broker comes back | KV handles are refreshed, consumer subscriptions are rebuilt (durables resume where they stopped), the KV watcher resumes after the last change it delivered (so changes made during the outage still raise E_NATS_KV_CHANGE), and the async RPC inbox is re-created. No restart needed. |
 | Stream, consumer or bucket deleted on the server | Ephemeral consumers are re-created automatically. A durable consumer on a deleted stream stays failed until an operator unbinds it and binds it again after re-creating the stream. |
@@ -267,7 +273,7 @@ Return values while disconnected:
 | Operation | Returns |
 | --------- | ------- |
 | `cachedb_nats` operations (`cache_*`, `nats_kv_*`, map, raw, query) | `-1` |
-| `nats_publish()` (event_nats) and Event Interface publishes | `-1`; the message is counted as failed and dropped |
+| `nats_publish()` (event_nats) and Event Interface publishes | `1`: the message waits in the reconnect buffer and is sent after the reconnect. `-1` once the buffer (`reconnect_buf_size`) is full, counted in `failed` and `reconnect_buf_dropped` |
 | `nats_fetch()` / `nats_fetch_batch()` | `-2` |
 | `nats_request()`, synchronous | `-3` |
 | `nats_request()`, async | `-2` |
@@ -346,6 +352,7 @@ These apply to the whole family. Each module's README lists its own.
 | `nats_str.h` | `str` → bounded NUL-terminated buffer for the libnats C-string edge (keys, subjects); rejects embedded NUL |
 | `nats_validate.c/.h` | Subject and KV-key validator used by every publish and KV path |
 | `nats_js_opts.h` | Shared JetStream publish options (async queue limits) |
+| `nats_js_retry.h` + `nats_js_retry.c` | JetStream async publish retry policy (which ack errors are resent, how often) and the table counting the resends of each message |
 | `Makefile.nats` | `pkg-config` probe that gates the module builds on libnats, plus a compile probe for `kvConfig.AllowMsgTTLBelowMarker` |
 
 The library is built once as `libnats_pool.so` in the modules directory.
@@ -401,6 +408,9 @@ never the `*String` variants, which stop at the first NUL.
 | `modules/nats_consumer/tests/` | docker-compose functional and stress suites (`run_all.sh`, `stress_3way.sh`) |
 | `lib/nats/tests/test_three_module_e2e.sh` | shared-connection round trip across the modules |
 | `lib/nats/tests/test_tls_mgm_smoke.sh` | real TLS handshake through `tls_mgm`, plus failure cases |
+| `modules/event_nats/tests/test_js_msg_id_e2e.sh` | JetStream message ids: from `msg_id` rules, from `nats_publish()`, generated; repeats stored once |
+| `modules/event_nats/tests/test_js_ack_retry_e2e.sh` | lost acks (through `tests/nats_ack_drop_proxy.py`): resent with the same id, bounded by `js_publish_retries` |
+| `modules/event_nats/tests/test_publish_during_disconnect.sh` | publishing through a broker restart, and a full reconnect buffer |
 | `lib/nats/tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format and match the modules' export tables (`selftest_readme_format.sh` checks the checker) |
 
 The end-to-end tests start their own disposable `nats-server` (it must be

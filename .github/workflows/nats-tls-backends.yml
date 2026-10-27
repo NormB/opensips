@@ -73,15 +73,17 @@ jobs:
           SUDO=sudo LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
       - name: Install nats CLI (pinned)
         run: |
-          # the nats_consumer smoke creates its stream and publishes with it
-          wget -q https://github.com/nats-io/natscli/releases/download/v0.1.5/nats-0.1.5-amd64.deb
-          sudo dpkg -i nats-0.1.5-amd64.deb
+          # the nats_consumer smoke creates its stream and publishes with
+          # it; the event_nats e2e tests read message headers
+          # (stream get --json) and create credentials (nats auth)
+          wget -q https://github.com/nats-io/natscli/releases/download/v0.3.1/nats-0.3.1-amd64.deb
+          sudo dpkg -i nats-0.3.1-amd64.deb
           nats --version
       - name: Build OpenSIPS core + tls_mgm + NATS modules
         run: |
           set -e
           make -j"$(nproc)" opensips
-          for m in signaling sl tm rr maxfwd sipmsgops proto_udp mi_datagram \
+          for m in signaling sl tm rr maxfwd sipmsgops proto_udp mi_datagram mi_fifo cfgutils \
                    tls_mgm tls_openssl \
                    cachedb_nats cachedb_nats_fts event_nats nats_consumer; do
             make modules=modules/$m modules
@@ -100,6 +102,19 @@ jobs:
           # 'nats' client_domain, ca_dir directory path, verify_cert=0,
           # a broker certificate issued for another host).
           bash lib/nats/tests/test_tls_mgm_smoke.sh
+      - name: Run the event_nats JetStream and outage e2e tests
+        run: |
+          # Each starts its own private nats-server.  Exit 77 means a
+          # missing prerequisite: a failure here, not a skip.
+          for t in test_js_msg_id_e2e.sh test_js_ack_retry_e2e.sh \
+                   test_publish_during_disconnect.sh; do
+            rc=0
+            bash "modules/event_nats/tests/$t" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "$t: rc=$rc"
+              exit 1
+            fi
+          done
       - name: Build a wolfSSL-backed libnats (lib/nats/patches)
         run: |
           PREFIX="$RUNNER_TEMP/nats-wolfssl" \

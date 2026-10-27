@@ -451,25 +451,67 @@ int nats_pool_no_randomize_setter(unsigned int type, void *val);
  */
 extern int nats_pool_kv_op_timeout_ms;
 
+/*
+ * Size, in bytes, of the libnats buffer that keeps what is published
+ * while the connection is reconnecting (natsOptions_SetReconnectBufSize);
+ * it is sent once the connection is back.  When it is full, a publish
+ * fails with NATS_INSUFFICIENT_BUFFER (the module counts it).  libnats
+ * checks the bound before appending a message, so the buffer may exceed
+ * it by one message.  Set pre-fork by the `reconnect_buf_size` modparam
+ * of the NATS modules, read at connect time.
+ */
+#define NATS_POOL_RECONNECT_BUF_SIZE_DEFAULT  (8 * 1024 * 1024)
+extern int nats_pool_reconnect_buf_size;
 
+/* Merge decision for reconnect_buf_size, pure and header-inline so the
+ * contract is unit-testable: the first explicit value replaces the
+ * default, including below it; across several modules the largest wins
+ * (the one connection must hold what any of them publishes). */
+static inline int nats_pool_reconnect_buf_size_decide(int current,
+	int have_explicit, int proposed)
+{
+	if (!have_explicit)
+		return proposed;
+	return proposed > current ? proposed : current;
+}
+
+/* Shared modparam setter for `reconnect_buf_size` (INT_PARAM|USE_FUNC_PARAM
+ * in event_nats, cachedb_nats and nats_consumer).  Accepts 1 or more.
+ * `type` is modparam_t, spelled out as for nats_pool_drain_timeout_setter(). */
+int nats_pool_reconnect_buf_size_setter(unsigned int type, void *val);
+
+/*
+ * JetStream async publish acknowledgements (see nats_js_retry.h).  Each
+ * async publish waits nats_pool_js_ack_timeout_ms for its ack
+ * (jsPubOptions.MaxWait); the ack handler resends a message whose ack
+ * failed with a retryable error at most nats_pool_js_publish_retries
+ * times.  Set pre-fork by event_nats (js_ack_timeout_ms,
+ * js_publish_retries); read by the ack handler on the libnats thread.
+ */
+extern int nats_pool_js_ack_timeout_ms;
+extern int nats_pool_js_publish_retries;
 
 /*
  * Register a callback for JetStream publish-ack outcomes.
  *
  * The cnats library invokes the AckHandler from a library-internal
- * I/O thread.  Modules that want to observe per-ack success/failure
+ * I/O thread.  Modules that want to observe per-ack outcomes
  * (e.g. to bump nats_stats counters) register a callback here.
  * The callback runs on the cnats thread and MUST NOT call any
  * OpenSIPS APIs (LM_*, pkg_malloc, etc.); it may only do atomic
  * memory operations and async-signal-safe I/O.
  *
- * @param cb  Function called as cb(success) where success != 0 if
- *            the JS broker acked the publish, 0 on error.  Pass
- *            NULL to clear any previously-registered callback.
+ * @param cb  Function called as cb(outcome) for every ack, with an
+ *            nats_pub_ack_outcome value (nats_js_retry.h): NATS_PUB_ACK_OK
+ *            (1) and NATS_PUB_ACK_FAILED (0) as before, plus DUPLICATE,
+ *            RETRIED, FAILED_BUFFER_FULL and FAILED_PENDING_FULL.  A
+ *            message reports one RETRIED per resend and exactly one of
+ *            the other outcomes at the end.  Pass NULL to clear any
+ *            previously-registered callback.
  *
  * Thread safety: Set once during mod_init, before fork.  The
  * callback pointer is read on the cnats thread without locking.
  */
-void nats_pool_set_pub_ack_cb(void (*cb)(int success));
+void nats_pool_set_pub_ack_cb(void (*cb)(int outcome));
 
 #endif /* NATS_POOL_H */

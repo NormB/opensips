@@ -327,6 +327,10 @@ static const param_export_t params[] = {
 	 * nats_pool_no_randomize_decide for the merge contract). */
 	{"no_randomize",                INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_no_randomize_setter},
+	/* Reconnect buffer of the shared connection (ONE pool value; see
+	 * nats_pool_reconnect_buf_size_decide for the merge contract). */
+	{"reconnect_buf_size",          INT_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_reconnect_buf_size_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	/* canonical names (the redundant nats_ prefix inside a
