@@ -115,11 +115,11 @@ jobs:
               exit 1
             fi
           done
-      - name: Run the lib/nats credential e2e tests
+      - name: Run the lib/nats credential and server-order e2e tests
         run: |
           # user/password, token, NKey, creds file, TLS client certificate
           # against a private nats-server.  Exit 77 is a failure here.
-          for t in test_auth_e2e.sh; do
+          for t in test_auth_e2e.sh test_no_randomize_e2e.sh; do
             rc=0
             bash "lib/nats/tests/$t" || rc=$?
             if [ "$rc" -ne 0 ]; then

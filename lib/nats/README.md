@@ -427,6 +427,7 @@ never the `*String` variants, which stop at the first NUL.
 | `modules/event_nats/tests/test_js_ack_retry_e2e.sh` | lost acks (through `tests/nats_ack_drop_proxy.py`): resent with the same id, bounded by `js_publish_retries` |
 | `modules/event_nats/tests/test_publish_during_disconnect.sh` | publishing through a broker restart, and a full reconnect buffer |
 | `lib/nats/tests/test_auth_e2e.sh` | user/password, token, NKey, creds file and TLS client certificate against a real server, plus refusals |
+| `lib/nats/tests/test_no_randomize_e2e.sh` | `no_randomize=1`: every process connects to the first configured server |
 | `lib/nats/tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format and match the modules' export tables (`selftest_readme_format.sh` checks the checker) |
 
 The end-to-end tests start their own disposable `nats-server` (it must be
