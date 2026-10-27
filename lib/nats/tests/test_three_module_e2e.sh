@@ -25,7 +25,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 require_nats_reachable
 require_opensips_built
-require_cmd nats opensips
+require_cmd nats
 
 STREAM="X8_INBOX_$$"
 BUCKET="X8_KV_$$"

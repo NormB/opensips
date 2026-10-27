@@ -25,7 +25,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/../../../lib/nats/tests/nats_local_lib.sh"
 
 require_opensips_built
-require_cmd nats nats-server opensips jq nc base64
+require_cmd nats nats-server jq nc base64
 
 mkworkdir js_msg_id >/dev/null
 PRIV_PORT=$((21000 + ($$ % 15000)))

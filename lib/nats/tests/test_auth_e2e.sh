@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/nats_local_lib.sh"
 
 require_opensips_built
-require_cmd nats nats-server opensips openssl curl jq
+require_cmd nats nats-server openssl curl jq
 nats auth --help >/dev/null 2>&1 || skip "nats CLI without 'nats auth'"
 [ -f "${OPENSIPS_MPATH}/tls_mgm/tls_mgm.so" ] || skip "tls_mgm not built"
 [ -f "${OPENSIPS_MPATH}/tls_openssl/tls_openssl.so" ] || skip "tls_openssl not built"

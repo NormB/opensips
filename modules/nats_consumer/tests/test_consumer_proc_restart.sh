@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 require_nats_reachable
 require_opensips_built
-require_cmd nats opensips
+require_cmd nats
 
 mkworkdir consumer_kill
 trap 'stop_opensips; cleanup_workdir' EXIT

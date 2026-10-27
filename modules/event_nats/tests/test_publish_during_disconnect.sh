@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/../../../lib/nats/tests/nats_local_lib.sh"
 
 require_opensips_built
-require_cmd nats nats-server opensips jq
+require_cmd nats nats-server jq
 
 mkworkdir disconnect >/dev/null
 

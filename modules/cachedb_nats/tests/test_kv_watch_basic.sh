@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 require_nats_reachable
 require_opensips_built
-require_cmd nats opensips
+require_cmd nats
 
 BUCKET="OS_TEST_KV_C8_$$"
 mkworkdir watch_basic

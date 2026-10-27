@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/../../../lib/nats/tests/nats_local_lib.sh"
 
 require_opensips_built
-require_cmd nats nats-server opensips jq python3 nc
+require_cmd nats nats-server jq python3 nc
 
 PROXY="${HERE}/../../../lib/nats/tests/nats_ack_drop_proxy.py"
 mkworkdir js_ack_retry >/dev/null

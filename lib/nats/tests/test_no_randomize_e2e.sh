@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "${HERE}/nats_local_lib.sh"
 
 require_opensips_built
-require_cmd nats-server opensips curl jq
+require_cmd nats-server curl jq
 
 mkworkdir no_randomize >/dev/null
 PA=$((23000 + ($$ % 15000)))
