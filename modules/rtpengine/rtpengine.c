@@ -5037,7 +5037,7 @@ static int rtpengine_subscribe_answer_f(struct sip_msg *msg, str *flags,
 	if (set_rtpengine_set_from_avp(msg) == -1)
 		return -1;
 
-	/* get the answer SDP — from the pvar if provided, otherwise from message body */
+	/* get the answer SDP: from the pvar if provided, otherwise from message body */
 	if (bpvar) {
 		pv_value_t pval;
 		memset(&pval, 0, sizeof(pv_value_t));
@@ -5076,7 +5076,7 @@ static int rtpengine_publish_f(struct sip_msg *msg, str *flags,
 	if (set_rtpengine_set_from_avp(msg) == -1)
 		return -1;
 
-	/* get the sendonly SDP to publish — from pvar or message body */
+	/* get the sendonly SDP to publish: from pvar or message body */
 	if (bpvar) {
 		pv_value_t pval;
 		memset(&pval, 0, sizeof(pv_value_t));
