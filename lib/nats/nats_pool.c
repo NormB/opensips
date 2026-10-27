@@ -83,6 +83,7 @@
 #include "nats_pool.h"
 #include "nats_js_opts.h"
 #include "nats_js_retry.h"
+#include "nats_auth.h"
 #include "nats_redact.h"
 #include "nats_server_info.h"
 #include "nats_ca_dir.h"
@@ -126,6 +127,7 @@ typedef struct nats_pool_cfg {
 
 	int   reconnect_wait;                 /* ms */
 	int   max_reconnect;
+	int   auth_plain_warned;              /* plain-text credential warning given */
 } nats_pool_cfg;
 
 /* Single shared config — allocated on first register */
@@ -312,6 +314,116 @@ int nats_pool_reconnect_buf_size_setter(modparam_t type, void *val)
  * retries, set by event_nats. */
 int nats_pool_js_ack_timeout_ms = NATS_JS_ACK_TIMEOUT_MS_DEFAULT;
 int nats_pool_js_publish_retries = NATS_JS_PUBLISH_RETRIES_DEFAULT;
+/* See nats_pool.h / nats_auth.h — credentials of the shared connection.
+ * Set pre-fork by the modparam setters below, inherited by the children;
+ * the strings are the modparam values, which live as long as the
+ * process. */
+static nats_auth_cfg _auth;
+
+static int auth_set(const char *name, const char **slot, modparam_t type,
+	void *val)
+{
+	const char *v = (const char *)val;
+
+	if ((type & PARAM_TYPE_MASK(STR_PARAM)) == 0) {
+		LM_ERR("%s: must be a string\n", name);
+		return -1;
+	}
+	switch (nats_auth_str_decide(*slot, v)) {
+	case NATS_AUTH_SET:
+		*slot = v;
+		return 0;
+	case NATS_AUTH_SAME:
+		return 0;
+	default:
+		/* never log the value: it may be a secret */
+		if (!v || !*v)
+			LM_ERR("%s: empty value\n", name);
+		else
+			LM_ERR("%s: NATS modules set different values; the shared "
+				"connection takes one\n", name);
+		return -1;
+	}
+}
+
+int nats_pool_auth_user_setter(modparam_t type, void *val)
+{ return auth_set("user", &_auth.user, type, val); }
+int nats_pool_auth_password_setter(modparam_t type, void *val)
+{ return auth_set("password", &_auth.password, type, val); }
+int nats_pool_auth_token_setter(modparam_t type, void *val)
+{ return auth_set("token", &_auth.token, type, val); }
+int nats_pool_auth_creds_file_setter(modparam_t type, void *val)
+{ return auth_set("creds_file", &_auth.creds_file, type, val); }
+int nats_pool_auth_nkey_setter(modparam_t type, void *val)
+{ return auth_set("nkey", &_auth.nkey, type, val); }
+int nats_pool_auth_nkey_seed_file_setter(modparam_t type, void *val)
+{ return auth_set("nkey_seed_file", &_auth.nkey_seed_file, type, val); }
+
+int nats_pool_auth_configured(void)
+{
+	return nats_auth_method(&_auth) != NATS_AUTH_NONE;
+}
+
+/* Startup check of the credential modparams: one complete method, and
+ * the files readable now (libnats reads them at each connect). */
+static int pool_auth_check(const char *module)
+{
+	const char *err = NULL;
+
+	if (nats_auth_validate(&_auth, &err) < 0) {
+		LM_ERR("[%s] NATS credentials: %s\n", module, err);
+		return -1;
+	}
+	if (_auth.creds_file && access(_auth.creds_file, R_OK) != 0) {
+		LM_ERR("[%s] NATS creds_file '%s' cannot be read\n", module,
+			_auth.creds_file);
+		return -1;
+	}
+	if (_auth.nkey_seed_file && access(_auth.nkey_seed_file, R_OK) != 0) {
+		LM_ERR("[%s] NATS nkey_seed_file '%s' cannot be read\n", module,
+			_auth.nkey_seed_file);
+		return -1;
+	}
+	return 0;
+}
+
+/* Hand the credentials to libnats (none: nothing to do).  A refusal fails
+ * the connection setup: connecting without them would be refused by the
+ * server anyway, or reach an account the operator did not mean. */
+static int pool_auth_apply(natsOptions *opts)
+{
+	natsStatus s = NATS_OK;
+	const char *what = NULL;
+
+	switch (nats_auth_method(&_auth)) {
+	case NATS_AUTH_NONE:
+		return 0;
+	case NATS_AUTH_USERPASS:
+		what = "natsOptions_SetUserInfo";
+		s = nats_dl.natsOptions_SetUserInfo(opts, _auth.user, _auth.password);
+		break;
+	case NATS_AUTH_TOKEN:
+		what = "natsOptions_SetToken";
+		s = nats_dl.natsOptions_SetToken(opts, _auth.token);
+		break;
+	case NATS_AUTH_CREDS:
+		what = "natsOptions_SetUserCredentialsFromFiles";
+		s = nats_dl.natsOptions_SetUserCredentialsFromFiles(opts,
+			_auth.creds_file, NULL);
+		break;
+	case NATS_AUTH_NKEY:
+		what = "natsOptions_SetNKeyFromSeed";
+		s = nats_dl.natsOptions_SetNKeyFromSeed(opts, _auth.nkey,
+			_auth.nkey_seed_file);
+		break;
+	}
+	if (s != NATS_OK) {
+		LM_ERR("NATS pool: %s failed: %s\n", what,
+			nats_dl.natsStatus_GetText(s));
+		return -1;
+	}
+	return 0;
+}
 
 /* See nats_pool.h — module-tunable JetStream/KV op timeout, ms.  0 keeps
  * cnats's default (5 s).  Set a smaller value (500-1000 ms) on hot paths
@@ -801,8 +913,19 @@ static int pool_register(const char *url, const char *module,
 		return -1;
 	}
 
+	/* Credentials as modparams and inside a URL: libnats would use the
+	 * URL's for that server and the modparams' for the others. */
+	if (nats_pool_auth_configured() && nats_url_list_has_userinfo(url)) {
+		LM_ERR("[%s] NATS credentials are set both in a server URL and "
+		       "as modparams (user, password, token, creds_file, nkey); "
+		       "remove them from the URL\n", module ? module : "?");
+		return -1;
+	}
+
 	/* First registration — allocate the shared config */
 	first = !pool_cfg;
+	if (first && pool_auth_check(module ? module : "?") < 0)
+		return -1;
 	if (first) {
 		pool_cfg = shm_malloc(sizeof(nats_pool_cfg));
 		if (!pool_cfg) {
@@ -1148,6 +1271,17 @@ natsConnection *nats_pool_get(void)
 		LM_ERR("NATS pool: natsOptions_SetServers failed: %s\n",
 			nats_dl.natsStatus_GetText(s));
 		goto error;
+	}
+
+	if (pool_auth_apply(opts) < 0)
+		goto error;
+	/* user/password and token travel in the CONNECT message */
+	if (nats_auth_sends_secret(&_auth) && !pool_cfg->use_tls &&
+	    !pool_cfg->auth_plain_warned) {
+		pool_cfg->auth_plain_warned = 1;
+		LM_WARN("NATS pool: the %s is sent in plain text: use tls:// "
+			"server URLs\n", nats_auth_method(&_auth) ==
+			NATS_AUTH_TOKEN ? "token" : "password");
 	}
 
 	/* Configure reconnection behavior and register callbacks */

@@ -152,6 +152,19 @@ test_pool_js_ack: test_pool_js_ack.c ../nats_pool.c ../nats_pool.h ../nats_dl_ta
 		-I/usr/local/include -o $@ test_pool_js_ack.c \
 		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
 
+# Behavioural: the credentials the shared pool hands libnats (user,
+# password, token, creds_file, nkey, nkey_seed_file).  Links the REAL
+# ../nats_pool.c against a fake libnats table, like test_pool_fork.
+test_pool_auth_opts: test_pool_auth_opts.c ../nats_pool.c ../nats_pool.h ../nats_dl_table.def \
+		../nats_auth.h ../nats_js_retry.c
+	$(CC) $(CFLAGS) $(ASAN) $(CORE_DEFS) -Wno-cast-function-type \
+		-I/usr/local/include -o $@ test_pool_auth_opts.c \
+		../nats_pool.c ../nats_js_retry.c ../nats_redact.c ../nats_ca_dir.c -pthread
+
+# Pure header-inline credential rules of the shared connection.
+test_nats_auth: test_nats_auth.c ../nats_auth.h ../nats_url_scheme.h
+	$(CC) $(CFLAGS) $(ASAN) -I.. -o $@ test_nats_auth.c
+
 # Pure header-inline helpers (the implicit rule would not know about the
 # header).
 test_url_scheme: test_url_scheme.c ../nats_url_scheme.h

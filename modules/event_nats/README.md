@@ -663,6 +663,131 @@ modparam("event_nats", "reconnect_buf_size", 33554432)
 ```
 
 
+#### user (string)
+
+
+User name for the connection shared by the NATS modules, sent with
+[password](#password-string).  Together they replace credentials in the
+server URL (`nats://user:pass@host`), which must then not carry any:
+credentials both in a URL and in these parameters refuse startup, as do
+a user without a password, and more than one way to authenticate
+(user/password, [token](#token-string), [creds_file](#creds_file-string),
+[nkey](#nkey-string)).  The user and password are sent in the CONNECT
+message: over a `nats://` URL OpenSIPS warns that they travel in plain
+text.  A value is never logged.
+
+
+The credential parameters are shared by *event_nats*, *cachedb_nats*
+and *nats_consumer*: setting one in any module sets it for the shared
+connection; two modules setting different values refuse startup.
+
+
+*Default value is "NULL" (no user).*
+
+
+```opensips title="Set user parameter"
+...
+modparam("event_nats", "user", "opensips")
+modparam("event_nats", "password", "s3cret")
+...
+```
+
+
+#### password (string)
+
+
+Password for [user](#user-string); both must be set.
+
+
+*Default value is "NULL" (no password).*
+
+
+```opensips title="Set password parameter"
+...
+modparam("event_nats", "password", "s3cret")
+...
+```
+
+
+#### token (string)
+
+
+Authentication token for the shared connection (the server's
+`authorization { token }`), instead of `nats://token@host`.  Sent in the
+CONNECT message: over a `nats://` URL OpenSIPS warns that it travels in
+plain text.  Not combinable with the other credential parameters (see
+[user](#user-string)).
+
+
+*Default value is "NULL" (no token).*
+
+
+```opensips title="Set token parameter"
+...
+modparam("event_nats", "token", "s3cr3t-t0ken")
+...
+```
+
+
+#### creds_file (string)
+
+
+Path of a NATS credentials file (`.creds`, holding the user JWT and its
+NKey seed) for servers in operator (JWT) mode.  libnats reads it at
+each connect and signs the server's nonce with the seed; no secret is
+sent.  The file must be readable when OpenSIPS starts.  Not combinable
+with the other credential parameters (see [user](#user-string)).
+
+
+*Default value is "NULL" (no credentials file).*
+
+
+```opensips title="Set creds_file parameter"
+...
+modparam("event_nats", "creds_file", "/etc/opensips/nats/opensips.creds")
+...
+```
+
+
+#### nkey (string)
+
+
+Public NKey of the user (`U...`), for servers that list it in
+`authorization { users = [ { nkey: ... } ] }`.  Set with
+[nkey_seed_file](#nkey_seed_file-string); libnats signs the server's
+nonce with the seed, no secret is sent.  Not combinable with the other
+credential parameters (see [user](#user-string)).
+
+
+*Default value is "NULL" (no NKey).*
+
+
+```opensips title="Set nkey parameter"
+...
+modparam("event_nats", "nkey", "UDXU4RCSJNZOIQHZNWXHXORDPRTGNJAHAHFRGZNEEJCPQTT2M7NLCNF4")
+modparam("event_nats", "nkey_seed_file", "/etc/opensips/nats/opensips.nk")
+...
+```
+
+
+#### nkey_seed_file (string)
+
+
+Path of the file holding the NKey seed (`SU...`) of
+[nkey](#nkey-string); both must be set.  The file must be readable when
+OpenSIPS starts.
+
+
+*Default value is "NULL" (no seed file).*
+
+
+```opensips title="Set nkey_seed_file parameter"
+...
+modparam("event_nats", "nkey_seed_file", "/etc/opensips/nats/opensips.nk")
+...
+```
+
+
 #### msg_id (string)
 
 

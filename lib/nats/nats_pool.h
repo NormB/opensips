@@ -445,6 +445,26 @@ static inline int nats_pool_no_randomize_decide(int current, int proposed)
 int nats_pool_no_randomize_setter(unsigned int type, void *val);
 
 /*
+ * Credentials of the shared connection (nats_auth.h), set pre-fork by the
+ * user, password, token, creds_file, nkey and nkey_seed_file modparams of
+ * the NATS modules.  Each setter accepts a non-empty string; a second
+ * module setting another value refuses startup.  The first
+ * nats_pool_register() checks the set (one method, complete pairs,
+ * readable files) and every registration refuses a server URL that also
+ * carries user information.  `type` is modparam_t, spelled out as for
+ * nats_pool_drain_timeout_setter().
+ */
+int nats_pool_auth_user_setter(unsigned int type, void *val);
+int nats_pool_auth_password_setter(unsigned int type, void *val);
+int nats_pool_auth_token_setter(unsigned int type, void *val);
+int nats_pool_auth_creds_file_setter(unsigned int type, void *val);
+int nats_pool_auth_nkey_setter(unsigned int type, void *val);
+int nats_pool_auth_nkey_seed_file_setter(unsigned int type, void *val);
+
+/* Non-zero when credentials are configured as modparams. */
+int nats_pool_auth_configured(void);
+
+/*
  * Module-tunable per-operation timeout (ms) for JetStream / KV requests,
  * plumbed into jsOptions.Wait.  0 keeps cnats's 5 s default; set a smaller
  * value (e.g. cachedb_nats "kv_op_timeout_ms") on hot paths.

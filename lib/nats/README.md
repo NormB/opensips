@@ -297,6 +297,20 @@ NULL), because usrloc, b2b and the script engine free or read them after
 an error. `modules/cachedb_nats/tests/test_query_res_init.c` and
 `test_outparam_contracts.c` cover this.
 
+Credentials can be given without putting a secret in a URL: the
+`user` + `password`, `token`, `creds_file` (a `.creds` file with the
+user JWT and seed, for operator mode) and `nkey` + `nkey_seed_file`
+parameters of event_nats, cachedb_nats and nats_consumer set them for
+the shared connection (`nats_auth.h`; libnats `natsOptions_SetUserInfo()`,
+`_SetToken()`, `_SetUserCredentialsFromFiles()`, `_SetNKeyFromSeed()`).
+Exactly one method may be set, the files must be readable at startup,
+and a server URL that also carries user information refuses startup.
+A TLS client certificate comes from the `tls_mgm` "nats" domain
+(`certificate`, `private_key`) and works with or without them.
+`tests/test_nats_auth.c`, `tests/test_pool_auth_opts.c` and
+`tests/test_auth_e2e.sh` cover them, the last against a real server per
+method.
+
 Credentials in server URLs (`nats://user:pass@host`,
 `nats://token@host`) are never logged: every log line that prints a URL
 passes it through `nats_redact_url()` (`nats_redact.c`), which replaces
@@ -353,6 +367,7 @@ These apply to the whole family. Each module's README lists its own.
 | `nats_validate.c/.h` | Subject and KV-key validator used by every publish and KV path |
 | `nats_js_opts.h` | Shared JetStream publish options (async queue limits) |
 | `nats_js_retry.h` + `nats_js_retry.c` | JetStream async publish retry policy (which ack errors are resent, how often) and the table counting the resends of each message |
+| `nats_auth.h` | Credential modparams of the shared connection: merge, validation, which method; the URL user-info and insecure-URL rules |
 | `Makefile.nats` | `pkg-config` probe that gates the module builds on libnats, plus a compile probe for `kvConfig.AllowMsgTTLBelowMarker` |
 
 The library is built once as `libnats_pool.so` in the modules directory.
@@ -411,6 +426,7 @@ never the `*String` variants, which stop at the first NUL.
 | `modules/event_nats/tests/test_js_msg_id_e2e.sh` | JetStream message ids: from `msg_id` rules, from `nats_publish()`, generated; repeats stored once |
 | `modules/event_nats/tests/test_js_ack_retry_e2e.sh` | lost acks (through `tests/nats_ack_drop_proxy.py`): resent with the same id, bounded by `js_publish_retries` |
 | `modules/event_nats/tests/test_publish_during_disconnect.sh` | publishing through a broker restart, and a full reconnect buffer |
+| `lib/nats/tests/test_auth_e2e.sh` | user/password, token, NKey, creds file and TLS client certificate against a real server, plus refusals |
 | `lib/nats/tests/test_readme_format.sh` | the module READMEs follow the OpenSIPS documentation format and match the modules' export tables (`selftest_readme_format.sh` checks the checker) |
 
 The end-to-end tests start their own disposable `nats-server` (it must be

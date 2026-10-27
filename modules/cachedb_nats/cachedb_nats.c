@@ -78,6 +78,7 @@
 #include "cachedb_nats_reg.h"      /* registration MI + reap-pass gauges */
 #include "cachedb_nats_kvobs.h"    /* generic stream/KV introspection MI */
 #include "cachedb_nats_url.h"      /* cachedb_url -> server list */
+#include "../../lib/nats/nats_auth.h"
 #include "../../lib/nats/nats_pool.h"
 #include "../../lib/nats/nats_url_scheme.h"
 #include "../../lib/nats/nats_redact.h"
@@ -331,6 +332,20 @@ static const param_export_t params[] = {
 	 * nats_pool_reconnect_buf_size_decide for the merge contract). */
 	{"reconnect_buf_size",          INT_PARAM|USE_FUNC_PARAM,
 	      (void *)nats_pool_reconnect_buf_size_setter},
+	/* Credentials of the shared connection (ONE pool value each; see
+	 * lib/nats/nats_auth.h), so no secret has to be inside a URL. */
+	{"user",                 STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_user_setter},
+	{"password",             STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_password_setter},
+	{"token",                STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_token_setter},
+	{"creds_file",           STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_creds_file_setter},
+	{"nkey",                 STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_nkey_setter},
+	{"nkey_seed_file",       STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_nkey_seed_file_setter},
 	{"kv_op_timeout_ms",            INT_PARAM,    &nats_pool_kv_op_timeout_ms},
 	{"fts_json_prefix", STR_PARAM,               &fts_json_prefix},
 	/* canonical names (the redundant nats_ prefix inside a
@@ -532,26 +547,14 @@ struct module_exports exports = {
  *
  * @return  0 on success, -1 on error (aborts module loading).
  */
-/* Is the effective connection URL insecure for a PII store?
- * Returns 1 when the WARN must fire: not TLS (tls://, tls+srv://), OR no "user[:pass]@" in the
- * authority (between "://" and the first '/').  Credentials in a path/query do
- * not count.  Pure; mirrored by tests/test_insecure_url_warn.c. */
+/* Is the effective connection URL insecure for a PII store?  Returns 1
+ * when the WARN must fire: not TLS (tls://, tls+srv://), OR no
+ * credentials -- neither "user[:pass]@" in the URL's authority nor the
+ * credential modparams.  One rule, in lib/nats/nats_auth.h
+ * (nats_url_insecure_for), tested by tests/test_insecure_url_warn.c. */
 static int nats_url_insecure(const char *url)
 {
-	const char *sep, *authority, *slash, *at;
-	int is_tls, has_creds;
-
-	if (!url)
-		return 1;
-	sep = strstr(url, "://");
-	if (!sep)
-		return 1;
-	is_tls = nats_url_is_tls(url);
-	authority = sep + 3;
-	slash = strchr(authority, '/');
-	at = strchr(authority, '@');
-	has_creds = (at != NULL) && (slash == NULL || at < slash);
-	return (!is_tls || !has_creds) ? 1 : 0;
+	return nats_url_insecure_for(url, nats_pool_auth_configured());
 }
 
 /* ── mod_init phases ─────────────────────────────────────────

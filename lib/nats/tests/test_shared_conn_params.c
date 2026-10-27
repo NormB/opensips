@@ -17,7 +17,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
- * Settings of the shared connection (reconnect_buf_size) must be
+ * Settings of the shared connection (reconnect_buf_size and the
+ * credentials user, password, token, creds_file, nkey, nkey_seed_file) must be
  * exported by every module that registers the pool, through the shared
  * setter, never as a module-local int: a module-local value would never
  * reach the connection.
@@ -76,6 +77,18 @@ static void check_module(const char *path, const char *label)
 
 	check_param(src, label, "reconnect_buf_size", "INT_PARAM|USE_FUNC_PARAM",
 		"nats_pool_reconnect_buf_size_setter");
+	check_param(src, label, "user", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_user_setter");
+	check_param(src, label, "password", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_password_setter");
+	check_param(src, label, "token", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_token_setter");
+	check_param(src, label, "creds_file", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_creds_file_setter");
+	check_param(src, label, "nkey", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_nkey_setter");
+	check_param(src, label, "nkey_seed_file", "STR_PARAM|USE_FUNC_PARAM",
+		"nats_pool_auth_nkey_seed_file_setter");
 	free(src);
 }
 

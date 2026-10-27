@@ -466,6 +466,20 @@ static const param_export_t params[] = {
 	 * nats_pool_reconnect_buf_size_decide for the merge contract) */
 	{ "reconnect_buf_size", INT_PARAM|USE_FUNC_PARAM,
 	                       (void *)nats_pool_reconnect_buf_size_setter },
+	/* Credentials of the shared connection (ONE pool value each; see
+	 * lib/nats/nats_auth.h), so no secret has to be inside a URL. */
+	{ "user",             STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_user_setter },
+	{ "password",         STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_password_setter },
+	{ "token",            STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_token_setter },
+	{ "creds_file",       STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_creds_file_setter },
+	{ "nkey",             STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_nkey_setter },
+	{ "nkey_seed_file",   STR_PARAM|USE_FUNC_PARAM,
+	                       (void *)nats_pool_auth_nkey_seed_file_setter },
 	{ "bind",              STR_PARAM|USE_FUNC_PARAM,
 	                       (void *)set_bind_param },
 	{ "fetch_batch",       INT_PARAM, &nats_consumer_fetch_batch       },

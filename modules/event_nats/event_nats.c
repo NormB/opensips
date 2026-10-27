@@ -148,6 +148,20 @@ static const param_export_t mod_params[] = {
 	      (void *)nats_msg_id_param},
 	{"js_ack_timeout_ms",   INT_PARAM, &nats_pool_js_ack_timeout_ms},
 	{"js_publish_retries",  INT_PARAM, &nats_pool_js_publish_retries},
+	/* Credentials of the shared connection (ONE pool value each; see
+	 * lib/nats/nats_auth.h), so no secret has to be inside a URL. */
+	{"user",                 STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_user_setter},
+	{"password",             STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_password_setter},
+	{"token",                STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_token_setter},
+	{"creds_file",           STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_creds_file_setter},
+	{"nkey",                 STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_nkey_setter},
+	{"nkey_seed_file",       STR_PARAM|USE_FUNC_PARAM,
+	      (void *)nats_pool_auth_nkey_seed_file_setter},
 	{"subscribe",           STR_PARAM|USE_FUNC_PARAM,
 	                        (void *)nats_consumer_parse_subscribe},
 	{0,0,0}
