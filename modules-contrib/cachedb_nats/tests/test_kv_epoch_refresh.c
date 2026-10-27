@@ -116,8 +116,10 @@ nats_dl_funcs_t nats_dl;
 /* other TU link deps the refresh path never reaches */
 int nats_validate(const char *s, int len, nats_validate_mode_t mode)
 { (void)s; (void)len; (void)mode; return 0; }
+/* the connection constructor the module hands the cachedb core */
+static void *(*g_new_con)(struct cachedb_id *);
 cachedb_con *cachedb_do_init(str *url, void *(*new_con)(struct cachedb_id *))
-{ (void)url; (void)new_con; return NULL; }
+{ (void)url; g_new_con = new_con; return NULL; }
 void cachedb_do_close(cachedb_con *con, void (*free_con)(cachedb_pool_con *))
 { (void)con; (void)free_con; }
 
@@ -128,7 +130,19 @@ static int fake_epoch = 0;
 static kvStore *fake_kv_ret = NULL;   /* what get_kv returns next */
 static int get_kv_calls = 0;
 
+/* a process connects on its first nats_pool_get() (when the broker is
+ * up): until then nats_pool_is_connected() is 0 */
+static int fake_broker_up = 1;
+static int get_calls = 0;
 int nats_pool_is_connected(void) { return fake_connected; }
+natsConnection *nats_pool_get(void)
+{
+	get_calls++;
+	if (!fake_broker_up)
+		return NULL;
+	fake_connected = 1;
+	return (natsConnection *)0x2001;
+}
 int nats_pool_get_reconnect_epoch(void) { return fake_epoch; }
 kvStore *nats_pool_get_kv(const char *bucket, int replicas, int history,
 	int64_t ttl)
@@ -226,6 +240,39 @@ int main(void)
 		ASSERT(all_failed, "persistent failure: every call still -1");
 		ASSERT(refresh_err_logs == 1,
 			"persistent failure: logged once, not per call");
+	}
+
+	/* 7. a process that has not connected yet -- the attendant before
+	 * the fork, where b2b_entities and b2b_logic restore their state
+	 * from mod_init -- connects when it opens a cachedb connection,
+	 * and the connection gets its KV handle */
+	{
+		struct cachedb_id id;
+		nats_cachedb_con *c;
+		str url = str_init("nats://127.0.0.1:4222/");
+
+		memset(&id, 0, sizeof id);
+		nats_cachedb_init(&url);
+		ASSERT(g_new_con != NULL, "the module hands its constructor to the core");
+
+		fake_connected = 0; fake_broker_up = 1; fake_kv_ret = H1;
+		get_calls = get_kv_calls = 0;
+		c = g_new_con ? g_new_con(&id) : NULL;
+		ASSERT(c != NULL, "not connected yet: the connection is created");
+		ASSERT(get_calls == 1, "not connected yet: it connects first");
+		ASSERT(c && c->kv == H1 && get_kv_calls == 1,
+			"not connected yet: the connection gets its KV handle");
+		free(c);
+
+		/* 8. the broker down at that moment: the connection is still
+		 * created, without a handle (degraded start); the operations
+		 * get it once connected */
+		fake_connected = 0; fake_broker_up = 0;
+		get_calls = get_kv_calls = 0;
+		c = g_new_con ? g_new_con(&id) : NULL;
+		ASSERT(c != NULL && c->kv == NULL && get_kv_calls == 0,
+			"broker down: created without a KV handle");
+		free(c);
 	}
 
 	fprintf(stderr, "\n=== %s (fails=%d) ===\n",

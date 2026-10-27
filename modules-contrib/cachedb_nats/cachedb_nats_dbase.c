@@ -121,8 +121,11 @@ static nats_cachedb_con *nats_new_connection(struct cachedb_id *id)
 
 	/* Without a NATS connection (degraded start, see child_init), the
 	 * connection is created without a KV handle: the operations get it
-	 * once connected (nats_con_refresh_kv()). */
-	if (!nats_pool_is_connected()) {
+	 * once connected (nats_con_refresh_kv()).  A process that has not
+	 * connected yet connects first: the attendant before the fork, where
+	 * b2b_entities and b2b_logic restore their state from mod_init, has
+	 * no child_init to do it. */
+	if (!nats_pool_get() || !nats_pool_is_connected()) {
 		LM_DBG("NATS unavailable; KV handle for bucket '%s' deferred\n",
 			kv_bucket);
 		return con;
