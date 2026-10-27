@@ -67,6 +67,13 @@ jobs:
             libpcre3-dev libxml2-dev cmake \
             autoconf automake libtool git \
             nats-server netcat-openbsd sip-tester jq curl python3
+          # the nats-server package enables and starts its systemd
+          # service on 4222; the tests start their own servers, and
+          # test_default_url_e2e.sh needs 4222 free
+          sudo systemctl disable --now nats-server
+          if ss -ltn 'sport = :4222' | grep -q LISTEN; then
+            echo "port 4222 still in use"; exit 1
+          fi
           # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
           # NATS-over-TLS.
