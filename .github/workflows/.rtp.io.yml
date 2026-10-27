@@ -250,7 +250,11 @@ jobs:
         tags: ${{ env.OUTPUT_TAG }}
         outputs: type=docker,dest=${{ env.OUTPUT_IMAGE }}
         cache-from: ${{ env.CACHE_SPEC }}
-        cache-to: ${{ env.CACHE_SPEC }},mode=max
+        # The repository Actions cache is capped at 10 GB; at the cap
+        # GitHub evicts entries while BuildKit exports, and the export
+        # fails with "error writing layer blob: not_found".  The cache only
+        # speeds the build up: a failed export must not fail the build.
+        cache-to: ${{ env.CACHE_SPEC }},mode=max,ignore-error=true
 
     - name: Upload image artifact
       uses: actions/upload-artifact@v7

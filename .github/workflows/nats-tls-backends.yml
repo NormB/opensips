@@ -66,7 +66,7 @@ jobs:
             build-essential pkg-config libssl-dev \
             libpcre3-dev libxml2-dev cmake \
             autoconf automake libtool git \
-            nats-server netcat-openbsd
+            nats-server netcat-openbsd sip-tester jq curl python3
           # One pinned nats.c SHA across every CI leg; the pin
           # lives in install_libnats.sh.  TLS=ON: this leg exercises
           # NATS-over-TLS.
@@ -84,12 +84,18 @@ jobs:
           set -e
           make -j"$(nproc)" opensips
           for m in signaling sl tm rr maxfwd sipmsgops proto_udp mi_datagram mi_fifo cfgutils \
-                   tls_mgm tls_openssl; do
+                   tls_mgm tls_openssl \
+                   b2b_entities b2b_logic clusterer nathelper proto_bin registrar usrloc; do
             make modules=modules/$m modules
           done
           make modules="modules-contrib/nats modules-contrib/cachedb_nats \
             modules-contrib/cachedb_nats_fts modules-contrib/event_nats \
             modules-contrib/nats_consumer" modules-contrib
+          # one directory with every built module, for the tests that use
+          # a single module path
+          mkdir -p _modules
+          find modules modules-contrib -maxdepth 2 -name '*.so' \
+            -exec ln -sf "$(pwd)/{}" _modules/ \;
       - name: Docs — every opensips example in the NATS READMEs passes opensips -C
         run: |
           bash modules-contrib/nats/tests/selftest_readme_examples.sh
@@ -132,6 +138,61 @@ jobs:
               exit 1
             fi
           done
+      - name: Run the NATS real-server tests that start their own brokers
+        run: |
+          # cachedb_nats KV watcher resume, outage matrix, b2b restore over
+          # the map API, usrloc NAT pinging; nats_consumer async requests,
+          # durable consumers across instances, NAK delay, fetch/RPC outage;
+          # the module default URL (needs 127.0.0.1:4222 free, so it runs
+          # before the shared broker below).  Exit 77 is a failure here.
+          set -u
+          for t in nats/tests/test_default_url_e2e.sh \
+                   cachedb_nats/tests/test_kv_watch_resume_e2e.sh \
+                   cachedb_nats/tests/test_outage_matrix_e2e.sh \
+                   cachedb_nats/tests/test_map_b2b_restore_e2e.sh \
+                   cachedb_nats/tests/test_usrloc_natping_e2e.sh \
+                   nats_consumer/tests/test_async_request_dispatch.sh \
+                   nats_consumer/tests/test_multi_instance_durable.sh \
+                   nats_consumer/tests/test_nak_delay_e2e.sh \
+                   nats_consumer/tests/test_outage_rpc_fetch_e2e.sh; do
+            echo "::group::$t"
+            rc=0
+            bash "modules-contrib/$t" || rc=$?
+            echo "::endgroup::"
+            echo "$t: rc=$rc"
+            [ "$rc" -eq 0 ] || exit 1
+          done
+      - name: Start a nats-server on 127.0.0.1:4222 (image pinned by digest)
+        run: |
+          # nats:2.11.10, the version of the nats_consumer docker-compose suite
+          docker run -d --name nats4222 -p 127.0.0.1:4222:4222 \
+            nats@sha256:3e8ce97694fcc370aff94d554573a416c4ed0a56fb8b02726f96440deaa22b54 -js
+          for i in $(seq 1 50); do
+            nats --server nats://127.0.0.1:4222 rtt --timeout 200ms >/dev/null 2>&1 && exit 0
+            sleep 0.2
+          done
+          docker logs nats4222
+          exit 1
+      - name: Run the NATS real-server tests that use the broker on 4222
+        run: |
+          # the three modules sharing one connection, cachedb_nats CRUD and
+          # KV watch, the nats_consumer process restart contract.  Exit 77
+          # is a failure here.
+          set -u
+          for t in nats/tests/test_three_module_e2e.sh \
+                   cachedb_nats/tests/test_kv_crud_e2e.sh \
+                   cachedb_nats/tests/test_kv_watch_basic.sh \
+                   nats_consumer/tests/test_consumer_proc_restart.sh; do
+            echo "::group::$t"
+            rc=0
+            bash "modules-contrib/$t" || rc=$?
+            echo "::endgroup::"
+            echo "$t: rc=$rc"
+            [ "$rc" -eq 0 ] || exit 1
+          done
+      - name: Stop the nats-server on 4222
+        if: always()
+        run: docker rm -f nats4222 >/dev/null 2>&1 || true
       - name: Build a wolfSSL-backed libnats (modules-contrib/nats/patches)
         run: |
           PREFIX="$RUNNER_TEMP/nats-wolfssl" \
