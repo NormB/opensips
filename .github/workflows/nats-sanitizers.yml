@@ -1,10 +1,10 @@
 # Sanitizer CI for the NATS modules.
 #
-# Builds the four NATS test suites (lib/nats, event_nats, cachedb_nats,
+# Builds the four NATS test suites (modules-contrib/nats, event_nats, cachedb_nats,
 # nats_consumer) under AddressSanitizer + UBSan and ThreadSanitizer.
 # Unit tests are pure C with their own main() functions, so they don't
 # require a running nats-server -- which keeps this workflow cheap and
-# fast vs. the integration shell tests in modules/nats_consumer/tests/
+# fast vs. the integration shell tests in modules-contrib/nats_consumer/tests/
 # (those still need the docker-compose stack).
 #
 # Why two sanitizer variants:
@@ -26,20 +26,20 @@ concurrency:
 on:
   push:
     paths:
-      - 'lib/nats/**'
-      - 'modules/event_nats/**'
-      - 'modules/cachedb_nats/**'
-      - 'modules/cachedb_nats_fts/**'
-      - 'modules/nats_consumer/**'
+      - 'modules-contrib/nats/**'
+      - 'modules-contrib/event_nats/**'
+      - 'modules-contrib/cachedb_nats/**'
+      - 'modules-contrib/cachedb_nats_fts/**'
+      - 'modules-contrib/nats_consumer/**'
       - 'scripts/git-hooks/**'
       - '.github/workflows/nats-sanitizers.yml'
   pull_request:
     paths:
-      - 'lib/nats/**'
-      - 'modules/event_nats/**'
-      - 'modules/cachedb_nats/**'
-      - 'modules/cachedb_nats_fts/**'
-      - 'modules/nats_consumer/**'
+      - 'modules-contrib/nats/**'
+      - 'modules-contrib/event_nats/**'
+      - 'modules-contrib/cachedb_nats/**'
+      - 'modules-contrib/cachedb_nats_fts/**'
+      - 'modules-contrib/nats_consumer/**'
       - 'scripts/git-hooks/**'
       - '.github/workflows/nats-sanitizers.yml'
   workflow_dispatch:
@@ -110,7 +110,7 @@ jobs:
         run: |
           # apt's libnats-dev on ubuntu 22.04/24.04 ships libnats 3.7,
           # which predates kvStore_WatchMulti / kvStore_WatchAll-with-opts
-          # and several other symbols referenced by lib/nats/nats_dl_table.def.
+          # and several other symbols referenced by modules-contrib/nats/nats_dl_table.def.
           # install_libnats.sh builds the ONE pinned nats.c SHA every CI
           # leg shares; LIBNATS_TLS=ON for dev-env parity.  The
           # container runs as root, so SUDO stays empty.
@@ -119,49 +119,49 @@ jobs:
           LIBNATS_TLS=ON sh scripts/build/install_libnats.sh
 
       - name: Lint — no unredacted URLs in log calls
-        run: ./lib/nats/tests/lint_url_redaction.sh
+        run: ./modules-contrib/nats/tests/lint_url_redaction.sh
 
       - name: Lint — no raw KV row keys (AoRs) in log calls
-        run: ./lib/nats/tests/lint_key_redaction.sh
+        run: ./modules-contrib/nats/tests/lint_key_redaction.sh
 
       - name: Lint — KV error logs carry the libnats detail
-        run: sh ./lib/nats/tests/lint_err_text.sh
+        run: sh ./modules-contrib/nats/tests/lint_err_text.sh
 
       - name: Lint — no references to private planning material
         run: |
-          sh ./lib/nats/tests/lint_private_refs.sh
+          sh ./modules-contrib/nats/tests/lint_private_refs.sh
           sh ./scripts/git-hooks/selftest_precommit.sh
 
       - name: sip_e2e harness selftests (skip-vs-fail contract, MI 503 retry)
         run: |
-          ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
-          ./modules/cachedb_nats/tests/sip_e2e/selftest_mi_retry.sh
+          ./modules-contrib/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+          ./modules-contrib/cachedb_nats/tests/sip_e2e/selftest_mi_retry.sh
 
       - name: Harness self-tests (nats_consumer stress plumbing, TLS probe, broker probe)
         run: |
-          ./modules/nats_consumer/tests/selftest_harness.sh
-          ./lib/nats/tests/selftest_tls_probe.sh
-          ./lib/nats/tests/selftest_nats_probe.sh
+          ./modules-contrib/nats_consumer/tests/selftest_harness.sh
+          ./modules-contrib/nats/tests/selftest_tls_probe.sh
+          ./modules-contrib/nats/tests/selftest_nats_probe.sh
 
       - name: Docs — README format; drain examples fit their timer interval
         run: |
-          ./lib/nats/tests/test_readme_format.sh
-          ./lib/nats/tests/selftest_readme_format.sh
-          ./modules/nats_consumer/tests/test_doc_drain_budget.sh
+          ./modules-contrib/nats/tests/test_readme_format.sh
+          ./modules-contrib/nats/tests/selftest_readme_format.sh
+          ./modules-contrib/nats_consumer/tests/test_doc_drain_budget.sh
 
-      - name: lib/nats unit tests
+      - name: modules-contrib/nats unit tests
         run: |
-          make -C lib/nats/tests \
+          make -C modules-contrib/nats/tests \
               CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
 
       - name: event_nats unit tests
         run: |
-          make -C modules/event_nats/tests \
+          make -C modules-contrib/event_nats/tests \
               CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
 
       - name: cachedb_nats unit tests
         run: |
-          make -C modules/cachedb_nats/tests \
+          make -C modules-contrib/cachedb_nats/tests \
               CFLAGS="${SAN_CFLAGS}" LDFLAGS="${SAN_LDFLAGS}" ASAN="" "${CHECK_TARGET}"
 
       - name: nats_consumer unit tests
@@ -169,7 +169,7 @@ jobs:
           # nats_consumer/tests/Makefile already builds test_slurp_file_cap
           # with -fsanitize=address; we override CFLAGS/LDFLAGS to apply
           # the matrix-selected sanitizer to every binary uniformly.
-          make -C modules/nats_consumer/tests \
+          make -C modules-contrib/nats_consumer/tests \
               CFLAGS="-DTEST_SHIM -I. -I../../.. ${SAN_CFLAGS}" \
               LDFLAGS="-lpthread ${SAN_LDFLAGS}" \
               "${CHECK_TARGET}"
@@ -213,20 +213,33 @@ jobs:
       - name: Install build deps + libnats (pinned)
         run: |
           apt-get install -y --no-install-recommends \
-            build-essential clang pkg-config libssl-dev libuv1-dev cmake wget
+            build-essential clang pkg-config libssl-dev libuv1-dev cmake wget \
+            bison flex
           sh scripts/build/install_libnats.sh
 
-      - name: lib/nats unit tests (-Werror)
-        run: make -C lib/nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+      # The NATS modules live in modules-contrib/, outside the default
+      # build of Main CI: build all five here with -Werror per compiler.
+      - name: NATS modules build (-Werror)
+        run: |
+          make CC="${MCC}" CC_EXTRA_OPTS=-Werror \
+            modules="modules-contrib/nats modules-contrib/event_nats modules-contrib/cachedb_nats modules-contrib/cachedb_nats_fts modules-contrib/nats_consumer" \
+            modules-contrib
+          ls modules-contrib/nats/nats.so modules-contrib/event_nats/event_nats.so \
+            modules-contrib/cachedb_nats/cachedb_nats.so \
+            modules-contrib/cachedb_nats_fts/cachedb_nats_fts.so \
+            modules-contrib/nats_consumer/nats_consumer.so
+
+      - name: modules-contrib/nats unit tests (-Werror)
+        run: make -C modules-contrib/nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
 
       - name: event_nats unit tests (-Werror)
-        run: make -C modules/event_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+        run: make -C modules-contrib/event_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
 
       - name: cachedb_nats unit tests (-Werror)
-        run: make -C modules/cachedb_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
+        run: make -C modules-contrib/cachedb_nats/tests CC="${MCC}" CFLAGS="${WFLAGS}" ASAN="" check-tsan
 
       - name: nats_consumer unit tests (-Werror)
         run: |
-          make -C modules/nats_consumer/tests CC="${MCC}" \
+          make -C modules-contrib/nats_consumer/tests CC="${MCC}" \
             CFLAGS="-DTEST_SHIM -I. -I../../.. ${WFLAGS}" \
             LDFLAGS="-lpthread" check-tsan

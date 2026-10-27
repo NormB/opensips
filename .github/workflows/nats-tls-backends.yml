@@ -7,7 +7,7 @@
 # operator-error path.  The same built tree also config-checks every
 # opensips example in the NATS READMEs.
 #
-# The single source of truth is lib/nats/tests/test_tls_mgm_smoke.sh
+# The single source of truth is modules-contrib/nats/tests/test_tls_mgm_smoke.sh
 # which is what we exec at the end -- so any expansion of the smoke
 # extends the shell test rather than this workflow.
 #
@@ -24,22 +24,22 @@ concurrency:
 on:
   push:
     paths:
-      - 'lib/nats/**'
-      - 'modules/event_nats/**'
-      - 'modules/cachedb_nats/**'
-      - 'modules/cachedb_nats_fts/**'
-      - 'modules/nats_consumer/**'
+      - 'modules-contrib/nats/**'
+      - 'modules-contrib/event_nats/**'
+      - 'modules-contrib/cachedb_nats/**'
+      - 'modules-contrib/cachedb_nats_fts/**'
+      - 'modules-contrib/nats_consumer/**'
       - 'modules/tls_mgm/**'
       - 'modules/tls_openssl/**'
       - 'scripts/build/install_libnats.sh'
       - '.github/workflows/nats-tls-backends.yml'
   pull_request:
     paths:
-      - 'lib/nats/**'
-      - 'modules/event_nats/**'
-      - 'modules/cachedb_nats/**'
-      - 'modules/cachedb_nats_fts/**'
-      - 'modules/nats_consumer/**'
+      - 'modules-contrib/nats/**'
+      - 'modules-contrib/event_nats/**'
+      - 'modules-contrib/cachedb_nats/**'
+      - 'modules-contrib/cachedb_nats_fts/**'
+      - 'modules-contrib/nats_consumer/**'
       - 'modules/tls_mgm/**'
       - 'modules/tls_openssl/**'
       - 'scripts/build/install_libnats.sh'
@@ -54,12 +54,12 @@ jobs:
       - name: Install build deps + build libnats from source
         run: |
           # Ubuntu's libnats-dev predates several symbols referenced
-          # by lib/nats/nats_dl_table.def (kvStore_WatchMulti,
+          # by modules-contrib/nats/nats_dl_table.def (kvStore_WatchMulti,
           # kvStore_WatchAll-with-opts, ...); the X-macro that
           # materialises the dl table needs every symbol declared
           # in nats/nats.h at compile time even though the actual
           # link is lazy via dlopen.  Build pinned upstream so the
-          # symbol set matches what lib/nats was developed against.
+          # symbol set matches what modules-contrib/nats was developed against.
           set -e
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -84,15 +84,17 @@ jobs:
           set -e
           make -j"$(nproc)" opensips
           for m in signaling sl tm rr maxfwd sipmsgops proto_udp mi_datagram mi_fifo cfgutils \
-                   tls_mgm tls_openssl \
-                   cachedb_nats cachedb_nats_fts event_nats nats_consumer; do
+                   tls_mgm tls_openssl; do
             make modules=modules/$m modules
           done
+          make modules="modules-contrib/nats modules-contrib/cachedb_nats \
+            modules-contrib/cachedb_nats_fts modules-contrib/event_nats \
+            modules-contrib/nats_consumer" modules-contrib
       - name: Docs — every opensips example in the NATS READMEs passes opensips -C
         run: |
-          bash lib/nats/tests/selftest_readme_examples.sh
-          bash lib/nats/tests/test_readme_examples.sh
-      - name: Run lib/nats tls_mgm smoke
+          bash modules-contrib/nats/tests/selftest_readme_examples.sh
+          bash modules-contrib/nats/tests/test_readme_examples.sh
+      - name: Run modules-contrib/nats tls_mgm smoke
         run: |
           set -e
           # The smoke spins up its own private nats-server with self-
@@ -101,7 +103,7 @@ jobs:
           # completion plus negative scenarios (no tls_mgm loaded, no
           # 'nats' client_domain, ca_dir directory path, verify_cert=0,
           # a broker certificate issued for another host).
-          bash lib/nats/tests/test_tls_mgm_smoke.sh
+          bash modules-contrib/nats/tests/test_tls_mgm_smoke.sh
       - name: Run the event_nats JetStream and outage e2e tests
         run: |
           # Each starts its own private nats-server.  Exit 77 means a
@@ -109,33 +111,34 @@ jobs:
           for t in test_js_msg_id_e2e.sh test_js_ack_retry_e2e.sh \
                    test_publish_during_disconnect.sh; do
             rc=0
-            bash "modules/event_nats/tests/$t" || rc=$?
+            bash "modules-contrib/event_nats/tests/$t" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "$t: rc=$rc"
               exit 1
             fi
           done
-      - name: Run the lib/nats credential and server-order e2e tests
+      - name: Run the modules-contrib/nats module, credential and server-order e2e tests
         run: |
-          # user/password, token, NKey, creds file, TLS client certificate
-          # against a private nats-server.  Exit 77 is a failure here.
-          for t in test_auth_e2e.sh test_no_randomize_e2e.sh; do
+          # each NATS module requires nats.so; user/password, token, NKey,
+          # creds file, TLS client certificate against a private
+          # nats-server.  Exit 77 is a failure here.
+          for t in test_nats_module_required_e2e.sh test_auth_e2e.sh test_no_randomize_e2e.sh; do
             rc=0
-            bash "lib/nats/tests/$t" || rc=$?
+            bash "modules-contrib/nats/tests/$t" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "$t: rc=$rc"
               exit 1
             fi
           done
-      - name: Build a wolfSSL-backed libnats (lib/nats/patches)
+      - name: Build a wolfSSL-backed libnats (modules-contrib/nats/patches)
         run: |
           PREFIX="$RUNNER_TEMP/nats-wolfssl" \
-            sh lib/nats/patches/build_libnats_wolfssl.sh
+            sh modules-contrib/nats/patches/build_libnats_wolfssl.sh
       - name: Run both tls_mgm smokes on the wolfSSL-backed libnats
         run: |
           set -e
           lib=$(ls "$RUNNER_TEMP"/nats-wolfssl/libnats/lib/libnats.so.* \
                 | grep -E '\.so\.[0-9]+\.[0-9]+$' | head -1)
           export NATS_DL_LIBNATS_PATH="$lib"
-          bash lib/nats/tests/test_tls_mgm_smoke.sh
-          bash modules/nats_consumer/tests/test_tls_mgm_consumer_smoke.sh
+          bash modules-contrib/nats/tests/test_tls_mgm_smoke.sh
+          bash modules-contrib/nats_consumer/tests/test_tls_mgm_consumer_smoke.sh

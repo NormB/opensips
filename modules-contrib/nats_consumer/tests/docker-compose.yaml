@@ -1,0 +1,59 @@
+# nats_consumer integration-test compose stack.
+#
+# Two services:
+#   - nats:      JetStream-enabled nats-server, plus the nats CLI via
+#                image. Exposes 4222 (client) and 8222 (monitor).
+#   - opensips:  container built from Dockerfile in this directory;
+#                loads event_nats.so + nats_consumer.so and runs the
+#                minimal opensips.cfg. MI FIFO is at /var/run/opensips/mi.
+#
+# Usage:
+#   docker compose -f docker-compose.yaml build
+#   docker compose -f docker-compose.yaml up -d
+#   bash test_fetch_sync.sh
+#   docker compose -f docker-compose.yaml down -v
+
+services:
+  nats:
+    image: nats:2.11.10-alpine
+    command: -js -m 8222
+    ports:
+      - "14222:4222"
+      - "18222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  # nats CLI in a separate container so the harness can script stream /
+  # consumer / publish commands without requiring the nats CLI to be
+  # installed on the host.  The CLI runs one-shot invocations and exits.
+  natscli:
+    image: natsio/nats-box:latest
+    depends_on:
+      nats:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+
+  opensips:
+    build:
+      context: ../../..
+      dockerfile: modules-contrib/nats_consumer/tests/Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - NATS_URL=nats://nats:4222
+      # The runtime stage carries the pinned libnats build at
+      # /usr/local/lib (no distro package, no dev symlink in the ld
+      # cache).  An explicit path makes nats_dl_load()'s dlopen bypass
+      # the SONAME search entirely and stays valid across pin bumps.
+      - NATS_DL_LIBNATS_PATH=/usr/local/lib/libnats.so
+    ports:
+      - "15060:5060/udp"
+    volumes:
+      - mi:/var/run/opensips
+
+volumes:
+  mi:

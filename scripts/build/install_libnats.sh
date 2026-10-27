@@ -1,8 +1,10 @@
 #!/bin/sh
 # scripts/build/install_libnats.sh -- install the libnats C client SDK.
 #
-# OpenSIPS's NATS modules (event_nats, cachedb_nats, cachedb_nats_fts,
-# nats_consumer) and lib/nats depend on the libnats C client SDK.  Ubuntu < 22.04 does
+# The NATS modules in modules-contrib/ (nats, event_nats, cachedb_nats,
+# cachedb_nats_fts, nats_consumer) depend on the libnats C client SDK.
+# Used by the nats-* workflows and modules-contrib/nats_consumer/tests/Dockerfile.
+# Ubuntu < 22.04 does
 # not ship libnats-dev in apt, and the package is universe-only on
 # 22.04+, so rather than maintain split logic we always build from a
 # pinned source tarball.  Output is staged at $LIBNATS_PREFIX (default
@@ -24,9 +26,7 @@ set -e
 # (PR #1000 kvConfig.LimitMarkerTTL + kvStore_*WithTTL, PR #1001 sub-second
 # TTL rejection) and picks up later fixes, notably the data race between
 # the library destructor and nats_Close[AndWait]() (PR #1020).  A pin (not
-# 'main') keeps every CI leg and every cache generation building the SAME
-# libnats; the main.yml cache key hashes this script, so bumping the pin
-# rolls the cache automatically.
+# 'main') keeps every CI leg building the SAME libnats.
 LIBNATS_VERSION="${LIBNATS_VERSION:-a0777d6daa4fb695f9dfd35901b7b734d3845bb2}"
 LIBNATS_PREFIX="${LIBNATS_PREFIX:-/usr/local}"
 # TLS in the libnats build (-DNATS_BUILD_WITH_TLS).  Default OFF: the OpenSIPS
@@ -41,7 +41,7 @@ LIBNATS_TLS="${LIBNATS_TLS:-OFF}"
 # can't build libnats >= 3.10 (CMake 3.13+ required).  Even if we
 # upgraded cmake there, the resulting libnats would target the
 # build host's architecture and link-fail against the cross-built
-# OpenSIPS modules.  The Makefile gate in lib/nats/Makefile.nats
+# OpenSIPS modules.  The Makefile gate in modules-contrib/nats/Makefile.nats
 # handles the no-libnats case cleanly: NATS modules silently skip,
 # the rest of the build proceeds.
 case "${COMPILER:-}" in

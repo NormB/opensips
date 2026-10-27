@@ -3,7 +3,7 @@
 //
 // 1. Findings inside OpenSIPS CORE headers the NATS code includes but
 //    does not own -- fixing those belongs upstream, not on this branch.
-// 2. Nothing else: findings in lib/nats/ and modules/*nats*/ fail the
+// 2. Nothing else: findings in modules-contrib/nats/ and modules/*nats*/ fail the
 //    job (or carry an inline // cppcheck-suppress with a rationale).
 // unknownMacro is a cppcheck CONFIG gap, not a code finding: the
 // MODULE_VERSION initializer expands through build-generated macros

@@ -51,17 +51,17 @@ jobs:
           set -e
           make -j"$(nproc)" opensips
           make -j"$(nproc)" modules \
-            modules="modules/event_nats modules/cachedb_nats modules/cachedb_nats_fts modules/nats_consumer modules/mi_datagram modules/proto_udp modules/signaling modules/sipmsgops modules/sl"
+            modules="modules-contrib/nats modules-contrib/event_nats modules-contrib/cachedb_nats modules-contrib/cachedb_nats_fts modules-contrib/nats_consumer modules/mi_datagram modules/proto_udp modules/signaling modules/sipmsgops modules/sl"
           mkdir -p _modules
-          find modules -maxdepth 2 -name '*.so' \
+          find modules modules-contrib -maxdepth 2 -name '*.so' \
             -exec ln -sf "$(pwd)/{}" _modules/ \;
 
       - name: Strict-gate selftest (skip-vs-fail contract)
-        run: ./modules/cachedb_nats/tests/sip_e2e/selftest_strict.sh
+        run: ./modules-contrib/cachedb_nats/tests/sip_e2e/selftest_strict.sh
 
       - name: event_nats sip_e2e (docker broker; skip = FAILURE)
         run: |
-          ./modules/event_nats/tests/sip_e2e/run.sh; rc=$?
+          ./modules-contrib/event_nats/tests/sip_e2e/run.sh; rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "e2e rc=$rc (77 = missing prerequisite: a FAILURE on the nightly gate)"
             exit 1
@@ -94,7 +94,7 @@ jobs:
             -D'LM_ERR(...)=' -D'LM_WARN(...)=' -D'LM_INFO(...)=' \
             -D'LM_NOTICE(...)=' -D'LM_DBG(...)=' \
             --suppressions-list=scripts/build/cppcheck-nats.supp \
-            lib/nats modules/cachedb_nats modules/cachedb_nats_fts \
-            modules/event_nats modules/nats_consumer \
-            -i modules/cachedb_nats/tests -i modules/event_nats/tests \
-            -i modules/nats_consumer/tests -i lib/nats/tests
+            modules-contrib/nats modules-contrib/cachedb_nats modules-contrib/cachedb_nats_fts \
+            modules-contrib/event_nats modules-contrib/nats_consumer \
+            -i modules-contrib/cachedb_nats/tests -i modules-contrib/event_nats/tests \
+            -i modules-contrib/nats_consumer/tests -i modules-contrib/nats/tests

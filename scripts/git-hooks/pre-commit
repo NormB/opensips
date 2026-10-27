@@ -65,7 +65,7 @@ fi
 
 # No references to private planning material in the NATS tree (work-item
 # labels, review ids, documents that are not in this repository).
-lint="$(git rev-parse --show-toplevel)/lib/nats/tests/lint_private_refs.sh"
+lint="$(git rev-parse --show-toplevel)/modules-contrib/nats/tests/lint_private_refs.sh"
 if [ -f "$lint" ] && ! out=$(sh "$lint" 2>&1); then
 	printf 'pre-commit: %s\n' "$out" >&2
 	exit 1

@@ -96,12 +96,6 @@ ${SUDO} apt-get ${APT_OPTS} -y autoremove
 PKGS="$PKGS $(. "$(dirname $0)/apt_requirements_postupdate.sh")"
 ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get ${APT_OPTS} -y --allow-downgrades install ${PKGS}
 
-# libnats C client SDK (build-from-source, idempotent + cache-aware).
-# Required by lib/nats and the three NATS modules (event_nats,
-# cachedb_nats, nats_consumer).  Skipped automatically when an
-# install is already present (typical with actions/cache restore).
-sh -x "$(dirname $0)/install_libnats.sh"
-
 if [ ! -z "${POST_INSTALL_CMD}" ]
 then
 	${POST_INSTALL_CMD}
