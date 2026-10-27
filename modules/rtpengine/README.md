@@ -1324,8 +1324,8 @@ if (rtpengine_subscribe_request("all codec=[transcode=[L16/16000]]",
 	# one m= line per participant, on consecutive ports
 	$var(port) = 20000;
 	$var(port2) = $var(port) + 2;
-	$var(answer_sdp) = "v=0\r\no=- 1 1 IN IP4 10.0.0.100\r\ns=-\r\n"
-		+ "c=IN IP4 10.0.0.100\r\nt=0 0\r\n"
+	$var(answer_sdp) = "v=0\r\no=- 1 1 IN IP4 192.0.2.100\r\ns=-\r\n"
+		+ "c=IN IP4 192.0.2.100\r\nt=0 0\r\n"
 		+ "m=audio " + $var(port) + " RTP/AVP 96\r\n"
 		+ "a=rtpmap:96 L16/16000\r\na=recvonly\r\n"
 		+ "m=audio " + $var(port2) + " RTP/AVP 96\r\n"
@@ -1364,9 +1364,9 @@ This function can be used from any route.
 
 ```opensips title="rtpengine_subscribe_answer usage"
 ...
-# the subscriber receives the copied media on 10.0.0.100:20000
-$var(answer_sdp) = "v=0\r\no=- 1 1 IN IP4 10.0.0.100\r\ns=-\r\n"
-	+ "c=IN IP4 10.0.0.100\r\nt=0 0\r\n"
+# the subscriber receives the copied media on 192.0.2.100:20000
+$var(answer_sdp) = "v=0\r\no=- 1 1 IN IP4 192.0.2.100\r\ns=-\r\n"
+	+ "c=IN IP4 192.0.2.100\r\nt=0 0\r\n"
 	+ "m=audio 20000 RTP/AVP 0\r\na=recvonly\r\n";
 
 if (!rtpengine_subscribe_answer("to-tag=$var(sub_tag)", $var(rtpe_sock),
