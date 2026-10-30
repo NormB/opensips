@@ -35,4 +35,6 @@ int receive_msg(char* buf, unsigned int len, struct receive_info *ri,
 
 unsigned int get_next_msg_no(void);
 
+str *get_rcv_raw_buf(const char *buf, int len);
+
 #endif
