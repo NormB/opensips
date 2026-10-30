@@ -45,6 +45,7 @@
 #include "../../sl_cb.h"
 #include "../../str.h"
 #include "../../script_cb.h"
+#include "../../receive.h"
 #include "../tm/tm_load.h"
 #include "../dialog/dlg_load.h"
 #include "../b2b_logic/b2b_load.h"
@@ -1263,6 +1264,7 @@ static int save_siptrace(struct sip_msg *msg, db_key_t *keys, db_val_t *vals,
 				trace_instance_p info, int conn_id)
 {
 	unsigned int hash;
+	str *raw;
 
 	tlist_elem_p it;
 
@@ -1270,6 +1272,12 @@ static int save_siptrace(struct sip_msg *msg, db_key_t *keys, db_val_t *vals,
 		LM_ERR("invalid trace info!\n");
 		return -1;
 	}
+
+	/* trace a received message as it came from the network, not as the
+	 * raw processing callbacks (e.g. topology_hiding) turned it */
+	if (vals[11].val.string_val[0] == 'i' &&
+	(raw = get_rcv_raw_buf(vals[0].val.str_val.s, vals[0].val.str_val.len)))
+		vals[0].val.str_val = *raw;
 
 	/* makes sense only if trace protocol loaded */
 	if ( tprot.send_message && !is_id_traced(sip_trace_id, info)) {
@@ -2296,13 +2304,15 @@ static void trace_slreq_out(struct sip_msg* req, str *buffer,int rpl_code,
 				const union sockaddr_union *to, const struct socket_info *sock, int proto)
 {
 	trace_info_p info;
+	str *sent = slcb_get_sent_buf();
 
 	info = GET_TRACER_CONTEXT;
 
 	/* as this is a stateless callback, we have no idea about the direction
 	 * caller versus callee (if an in-dialog request) so let's assume
-	 * callee, higher chances */
-	trace_msg_out(req, buffer, sock, proto, to, info, TRACE_C_CALLEE);
+	 * callee, higher chances; trace what went on the network */
+	trace_msg_out(req, sent ? sent : buffer, sock, proto, to, info,
+		TRACE_C_CALLEE);
 }
 
 static void trace_slreply_out(struct sip_msg* req, str *buffer,int rpl_code,
