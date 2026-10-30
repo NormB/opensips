@@ -233,6 +233,44 @@ const struct socket_info* get_send_socket(struct sip_msg *msg,
  * WARNING: uses str2ip6 so it will overwrite any previous
  *  unsaved result of this function (static buffer)
  */
+/* the buffer last given to msg_send() and, when the POST_RAW_PROCESSING
+ * callbacks changed it, the one actually sent */
+static char *sent_raw_orig;
+static int sent_raw_orig_len;
+static str sent_raw_buf;
+
+/*! \brief takes over @out_buff, the buffer msg_send() sent for @buf
+ * (NULL @buf: nothing was sent) */
+void keep_sent_raw_buf(char *buf, int len, str *out_buff)
+{
+	if (sent_raw_buf.s)
+		pkg_free(sent_raw_buf.s);
+
+	if (!buf || out_buff->s == buf) {
+		sent_raw_orig = NULL;
+		sent_raw_orig_len = 0;
+		sent_raw_buf.s = NULL;
+		sent_raw_buf.len = 0;
+		return;
+	}
+
+	sent_raw_orig = buf;
+	sent_raw_orig_len = len;
+	sent_raw_buf = *out_buff;
+}
+
+/*! \brief the bytes the last msg_send() put on the network for @buf, if
+ * the POST_RAW_PROCESSING callbacks changed them, otherwise NULL; valid
+ * until the next msg_send() */
+str *get_sent_raw_buf(const char *buf, int len)
+{
+	if (!sent_raw_buf.s || buf != sent_raw_orig || len != sent_raw_orig_len)
+		return NULL;
+
+	return &sent_raw_buf;
+}
+
+
 int check_self(str* host, unsigned short port, unsigned short proto)
 {
 	if (grep_sock_info(host, port, proto)) goto found;

@@ -45,6 +45,8 @@
 #include "../../sl_cb.h"
 #include "../../str.h"
 #include "../../script_cb.h"
+#include "../../forward.h"
+#include "../../receive.h"
 #include "../tm/tm_load.h"
 #include "../dialog/dlg_load.h"
 #include "../b2b_logic/b2b_load.h"
@@ -1259,6 +1261,39 @@ static inline int trace_write_syslog(st_syslog_struct_t *s,
 	( (((_instance)->control_flags)&(TRACE_C_CALLER|TRACE_C_CALLEE))==0 \
 	|| ((_instance)->control_flags&_leg_flag)!=0 )
 
+/* trace the bytes as they are on the network, not what the raw processing
+ * callbacks (e.g. topology_hiding Call-ID masking) turn them into; they are
+ * copied, as the destinations may send (and so free a sent raw buffer) */
+static inline void trace_raw_buf(str *buf, const char *dir)
+{
+	static char *raw_copy;
+	static int raw_copy_size;
+	str *raw;
+	char *p;
+
+	if (dir[0] == 'i')
+		raw = get_rcv_raw_buf(buf->s, buf->len);
+	else
+		raw = get_sent_raw_buf(buf->s, buf->len);
+
+	if (!raw)
+		return;
+
+	if (raw->len > raw_copy_size) {
+		p = pkg_realloc(raw_copy, raw->len);
+		if (!p) {
+			LM_ERR("oom, tracing the message as processed\n");
+			return;
+		}
+		raw_copy = p;
+		raw_copy_size = raw->len;
+	}
+
+	memcpy(raw_copy, raw->s, raw->len);
+	buf->s = raw_copy;
+	buf->len = raw->len;
+}
+
 static int save_siptrace(struct sip_msg *msg, db_key_t *keys, db_val_t *vals,
 				trace_instance_p info, int conn_id)
 {
@@ -1270,6 +1305,8 @@ static int save_siptrace(struct sip_msg *msg, db_key_t *keys, db_val_t *vals,
 		LM_ERR("invalid trace info!\n");
 		return -1;
 	}
+
+	trace_raw_buf(&vals[0].val.str_val, vals[11].val.string_val);
 
 	/* makes sense only if trace protocol loaded */
 	if ( tprot.send_message && !is_id_traced(sip_trace_id, info)) {

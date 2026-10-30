@@ -72,6 +72,9 @@ int update_sock_struct_from_via( union sockaddr_union* to,
 
 int forward_reply( struct sip_msg* msg);
 
+void keep_sent_raw_buf(char *buf, int len, str *out_buff);
+str *get_sent_raw_buf(const char *buf, int len);
+
 
 
 /*! \brief
@@ -93,6 +96,7 @@ static inline int msg_send( const struct socket_info* send_sock, int proto,
 							char* buf, int len, struct sip_msg* msg)
 {
 	str out_buff;
+	int len_in = len;
 	unsigned short port;
 	char *ip;
 
@@ -145,12 +149,13 @@ static inline int msg_send( const struct socket_info* send_sock, int proto,
 		goto error;
 	}
 
-	/* potentially allocated by the out raw processing */
-	if (out_buff.s != buf)
-		pkg_free(out_buff.s);
+	/* keep what the out raw processing made of the buffer (if anything),
+	 * for get_sent_raw_buf() */
+	keep_sent_raw_buf(buf, len_in, &out_buff);
 
 	return 0;
 error:
+	keep_sent_raw_buf(NULL, 0, NULL);
 	if (out_buff.s != buf)
 		pkg_free(out_buff.s);
 	return -1;

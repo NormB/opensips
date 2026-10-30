@@ -30,6 +30,14 @@ or for a certain trace_id.
 > In 2.2 version support for stateless trace has been removed.
 
 
+A traced message is the one on the network: what the raw processing
+callbacks of other modules change (like the Call-ID masking of
+topology_hiding, or the compression module) shows in the trace.
+The Call-ID kept apart from the message (the *callid* column, the HEP
+correlation id) is the one OpenSIPS works with, so both sides of a
+topology hidden call share it.
+
+
 The tracing tracing can be turned on/off using fifo command.
 
 ```bash
