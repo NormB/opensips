@@ -2304,13 +2304,15 @@ static void trace_slreq_out(struct sip_msg* req, str *buffer,int rpl_code,
 				const union sockaddr_union *to, const struct socket_info *sock, int proto)
 {
 	trace_info_p info;
+	str *sent = slcb_get_sent_buf();
 
 	info = GET_TRACER_CONTEXT;
 
 	/* as this is a stateless callback, we have no idea about the direction
 	 * caller versus callee (if an in-dialog request) so let's assume
-	 * callee, higher chances */
-	trace_msg_out(req, buffer, sock, proto, to, info, TRACE_C_CALLEE);
+	 * callee, higher chances; trace what went on the network */
+	trace_msg_out(req, sent ? sent : buffer, sock, proto, to, info,
+		TRACE_C_CALLEE);
 }
 
 static void trace_slreply_out(struct sip_msg* req, str *buffer,int rpl_code,
