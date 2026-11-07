@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2025 Summit-2026 / event_nats contributors
+ * Copyright (C) 2025 OpenSIPS Solutions
+ * Copyright (C) 2025 Norm Brandinger <n.brandinger@gmail.com>
  *
  * This file is part of opensips, a free SIP server.
  *

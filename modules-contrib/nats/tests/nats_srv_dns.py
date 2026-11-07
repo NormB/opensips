@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright (C) 2026 OpenSIPS Solutions
+# Copyright (C) 2026 Norm Brandinger <n.brandinger@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # nats_srv_dns.py -- a minimal DNS server (UDP, stdlib only) for the DNS

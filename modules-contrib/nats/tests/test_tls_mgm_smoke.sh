@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Copyright (C) 2026 OpenSIPS Solutions
+# Copyright (C) 2026 Norm Brandinger <n.brandinger@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # test_tls_mgm_smoke.sh -- end-to-end smoke test for the modules-contrib/nats

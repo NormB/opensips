@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 OpenSIPS Solutions
+ * Copyright (C) 2026 Norm Brandinger <n.brandinger@gmail.com>
  *
  * This file is part of opensips, a free SIP server.
  *
