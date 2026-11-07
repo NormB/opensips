@@ -115,6 +115,7 @@ str dlg_repl_cap = str_init("dialog-dlg-repl");
 str prof_repl_cap = str_init("dialog-prof-repl");
 
 int cluster_auto_sync = 1;
+int raise_events_as_backup = 1;
 
 static int pv_get_dlg_count( struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res);
@@ -361,6 +362,7 @@ static const param_export_t mod_params[]={
 	{ "replicate_profiles_buffer",INT_PARAM, &repl_prof_buffer_th   },
 	{ "replicate_profiles_expire",INT_PARAM, &repl_prof_timer_expire},
 	{ "cluster_auto_sync",        INT_PARAM, &cluster_auto_sync     },
+	{ "raise_events_as_backup",   INT_PARAM, &raise_events_as_backup },
 	{ 0,0,0 }
 };
 
@@ -1383,7 +1385,8 @@ static int w_store_dlg_value(struct sip_msg *msg, str *name, pv_spec_t *val)
 
 	if (pvv_is_int(&pval)) {
 		isval.n = pval.ri;
-		type = DLG_VAL_TYPE_INT;
+		type = pval.flags & PV_VAL_BOOL ?
+			DLG_VAL_TYPE_BOOL : DLG_VAL_TYPE_INT;
 	} else if (pvv_is_str(&pval)) {
 		isval.s = pval.rs;
 		type = DLG_VAL_TYPE_STR;
@@ -1406,7 +1409,7 @@ int w_fetch_dlg_value(struct sip_msg *msg, str *name, pv_spec_t *result)
 	if ( (dlg=get_current_dialog())==NULL )
 		return -1;
 
-	if (fetch_dlg_value(dlg, name, &type, &isval, 0) ) {
+	if (fetch_dlg_value_typed(dlg, name, &type, &isval, 0) ) {
 		LM_DBG("failed to fetch dialog value <%.*s>\n",
 			((str*)name)->len, ((str*)name)->s);
 		return -1;
@@ -1416,8 +1419,14 @@ int w_fetch_dlg_value(struct sip_msg *msg, str *name, pv_spec_t *result)
 		value.rs = isval.s;
 		value.flags = PV_VAL_STR;
 	} else {
+		if (type == DLG_VAL_TYPE_BOOL) {
+			value.rs = isval.n ? str_init("true") : str_init("false");
+			value.flags = PV_VAL_BOOL|PV_VAL_STR;
+		} else {
+			value.flags = 0;
+		}
 		value.ri = isval.n;
-		value.flags = PV_VAL_INT|PV_TYPE_INT;
+		value.flags |= PV_VAL_INT|PV_TYPE_INT;
 	}
 
 	if (pv_set_value(msg, result, 0, &value) != 0) {
@@ -1461,7 +1470,8 @@ static int w_get_dlg_info(struct sip_msg *msg, str *attr, pv_spec_t *attr_val,
 				goto next_dialog;
 
 			/* success! now fetch @attr into @attr_val, within this dialog */
-			if (fetch_dlg_value_unsafe(dlg, attr, &type, &isval, 0) != 0) {
+			if (fetch_dlg_value_unsafe_typed(dlg, attr, &type,
+				&isval, 0) != 0) {
 				lock_stop_read(dlg->vals_lock);
 				dlg_unlock( d_table, d_entry);
 				LM_ERR("failed to fetch dialog value <%.*s>\n",
@@ -1473,8 +1483,14 @@ static int w_get_dlg_info(struct sip_msg *msg, str *attr, pv_spec_t *attr_val,
 				val.rs = isval.s;
 				val.flags = PV_VAL_STR;
 			} else {
+				if (type == DLG_VAL_TYPE_BOOL) {
+					val.rs = isval.n ? str_init("true") : str_init("false");
+					val.flags = PV_VAL_BOOL|PV_VAL_STR;
+				} else {
+					val.flags = 0;
+				}
 				val.ri = isval.n;
-				val.flags = PV_VAL_INT|PV_TYPE_INT;
+				val.flags |= PV_VAL_INT|PV_TYPE_INT;
 			}
 
 			if (attr_val->setf(msg, &attr_val->pvp, 0, &val) != 0) {
@@ -1544,8 +1560,14 @@ static int w_get_dlg_vals(struct sip_msg *msg, pv_spec_t *v_name,
 				val.flags = PV_VAL_STR;
 				val.rs = dv->val.s;
 			} else {
-				val.flags = PV_VAL_INT|PV_TYPE_INT;
+				if (dv->type == DLG_VAL_TYPE_BOOL) {
+					val.rs = dv->val.n ? str_init("true") : str_init("false");
+					val.flags = PV_VAL_BOOL|PV_VAL_STR;
+				} else {
+					val.flags = 0;
+				}
 				val.ri = dv->val.n;
+				val.flags |= PV_VAL_INT|PV_TYPE_INT;
 			}
 			if ( pv_set_value( msg, v_val, 0, &val)<0 ) {
 				LM_ERR("failed to add new value in dlg val list, ignoring\n");
@@ -2372,7 +2394,12 @@ static char *dlg_get_json_out(struct dlg_cell *dlg,int ctx,int *out_len)
 
 				*p++='"';
 			} else {
-				intbuf = sint2str(dv->val.n, &intlen);
+				if (dv->type == DLG_VAL_TYPE_BOOL) {
+					intbuf = dv->val.n ? "true" : "false";
+					intlen = dv->val.n ? 4 : 5;
+				} else {
+					intbuf = sint2str(dv->val.n, &intlen);
+				}
 
 				DEC_AND_CHECK_LEN(len, 1 + dv->name.len + 2 + intlen);
 				*p++='"';

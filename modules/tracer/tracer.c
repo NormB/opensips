@@ -1288,7 +1288,7 @@ static int save_siptrace(struct sip_msg *msg, db_key_t *keys, db_val_t *vals,
 		case TYPE_HEP:
 			if (send_trace_proto_duplicate(it->el.hep.hep_id,
 					&msg->callid->body, info, conn_id) < 0) {
-				LM_ERR("Failed to duplicate with hep to <%.*s:%u>\n",
+				LMR_ERR("Failed to duplicate with hep to <%.*s:%u>\n",
 						it->el.hep.hep_id->ip.len, it->el.hep.hep_id->ip.s,
 						it->el.hep.hep_id->port_no);
 				continue;
@@ -3568,7 +3568,7 @@ static int send_trace_proto_duplicate(trace_dest dest, str* correlation,
 	}
 
 	if (tprot.send_message(trace_msg, dest, NULL) < 0) {
-		LM_ERR("failed to forward message to destination!\n");
+		LMR_ERR("failed to forward message to destination!\n");
 		goto error;
 	}
 
