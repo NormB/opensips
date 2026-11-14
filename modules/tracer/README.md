@@ -30,6 +30,14 @@ or for a certain trace_id.
 > In 2.2 version support for stateless trace has been removed.
 
 
+A traced message is the one on the network: what the raw processing
+callbacks of other modules change (like the Call-ID masking of
+topology_hiding, or the compression module) shows in the trace.
+The Call-ID kept apart from the message (the *callid* column, the HEP
+correlation id) is the one OpenSIPS works with, so both sides of a
+topology hidden call share it.
+
+
 The tracing tracing can be turned on/off using fifo command.
 
 ```bash
@@ -536,6 +544,11 @@ traced since they are handled statelessly using forward_request function.
 Fixing it would mean to register a fwdcb callback that would be called
 for all the messages but would be used only by ACKs, which would be
 highly ineffective.
+
+
+Replies sent statelessly (*sl_send_reply()*) are traced before the raw
+processing callbacks of other modules run, so their changes (like the
+Call-ID masking of topology_hiding) do not show in those traces.
 <!-- CONTRIBUTORS -->
 
 ### License

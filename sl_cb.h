@@ -53,8 +53,12 @@ int register_slcb(enum sl_cb_type, unsigned int fmask, sl_cb_t f);
 void slcb_run_reply_out(struct sip_msg *req, str *buffer,
 		union sockaddr_union *dst, int rpl_code);
 void slcb_run_ack_in(struct sip_msg *req);
-void slcb_run_req_out(struct sip_msg *req, str *buffer,
+void slcb_run_req_out(struct sip_msg *req, str *buffer, str *sent_buffer,
 		const union sockaddr_union *dst, const struct socket_info *sock, int proto);
+
+/* for a SLCB_REQUEST_OUT callback: the buffer as sent, after the raw
+ * processing callbacks (the callback gets the one built by OpenSIPS) */
+str *slcb_get_sent_buf(void);
 
 #endif
 

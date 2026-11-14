@@ -99,16 +99,27 @@ void slcb_run_ack_in(struct sip_msg *req)
 }
 
 
-void slcb_run_req_out(struct sip_msg *req, str *buffer,
+/* the buffer actually sent, while the SLCB_REQUEST_OUT callbacks run */
+static str *req_out_sent_buf;
+
+str *slcb_get_sent_buf(void)
+{
+	return req_out_sent_buf;
+}
+
+void slcb_run_req_out(struct sip_msg *req, str *buffer, str *sent_buffer,
 			const union sockaddr_union *dst, const struct socket_info *sock, int proto)
 {
 	struct sl_callback *cbp;
+	str *bak_sent_buf = req_out_sent_buf;
 
+	req_out_sent_buf = sent_buffer;
 	for ( cbp=slcb_hl[SLCB_REQUEST_OUT] ; cbp ; cbp=cbp->next ) {
 		if (cbp->fmask==0 || cbp->fmask&req->msg_flags) {
 			cbp->callback( req, buffer, 0, dst, sock, proto);
 		}
 	}
+	req_out_sent_buf = bak_sent_buf;
 }
 
 

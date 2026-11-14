@@ -333,7 +333,7 @@ found:
 int forward_request( struct sip_msg* msg, struct proxy_l * p)
 {
 	union sockaddr_union to;
-	str buf;
+	str buf, sent_buf;
 	const struct socket_info* send_sock;
 	const struct socket_info* last_sock;
 
@@ -395,12 +395,15 @@ int forward_request( struct sip_msg* msg, struct proxy_l * p)
 		LM_DBG("orig. len=%d, new_len=%d, proto=%d\n",
 			msg->len, buf.len, p->proto );
 
-		if (msg_send(send_sock, p->proto, &to, 0, buf.s, buf.len, msg)<0){
+		if (msg_send_ex(send_sock, p->proto, &to, 0, buf.s, buf.len, msg,
+		&sent_buf)<0){
 			ser_error=E_SEND;
 			continue;
 		}
 
-		slcb_run_req_out( msg, &buf, &to, send_sock, p->proto);
+		slcb_run_req_out( msg, &buf, &sent_buf, &to, send_sock, p->proto);
+		if (sent_buf.s != buf.s)
+			pkg_free(sent_buf.s);
 
 		ser_error = 0;
 		break;

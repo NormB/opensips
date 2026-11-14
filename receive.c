@@ -94,6 +94,24 @@ unsigned int get_next_msg_no(void)
 	}while(0)
 
 
+/* while receive_msg() runs: the bytes received from the network and,
+ * when the PRE_RAW_PROCESSING callbacks changed them, what they became */
+static str rcv_raw_buf;
+static str rcv_raw_msg_buf;
+
+/*! \brief the bytes received from the network for the message being
+ * processed, if @buf/@len is its buffer and the PRE_RAW_PROCESSING
+ * callbacks changed it, otherwise NULL */
+str *get_rcv_raw_buf(const char *buf, int len)
+{
+	if (!rcv_raw_msg_buf.s || buf != rcv_raw_msg_buf.s
+			|| len != rcv_raw_msg_buf.len)
+		return NULL;
+
+	return &rcv_raw_buf;
+}
+
+
 /*! \note WARNING: buf must be 0 terminated (buf[len]=0) or some things might
  * break (e.g.: modules/textops)
  */
@@ -116,6 +134,7 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 	int rc, ret, old_route_type;
 	char *tmp;
 	str in_buff;
+	str bak_raw_buf = rcv_raw_buf, bak_raw_msg_buf = rcv_raw_msg_buf;
 
 	profiling_proc_enter( LEVEL_SIP, "receive_msg", 0 );
 
@@ -133,6 +152,14 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 	if (run_pre_raw_processing_cb(PRE_RAW_PROCESSING,&in_buff,NULL)<0) {
 		LM_ERR("error in running pre raw callbacks, dropping\n");
 		goto error;
+	}
+	if (in_buff.s != buf) {
+		rcv_raw_buf.s = buf;
+		rcv_raw_buf.len = len;
+		rcv_raw_msg_buf = in_buff;
+	} else {
+		rcv_raw_msg_buf.s = NULL;
+		rcv_raw_msg_buf.len = 0;
 	}
 	/* update the length for further processing */
 	len = in_buff.len;
@@ -313,6 +340,8 @@ end:
 	pkg_free(msg);
 	if (in_buff.s != buf)
 		pkg_free(in_buff.s);
+	rcv_raw_buf = bak_raw_buf;
+	rcv_raw_msg_buf = bak_raw_msg_buf;
 	profiling_proc_exit( LEVEL_SIP, "receive_msg", 0 );
 	return 0;
 parse_error_reset:
@@ -324,6 +353,8 @@ parse_error:
 error:
 	if (in_buff.s != buf)
 		pkg_free(in_buff.s);
+	rcv_raw_buf = bak_raw_buf;
+	rcv_raw_msg_buf = bak_raw_msg_buf;
 	profiling_proc_exit( LEVEL_SIP, "receive_msg", -1 );
 	return -1;
 }
